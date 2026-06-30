@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>太虚境监控</title></head>
+<body style="margin:0;background:#0d0f14;color:#d0d8e0;font-family:sans-serif;height:100vh;display:flex;flex-direction:column">
+<div id="app" style="display:flex;flex:1;min-height:0">
+<div style="flex:3;display:flex;flex-direction:column;padding:10px;background:#141820">
+  <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="color:#00d4d4;font-size:15px;font-weight:700">&#x26A1; 太虚境监控</span><span style="font-size:11px;color:#556" id="st">{{STATS}}</span></div>
+  <div id="grd" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;flex:2;overflow-y:auto;align-content:start">{{CARDS}}</div>
+  <div style="display:flex;gap:10px;padding-top:6px;flex:1;min-height:0">
+    <div style="flex:1;background:#0f1118;border-radius:4px;padding:6px">
+      <div style="color:#f1c40f;font-size:11px;font-weight:600">&#x26A0; 异常汇总 <span id="ab" style="font-weight:400;color:#556">0</span></div>
+      <div id="ap" style="font-size:10px;color:#667">{{ALERTS}}</div>
+    </div>
+    <div style="flex:1;background:#0f1118;border-radius:4px;padding:6px">
+      <div style="color:#889;font-size:11px;font-weight:600">&#x1F4E1; 调度总台</div>
+      <div style="font-size:10px;color:#667">评分:<span id="sc">{{SCORE}}</span> 模式:<span id="md">{{MODE}}</span></div>
+      <div id="dp" style="font-size:10px;color:#667"></div>
+    </div>
+  </div>
+</div>
+<div style="flex:1.1;display:flex;flex-direction:column;min-width:260px;background:#0d0f14;border-left:1px solid #222">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #222">
+    <span style="color:#00d4d4;font-size:14px;font-weight:600">&#x1F4A0; 玉瑶</span>
+    <div><button onclick="clr()" style="background:none;border:1px solid #333;color:#556;width:24px;height:22px;border-radius:4px;cursor:pointer;font-size:11px" title="清除">&#x1F5D1;</button>
+    <button onclick="rst()" style="background:none;border:1px solid #333;color:#556;width:24px;height:22px;border-radius:4px;cursor:pointer;font-size:11px" title="重置">&#x21BA;</button></div>
+  </div>
+  <div id="ms" style="flex:1;overflow-y:auto;padding:8px 12px;font-size:12px;line-height:1.5"><div style="color:#667">你好，我是玉瑶。&#x1F4A0;</div></div>
+  <div style="flex-shrink:0;padding:8px 12px;border-top:1px solid #222">
+    <div style="display:flex;gap:5px"><textarea id="inp" rows="1" style="flex:1;background:#0a0c10;border:1px solid #333;border-radius:6px;padding:6px 10px;color:#d0d8e0;font-size:12px;outline:none;resize:none;font-family:inherit;min-height:30px;max-height:80px" placeholder="对玉瑶说..." onkeydown="if(event.key=='Enter'&&!event.shiftKey){event.preventDefault();snd()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
+    <button onclick="snd()" style="background:rgba(0,212,212,0.07);border:1px solid rgba(0,212,212,0.1);color:#0dd;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:11px;font-weight:600">发送</button></div>
+    <div style="display:flex;gap:4px;margin-top:4px;font-size:11px;color:#445;align-items:center">
+      <span style="cursor:pointer" onclick="document.getElementById('fu').click()">&#x1F4CE;</span><input type="file" id="fu" style="display:none" multiple onchange="uf(this.files)">
+      <span style="cursor:pointer" onclick="document.getElementById('kf').click()">&#x1F4DA;</span><input type="file" id="kf" style="display:none" accept=".txt,.md,.pdf" onchange="uk(this.files)">
+      <span onclick="mic()" id="mb" style="cursor:pointer">&#x1F3A4;</span>
+      <span onclick="tt()" id="tb" style="cursor:pointer">&#x1F507;</span>
+      <span style="flex:1;text-align:right;font-size:10px" id="slb">就绪</span>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+var tts=false;
+function tt(){tts=!tts;document.getElementById('tb').textContent=tts?'🔊':'🔇'}
+function clr(){document.getElementById('ms').innerHTML='';_m=[];sv()}
+function rst(){fetch('/api/reset',{method:'POST'})}
+var _m=[];var SK='wa';
+function sv(){try{localStorage.setItem(SK,JSON.stringify(_m))}catch(e){}}
+function ld(){try{var d=localStorage.getItem(SK);if(d){_m=JSON.parse(d);for(var i=0;i<_m.length;i++){var p=document.getElementById('ms');p.innerHTML+='<div style="padding:6px 10px;margin-bottom:4px">'+_m[i].c+'</div>'}}}catch(e){}}
+function ad(r,c){var d=document.getElementById('ms');d.innerHTML+='<div style="padding:6px 10px;border-radius:6px;margin-bottom:4px;max-width:98%;'+(r==='u'?'text-align:right':'')+'">'+c+'<div style="font-size:9px;color:#445;margin-top:2px">'+new Date().toLocaleTimeString()+'</div></div>';d.scrollTop=d.scrollHeight;_m.push({c:c});sv()}
+function snd(){var i=document.getElementById('inp'),m=i.value.trim();if(!m)return;i.value='';i.style.height='30px';ad('u',m);document.getElementById('slb').textContent='...';fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:m,tts:tts})}).then(function(r){return r.json()}).then(function(d){ad('a',d.reply||'');document.getElementById('slb').textContent='就绪';ra();rd();if(tts&&d.audio_url){try{(new Audio(d.audio_url)).play()}catch(e){}}}).catch(function(e){ad('a','错误');document.getElementById('slb').textContent='错误'})}
+var rc=null;
+function mic(){if(rc){rc.stop();rc=null;document.getElementById('mb').style.color='#556';return}var SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){ad('a','语音不支持');return}rc=new SR();rc.lang='zh-CN';rc.interimResults=false;rc.onresult=function(e){document.getElementById('inp').value=e.results[e.results.length-1][0].transcript;rc=null;document.getElementById('mb').style.color='#556'};rc.onerror=function(){rc=null;document.getElementById('mb').style.color='#556'};rc.start();document.getElementById('mb').style.color='#2ecc71'}
+function uf(fs){for(var i=0;i<fs.length;i++){(function(f){ad('u','📎 '+f.name);var r=new FileReader();r.onload=function(e){ad('a','已读取')};r.readAsText(f)})(fs[i])}}
+function uk(fs){for(var i=0;i<fs.length;i++){(function(f){ad('u','📚 '+f.name);var r=new FileReader();r.onload=function(e){fetch('/api/knowledge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:f.name.replace(/\.[^.]+$/,''),content:e.target.result})}).then(function(r2){r2.ok?ad('a','已存入'):ad('a','失败')})};r.readAsText(f)})(fs[i])}}
+function rf(){fetch('/_hooks/monitor',{cache:'no-cache'}).then(function(r){return r.json()}).then(function(d){var h='';for(var i=0;i<d.cards.length;i++){var c=d.cards[i];var cl=c.status==='green'?'#2ecc71':c.status==='yellow'?'#f1c40f':c.status==='red'?'#e74c3c':'#333';h+='<div style="background:#0a0c10;border:1px solid #222;border-radius:8px;padding:6px 14px;font-size:14px"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+cl+';margin-right:4px"></span><b>'+c.id+'</b> '+c.name+'<br><span style="color:#556;font-size:12px">'+c.callCount+'次 均:'+c.avgDuration+'ms</span></div>'}document.getElementById('grd').innerHTML=h;document.getElementById('st').innerHTML='🟢'+d.cards.filter(function(x){return x.status==='green'}).length+' 🟡'+d.cards.filter(function(x){return x.status==='yellow'}).length+' 🔴'+d.cards.filter(function(x){return x.status==='red'}).length})}
+function ra(){fetch('/_hooks/alerts',{cache:'no-cache'}).then(function(r){return r.json()}).then(function(d){document.getElementById('ab').textContent=d.alerts.length;if(!d.alerts.length){document.getElementById('ap').innerHTML='<span style="color:#556">✅ 正常</span>'}else{document.getElementById('ap').innerHTML=d.alerts.map(function(a){return '<div style="font-size:10px;color:#aab;padding:1px 0">⚠ '+a.id+' '+a.type+'</div>'}).join('')}})}
+function rd(){fetch('/_hooks/dispatch',{cache:'no-cache'}).then(function(r){return r.json()}).then(function(d){document.getElementById('sc').textContent=d.score;document.getElementById('md').textContent=d.mode;document.getElementById('dp').innerHTML=d.decisions.map(function(x){return '<div style="font-size:10px;color:#aab;margin:1px 0">'+(x.type==='ok'?'✅':'⚠')+' '+x.target+' → '+x.action+'</div>'}).join('')})}
+setInterval(function(){try{rf()}catch(e){}try{ra()}catch(e){}try{rd()}catch(e){}},4000);
+ld();rf();ra();rd();
+</script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+{
+  "findings": [
+    {
+      "level": "P0",
+      "module": "M2/M3",
+      "title": "钙化计算不一致: m2 L2范数 vs m3加权公式",
+      "detail": "m2/math.ts computeCalcium (line 43-56) 使用[0,1]归一化向量L2范数: sqrt(sumSq)/sqrt(24)。m3/PerceptionAnalyzer.ts calculateCalcium (line 394-474) 使用完全不同算法: avgEmotion*0.3 + avgCognition*0.3 + maxDim*0.4 + threatBonus + selfCheck + 实体人物加权。同一输入产生不同分数。m2不感知实体/威胁/场景配置, m3包含全部。",
+      "impact": "同一事件在M2存储时一个钙化分, M3决策时另一个分, 导致记忆晋升/遗忘与对话情绪决策不一致。",
+      "suggestion": "统一钙化算法。m2/math.ts作为单一事实源, m3改为调用computeCalcium后使用config做场景微调。删除m3内独立的calculateCalcium函数。"
+    },
+    {
+      "level": "P0",
+      "module": "webui",
+      "title": "src/webui/guard-builder.ts是死代码 + getTopicRepeatCount重复",
+      "detail": "guard-builder.ts完全不被任何模块import。chat.ts line 192-204独立实现同名getTopicRepeatCount, 与guard-builder.ts line 42-51重复。chat.ts版本有TOPIC_ASK_MAX防泄漏上限, guard-builder.ts的topicAskCount Map无大小限制有内存泄漏风险。chat/guard-builder.ts是通过chat/index.ts实际使用的版本。",
+      "impact": "死代码占空间。guard-builder.ts topicAskCount无上限是隐式内存泄漏。两个版本未来可能分歧。",
+      "suggestion": "删除src/webui/guard-builder.ts。确认chat.ts的getTopicRepeatCount已覆盖全部功能。"
+    },
+    {
+      "level": "P0",
+      "module": "webui/chat",
+      "title": "at-ts-nocheck脚手架: guard-builder.ts和post-process.ts",
+      "detail": "src/webui/chat/guard-builder.ts line 1和post-process.ts line 1均标注@ts-nocheck完全关闭类型检查。post-process.ts向M6/M7/M8传递dna as any和decision as any(lines 87, 112)。运行时类型错误无法编译时发现。这是S3-2拆分的中间产物。",
+      "impact": "运行时类型不匹配导致M6反馈/M7梦境/M8年轮写入静默失败, 数据无法追溯。",
+      "suggestion": "移除@ts-nocheck补全正确类型。优先补全M8 writeCycle参数类型和M6 ingestFeedback签名。"
+    },
+    {
+      "level": "P1",
+      "module": "M2",
+      "title": "as any逃逸: SQLiteAdapter 4处(db as any)穿透",
+      "detail": "src/m2/SQLiteAdapter.ts line 1078(flush export)、1093(runSql run)、1099(execSql prepare)、1112(execSql exec)使用(this.db as any)绕过sql.js全部类型定义。方法参数完全unchecked, 运行时API不匹配直接崩溃。",
+      "impact": "db.export()失败导致flush静默错, prepare/run参数错误导致SQL执行崩溃和数据损坏。",
+      "suggestion": "为sql.js db对象声明完整类型接口(SQLJsDatabase), 或封装类型安全包装方法。"
+    },
+    {
+      "level": "P1",
+      "module": "M4",
+      "title": "as any逃逸: FamilyGraph.ts 33处类型穿透",
+      "detail": "src/m4/FamilyGraph.ts line 583-2160共33处as any。密集区域: updatePersonProfile 12处传递{} as any(lines 583-1606); SQLite结果行获取cnt(lines 2141-2144); 人物档案动态字段访问(lines 1225-1243)。",
+      "impact": "updatePersonProfile参数错误无法编译时发现, 可能导致人物档案数据库写入异常或冲突检测失败。",
+      "suggestion": "为updatePersonProfile定义Partial<PersonProfile>签名。SQL结果行定义ResultRow接口取代as any。"
+    },
+    {
+      "level": "P1",
+      "module": "M3",
+      "title": "as any逃逸: PerceptionAnalyzer.ts 8处(p as any)字段访问",
+      "detail": "src/m3/PerceptionAnalyzer.ts line 409(calculateCalcium)和lines 729-733/824/826(deriveEmotionLabels)反复使用(p as any).sexual_attraction, .sensory_craving, .energy_merge, .possessiveness, .ecstasy, .belonging, .etiquette。这些字段运行时存在但Perception24D类型定义缺少。",
+      "impact": "类型定义不完整, 新增亲密维度字段需要到处加as any, 类型安全逐步退化。",
+      "suggestion": "将sexual_attraction等8个字段补全到Perception24D类型定义中(src/m3/types/perception.ts), 删除全部as any。"
+    },
+    {
+      "level": "P1",
+      "module": "webui",
+      "title": "静默catch: chat.ts lines 1901-1902对话插入静默失败",
+      "detail": "src/webui/chat.ts line 1901-1902: try { ctx.conversationDB?.insertConversation(user) } catch {} 和 try { insertConversation(assistant) } catch {}。用户回复和助手回复的数据库插入被静默吞掉异常。line 1901含复杂参数(含filter/map函数链), 异常概率较高。",
+      "impact": "对话数据丢失——用户说了话但数据库无记录, 重启后历史消失, 用户无感知。",
+      "suggestion": "至少加console.error日志, 或在catch中做降级重试。移除insertConversation行内filter/map减少异常源。"
+    },
+    {
+      "level": "P1",
+      "module": "webui/server",
+      "title": "静默catch: server.ts 20处空catch块",
+      "detail": "src/webui/server.ts: line 102(clearAllTimers)、156(conv加载)、162、354(备份定时器)、392/405/419(删除文件)、464(目录清理)、472-473(备份定时器)、580、820(backupFiles)、1160、1225、1377、2234(flush)。lines 472-473备份定时器失败无声, 整个备份系统可能已停但管理员不知道。",
+      "impact": "备份失败不报错=数据无保护。文件删除失败不报错=磁盘空间泄漏。",
+      "suggestion": "删除空try块或加console.warn日志。备份代码至少加错误计数上报。"
+    },
+    {
+      "level": "P1",
+      "module": "M2",
+      "title": "重复JSDoc: types/index.ts line 54-60 vad_spectrum注释重复",
+      "detail": "src/m2/types/index.ts lines 54-55和59-60有两条完全相同的VAD谱曲注释。line 55的M3情绪标签注释本应绑定primary_emotion, 被错误放在两行VAD注释之间, 属于复制粘贴错误。vad_spectrum用any|null冗余(optional已含null)。",
+      "impact": "JSDoc误导读者, 类型用any降低类型安全性。",
+      "suggestion": "修正注释归属: M3情绪标签注释上移1行绑定primary_emotion, 删除重复VAD注释行。vad_spectrum改为?: string | null。"
+    },
+    {
+      "level": "P1",
+      "module": "webui/chat",
+      "title": "chat.ts 30+个下划线前缀变量 code smell",
+      "detail": "src/webui/chat.ts lines 319-680间30+个_underscorePrefixed变量(_hp, _fg, _tmMatch, _tmRows, _fgX, _prof, _sents, _ts, _clean等)。这是抑制TS unused variable警告的模式。多数变量实际被使用了, 前缀误导。个别变量确实未使用(如_tmRows赋值后只取_tmTexts)。",
+      "impact": "代码可读性差, 维护者分不清哪些变量真正dead。",
+      "suggestion": "实际使用的变量不加下划线前缀。未使用的直接删除或用void操作符。"
+    },
+    {
+      "level": "P1",
+      "module": "M3",
+      "title": "console.log调试输出留在生产代码",
+      "detail": "src/m3/PerceptionAnalyzer.ts line 443: console.log([M3Calcium] 人物结构化信息加权); line 552: console.log([隐性情绪] 检测到...)。每次对话都会输出到stdout, 污染生产日志。",
+      "impact": "生产日志被调试信息污染, 真实错误被淹没难以排查。",
+      "suggestion": "改为if (process.env.DEBUG)条件下console.debug, 或使用统一日志框架。"
+    },
+    {
+      "level": "P2",
+      "module": "M2",
+      "title": "math.ts导出但仅内部使用的函数",
+      "detail": "src/m2/math.ts的toNormalizedVector(line 24)、decayRate(line 154)、applyDecay(line 159)、shouldPromote(line 186)被export但没有任何模块import它们。它们只在math.ts内部被computeCalcium/updateDynamics调用。",
+      "impact": "导出过多公共API增大维护契约面, 对其他模块形成误导(以为可用实际没人用)。",
+      "suggestion": "删除export关键字改为普通function声明, 或只在确实需要外部调用时导出。"
+    },
+    {
+      "level": "P2",
+      "module": "webui",
+      "title": "硬编码农历映射只覆盖20天",
+      "detail": "src/webui/guard-builder.ts line 98-103定义lunarMap只覆盖2026-2027年的20天, 其他日期返回空字符串。农历计算应使用动态算法, 硬编码表无法覆盖全年。timeGuard被注入每次对话的system prompt。",
+      "impact": "大部分日期农历为空, 错失时间上下文信息。",
+      "suggestion": "移除硬编码农历, 用npm lunarcalendar/solarlunar包计算。或彻底移除fallback为仅显示公历。"
+    },
+    {
+      "level": "P2",
+      "module": "app",
+      "title": "VectorAlignmentGuard.ts 12个空catch块重复模式",
+      "detail": "src/app/alignment/VectorAlignmentGuard.ts lines 334-436共12个空catch块, 结构完全一致。每次try { dims.push(...) }或try { 对齐操作 } catch {}。这意味着开发者预知代码可能抛异常但不处理。",
+      "impact": "对齐错误被完全吞咽, 向量对齐结论错误而不自知。",
+      "suggestion": "在catch中至少记录错误和维度key。考虑是否应让异常传播到调用方。"
+    },
+    {
+      "level": "P2",
+      "module": "webui/server",
+      "title": "server.ts三次重复文件删除代码",
+      "detail": "src/webui/server.ts line 392, 405, 419: 三处 try { unlinkSync(bkPath); } catch {} 在100行范围内重复, 逻辑完全一致。",
+      "impact": "代码冗余, 修改删除逻辑需改3处易遗漏。",
+      "suggestion": "抽取为function safeDeleteFile(path): void { try { unlinkSync(path); } catch { console.warn(...) } }"
+    }
+  ],
+  "dimensionScore": "🔴",
+  "dimensionSummary": "代码质量: 严重(红)。P0问题3个(钙化算法分歧x2、guard-builder.ts死代码、@ts-nocheck脚手架残留)。P1问题9个(as any密集逃逸192处横跨36文件、静默catch 112处、JSDoc复制错误、调试日志、下划线变量)。P2问题3个(不必要导出、硬编码农历、重复代码段)。最关键缺陷: 钙化算法不一致导致M2和M3同一概念两套分, 直接影响记忆生命周期管理; 大量as any和静默catch表明类型安全和错误处理文化缺失, 核心SQLiteAdapter和FamilyGraph的数据路径上as any直接威胁运行时数据安全。"
+}

@@ -1,0 +1,86 @@
+{
+  "findings": [
+    {
+      "level": "P1",
+      "module": "M5Orchestrator.ts + DeepSeekLLMProvider.ts",
+      "title": "DeepSeekLLMProvider.generate() never throws, M5 MockLLM fallback unreachable for API failures",
+      "detail": "File: D:\\wenstar\\src\\m5\\DeepSeekLLMProvider.ts, lines 494-502. The generate() method catches all errors from callDeepSeekApi() and returns fallbackReply() text (e.g. 'en.', 'hao.') instead of throwing. M5Orchestrator.orchestrate() at lines 60-72 only catches thrown errors, which means API failures (timeout, 429, 503) never trigger the MockLLMProvider fallback at lines 75-86. The fallback only fires when the returned text is <=6 chars, which is an indirect side effect. MockLLMProvider's richer template system is thus never used as a true degradation path from DeepSeek failures.",
+      "impact": "Medium: API failures produce 2-3 character static replies instead of the full MockLLM template pool. User experience degrades to short static replies rather than natural contextual responses.",
+      "suggestion": "In DeepSeekLLMProvider.generate() catch block, throw the error instead of returning fallbackReply. Let M5Orchestrator manage all degradation routing centrally. Move fallbackReply logic to M5Orchestrator's final hardcoded fallback (lines 111-118)."
+    },
+    {
+      "level": "P1",
+      "module": "server.ts + chat.ts",
+      "title": "conversationHistory has no concurrent-write protection against Maintenance timer",
+      "detail": "File: D:\\wenstar\\src\\webui\\server.ts, lines 133, 195-197. conversationHistory is a module-level mutable array. MaintenanceService holds a direct reference and a setter. When maintenance triggers compaction, it can splice/read the array while processChat() (chat.ts lines 1895-1906) is pushing new turns. The setter replaces the array reference, but processChat's enrichedHistory (chat.ts line 573) is a .slice() copy taken earlier. This creates a window where chat code holds a stale reference and maintenance modifies a different one, causing history data loss on the splice at chat.ts line 1899.",
+      "impact": "Medium: Potential conversation truncation or cross-talk between maintenance and chat processing. In-memory history corruption does not affect SQLite persistence, but is reflected in LLM context window.",
+      "suggestion": "Use a simple mutex/queue for conversationHistory writes from both chat and maintenance paths. Or have maintenance operate on a snapshot and re-assign via the setter atomically."
+    },
+    {
+      "level": "P1",
+      "module": "SQLiteAdapter.ts",
+      "title": "DDL migration empty catch blocks silently swallow all errors",
+      "detail": "File: D:\\wenstar\\src\\m2\\SQLiteAdapter.ts, lines 124-127, 130, 133-134, 140, 143-153, 161-162, 165-174. All ALTER TABLE ADD COLUMN and CREATE INDEX migrations use empty catch blocks with comments like 'column already exists'. If a migration fails for reasons other than 'duplicate column' (disk full, corrupted schema, permission error), the error is silently ignored. The application continues running with an incomplete schema. Particularly dangerous: the nested try-catch at lines 147-153 has the outer catch at line 153 empty while the inner try (lines 149-150) has a console.warn. Any error in the CREATE INDEX at line 147 is completely invisible with zero diagnostic output.",
+      "impact": "High: Silent schema corruption. If a migration fails for non-trivial reasons, subsequent queries against missing columns throw SQL errors, and the application has no diagnostic information in logs.",
+      "suggestion": "Wrap each DDL migration with: try { db.run(sql); } catch (e) { if (!/duplicate|already exists/i.test(e.message)) { console.error('[SQLite] Migration failed:', e); throw e; } }"
+    },
+    {
+      "level": "P1",
+      "module": "server.ts + chat.ts",
+      "title": "processChat() has no total-response timeout; request can hang indefinitely",
+      "detail": "File: D:\\wenstar\\src\\webui\\server.ts, lines 860-889 and 1075-1108. processChat chains multiple async operations: LLM entity extraction, M3 decision, black-diamond FTS, knowledge-base search, bionic-adapter fetch, VAD-tone fetch (8100 with 2s timeout), M4, M5, hallucination validation, dream queue, topic tracking, relationship extraction, M6 evolution, and bionic store. There is no total deadline. DeepSeek calls have per-call timeouts (10-20s) but the LLM entity extraction (chat.ts line 288) reuses the same provider and can double the wait. The overall chain is unbounded.",
+      "impact": "Medium: A slow external service or stuck internal operation holds the HTTP response open indefinitely, exhausting server connections under load.",
+      "suggestion": "Add a top-level AbortController with a 30s timeout for the entire processChat call. Pass the signal to all sub-operations that support it. Return a degraded response on timeout."
+    },
+    {
+      "level": "P2",
+      "module": "MockLLMProvider.ts",
+      "title": "Module-level state shared across all MockLLMProvider instances",
+      "detail": "File: D:\\wenstar\\src\\m5\\MockLLMProvider.ts, lines 24, 50. _recentUsed (Set) and sessionIntimacy (number) are module-level globals shared across all instances. M5Orchestrator.orchestrate() line 78 creates a new MockLLMProvider() for fallback, sharing the same state as the default instance. While partially intentional for consistency, the coupling means resetMockSession() (line 53) affects both instances. The behavior is undocumented.",
+      "impact": "Low: State sharing is mostly intentional. resetSession() correctly resets both. No functional defect but undocumented coupling.",
+      "suggestion": "Document the module-level state sharing. Consider making sessionIntimacy instance-level if separation is ever needed."
+    },
+    {
+      "level": "P2",
+      "module": "chat.ts",
+      "title": "_vadAvailable variable shadowing prevents effective offline caching",
+      "detail": "File: D:\\wenstar\\src\\webui\\chat.ts, lines 82, 1036, 1045. A module-level 'let _vadAvailable: boolean | undefined = undefined' at line 82 is shadowed by a local 'let _vadAvailable = true;' at line 1036 inside the try block. The assignment '_vadAvailable = false;' at line 1045 modifies the local, not the module-level one. The module-level variable is NEVER set to false, so the 8100 health check runs on every single chat turn even if the service has been down for hours, adding 2s latency each time.",
+      "impact": "Medium: Every chat request makes a TCP connection attempt to port 8100 with a 2s timeout, even if the service has been offline for hours. Adds up to 2s latency to every chat turn in degraded mode.",
+      "suggestion": "Remove the local 'let' declaration at line 1036. Replace with direct assignment: '_vadAvailable = true;' (no let) so it modifies the module-level variable."
+    },
+    {
+      "level": "P2",
+      "module": "FusionStorageAdapter.ts + WorkingMemory.ts",
+      "title": "WorkingMemory.consolidate() buffer flush loses all entries on write error",
+      "detail": "File: D:\\wenstar\\src\\m9\\WorkingMemory.ts, lines 152-168. consolidate() iterates all entries, calls writeEntry() for graduates, then at line 163 unconditionally clears the entire buffer with 'this.buffer = []'. If writeEntry() throws (FusionStorageAdapter.write() at FusionStorageAdapter.ts line 97 has no try-catch), the exception propagates from consolidate() and the buffer is already emptied. All entries, including unprocessed ones, are lost. flushAll() at lines 189-211 correctly has per-entry try-catch and preserves failed entries.",
+      "impact": "Medium: A single SQLite write failure during automatic consolidation (triggered every 60s by timer or buffer overflow) discards ALL buffered entries, not just the failing one.",
+      "suggestion": "In consolidate(), wrap the write loop in try-catch per entry, collect errors, and only clear successfully-written entries from the buffer. Keep failed entries for retry."
+    },
+    {
+      "level": "P2",
+      "module": "server.ts",
+      "title": "SSE client stale entry can persist between broadcasts",
+      "detail": "File: D:\\wenstar\\src\\webui\\server.ts, lines 730-741, 799-801. The sseClients Set removes clients on 'close' event (line 800) and on write failure during broadcast (line 739). If a client disconnects without firing 'close' (browser process killed, network adapter disabled), the stale response object stays until the next broadcast tries to write. The 'error'/'finish' events are not monitored as additional cleanup triggers.",
+      "impact": "Low: Minor memory leak of one HTTP response object per orphaned client, cleaned on next broadcast.",
+      "suggestion": "Also listen for 'error' and 'finish' events: req.on('error', () => sseClients.delete(res)); req.on('finish', () => sseClients.delete(res));"
+    },
+    {
+      "level": "P2",
+      "module": "DeepSeekLLMProvider.ts",
+      "title": "Redundant API key resolution in Authorization header",
+      "detail": "File: D:\\wenstar\\src\\m5\\DeepSeekLLMProvider.ts, line 116. The Authorization header uses 'Bearer ${resolveApiKey() || process.env["DEEPSEEK_API_KEY"] || ""}'. resolveApiKey() (lines 60-62) already checks process.env first, then falls back to getKeyValue(). The '|| process.env[...]' fallback is redundant. If getKeyValue() returns a key, it is used. If it returns undefined, the environment variable fallback produces the same result as resolveApiKey already did. No functional bug.",
+      "impact": "Low: No functional impact. Code clarity issue.",
+      "suggestion": "Simplify to: 'Bearer ${resolveApiKey() || ""}'"
+    },
+    {
+      "level": "P3",
+      "module": "DeepSeekLLMProvider.ts",
+      "title": "extraParams level field passed as 'as any' bypassing type safety",
+      "detail": "File: D:\\wenstar\\src\\m5\\DeepSeekLLMProvider.ts, lines 488-492. The third parameter to callDeepSeekApi includes 'level: level' in an object typed as 'as any'. Inside callDeepSeekApi, line 107 reads 'const _dl = (extraParams as any).level ?? 0'. The level parameter is not in the function's type signature, causing the use of 'as any' to bypass TypeScript checking.",
+      "impact": "Low: Type safety bypass. Refactoring risk if the function signature changes.",
+      "suggestion": "Add 'level' as a properly typed optional parameter to callDeepSeekApi's signature."
+    }
+  ],
+  "dimensionScore": "yellow",
+  "dimensionSummary": "Stability and Reliability rating: YELLOW. Found 4 P1, 6 P2, 1 P3 issues. Key concerns: (1) M5 degradation chain is broken because DeepSeekLLMProvider catches its own errors and never throws, so MockLLM fallback is unreachable for API failures. (2) DDL migrations use empty catch blocks that mask real errors. (3) conversatonHistory has no concurrent access protection against maintenance timer. (4) processChat has no total timeout. Positive highlights: WorkingMemory.consolidateSafe lock design is correct, SSE client cleanup is mostly good, rateLimitMap has cleanup, topicAskCount has size cap."
+}

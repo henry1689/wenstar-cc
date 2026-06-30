@@ -1,0 +1,235 @@
+[
+  {
+    "id": "emotional_distress",
+    "input": "妈妈在ICU，医生说只有30%希望...",
+    "description": "家人重病紧急场景",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.5
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.5
+      ],
+      "temporal_focus_range": [
+        0.5,
+        1.0
+      ]
+    }
+  },
+  {
+    "id": "sad_feeling",
+    "input": "好难过",
+    "description": "情绪低落 — 审计P0已修复isCasualChat拦截",
+    "expected": {
+      "calcium_range": [
+        0.2,
+        0.45
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.5
+      ]
+    }
+  },
+  {
+    "id": "work_stress",
+    "input": "最近天天加班到凌晨，感觉自己快撑不住了",
+    "description": "工作压力倾诉",
+    "expected": {
+      "calcium_range": [
+        0.2,
+        0.45
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.5
+      ]
+    }
+  },
+  {
+    "id": "positive_share",
+    "input": "我升职了！今天太开心了！",
+    "description": "积极事件分享",
+    "expected": {
+      "calcium_range": [
+        0.3,
+        0.5
+      ],
+      "pleasure_range": [
+        0.5,
+        1.0
+      ]
+    }
+  },
+  {
+    "id": "intimate_miss",
+    "input": "想你了",
+    "description": "亲密思念 — 审计P0已修复INTIMATE_KEYWORDS误判",
+    "expected": {
+      "calcium_range": [
+        0.3,
+        0.5
+      ],
+      "intimacy_range": [
+        0.5,
+        1.0
+      ],
+      "pleasure_range": [
+        -0.3,
+        0.5
+      ]
+    }
+  },
+  {
+    "id": "work_request",
+    "input": "帮我写个方案",
+    "description": "工作请求",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.45
+      ],
+      "factual_range": [
+        0.15,
+        0.4
+      ]
+    }
+  },
+  {
+    "id": "casual_greeting",
+    "input": "在干嘛",
+    "description": "日常闲聊",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.45
+      ],
+      "pleasure_range": [
+        -0.3,
+        0.3
+      ]
+    }
+  },
+  {
+    "id": "family_happy",
+    "input": "妈妈今天很开心",
+    "description": "家庭情感话题",
+    "expected": {
+      "calcium_range": [
+        0.3,
+        0.5
+      ],
+      "pleasure_range": [
+        0.5,
+        1.0
+      ]
+    }
+  },
+  {
+    "id": "vague_recall",
+    "input": "上次那家店",
+    "description": "模糊回忆",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.45
+      ]
+    }
+  },
+  {
+    "id": "anger_conflict",
+    "input": "我恨你！你根本不在乎我的感受！",
+    "description": "愤怒冲突 — 高攻击性",
+    "expected": {
+      "calcium_range": [
+        0.3,
+        0.5
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.5
+      ],
+      "aggression_range": [
+        0.5,
+        1.0
+      ]
+    }
+  },
+  {
+    "id": "empty_input",
+    "input": "",
+    "description": "空文本不崩溃",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.4
+      ]
+    }
+  },
+  {
+    "id": "long_text",
+    "input": "我跟你说今天我遇到一件特别有意思的事情。早上出门的时候碰到了一只橘猫，它蹲在楼梯口看着我，然后我就蹲下来摸了它一下，它居然蹭了蹭我的手。然后我去坐地铁，地铁上人特别多，我站着看手机，突然一个刹车我没站稳差点摔倒，旁边的姑娘扶了我一下。到了公司发现今天食堂做了我最爱的红烧肉，太幸福了。一天下来虽然累但是挺开心的。",
+    "description": "超长日常叙述",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.6
+      ],
+      "pleasure_range": [
+        0.0,
+        0.5
+      ]
+    }
+  },
+  {
+    "id": "health_inquiry",
+    "input": "生病了，头痛发烧",
+    "description": "健康问题",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.45
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.3
+      ],
+      "intimacy_range": [
+        0.2,
+        0.5
+      ]
+    }
+  },
+  {
+    "id": "privacy_test",
+    "input": "我的银行卡号是6222021234567890123",
+    "description": "隐私信息",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.45
+      ],
+      "factual_range": [
+        0.3,
+        0.6
+      ]
+    }
+  },
+  {
+    "id": "mixed_work_emotion",
+    "input": "项目延期了，老板天天骂，真的好烦",
+    "description": "混合话题 工作+情绪",
+    "expected": {
+      "calcium_range": [
+        0.25,
+        0.5
+      ],
+      "pleasure_range": [
+        -1.0,
+        -0.5
+      ]
+    }
+  }
+]
