@@ -93,6 +93,29 @@ export function checkRoleplayHealth(
     }
   }
 
+  // ── 检查 6: 反事实幻觉检测 — 回复中是否编造了角色设定中不存在的人物 ──
+  if (reply && typeof reply === 'string' && finalKnowledgeText) {
+    // 从 finalKnowledgeText 中提取所有已知人名（FG+KB+画像中明确提到的）
+    const knownPeople: string[] = [];
+    const namePattern = /「([一-龥]{2,4})」/g;
+    let m;
+    while ((m = namePattern.exec(finalKnowledgeText)) !== null) {
+      if (!knownPeople.includes(m[1])) knownPeople.push(m[1]);
+    }
+    // 额外加上角色名自身
+    if (roleName && !knownPeople.includes(roleName)) knownPeople.push(roleName);
+
+    // 检测回复中出现的 2-4 字中文人名是否在已知人物中
+    const replyNames = reply.match(/[一-龥]{2,4}(?=[，。！？\s\n，]|的|了|是|有|在|说|叫)/g) || [];
+    for (const rn of replyNames) {
+      if (rn === roleName || knownPeople.includes(rn)) continue;
+      // 这个人在设定中不存在 → LLM 可能在编造
+      issues.push(`反事实幻觉: 回复中提到了设定里不存在的人物「${rn}」`);
+      fixes.push('规则⑤已要求LLM不知道的人不能说，需要强化注入');
+      break;
+    }
+  }
+
   const healthy = issues.length === 0;
   if (!healthy) {
     console.error(

@@ -1447,6 +1447,14 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         _rpTurnCounter = 0;
         console.log('[Roleplay] 稳定性重注入: 完整画像已刷新');
       }
+      
+      // 🔴 每轮强制注入年龄锚点（从画像中提取，防LLM随口改年龄）
+      if (_currentPortrait && _currentPortrait.includes('岁')) {
+        const _ageMatch = _currentPortrait.match(/(\d+)岁/);
+        if (_ageMatch && !knowledgeBaseText.includes('【年龄】')) {
+          knowledgeBaseText += '\n\n【年龄】你的年龄是' + _ageMatch[1] + '岁，不要说自己其他年龄。';
+        }
+      }
 
       // 角色前缀丢失时重建（兜底 + 隐式扮演首次构建）
       if (!knowledgeBaseText || !knowledgeBaseText.startsWith('【角色扮演】')) {
@@ -1486,6 +1494,8 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
             .map((g: any) => g.name);
 
           // ② FG 亲属解析（只在有 FG 分支时生效）
+          // 🔴 即使 DNA 没提取到实体，只要用户说了亲属称呼就强制解析
+          // 例：「她叫什么名字」「你姐姐在哪」中的「她」「姐姐」无法被 M1 提取为人名
           if (_currentRPBranch && /妈妈|妈|爸爸|爸|母亲|父亲|姐姐|妹妹|哥哥|弟弟|老婆|老公/.test(message)) {
             const _kinship = ['妈妈','妈','爸爸','爸','母亲','父亲','姐姐','妹妹','哥哥','弟弟','老婆','老公'];
             for (const _kw of _kinship) {
@@ -1494,6 +1504,18 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
                 for (const _rn of _resolved) {
                   if (!_rpEntities.includes(_rn)) _rpEntities.push(_rn);
                 }
+              }
+            }
+          }
+          // 🔴 代词「她」「他」触发：从上一轮用户消息中找最近的人名作为检索目标
+          if (_rpEntities.length === 0 && /[她他]/.test(message)) {
+            const _recentUser = ctx.conversationHistory.slice(-3).filter(t => t.role === 'user').map(t => t.content).join(' ');
+            const _lastName = _recentUser.match(/[一-龥]{2,4}(?=[，。！？\s]|的|了|是|有|在|说)/g);
+            if (_lastName && _lastName.length > 0) {
+              const _last = _lastName[_lastName.length - 1];
+              if (_last !== _currentRoleplay && _last !== '我' && _last.length >= 2) {
+                _rpEntities.push(_last);
+                console.log('[Roleplay] 代词解析: 从历史提取「' + _last + '」');
               }
             }
           }
@@ -1537,6 +1559,18 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
             if (_transitive && knowledgeBaseText && !knowledgeBaseText.includes(_transitive.substring(0, 30))) {
               knowledgeBaseText += _transitive;
               console.log('[Roleplay] 主动检索已追加: +' + _transitive.length + '字节 [' + _entity + ']');
+            }
+          }
+
+          // 🔴 ④ 检索后反编造屏障：如果用户问了关于人的问题但全部检索为空，强制注入"不知道"
+          if (_rpEntities.length > 0) {
+            const _allEmpty = _rpEntities.every(function(e) {
+              return !knowledgeBaseText || !knowledgeBaseText.includes(e);
+            });
+            if (_allEmpty && /谁|名字|叫.*什么|在哪|做什么|什么样|年龄|多大|几岁/.test(message)) {
+              const _unknownGuard = '\n\n【⚠️ 反编造铁律】用户刚才问了你关于以下人物的信息：' + _rpEntities.join('、') + '。但你的设定里完全没有这些人的资料，你不知道他们是谁。请直接回答"我不清楚""没听说过"或"不知道"。绝对不能编造任何名字、关系、经历、外貌。宁可说不知道，不能说假话。';
+              knowledgeBaseText += _unknownGuard;
+              console.log('[Roleplay] ⚠️ 反编造屏障已触发: ' + _rpEntities.join(', '));
             }
           }
         } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }

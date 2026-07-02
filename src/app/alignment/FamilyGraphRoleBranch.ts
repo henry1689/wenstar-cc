@@ -247,14 +247,28 @@ export class FamilyGraphRoleBranch {
   /**
    * 根据亲属称呼解析角色视角下的具体人名
    * 例：(「妈妈」, 熊梓铭视角) → 「王全芬」
+   *     (「姐姐」, 徐诗韵视角) → 「徐诗雨」
+   *
+   * 🔴 姊妹类兼容：relationToLabel 输出「兄弟姐妹」，但用户可能说「姐姐」「妹妹」「哥哥」「弟弟」。
+   *    只要 kinshipTerm 包含「姐」「妹」「哥」「弟」之一，且关系是 sibling_of，就匹配。
    */
   resolveKinship(kinshipTerm: string): string[] {
     const results: string[] = [];
     const rootRelations = this.persons.get(this.rootName)?.relations || [];
 
+    // 判断当前称呼是否属于姊妹类
+    const isSiblingLike = /姐|妹|哥|弟/.test(kinshipTerm);
+
     for (const rel of rootRelations) {
       const label = FamilyGraphRoleBranch.relationToLabel(rel.relation, rel.direction, rel.personName);
-      if (label && label.includes(kinshipTerm)) {
+      if (!label) continue;
+      // 精确匹配（妈妈→妈妈）
+      if (label.includes(kinshipTerm)) {
+        results.push(rel.personName);
+        continue;
+      }
+      // 姊妹类模糊匹配：用户说「姐姐」但 label 是「兄弟姐妹」，同样匹配
+      if (isSiblingLike && rel.relation === 'sibling_of') {
         results.push(rel.personName);
       }
     }
@@ -407,6 +421,7 @@ export class FamilyGraphRoleBranch {
   /** 关系类型 → 中文称呼（从角色视角） */
   static relationToLabel(relation: string, direction: 'outgoing' | 'incoming', personName?: string): string {
     // outgoing = 角色 → 别人, incoming = 别人 → 角色
+    // 🔴 兄弟姐妹类输出多种标签（姐姐/妹妹/哥哥/弟弟），方便 resolveKinship 匹配任意称呼
     const MAP: Record<string, [string, string]> = {
       mother_of:    ['妈妈', '孩子'],
       father_of:    ['爸爸', '孩子'],
