@@ -32,16 +32,40 @@
 
 ## 🔴 代码质量铁律（基于 2026-07-02 全量扫描）
 
-以下规则是代码审查红线，违反的 PR 不通过：
+以下规则是代码审查红线，违反的 PR 不通过。
 
-| # | 铁律 | 禁止行为 | 替代方案 | 监控方式 |
+### P0 致命级 — 必须第一时间清零
+
+| # | 铁律 | 禁止行为 | 替代方案 | 验收标准 |
 |:-:|------|---------|---------|---------|
-| 1 | **禁止空 catch** | `catch {}` 或 `catch (_) {}` 无内容 | 至少 `console.error('[模块] 失败:', e?.message)` | pre-commit grep 门禁 |
-| 2 | `bus.on` 必须有 `bus.off` | 注册事件监听但不清理 | `destroy()` 中调用 `this.bus?.off(event, handler)` | 代码审查 |
-| 3 | **禁止模块级 process.env** | 在模块顶层读取 env | `ConfigService.get('KEY')` 运行时懒加载 | 代码审查 |
-| 4 | **禁止新增 as any** | 用 `as any` 绕过类型检查 | 定义正确类型或用 `as` 具体类型断言 | pre-commit git diff 门禁 |
-| 5 | **写入路径必须走公共 API** | `(sqlite as any).xxx()` 操作原始 sql.js | `SQLiteAdapter.writeMemory()` / `FusionStorageAdapter` | 代码审查 |
-| 6 | **角色扮演规则必须集中** | 在 chat.ts 内联构建规则 | `buildRoleplayRules()` / `buildRoleplayRules()` | 编译阶段（函数引用） |
+| 1 | **禁止空 catch** | `catch {}` 或 `catch (_) {}` | 核心链路（记忆写入/DB/备份/定时任务）：`catch(e){console.error(...); hook.alert()}`；非核心：至少 `console.error('[模块]', e?.message)`。**确实需静默的必须加注释 + logger.debug** | ①全局搜索 `catch\s*\{\s*\}` 确认归零；②故意构造DB错误/API密钥错误/权限错误，验证日志输出模块名+错误信息+堆栈 |
+| 2 | **`bus.on` 必须有 `bus.off`** | 注册事件监听不清理 | `destroy()` 中 `this.bus?.off(event, handler)`。热重载时先销毁旧实例再注册新实例 | ①模拟3次模块重载后监听器数不变；②触发一次事件确认回调只执行1次 |
+| 3 | **Hook 数据必须真实，禁止伪造** | 强制 setStatus green、批量伪造 callCount | 移除10s保活循环 + 移除聊天全勾选伪造。超时3min→灰色，超时10min→红色 | ①确认无强制保绿/伪造计数代码；②注释埋点后3min变灰/红；③10轮对话后计数=10 |
+
+### P1 重要级 — 分批清理
+
+| # | 铁律 | 禁止行为 | 替代方案 |
+|:-:|------|---------|---------|
+| 4 | **禁止模块级 process.env** | 模块顶层读环境变量 | `ConfigService.get('KEY')` 运行时懒加载 |
+| 5 | **禁止滥用 `as any`** | 新增 `as any` 类型逃逸 | 定义正确类型或用 `as` 具体类型断言。日常迭代哪个模块碰了就顺手补上 |
+| 6 | **写入路径必须走公共 API** | `(sqlite as any).xxx()` 操作原始 sql.js | `SQLiteAdapter.writeMemory()` / `FusionStorageAdapter` |
+| 7 | **角色扮演规则必须集中** | chat.ts 内联构建规则 | `buildRoleplayRules()` |
+
+### P2 整洁级 — 顺手处理
+
+| # | 建议 |
+|:-:|------|
+| 8 | 大文件拆分（chat.ts/server.ts/FamilyGraph.ts/SQLiteAdapter.ts）等P0+P1稳定运行1周后分批拆，拆一块验一块 |
+| 9 | 重复字符串提取常量 + `@ts-ignore` → `@ts-expect-error` + 旧文件清理 |
+
+## 🛡️ 整改执行四铁则
+
+```
+1. 批次推进，绝不并行 — P0→P1→P2，每批验收通过+稳定2天再进下一批
+2. 只修问题，不顺手优化 — 改catch就只改catch，try里面一行都不动
+3. 改一项，验一项 — 每类问题构造对应场景验证后方可进入下一项
+4. 全程可回滚 — 每批次开独立分支，验证不通过立刻回滚
+```
 
 ## 🛡️ 质量改进流程
 
@@ -49,9 +73,9 @@
 
 ```
 ① 怎么改 → 根因分析(5 Why) + 影响面 + 改法选择 + 写测试
-② 防复发 → 门禁规则 + lint 配置 + 设计模式
-③ 验证 → 编译 + 烟雾测试 + 灰度观察
-④ 监控 → 运行时自检 + 健康指标 + 告警阈值
+② 防复发 → 代码门禁 + 运行时监控 + 定期体检 + 开发规范
+③ 验证 → 场景验证(故意构造错误) + 烟雾测试 + 灰度观察2天
+④ 监控 → 错误日志告警(10min>5条) + 事件监听器巡检(每小时) + 探针健康度巡检(5分钟)
 ```
 
 详见 `docs/quality-improvement-workflow.md`

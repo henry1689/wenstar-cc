@@ -180,52 +180,72 @@ describe('质量守卫', () => {
 
 ---
 
-## 四、监控检测：运行时三层监控
+## 四、P0 整改验收标准（逐项验证）
 
-### 第一层：运行时自检（每轮对话）
+### P0-1 空 catch 验收
 
-已实现 `RoleplayHealthGuard`，扩展到通用：
+1. **静态校验**：全局正则搜索 `catch\s*\{\s*\}`，确认 88 处空 catch 全部清零
+2. **场景验证**：故意构造 3 类错误验证日志输出：
+   - DB 操作错误（改错表名）→ 日志输出模块名 + SQL 错误信息
+   - 模型调用失败（填错 API key）→ 日志输出模块名 + 网络错误信息
+   - 备份任务异常（删目录权限）→ 日志输出模块名 + 文件系统错误信息
+3. **无法静默**：以上每类错误必须在日志中找到对应记录，无静默失败
 
-```typescript
-// src/app/health/SystemHealthGuard.ts
-export class SystemHealthGuard {
-  static checkEventBusLeaks(bus: EventBus): HealthReport {
-    const subscriberCount = bus.getSubscriberCount();
-    const warnings = [];
-    // 如果订阅者超过 10 秒前的 2 倍，告警泄漏
-    if (subscriberCount > this._lastCount * 2) {
-      warnings.push(`事件订阅者异常增长: ${this._lastCount}→${subscriberCount}`);
-    }
-    return { healthy: warnings.length === 0, warnings };
-  }
-  
-  static checkUncaughtErrors(): void {
-    process.on('unhandledRejection', (reason) => {
-      console.error('[HealthGuard] ❌ 未捕获Promise拒绝:', reason);
-    });
-  }
-}
+### P0-2 事件监听器泄漏验收
+
+1. **数量验证**：模拟 3 次模块重载/重连，事件总线监听器总数不增长，稳定在固定值
+2. **行为验证**：触发一次 `user:input` 事件，确认回调只执行 1 次，无多次触发
+
+### P0-3 Hook 系统真实性验收
+
+1. **假数据清零**：搜索代码，确认无强制设置 green、批量伪造计数的逻辑
+2. **异常场景**：注释某个功能的真实埋点 → 3min 后探针变灰/红（而非一直保绿）
+3. **计数准确**：跑 10 轮对话 → 核心探针调用计数 = 10，不多不少
+4. **全覆盖**：14 个探针全部有真实上报路径，无僵尸探针
+
+### 通用验收
+
+所有整改完成后，跑一遍全功能 8 项快速体检 + 核心链路测试，确认 0 回归 bug。
+
+---
+
+## 五、长效防控机制（四层）
+
+### 第一层：静态代码门禁（从源头堵死）
+
+把三条红线加入代码检查：
+- 禁止空 catch
+- 事件监听必须配对销毁
+- 禁止滥用 as any
+
+每次迭代提交前自动跑轻量扫描，新增违规项直接拦截，不让新债务进代码库。
+
+### 第二层：运行时监控（异常自动告警）
+
+| 监控项 | 触发条件 | 动作 |
+|--------|---------|------|
+| 错误日志 | 10 分钟内 error 级别 > 5 条 | 自动告警 |
+| 事件监听器 | 每小时检查数量，异常增长 | 自动告警 |
+| 探针健康度 | 每 5 分钟检查上报状态 | 离线/异常自动标红 |
+
+### 第三层：定期全量体检（债务不累积）
+
+- 每两周跑一次全量代码扫描，输出债务清单（空 catch 数、as any 数、大文件清单）
+- 跟踪趋势，避免慢慢越积越多
+- 每次版本迭代后：先跑代码质量扫描 → 再跑功能测试 → 双维度验收
+
+### 第四层：开发规范沉淀（统一认知）
+
+```
+- 写 try 必须带错误日志，禁止空 catch
+- 写事件监听必须同步写销毁方法
+- 监控数据必须真实，严禁伪造保活
+- 新增功能必须同步加对应 Hook 探针
 ```
 
-### 第二层：健康检查指标（API 可查询）
+---
 
-在 `/api/health` 中增加：
-
-```json
-{
-  "codeQuality": {
-    "emptyCatches": 0,
-    "eventLeaks": 0,
-    "typeEscapes": 0
-  },
-  "errors": {
-    "unhandledRejections": 0,
-    "uncaughtExceptions": 0
-  }
-}
-```
-
-### 第三层：告警阈值（自动告警）
+## 六、告警阈值
 
 | 指标 | 警告线 | 告警线 | 动作 |
 |------|:------:|:------:|------|
