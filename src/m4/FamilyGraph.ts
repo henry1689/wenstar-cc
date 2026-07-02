@@ -1442,7 +1442,8 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
     if (migrated > 0) {
       this.markDirty(true);
-      console.log(`[FamilyGraph] dossier 迁移: ${migrated} 人升级, ${errors} 错误`);
+      if (errors > 0) console.warn(`[FamilyGraph] dossier 迁移: ${migrated} 人升级, ${errors} 错误`);
+      else console.log(`[FamilyGraph] dossier 迁移: ${migrated} 人升级`);
     }
     return { total: persons.length, migrated, errors };
   }
@@ -1801,7 +1802,8 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     if (completed > 0) {
       this.markDirty(true);
-      console.log(`[FamilyGraph] 反向边补全: ${completed} 条新增, ${errors} 错误`);
+      if (errors > 0) console.warn(`[FamilyGraph] 反向边补全: ${completed} 条新增, ${errors} 错误`);
+      else console.log(`[FamilyGraph] 反向边补全: ${completed} 条新增`);
     }
     return { completed, errors };
   }

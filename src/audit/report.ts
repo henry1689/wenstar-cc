@@ -53,8 +53,8 @@ export function printReport(report: AuditReport): void {
   console.log(`  提交:         ${report.commitId} (${report.branch})`);
   console.log(`  总项:         ${s.total}`);
   console.log(`  ✅ 通过:       ${s.passed}`);
-  console.log(`  ❌ 失败:       ${s.failed}`);
-  console.log(`  ⚠️  异常:      ${s.error}`);
+  console.error(`  ❌ 失败:       ${s.failed}`);
+  console.warn(`  ⚠️  异常:      ${s.error}`);
   console.log(`  👤 需人工确认:  ${s.manual}`);
   console.log(`  通过率:       ${s.total > 0 ? Math.round((s.passed + s.manual) / s.total * 100) : 0}%`);
   console.log('───────────────────────────────────────');

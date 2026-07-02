@@ -405,7 +405,7 @@ async function runMigration(fmDb: any, fgDb: any, dryRun: boolean): Promise<{ me
   console.log(`  ✅ 创建节点: ${nodeCreated}`);
   console.log(`  ✅ 创建边: ${edgeCreated}`);
   console.log(`  ✅ 别名关联: ${aliasAdded}`);
-  console.log(`  ⚠️  错误: ${errorCount}`);
+  console.warn(`  ⚠️  错误: ${errorCount}`);
   console.log(`  🗑️  过滤噪音: ${result.noiseFiltered}`);
 
   return { mergedNodes: nodeCreated, mergedEdges: edgeCreated, aliasesAdded: aliasAdded, errors: errorCount, noiseFiltered: result.noiseFiltered };
