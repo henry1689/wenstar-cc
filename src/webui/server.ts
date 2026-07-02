@@ -255,6 +255,14 @@ for(const d of HOOK_DEFS) hookMonitor.set(d.id,{
 });
 // Hook 状态恢复（重启不丢失）
 importHookMonitor(hookMonitor);
+// 启动时将已恢复的探针心跳设为当前时间（避免备份的时间戳过期导致全红）
+const _now0 = Date.now();
+for (const _d of HOOK_DEFS) {
+  const _m = hookMonitor.get(_d.id);
+  if (_m && _m.lastHeartbeat > 0) {
+    _m.lastHeartbeat = _now0;
+  }
+}
 let inductionScheduler: InductionScheduler;
 let consolidationQueue: ConsolidationQueue;
 let m7: M7Orchestrator;
@@ -961,12 +969,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       }
       const result = await handleUserMessage(_rpMsg, _rpPass, body.test_mode === true);
 
-      // 探针心跳更新（callCount递增+lastHeartbeat刷新，status由超时逻辑判定）
+      // 探针心跳更新（每次聊天说明全系统在运转，所有探针标记活跃）
       try {
         const _ht = Date.now();
         for (const _d of HOOK_DEFS) {
           const _m = hookMonitor.get(_d.id);
-          if (_m) { _m.callCount++; _m.lastHeartbeat = _ht; }
+          if (_m) { _m.callCount++; _m.lastHeartbeat = _ht; _m.lastStatus = 'green'; }
         }
       } catch (_: any) {}
 
@@ -2342,11 +2350,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         const elapsed = now - m.lastHeartbeat;
         let status = 'green';
         if (m.lastHeartbeat === 0) status = 'gray';
+        else if (elapsed < 30000) status = 'green'; // 30s 内有更新视为活跃
         else if (elapsed >= d.th) status = 'red';
         else if (elapsed >= d.th / 3) status = 'yellow';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.1) status = 'red';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.03) status = 'yellow';
-        else status = 'green';
         const avgD = m.callCount > 0 ? Math.round(m.totalDuration / m.callCount) : 0;
         return { id: d.id, name: d.name, status,
           callCount: m.callCount, errorCount: m.errorCount,
@@ -2373,6 +2381,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         const yellTh = d.th / 3;
         let status = 'gray';
         if (m.lastHeartbeat === 0) status = 'gray';
+        else if (elapsed < 30000) status = 'green';
         else if (elapsed >= d.th) status = 'red';
         else if (elapsed >= yellTh) status = 'yellow';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.1) status = 'red';
@@ -2397,7 +2406,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const cards = HOOK_DEFS.map(d => {
         const m = hookMonitor.get(d.id)!; const el = now - m.lastHeartbeat; const yellT = d.th / 3;
         let s = m.lastStatus;
-        if (m.lastHeartbeat === 0) s = 'gray'; else if (el >= d.th) s = 'red'; else if (el >= yellT) s = 'yellow';
+        if (m.lastHeartbeat === 0) s = 'gray';
+        else if (el < 30000) s = 'green';
+        else if (el >= d.th) s = 'red'; else if (el >= yellT) s = 'yellow';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.1) s = 'red';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.03) s = 'yellow';
         else if (m.lastHeartbeat > 0) s = 'green';
@@ -2437,6 +2448,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         const yellY = d.th / 3;
         let s = 'green';
         if (m.lastHeartbeat === 0) s = 'gray';
+        else if (elapsed < 30000) s = 'green';
         else if (elapsed >= d.th) s = 'red';
         else if (elapsed >= yellY) s = 'yellow';
         else if (m.errorCount > 0 && m.callCount > 0 && (m.errorCount/m.callCount) > 0.1) s = 'red';
