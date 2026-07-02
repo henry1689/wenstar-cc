@@ -30,6 +30,32 @@
 
 ---
 
+## 🔴 代码质量铁律（基于 2026-07-02 全量扫描）
+
+以下规则是代码审查红线，违反的 PR 不通过：
+
+| # | 铁律 | 禁止行为 | 替代方案 | 监控方式 |
+|:-:|------|---------|---------|---------|
+| 1 | **禁止空 catch** | `catch {}` 或 `catch (_) {}` 无内容 | 至少 `console.error('[模块] 失败:', e?.message)` | pre-commit grep 门禁 |
+| 2 | `bus.on` 必须有 `bus.off` | 注册事件监听但不清理 | `destroy()` 中调用 `this.bus?.off(event, handler)` | 代码审查 |
+| 3 | **禁止模块级 process.env** | 在模块顶层读取 env | `ConfigService.get('KEY')` 运行时懒加载 | 代码审查 |
+| 4 | **禁止新增 as any** | 用 `as any` 绕过类型检查 | 定义正确类型或用 `as` 具体类型断言 | pre-commit git diff 门禁 |
+| 5 | **写入路径必须走公共 API** | `(sqlite as any).xxx()` 操作原始 sql.js | `SQLiteAdapter.writeMemory()` / `FusionStorageAdapter` | 代码审查 |
+| 6 | **角色扮演规则必须集中** | 在 chat.ts 内联构建规则 | `buildRoleplayRules()` / `buildRoleplayRules()` | 编译阶段（函数引用） |
+
+## 🛡️ 质量改进流程
+
+每次修复必须经过四步：
+
+```
+① 怎么改 → 根因分析(5 Why) + 影响面 + 改法选择 + 写测试
+② 防复发 → 门禁规则 + lint 配置 + 设计模式
+③ 验证 → 编译 + 烟雾测试 + 灰度观察
+④ 监控 → 运行时自检 + 健康指标 + 告警阈值
+```
+
+详见 `docs/quality-improvement-workflow.md`
+
 ## 📋 需要你主动调用的技能
 
 | 场景 | 命令 |
