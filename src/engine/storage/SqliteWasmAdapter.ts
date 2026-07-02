@@ -65,7 +65,7 @@ export class SqliteWasmStorage implements IStorageProvider {
       this.db.exec(
         `INSERT OR REPLACE INTO engine_store (key, value, updated_at) VALUES ('${key}', '${JSON.stringify(value).replace(/'/g, "''")}', datetime('now'))`
       );
-    } catch {}
+    } catch (e: any) { console.error('[SqliteWasm] error:', e?.message); }
   }
 
   async query<T>(sql: string, params?: any[]): Promise<T[]> {

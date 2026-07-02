@@ -389,7 +389,7 @@ export class M7Orchestrator {
 
         // 更新 FamilyGraph 备注
         if (typeof fg.updateNodeProperties === 'function') {
-          try { await fg.updateNodeProperties(name, { 梦境备注: summary.substring(0, 200) }); } catch {}
+          try { await fg.updateNodeProperties(name, { 梦境备注: summary.substring(0, 200) }); } catch (e: any) { console.error('[M7Orch] error:', e?.message); }
         }
       }
       console.log('[Dream] 人物复盘完成');

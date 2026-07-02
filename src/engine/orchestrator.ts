@@ -264,6 +264,6 @@ export class Orchestrator {
         const ctx = this._temporalModules.aggregator.getFullContext();
         EngineContext.setTemporalBlock(ctx.promptBlock);
       }
-    } catch {}
+    } catch (e: any) { console.error('[Orchestrator] error:', e?.message); }
   }
 }

@@ -19,11 +19,13 @@ interface ProcessChatFn {
 
 export class LegacyAdapter implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundHandleInput: ((event: any) => void) | null = null;
   private processChat: ProcessChatFn | null = null;
 
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
-    bus.on('user:input', this.handleInput, 500);
+    this._boundHandleInput = this.handleInput.bind(this);
+    bus.on('user:input', this._boundHandleInput, 500);
   }
 
   /** 注入 processChat 函数（从 server.ts 传入） */
@@ -32,7 +34,13 @@ export class LegacyAdapter implements ILifecycle {
   }
 
   reset(): void {}
-  destroy(): void { this.bus = null; }
+  destroy(): void {
+    if (this.bus && this._boundHandleInput) {
+      this.bus.off('user:input', this._boundHandleInput);
+    }
+    this.bus = null;
+    this._boundHandleInput = null;
+  }
 
   private handleInput = async (event: UserInputEvent): Promise<void> => {
     if (!this.processChat) return;

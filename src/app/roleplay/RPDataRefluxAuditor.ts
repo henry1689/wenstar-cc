@@ -153,7 +153,7 @@ export class RPDataRefluxAuditor {
           item.confidence = Math.min(item.confidence, 0.5);
           item.checkResults.conflictPass = false;
         }
-      } catch (_) {}
+      } catch (_e: any) { console.error('[RefluxAudit] error:', (_e as any)?.message); }
     }
 
     // 第三级：置信度校验

@@ -16,6 +16,7 @@ interface AsyncTask {
 
 export class OutputProcessor implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundOnGenerationResult: ((event: any) => void) | null = null;
   private storage: IStorageProvider | null = null;
   private taskQueue: AsyncTask[] = [];
   private processing = false;
@@ -23,7 +24,8 @@ export class OutputProcessor implements ILifecycle {
   async init(bus: IEventBus, storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
     this.storage = storage ?? null;
-    bus.on('generation:result', this.onGenerationResult, 500);
+    this._boundOnGenerationResult = this.onGenerationResult.bind(this);
+    bus.on('generation:result', this._boundOnGenerationResult, 500);
   }
 
   reset(): void {
@@ -31,8 +33,12 @@ export class OutputProcessor implements ILifecycle {
   }
 
   destroy(): void {
+    if (this.bus && this._boundOnGenerationResult) {
+      this.bus.off('generation:result', this._boundOnGenerationResult);
+    }
     this.bus = null;
     this.storage = null;
+    this._boundOnGenerationResult = null;
   }
 
   private onGenerationResult = async (event: GenerationResultEvent): Promise<void> => {

@@ -80,7 +80,7 @@ export class MemorySelfReview {
             [(rel as any).id],
           );
           report.expiredRelations++;
-        } catch {}
+        } catch (e: any) { console.error('[MemorySelfReview] error:', e?.message); }
       }
 
       if (oldRelations.length > 0) {

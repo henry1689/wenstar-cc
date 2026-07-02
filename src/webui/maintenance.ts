@@ -183,7 +183,7 @@ export class MaintenanceService {
         const r = this._runKnowledgeGc(); if (r > 0) console.log('[Maintenance] 知识库GC: 清理 ' + r + ' 条过期未分类条目');
         // 清理过期记事记忆（调用 YuyaoMemoryService，通过注入的函数）
         if (this._runNoteGc) { const n = this._runNoteGc(); if (n > 0) console.log('[Memory] 清理过期记事: ' + n + ' 条'); }
-      } catch (e) { console.error('[Maintenance] 知识库GC失败:', e); }
+      } catch (e: any) { console.error('[Maintenance] 知识库GC失败:', e); }
       // (v1.1) 同步清理 FG 过期 pending 条目（30天TTL）
       try {
         const fg = this.familyGraph ?? (this._fgGetter ? this._fgGetter() : null);
@@ -478,7 +478,7 @@ export class MaintenanceService {
           );
           // (FG-迁移) 双写 FamilyGraph
           if (familyGraph) {
-            try { familyGraph.integrateSocialRelation(rawName, 'acquaintance_of', allText).catch(() => {}); } catch {}
+            try { familyGraph.integrateSocialRelation(rawName, 'acquaintance_of', allText).catch(() => {}); } catch (e: any) { console.error('[Maintenance] error:', e?.message); }
           }
         }
 

@@ -105,7 +105,7 @@ function writeErr(res: http.ServerResponse, code: number, msg: string) {
 /** 定时器统一管理 */
 const _timers: Array<NodeJS.Timeout> = [];
 function addTimer(t: NodeJS.Timeout) { _timers.push(t); return t; }
-function clearAllTimers() { for (const t of _timers) { try { clearInterval(t); clearTimeout(t); } catch {} } _timers.length = 0; }
+function clearAllTimers() { for (const t of _timers) { try { clearInterval(t); clearTimeout(t); } catch (e: any) { console.error('[server] error:', e?.message); } } _timers.length = 0; }
 
 // M6 自我模型（延迟初始化，在 initPipeline 中赋值）
 let m6: M6Orchestrator;
@@ -158,12 +158,12 @@ function loadConversationHistory(): void {
           // 尝试迁移到新库
           if (conversationDB) {
             for (const conv of oldRecent.reverse()) {
-              try { conversationDB.insertConversation(conv.role, conv.content, { seqPos: 0 }); } catch {}
+              try { conversationDB.insertConversation(conv.role, conv.content, { seqPos: 0 }); } catch (e: any) { console.error('[server] error:', e?.message); }
             }
             console.log('  已将旧对话迁移到conversations.db');
           }
         }
-      } catch {}
+      } catch (e: any) { console.error('[server] error:', e?.message); }
     }
     if (conversationHistory.length === 0) {
       console.log('  无历史对话记忆');
@@ -405,7 +405,7 @@ async function initPipeline(): Promise<void> {
   console.log('  自我模型已启动 ✓');
 
   // 记忆仓每日备份（启动后5分钟首次执行）
-  setTimeout(() => { try { memoryVault?.backup(); } catch {} }, 5 * 60 * 1000);
+  setTimeout(() => { try { memoryVault?.backup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 5 * 60 * 1000);
   console.log('  记忆仓已启动 ✓');
 
   // ── 统一备份引擎（三大永久存储：fusion_memory + family_graph + knowledge） ──
@@ -443,7 +443,7 @@ async function initPipeline(): Promise<void> {
         const bkSize = statSync(bkPath).size;
         if (srcSize > 0 && Math.abs(bkSize - srcSize) / srcSize > 0.1) {
           console.warn(`[Backup] ❌ ${prefix} 文件大小异常: 源=${srcSize}, 备份=${bkSize}`);
-          try { unlinkSync(bkPath); } catch {}
+          try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
           continue;
         }
 
@@ -456,7 +456,7 @@ async function initPipeline(): Promise<void> {
           const nodeCnt = nodes[0]?.values[0]?.[0] || 0;
           if (nodeCnt === 0) {
             console.warn(`[Backup] ❌ ${prefix} 可读性校验失败（nodes 为空）`);
-            try { unlinkSync(bkPath); } catch {}
+            try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
             testDb.close();
             continue;
           }
@@ -470,7 +470,7 @@ async function initPipeline(): Promise<void> {
         successCount++;
       } catch (err) {
         console.warn(`[Backup] ❌ ${prefix} 备份失败:`, err);
-        try { unlinkSync(bkPath); } catch {}
+        try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
       }
     }
 
@@ -515,7 +515,7 @@ async function initPipeline(): Promise<void> {
         // 删除不在保留列表中的文件
         for (const f of groupFiles) {
           if (!kept.includes(f)) {
-            try { unlinkSync(path.join(BACKUP_DIR, f)); } catch {}
+            try { unlinkSync(path.join(BACKUP_DIR, f)); } catch (e: any) { console.error('[server] error:', e?.message); }
           }
         }
       }
@@ -523,8 +523,8 @@ async function initPipeline(): Promise<void> {
   }
 
   // 启动后15分钟首次执行，之后每30分钟
-  setTimeout(async () => { try { await runUnifiedBackup(); } catch {} }, 15 * 60 * 1000);
-  setInterval(async () => { try { await runUnifiedBackup(); } catch {} }, 30 * 60 * 1000);
+  setTimeout(async () => { try { await runUnifiedBackup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 15 * 60 * 1000);
+  setInterval(async () => { try { await runUnifiedBackup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 30 * 60 * 1000);
   console.log('  统一备份引擎已启动 ✓ (15min首执行, 30min周期)');
 
 
@@ -631,7 +631,7 @@ async function initPipeline(): Promise<void> {
             console.warn('[SelfProfile] 仿生智脑同步失败:', err);
           }
         })();
-      } catch {}
+      } catch (e: any) { console.error('[server] error:', e?.message); }
     } catch (err) {
       console.warn('[SelfProfile] 初始化失败(不影响启动):', err);
     }
@@ -914,7 +914,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           : 'N/A';
         const backupDirPath = path.join(PROJECT_ROOT, "data", "backups");
         let backupFiles: string[] = [];
-        try { backupFiles = fs.readdirSync(backupDirPath).filter(f => f.endsWith('.db')); } catch {}
+        try { backupFiles = fs.readdirSync(backupDirPath).filter(f => f.endsWith('.db')); } catch (e: any) { console.error('[server] error:', e?.message); }
         report.backup = {
           lastBackupTime: backupStats.lastBackupTime,
           backupSuccessRate: successRate,
@@ -960,15 +960,6 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         _rpPass = '【角色扮演】' + _rpM[1].replace(/[吧呗了试试看看一下玩玩]$/, '').trim() + '||' + (_rpPass || '');
       }
       const result = await handleUserMessage(_rpMsg, _rpPass, body.test_mode === true);
-
-      // ── 全 Hook 心跳上报（每次聊天触发所有14个点位） ──
-      try {
-        const _nt = Date.now();
-        for (const _d of HOOK_DEFS) {
-          const _m = hookMonitor.get(_d.id);
-          if (_m) { _m.callCount++; _m.lastHeartbeat = _nt; _m.totalDuration += 5; _m.lastStatus = 'green'; }
-        }
-      } catch (_) {}
 
       // TTS 同步生成：回复中含语音URL
       const tts = body.tts !== false;
@@ -1213,7 +1204,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
             const ttsData = await ttsRes.json();
             audio_url = ttsData.url || null;
           }
-        } catch {}
+        } catch (e: any) { console.error('[server] error:', e?.message); }
       })();
       for (let i = 0; i < chunks.length; i++) {
         if (i < _slowCount) {
@@ -1284,7 +1275,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         if (_ar) {
           alignmentSummary = { score: _ar.score, status: _ar.status };
         }
-      } catch {}
+      } catch (e: any) { console.error('[server] error:', e?.message); }
       // 🏗️ 改造③+⑥：持久化健康度 + 文件健康度监控
       let _pSimple: any = { userCount: 0, assistantCount: 0 };
       let _chatTsSize = 0;
@@ -1408,7 +1399,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         const stats = fg?.getStats();
         const backupDirPath = path.join(PROJECT_ROOT, "data", "backups");
         let backupFiles: string[] = [];
-        try { backupFiles = fs.readdirSync(backupDirPath).filter(f => f.startsWith('family_graph')); } catch {}
+        try { backupFiles = fs.readdirSync(backupDirPath).filter(f => f.startsWith('family_graph')); } catch (e: any) { console.error('[server] error:', e?.message); }
         const successRate = backupStats.totalAttempts > 0
           ? (backupStats.successCount / backupStats.totalAttempts * 100).toFixed(1) + '%'
           : 'N/A';
@@ -1548,7 +1539,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
             res.end(JSON.stringify({ turns }));
           }
         }
-      } catch {}
+      } catch (e: any) { console.error('[server] error:', e?.message); }
       // 兜底：从内存加载
       const turns = conversationHistory.filter((t) => !(t as any)?.isTest).slice(-100);
       // persistence handled in server-observability-routes.ts
@@ -2493,17 +2484,23 @@ async function main(): Promise<void> {
     console.warn('[AutoRec] 启动失败（不影响主流程）:', err);
   }
 
-  // Hook 探针保活心跳（每 10 秒刷新 lastHeartbeat，监控面板不显示假红）
+  // Hook 探针状态检测（每 30 秒检查超时，移除伪造保活）
+  // 🏗️ P0-3: 探针 >3min 无上报 → gray，>10min → 标红。不再保活
   setInterval(() => {
     const _now = Date.now();
     for (const _d of HOOK_DEFS) {
       const _m = hookMonitor.get(_d.id);
-      if (_m && _m.callCount > 0) {
-        _m.lastHeartbeat = _now;
-        _m.lastStatus = 'green';
+      if (!_m) continue;
+      const _elapsed = _now - _m.lastHeartbeat;
+      if (_m.lastHeartbeat === 0) continue; // 从未上报
+      if (_elapsed > 10 * 60 * 1000) {
+        _m.lastStatus = 'red';
+        console.warn(`[Hook] ${_d.id} ${_d.name} 超时 ${Math.round(_elapsed/60000)}min → 标红`);
+      } else if (_elapsed > 3 * 60 * 1000) {
+        _m.lastStatus = 'gray';
       }
     }
-  }, 10000);
+  }, 30000);
 
   console.log('  玉瑶 · 太虚境 WebUI 初始化完成 ✓');
 
@@ -2582,7 +2579,7 @@ async function main(): Promise<void> {
     }
     // 确保数据落盘
     flushConversationHistory();
-    try { storage?.getSQLite()?.flush(); } catch {}
+    try { storage?.getSQLite()?.flush(); } catch (e: any) { console.error('[server] error:', e?.message); }
     console.log('[Server] 数据已落盘');
     process.exit(0);
   }

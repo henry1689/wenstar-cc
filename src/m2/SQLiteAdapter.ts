@@ -173,9 +173,9 @@ export class SQLiteAdapter {
     try { this.db.run("ALTER TABLE memories ADD COLUMN remind_at TEXT"); } catch { /* 列已存在 */ }
     try { this.db.run("ALTER TABLE memories ADD COLUMN reminded INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
     try { this.db.run("ALTER TABLE memories ADD COLUMN repeat_rule TEXT"); } catch { /* 列已存在 */ }
-    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_note_key ON memories(note_key)"); } catch {}
-    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_remind ON memories(remind_at)"); } catch {}
-    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type)"); } catch {}
+    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_note_key ON memories(note_key)"); } catch { /* 索引已存在 */ }
+    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_remind ON memories(remind_at)"); } catch { /* 索引已存在 */ }
+    try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type)"); } catch { /* 索引已存在 */ }
 
     // 砂金库：原始对话表（三段存储③，与原设计合并回同库）
     try {

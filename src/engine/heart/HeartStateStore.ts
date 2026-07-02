@@ -20,6 +20,8 @@ const MAX_AUDIT_HISTORY = 20; // 保留最近 20 轮变更记录
 
 export class HeartStateStore implements ILifecycle {
   private state: HeartGlobalState = defaultHeartState();
+  private _onIntentClassified: ((event: any) => void) | null = null;
+  private _onMemoryRetrieved: ((event: any) => void) | null = null;
   private bus: IEventBus | null = null;
   private storage: IStorageProvider | null = null;
   private auditLog: StateChangeLog[] = [];
@@ -55,9 +57,11 @@ export class HeartStateStore implements ILifecycle {
     }
 
     // 订阅意图事件 → 更新情感状态（S2 主入口）
-    bus.on('intent:classified', this.onIntentClassified, 400);
+    this._onIntentClassified = this.onIntentClassified.bind(this);
+    bus.on('intent:classified', this._onIntentClassified, 400);
     // 订阅记忆事件 → 触达调整
-    bus.on('memory:retrieved', this.onMemoryRetrieved, 400);
+    this._onMemoryRetrieved = this.onMemoryRetrieved.bind(this);
+    bus.on('memory:retrieved', this._onMemoryRetrieved, 400);
   }
 
   reset(): void {
@@ -66,9 +70,15 @@ export class HeartStateStore implements ILifecycle {
   }
 
   destroy(): void {
+    if (this.bus) {
+      if (this._onIntentClassified) this.bus.off('intent:classified', this._onIntentClassified);
+      if (this._onMemoryRetrieved) this.bus.off('memory:retrieved', this._onMemoryRetrieved);
+    }
     this.bus = null;
     this.storage = null;
     this.listeners.clear();
+    this._onIntentClassified = null;
+    this._onMemoryRetrieved = null;
   }
 
   /** 获取当前状态快照 */

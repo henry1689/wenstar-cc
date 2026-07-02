@@ -211,7 +211,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
         if (c >= 0x4E00 && c <= 0x9FA5) return fixed;
         if (c === 0x300A || c === 0x300B) return fixed; // 《》
       }
-    } catch {}
+    } catch (e: any) { console.error('[KnowledgeEngine] error:', e?.message); }
     return str; // 无法修复，返回原字符串
   }
 
@@ -407,7 +407,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     }
 
     // P2: 缓存结果 + 质量报告
-    searchCache.set(cacheKey, results).catch(function() {});
+    searchCache.set(cacheKey, results).catch(function(e) { console.error('[KnowledgeEngine] error:', e?.message); });
     if (results.length > 0) {
       const avgScore = results.reduce(function(s: number, r: any) { return s + (r.matchScore || 0.5); }, 0) / results.length;
       console.log('[KB] 检索: ' + trimmed.substring(0,20) + ' → ' + results.length + '条 (均分' + avgScore.toFixed(2) + ')');

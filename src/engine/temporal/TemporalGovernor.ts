@@ -48,7 +48,7 @@ export class TemporalGovernor {
     try {
       const saved = await storage.get<string[]>(STORAGE_KEY_SILENT);
       if (saved) this.silentMessages = saved;
-    } catch {}
+    } catch (e: any) { console.error('[TemporalGov] error:', e?.message); }
 
     // 订阅定时到期事件（问题3修复）
     this.bus?.on('timer:expired', this.handleTimerExpired, 250);
@@ -155,6 +155,6 @@ export class TemporalGovernor {
   private async persistSilent(): Promise<void> {
     try {
       await this.storage?.set(STORAGE_KEY_SILENT, this.silentMessages);
-    } catch {}
+    } catch (e: any) { console.error('[TemporalGov] error:', e?.message); }
   }
 }

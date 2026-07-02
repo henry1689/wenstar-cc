@@ -191,7 +191,7 @@ export class TimerRegistry {
   private async saveTask(task: TimerTask): Promise<void> {
     try {
       await this.storage.set(`${STORAGE_PREFIX}${task.id}`, task);
-    } catch {}
+    } catch (e: any) { console.error('[TimerRegistry] error:', e?.message); }
   }
 
   private async loadTask(id: string): Promise<TimerTask | null> {

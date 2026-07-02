@@ -355,7 +355,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 	        break;
 	      }
 	    }
-	  } catch (_) {}
+	  } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
 	}
 
     const dna = ctx.encoder.encodeSingle(message);
@@ -516,7 +516,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
                           if (!_currentRoleplay) try { ctx.m4?.getFamilyGraph()?.addFeatureEdge(_n, _featName, 'appearance').catch(() => {}); } catch {}
                         }
                       }
-                    } catch {}
+                    } catch (e: any) { console.error('[chat] error:', e?.message); }
                   }
                 }
                 console.log('[PersonProfile] 已提取 ' + _n + ' 的外貌特征（反向检索可用）');
@@ -1277,7 +1277,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           console.log('[Roleplay] 找到角色资料: ' + kbItems.length + ' 条');
           return '\n【角色设定详细说明（以下是你必须严格遵循的设定）】\n' + kbData;
         }
-      } catch (_) {}
+      } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
       return '';
     }
 
@@ -1308,7 +1308,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
               if (profile.traits?.length) p.push('🎭 性格: ' + profile.traits.join('、'));
               if (p.length) parts.push('**' + name + '**\n' + p.join('\n'));
             }
-          } catch {}
+          } catch (e: any) { console.error('[chat] error:', e?.message); }
           // KB检索该人物的资料
           try {
             const kbItems = await ctx.knowledgeBase.search(name, 2);
@@ -1316,7 +1316,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
               const t = kbItems.map(function(k: any) { return '\u{1f4c4} ' + k.title + '\n' + (k.content || '').substring(0, 2000); }).join('\n\n');
               parts.push('**' + name + '的资料**\n' + t);
             }
-          } catch {}
+          } catch (e: any) { console.error('[chat] error:', e?.message); }
         }
         if (parts.length === 0) return '';
         return '\n【角色相关人物资料 — 以下是与' + charName + '有关的人的信息，你作为' + charName + '自然也知道这些】\n' + parts.join('\n\n');
@@ -1374,7 +1374,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
             const _fgPerson = _fgCheck.getPerson(character);
             _currentCharacterClass = _fgPerson ? 'A' : 'B';
           }
-        } catch (_) {}
+        } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
         console.log('[Roleplay] 角色分类: ' + _currentCharacterClass);
 
         // ── 多源加载（FG + KB + 历史扮演 + 上下文扫描） ──
@@ -1430,7 +1430,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
               if (_transitive) knowledgeBaseText += _transitive;
             }
           }
-        } catch (_) {}
+        } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
       }
     }
 
@@ -1531,7 +1531,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
                   }).join('\n\n');
                   _transitive = '\n【' + _entity + '的资料】（主动检索）\n' + _kbData;
                 }
-              } catch (_) {}
+              } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
             }
 
             if (_transitive && knowledgeBaseText && !knowledgeBaseText.includes(_transitive.substring(0, 30))) {
@@ -1539,7 +1539,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
               console.log('[Roleplay] 主动检索已追加: +' + _transitive.length + '字节 [' + _entity + ']');
             }
           }
-        } catch (_) {}
+        } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
       }
     }// 话题追问检测
 
@@ -1927,7 +1927,7 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
       if (ctxBlock) {
         finalKnowledgeText = ctxBlock + '\n\n' + finalKnowledgeText;
       }
-    } catch (_) {}
+    } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
 
 reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, knowledgeBaseText ? (knowledgeBaseText.split('\\n').filter(l => l.trim()).join('\n') + '\\n\\n' + message) : message);
 

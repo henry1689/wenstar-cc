@@ -66,7 +66,7 @@ export class SessionTracker {
     try {
       const saved = await this.storage.get<SessionSnapshot>(STORAGE_KEY_SESSION);
       if (saved) this.state = saved;
-    } catch {}
+    } catch (e: any) { console.error('[SessionTracker] error:', e?.message); }
   }
 
   reset(): void {
@@ -169,6 +169,6 @@ export class SessionTracker {
   private async persist(): Promise<void> {
     try {
       await this.storage.set(STORAGE_KEY_SESSION, this.state);
-    } catch {}
+    } catch (e: any) { console.error('[SessionTracker] error:', e?.message); }
   }
 }

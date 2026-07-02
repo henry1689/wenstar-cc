@@ -18,15 +18,23 @@ const EXTREME_REDLINE = [
 
 export class SafetyInterceptor implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundHandleInput: ((event: any) => void) | null = null;
 
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
     // 最高优先级：100（必须最先执行）
-    bus.on('user:input', this.handleInput, 100);
+    this._boundHandleInput = this.handleInput.bind(this);
+    bus.on('user:input', this._boundHandleInput, 100);
   }
 
   reset(): void {}
-  destroy(): void { this.bus = null; }
+  destroy(): void {
+    if (this.bus && this._boundHandleInput) {
+      this.bus.off('user:input', this._boundHandleInput);
+    }
+    this.bus = null;
+    this._boundHandleInput = null;
+  }
 
   private handleInput = async (event: UserInputEvent): Promise<void> => {
     const text = event.payload.content;

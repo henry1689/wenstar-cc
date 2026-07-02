@@ -16,13 +16,15 @@ interface M5Callable {
 
 export class GenerationOrchestrator implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundOnHeartUpdated: ((event: any) => void) | null = null;
   private m5: M5Callable | null = null;
   /** 缓存最新的 heart 状态，非 LLM 轮次也可以读取 */
   private lastHeartPayload: HeartStateUpdatedEvent['payload'] | null = null;
 
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
-    bus.on('heart:state_updated', this.onHeartUpdated, 400);
+    this._boundOnHeartUpdated = this.onHeartUpdated.bind(this);
+    bus.on('heart:state_updated', this._boundOnHeartUpdated, 400);
   }
 
   /** 注入 M5 实例（由 orchestrator 在初始化时注入） */
@@ -31,7 +33,13 @@ export class GenerationOrchestrator implements ILifecycle {
   }
 
   reset(): void { this.lastHeartPayload = null; }
-  destroy(): void { this.bus = null; }
+  destroy(): void {
+    if (this.bus && this._boundOnHeartUpdated) {
+      this.bus.off('heart:state_updated', this._boundOnHeartUpdated);
+    }
+    this.bus = null;
+    this._boundOnHeartUpdated = null;
+  }
 
   /** 获取组装好的系统提示词（供外部调用） */
   compose(input: Partial<ComposerInput>): string {

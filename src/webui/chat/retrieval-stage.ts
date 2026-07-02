@@ -212,7 +212,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               const _ids = _ftsR.map((r: any) => r.rowid).join(',');
               _rows = _sqlite.queryAll('SELECT id, summary, emotion_tag, tags FROM black_diamond WHERE rowid IN (' + _ids + ') ORDER BY created_at DESC LIMIT 2');
             }
-          } catch {}
+          } catch (e: any) { console.error('[Retrieval] error:', e?.message); }
           if (_rows.length === 0) {
             _rows = _sqlite.queryAll(
               'SELECT id, summary, emotion_tag, tags FROM black_diamond WHERE summary LIKE ? OR tags LIKE ? ORDER BY created_at DESC LIMIT 2',
@@ -225,7 +225,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             try {
               _sqlite.writeRaw('UPDATE black_diamond SET recall_count = recall_count + 1, updated_at = ? WHERE id = ?',
                 [new Date().toISOString(), _r.id]);
-            } catch {}
+            } catch (e: any) { console.error('[Retrieval] error:', e?.message); }
           }
           if (_rows.length > 0) console.log('[BlackDiamond] 命中 ' + _rows.length + ' 条珍藏记忆');
 

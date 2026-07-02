@@ -73,7 +73,7 @@ class HookQueue {
       const filePath = join(getBacklogDir(), `hook_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.jsonl`);
       const lines = events.map(e => JSON.stringify(e)).join('\n');
       appendFileSync(filePath, lines + '\n');
-    } catch {}
+    } catch (e: any) { console.error('[HooksQueue] error:', e?.message); }
   }
 
   /** 启动时补发 backlog */
@@ -93,7 +93,7 @@ class HookQueue {
           if (res.ok) unlinkSync(join(getBacklogDir(), f));
         } catch { /* 补发失败下次再试 */ }
       }
-    } catch {}
+    } catch (e: any) { console.error('[HooksQueue] error:', e?.message); }
   }
 
   /** 获取缓冲区大小 */

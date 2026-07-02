@@ -11,14 +11,22 @@ import { INTENT_RULES, type IntentRule } from './intentRules.js';
 
 export class L05IntentRouter implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundHandleIntent: ((event: any) => void) | null = null;
 
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
-    bus.on('intent:classified', this.handleIntent, 300);
+    this._boundHandleIntent = this.handleIntent.bind(this);
+    bus.on('intent:classified', this._boundHandleIntent, 300);
   }
 
   reset(): void {}
-  destroy(): void { this.bus = null; }
+  destroy(): void {
+    if (this.bus && this._boundHandleIntent) {
+      this.bus.off('intent:classified', this._boundHandleIntent);
+    }
+    this.bus = null;
+    this._boundHandleIntent = null;
+  }
 
   private handleIntent = async (event: IntentClassifiedEvent): Promise<void> => {
     const text = event.payload.rawInput;

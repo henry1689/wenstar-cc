@@ -35,7 +35,7 @@ export class CommunicationModeStore {
       try {
         const saved = await storage.get<CommModeState>(STORAGE_KEY);
         if (saved) this.state = saved;
-      } catch {}
+      } catch (e: any) { console.error('[CommModeStore] error:', e?.message); }
     }
   }
 
@@ -123,6 +123,6 @@ export class CommunicationModeStore {
   private async persist(): Promise<void> {
     try {
       await this.storage?.set(STORAGE_KEY, this.state);
-    } catch {}
+    } catch (e: any) { console.error('[CommModeStore] error:', e?.message); }
   }
 }

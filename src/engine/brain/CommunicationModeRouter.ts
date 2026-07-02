@@ -13,6 +13,7 @@ import { EngineContext } from '../EngineContext.js';
 
 export class CommunicationModeRouter implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundHandleInput: ((event: any) => void) | null = null;
   private store: CommunicationModeStore;
 
   constructor(store: CommunicationModeStore) {
@@ -22,11 +23,18 @@ export class CommunicationModeRouter implements ILifecycle {
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
     await this.store.init(_storage);
-    bus.on('user:input', this.handleInput, 180);
+    this._boundHandleInput = this.handleInput.bind(this);
+    bus.on('user:input', this._boundHandleInput, 180);
   }
 
   reset(): void { this.store.reset(); }
-  destroy(): void { this.bus = null; }
+  destroy(): void {
+    if (this.bus && this._boundHandleInput) {
+      this.bus.off('user:input', this._boundHandleInput);
+    }
+    this.bus = null;
+    this._boundHandleInput = null;
+  }
 
   /** 获取当前模式 */
   getMode(): string {

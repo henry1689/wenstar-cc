@@ -29,7 +29,7 @@ export function insertEvent(sqlite: SQLiteAdapter, event: HookEvent): string {
 export function insertEvents(sqlite: SQLiteAdapter, events: HookEvent[]): number {
   let count = 0;
   for (const ev of events) {
-    try { insertEvent(sqlite, ev); count++; } catch {}
+    try { insertEvent(sqlite, ev); count++; } catch (e: any) { console.error('[HooksBackend] error:', e?.message); }
   }
   return count;
 }
@@ -147,7 +147,7 @@ export function analyze(sqlite: SQLiteAdapter): AnalysisResult {
       );
       commands.push(cmd);
     }
-  } catch {}
+  } catch (e: any) { console.error('[HooksBackend] error:', e?.message); }
 
   // ② 过期砂金清理
   try {
@@ -164,7 +164,7 @@ export function analyze(sqlite: SQLiteAdapter): AnalysisResult {
       );
       commands.push(cmd);
     }
-  } catch {}
+  } catch (e: any) { console.error('[HooksBackend] error:', e?.message); }
 
   // ③ 慢查询检测 → 重索引建议
   try {
@@ -179,7 +179,7 @@ export function analyze(sqlite: SQLiteAdapter): AnalysisResult {
       );
       commands.push(cmd);
     }
-  } catch {}
+  } catch (e: any) { console.error('[HooksBackend] error:', e?.message); }
 
   return {
     commands,

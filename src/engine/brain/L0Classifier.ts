@@ -11,10 +11,12 @@ import { routeL0 } from '../../m1/L0Router.js';
 
 export class L0Classifier implements ILifecycle {
   private bus: IEventBus | null = null;
+  private _boundHandleInput: ((event: any) => void) | null = null;
 
   async init(bus: IEventBus, _storage?: IStorageProvider): Promise<void> {
     this.bus = bus;
-    bus.on('user:input', this.handleInput, 200);
+    this._boundHandleInput = this.handleInput.bind(this);
+    bus.on('user:input', this._boundHandleInput, 200);
   }
 
   reset(): void {
@@ -22,7 +24,11 @@ export class L0Classifier implements ILifecycle {
   }
 
   destroy(): void {
+    if (this.bus && this._boundHandleInput) {
+      this.bus.off('user:input', this._boundHandleInput);
+    }
     this.bus = null;
+    this._boundHandleInput = null;
   }
 
   private handleInput = async (event: UserInputEvent): Promise<void> => {

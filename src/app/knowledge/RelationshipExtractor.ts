@@ -334,7 +334,7 @@ export function storeRelations(sqlite: any, relations: DetectedRelationship[], s
       // 保证实体存在
               // (FG-迁移) 双写主库
         if (familyGraph && FAMILY_GRAPH_MIGRATION.writeMode !== 'shadow') {
-          try { familyGraph.integrateSocialRelation(rel.personName, rel.relation, sourceMessage).catch(() => {}); } catch {}
+          try { familyGraph.integrateSocialRelation(rel.personName, rel.relation, sourceMessage).catch(() => {}); } catch (e: any) { console.error('[RelationExtractor] error:', e?.message); }
         }
         sqlite.writeRaw(`INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)`, rel.personName, 'person');
       sqlite.writeRaw(`INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)`, '我', 'self');

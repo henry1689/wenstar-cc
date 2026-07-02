@@ -222,7 +222,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
       DeepSeekLLMProvider._currentRole = _t.newRole;
       console.log('[RoleRouter] ' + DeepSeekLLMProvider._currentRole + ' (' + _d.rule + ')');
       // R6: 记忆角色标签
-      try { const { WorkingMemory } = await import('../m9/WorkingMemory.js'); WorkingMemory.currentTag = DeepSeekLLMProvider._currentRole; } catch {}
+      try { const { WorkingMemory } = await import('../m9/WorkingMemory.js'); WorkingMemory.currentTag = DeepSeekLLMProvider._currentRole; } catch (e: any) { console.error('[DeepSeek] error:', e?.message); }
     } catch (_re) { /* 路由失败不阻塞 */ }
 
     // 📖 本地回复：KB内容含敏感词时绕过API过滤，基于知识库原文直接回答

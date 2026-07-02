@@ -81,7 +81,7 @@ export async function flushDialogGroup(
         const rpName = dg.rpChar;
         sql.writeRaw("UPDATE memories SET memory_type='rp_dialog', sub_type=? WHERE dialog_group_id=?", [rpName, dg.id]);
         sql.writeRaw("UPDATE conversations SET roleplay_char=? WHERE dialog_group_id=?", [rpName, dg.id]);
-      } catch (_) {}
+      } catch (_e: any) { console.error('[DialogGroup] error:', (_e as any)?.message); }
     }
 
     // 情感轨迹标签
@@ -116,7 +116,7 @@ export async function flushDialogGroup(
             fg.extractProfileFromText(name, combined).catch(() => {});
           }
         }
-      } catch {}
+      } catch (e: any) { console.error('[DialogGroup] error:', e?.message); }
     }
 
     // 闭组回填：将对话组内所有原始对话关联上 dialog_group_id

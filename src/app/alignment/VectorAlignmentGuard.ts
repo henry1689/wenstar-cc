@@ -331,7 +331,7 @@ export class VectorAlignmentGuard {
       const withVec = sqlite.queryAll("SELECT COUNT(*) as c FROM memories WHERE perception_json IS NOT NULL AND perception_json != ''");
       const withVecC = withVec[0]?.c || 0;
       vectorCompleteRate = totalReadable > 0 ? withVecC / totalReadable : 0;
-    } catch {}
+    } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
     const vecScore = Math.round(vectorCompleteRate * 100);
     checkpoints.push({
       checkpoint: '24D向量完整性',
@@ -346,7 +346,7 @@ export class VectorAlignmentGuard {
     try {
       const strs = sqlite.queryAll('SELECT effective_strength FROM memories');
       strViable = strs.filter((r: any) => (r.effective_strength || 0) >= THRESHOLDS.STRENGTH_FLOOR).length;
-    } catch {}
+    } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
     const strRate = totalReadable > 0 ? strViable / totalReadable : 0;
     checkpoints.push({
       checkpoint: '有效强度分布',
@@ -363,7 +363,7 @@ export class VectorAlignmentGuard {
       const recallC = bdRecall[0]?.c || 0;
       const allC = bdAll[0]?.c || 0;
       diamondRecallRate = allC > 0 ? recallC / allC : 0;
-    } catch {}
+    } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
     checkpoints.push({
       checkpoint: '黑钻召回率',
       passed: diamondRecallRate >= 0.3,
@@ -415,7 +415,7 @@ export class VectorAlignmentGuard {
     try {
       const prom = sqlite.queryAll("SELECT COUNT(*) as c FROM memories WHERE promoted_to_diamond = 1");
       promotedCount = prom[0]?.c || 0;
-    } catch {}
+    } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
 
     // 维度不匹配检测
     let dimMismatch = 0;
@@ -431,9 +431,9 @@ export class VectorAlignmentGuard {
               dimMismatch++;
             }
           }
-        } catch {}
+        } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
       }
-    } catch {}
+    } catch (e: any) { console.error('[VectorAlignmentGuard] error:', e?.message); }
 
     const report: AlignmentReport = {
       score: Math.round(weightedSum),

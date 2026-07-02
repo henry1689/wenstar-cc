@@ -85,7 +85,7 @@ export async function handleObservabilityRoutes(
     try {
       const _ar = alignmentGuard.getCachedReport();
       if (_ar) alignmentSummary = { score: _ar.score, status: _ar.status };
-    } catch {}
+    } catch (e: any) { console.error('[Observability] error:', e?.message); }
     let _pSimple: any = { userCount: 0, assistantCount: 0, ratio: '0' };
     let _chatAlert: string | null = null;
     try {

@@ -54,7 +54,7 @@ export class TimeKeeper {
           console.warn(`[TimeKeeper] 检测到系统时间跳变: ${Math.abs(jump)}ms`);
         }
       }
-    } catch {}
+    } catch (e: any) { console.error('[TimeKeeper] error:', e?.message); }
     this.initialized = true;
     this.persist();
   }
@@ -160,6 +160,6 @@ export class TimeKeeper {
   private async persist(): Promise<void> {
     try {
       await this.storage.set(STORAGE_KEY, this.snapshot);
-    } catch {}
+    } catch (e: any) { console.error('[TimeKeeper] error:', e?.message); }
   }
 }
