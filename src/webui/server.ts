@@ -1195,6 +1195,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       // 再处理聊天（LLM 调用约 1.5~2s）
             const result = await handleUserMessage(rawMessage.trim());
       const reply = result.reply || '';
+
+      // 探针心跳更新（stream 入口同 POST 入口保持一致）
+      try {
+        const _ht = Date.now();
+        for (const _d of HOOK_DEFS) {
+          const _m = hookMonitor.get(_d.id);
+          if (_m) { _m.callCount++; _m.lastHeartbeat = _ht; _m.lastStatus = 'green'; }
+        }
+      } catch (_: any) {}
       let audio_url: string | null = null;
 
       // 元数据

@@ -42,7 +42,7 @@
       <span style="cursor:pointer" onclick="document.getElementById('fu').click()">&#x1F4CE;</span><input type="file" id="fu" style="display:none" multiple onchange="uf(this.files)">
       <button onclick="kb()" style="background:none;border:none;color:#445;cursor:pointer;font-size:11px;padding:0" title="知识库管理">&#x1F4DA;</button>
       <span onclick="mic()" id="mb" style="cursor:pointer">&#x1F3A4;</span>
-      <span id="tb" style="display:none">&#x1F507;</span>
+      <span onclick="tt()" id="tb" style="cursor:pointer"><span id="tb" style="display:none">&#x1F507;</span>#x1F50A;</span>
       <span style="flex:1;text-align:right;font-size:10px" id="slb">就绪</span>
     </div>
   </div>
@@ -50,6 +50,7 @@
 </div>
 <script>
 var tts=true;
+function tt(){tts=!tts;document.getElementById('tb').textContent=tts?'🔊':'🔇'}
 function clr(){document.getElementById('ms').innerHTML='';_m=[];sv()}
 function rst(){fetch('/api/reset',{method:'POST'})}
 var _m=[];var SK='wc_v3';
