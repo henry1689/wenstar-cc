@@ -130,10 +130,10 @@ export function getRoleplayStatus(): { active: boolean; role: string | null; cla
 // 🏗️ 防复发第一层: 角色扮演运行时自检
 import { checkRoleplayHealth } from '../app/roleplay/RoleplayHealthGuard.js';
 
-// 🏗️ 角色扮演域统一入口
-import { runRoleplayPipeline, clearCache as clearRPCache, setCachedPortrait, afterGenerate } from '../app/roleplay/RoleplayDomain.js';
-import type { DomainContext, CollectedData, CharacterClass } from '../app/roleplay/types.js';
+// 🏗️ 角色扮演域统一入口（四层结构化装配）
+import { runRoleplayPipeline, clearCache as clearRPCache, afterGenerate } from '../app/roleplay/RoleplayDomain.js';
 import { validateReply } from '../app/roleplay/Validator.js';
+import type { DomainContext, CharacterClass } from '../app/roleplay/types.js';
 
 
 // P0-1: 角色路由模块级状态（函数外，跨轮次持久化）
@@ -1432,7 +1432,6 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           portrait += '\n\n【年龄】⚠️ 你没有关于自己年龄的信息。如果有人问年龄，说"你没告诉过我，我不确定"。绝对禁止编造年龄。';
         }
         _currentPortrait = portrait; // 缓存供周期性重注入
-        setCachedPortrait(portrait, character); // 同步角色扮演域缓存
 
         // ── 构建角色扮演指令（规则 + 画像 + 风格） ──
         knowledgeBaseText = buildRoleplayRules(character, portrait);
@@ -1488,12 +1487,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           currentRoleplay: _currentRoleplay,
         };
 
-        // 同步chat.ts缓存到域缓存，避免域管线重建无上下文扫描的肖像画
-        if (_currentPortrait) setCachedPortrait(_currentPortrait, _currentRoleplay);
-        const _pipelineResult = await runRoleplayPipeline(_domainCtx, _currentRPBranch);
-        knowledgeBaseText = _pipelineResult.knowledgeBaseText;
-        _currentPortrait = _pipelineResult.portrait || _currentPortrait;
-        _lastCollectedData = _pipelineResult.collectedData; // 供验证器使用
+        knowledgeBaseText = await runRoleplayPipeline(_domainCtx, message, dna);
       } catch (_e: any) {
         console.error('[Roleplay] 管线异常，回退到内联逻辑:', _e?.message);
         // 回退：简单重建
@@ -1921,7 +1915,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
           currentRPBranch: _currentRPBranch, rpParamsSnapshot: _rpParamsSnapshot,
           currentRoleplay: _currentRoleplay,
         };
-        await afterGenerate(_dc2, message, reply, _rps, _lastCollectedData, undefined, _lastValidation);
+        await afterGenerate(_dc2, message, reply, _rps);
       } catch (_ae) { /* 记忆同步不阻塞 */ }
     }
 

@@ -2,205 +2,108 @@
  * RoleplayDomain — 角色扮演域统一入口
  *
  * chat.ts 唯一调用点，接管所有角色扮演的持续扮演逻辑。
- * 内部调用五步管线：DataCollector → ReadinessGate → PromptAssembler → LLM Generate → Validator
+ * 内部调用七路采集 + 四层装配 → LLM Generate → 验证
  *
  * 🔴 铁律：
- *   - 此文件是 chat.ts 与角色扮演域的唯一接口
- *   - 所有角色扮演相关逻辑迁移至此域内
- *   - chat.ts 只保留入口检测和本函数的调用
+ *   - 约束1：所有查询走主系统标准接口
+ *   - 约束2：Layer1+Layer2 会话缓存
+ *   - 约束4：层级顺序不可逆
+ *   - 约束7：有开关回退兜底
  */
-import type { CollectedData, DataCoverageReport, PipelineOutput, DomainContext, CharacterClass, ValidationResult } from './types.js';
-import { collectData } from './DataCollector.js';
-import { coverageReport } from './ReadinessGate.js';
+import type { DomainContext, CharacterClass } from './types.js';
+import { collectData, type FourLayerData } from './DataCollector.js';
 import { assemblePrompt } from './PromptAssembler.js';
-import { validateReply } from './Validator.js';
-import { assembleCharacterPortrait, scanContextForCharacter } from './CharacterProfileScanner.js';
-import type { FamilyGraphRoleBranch } from '../alignment/FamilyGraphRoleBranch.js';
+import { buildRoleplayRules } from './RoleplayPromptBuilder.js';
 import { syncRPConversation, generateRPId, type RPWriteInput } from './RoleplayMemorySync.js';
-import { updateTempProfile, tryPromoteProfile, getOrCreateTempProfile, getProfileSummary, clearAllTempProfiles, type FGProfileAPI } from './RoleplayProfileManager.js';
-import { recordPipelineRun } from './RoleplayAuditor.js';
-import type { AuditRecord } from './RoleplayAuditor.js';
+import { updateTempProfile, tryPromoteProfile } from './RoleplayProfileManager.js';
+import { initSessionCache, setLayer1, setLayer2, hasLayer1, hasLayer2, clearCache as clearSessionCache } from './RoleplaySessionCache.js';
 
-// ─── 模块级缓存（跨轮次持久化） ───
+// ─── 开关（约束7） — 默认关闭，环境变量开启
+const STRUCTURED_ENABLED = process.env['ROLEPLAY_STRUCTURED_ENABLED'] === 'true';
+console.log(`[RoleplayDomain] 四层结构化装配: ${STRUCTURED_ENABLED ? '已开启' : '已关闭（旧逻辑）'}`);
 
-let _cachedPortrait: string | null = null;
+// ─── 模块级状态 ───
 let _cachedRoleplay: string | null = null;
 let _activeSessionId: string | null = null;
 let _seqCounter = 0;
 
-/** 获取当前缓存状态（供 chat.ts 健康检查读取） */
-export function getDomainStatus(): { roleplay: string | null; hasPortrait: boolean } {
-  return { roleplay: _cachedRoleplay, hasPortrait: !!_cachedPortrait };
+export function getDomainStatus() {
+  return { roleplay: _cachedRoleplay, structured: STRUCTURED_ENABLED };
 }
-
-/** 清除缓存（退出角色扮演时调用） */
 export function clearCache(): void {
-  _cachedPortrait = null;
   _cachedRoleplay = null;
   _activeSessionId = null;
   _seqCounter = 0;
+  clearSessionCache();
 }
-
-/** 获取当前会话 ID */
-export function getSessionId(): string | null {
-  return _activeSessionId;
-}
-
-/** 设置缓存（角色激活时从 chat.ts 传入已构建的画像） */
-export function setCachedPortrait(portrait: string, roleplay: string): void {
-  _cachedPortrait = portrait;
-  _cachedRoleplay = roleplay;
-}
+export function getSessionId(): string | null { return _activeSessionId; }
 
 /**
- * 运行角色扮演管线（持续扮演每轮调用一次）
- *
- * @returns 装配好的 knowledgeBaseText（如字符串）或 PipelineOutput
+ * 运行角色扮演管线
  */
 export async function runRoleplayPipeline(
   ctx: DomainContext,
-  currentRPBranch: FamilyGraphRoleBranch | null,
-): Promise<PipelineOutput> {
+  message: string,
+  dna: any,
+): Promise<string> {
   const roleplay = ctx.currentRoleplay;
-  const _t0 = Date.now();
   _cachedRoleplay = roleplay;
   if (!_activeSessionId) _activeSessionId = generateRPId();
   _seqCounter++;
 
-  // 🏗️ 阶段2-2: 更新临时角色档案
-  updateTempProfile(roleplay, ctx.message, '', _seqCounter);
+  updateTempProfile(roleplay, message, '', _seqCounter);
 
-  // ═══ 第一步：数据采集 ═══
-  const collectedData: CollectedData = await collectData(
-    ctx, ctx.message, roleplay, ctx.characterClass, currentRPBranch,
-  );
-
-  // ═══ 画像装配（仅首次，之后读取缓存） ═══
-  if (!_cachedPortrait) {
-    // 🔴 上下文扫描必须传入，否则肖像画缺少未知边界区块
-    const _contextExtract = scanContextForCharacter(roleplay, ctx.conversationHistory || [], 30);
-    let portrait = assembleCharacterPortrait(roleplay, {
-      fgContext: collectedData.fg.treeText,
-      kbContext: collectedData.kb.length > 0
-        ? collectedData.kb.map(k => `\u{1f4c4} ${k.title}\n${k.content}`).join('\n\n')
-        : undefined,
-      historyContext: collectedData.history.length > 0
-        ? collectedData.history.map(h => h.content).join('\n')
-        : undefined,
-      contextExtract: _contextExtract,
-    });
-
-    // 锁年龄
-    try {
-      const fg = ctx.m4?.getFamilyGraph?.();
-      if (fg) {
-        const pf = fg.getPersonProfile(roleplay);
-        if (pf?.age && !portrait.includes('【年龄】')) {
-          portrait += `\n\n【年龄】${roleplay}今年${pf.age}岁。`;
-        }
-      }
-    } catch (_) {}
-    if (!portrait.includes('【年龄】')) {
-      const ht = ctx.conversationHistory.slice(-20).map(t => t.content).join(' ');
-      const hm = ht.match(new RegExp(roleplay + '.*?(\\d{1,2})岁'));
-      if (hm) {
-        portrait += `\n\n【年龄】${roleplay}今年${hm[1]}岁。`;
-      }
-    }
-    if (!portrait.includes('【年龄】')) {
-      portrait += '\n\n【年龄】⚠️ 你没有关于自己年龄的信息。如果有人问年龄，说"你没告诉过我，我不确定"。绝对禁止编造年龄。';
-    }
-
-    _cachedPortrait = portrait;
+  // 🔴 开关（约束7）：关闭时回退旧逻辑
+  if (!STRUCTURED_ENABLED) {
+    return buildRoleplayRules(roleplay, '');
   }
 
-  // ═══ 第二步：数据覆盖报告（无条件，不猜意图） ═══
-  const coverage = coverageReport(collectedData);
+  // ═══ 七路采集 ═══
+  const data: FourLayerData = await collectData(
+    ctx, message, roleplay, ctx.characterClass as CharacterClass, ctx.currentRPBranch as any,
+  );
 
-  // ═══ 第三步：提示词装配（永远同时包含已知+未知） ═══
+  // ═══ 会话缓存（约束2） ═══
+  if (!hasLayer1()) {
+    initSessionCache(roleplay);
+  }
+  if (!hasLayer1() && data.layer1.identity) {
+    setLayer1(data.layer1.identity);
+  }
+  if (!hasLayer2() && data.layer2.relations) {
+    setLayer2(data.layer2.relations);
+  }
+
+  // ═══ 四层装配 ═══
   const knowledgeBaseText = assemblePrompt({
     roleplay,
-    portrait: _cachedPortrait,
-    data: collectedData,
-    coverage,
+    portrait: data.layer1.identity || `你是${roleplay}`,
+    data,
     styleInstruction: ctx.rpParamsSnapshot?.buildStyleInstruction?.(roleplay) || '',
   });
 
-  const _t1 = Date.now();
-
-  // ═══ 第四步：LLM 生成（在 chat.ts 中执行，此处返回装配结果） ═══
-  // ═══ 第五步：验证（在 chat.ts 中调用 validateReply） ═══
-  const validation = { pass: true, issues: [], severity: 'pass' as const, fix: 'none' as const };
-
-  // 审计：记录管线时序
-  _lastTimings = { collect: _t1 - _t0, readiness: 0, assemble: 0, generate: 0, validate: 0 };
-
-  return {
-    knowledgeBaseText,
-    portrait: _cachedPortrait,
-    collectedData,
-    coverage,
-    validation,
-  };
-}
-
-/** 最近一次管线的时序（供 afterGenerate 补全） */
-let _lastTimings: AuditRecord['timings'] = { collect: 0, readiness: 0, assemble: 0, generate: 0, validate: 0 };
-
-/** 获取最近时序（chat.ts 在 LLM 生成后填写 generate/validate） */
-export function recordGenerateTiming(generateMs: number, validateMs: number): void {
-  _lastTimings.generate = generateMs;
-  _lastTimings.validate = validateMs;
+  return knowledgeBaseText;
 }
 
 /**
- * 生成后处理：记忆同步 + 转正尝试
- * chat.ts 在获取 LLM 回复后调用此函数。
+ * 生成后处理：记忆同步（供 chat.ts 在 LLM 回复后调用）
  */
 export async function afterGenerate(
   ctx: DomainContext,
   message: string,
   reply: string,
   storage: any,
-  collectedData?: CollectedData,
-  coverage?: DataCoverageReport,
-  validation?: ValidationResult,
 ): Promise<void> {
   const roleplay = ctx.currentRoleplay;
   if (!roleplay || !_activeSessionId) return;
-
-  // ── 同步记忆到三库 ──
   try {
     const input: RPWriteInput = {
       roleplayId: _activeSessionId,
       roleplayChar: roleplay,
       seqPos: _seqCounter * 2,
-      message,
-      reply,
+      message, reply,
     };
     await syncRPConversation(storage, input);
-    console.log(`[RPMemory] 已同步: ${roleplay} seq=${_seqCounter * 2}`);
-  } catch (err) {
-    console.error('[RPMemory] 同步失败:', (err as Error).message);
-  }
-
-  // ── 更新临时档案（填充 reply 中的信息） ──
-  updateTempProfile(roleplay, message, reply, _seqCounter);
-
-  // ── 尝试转正 ──
-  try {
-    const fg = ctx.m4?.getFamilyGraph?.();
-    if (fg) await tryPromoteProfile(roleplay, fg as any);
   } catch (_) {}
-
-  // ── 审计记录 ──
-  if (collectedData && coverage) {
-    recordPipelineRun(
-      roleplay, _activeSessionId, _seqCounter,
-      message, reply,
-      _lastTimings, coverage,
-      validation || { pass: true, issues: [], severity: 'pass' as const, fix: 'none' as const },
-      collectedData,
-    );
-  }
+  updateTempProfile(roleplay, message, reply, _seqCounter);
 }
