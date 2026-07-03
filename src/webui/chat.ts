@@ -96,6 +96,9 @@ let _lastCandidates: any = null;
 // 🎭 角色扮演透传缓存：记录已加载KB的相关人物，避免重复检索
 const _rpLoadedPersons = new Set<string>();
 
+// 🏗️ 角色扮演域管线结果缓存（供验证器使用）
+let _lastCollectedData: any = null;
+
 // S3-2: 从 guard-builder 导入角色路由和守卫
 import { flushDialogGroup, persistConversation, runRetrieval } from './chat/index.js';
 
@@ -125,6 +128,11 @@ export function getRoleplayStatus(): { active: boolean; role: string | null; cla
 
 // 🏗️ 防复发第一层: 角色扮演运行时自检
 import { checkRoleplayHealth } from '../app/roleplay/RoleplayHealthGuard.js';
+
+// 🏗️ 角色扮演域统一入口
+import { runRoleplayPipeline, clearCache as clearRPCache, setCachedPortrait } from '../app/roleplay/RoleplayDomain.js';
+import type { DomainContext, CollectedData, CharacterClass } from '../app/roleplay/types.js';
+import { validateReply } from '../app/roleplay/Validator.js';
 
 
 // P0-1: 角色路由模块级状态（函数外，跨轮次持久化）
@@ -1226,6 +1234,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         _currentCharacterClass = null;  // 清除角色分类
         _rpTurnCounter = 0;  // 重置轮次计数
         _rpLoadedPersons.clear();
+        clearRPCache();  // 🏗️ 清除角色扮演域缓存
         _rpJustExited = true;  // 🎭 标记：本轮需强制恢复玉瑶身份
         console.log('[Roleplay] 退出角色扮演，完整清理完成');
     }
@@ -1422,6 +1431,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           portrait += '\n\n【年龄】⚠️ 你没有关于自己年龄的信息。如果有人问年龄，说"你没告诉过我，我不确定"。绝对禁止编造年龄。';
         }
         _currentPortrait = portrait; // 缓存供周期性重注入
+        setCachedPortrait(portrait, character); // 同步角色扮演域缓存
 
         // ── 构建角色扮演指令（规则 + 画像 + 风格） ──
         knowledgeBaseText = buildRoleplayRules(character, portrait);
@@ -1455,184 +1465,38 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       }
     }
 
-        // 跨轮次角色扮演锁定（每轮重注入，确保身份不丢失）
+    // ── 跨轮次角色扮演锁定（通过角色扮演域管线） ──
     if (_currentRoleplay && !rpMatch) {
       _rpTurnCounter++;
       console.log('[Roleplay] 持续扮演: ' + _currentRoleplay + ' (轮' + _rpTurnCounter + ')');
 
-      // P0-3: 每3轮稳定性重注入（防角色恍惚——身份指令被稀释）
-      if (_rpTurnCounter >= 3 && _currentPortrait) {
-        knowledgeBaseText = buildRoleplayRules(_currentRoleplay, _currentPortrait);
-        const _style = _rpParamsSnapshot?.buildStyleInstruction(_currentRoleplay);
-        if (_style) knowledgeBaseText += _style;
-        _rpTurnCounter = 0;
-        console.log('[Roleplay] 稳定性重注入: 完整画像已刷新');
-      }
+      // 🏗️ 调用角色扮演域五步管线
+      try {
+        const _domainCtx: DomainContext = {
+          roleplay: _currentRoleplay,
+          characterClass: _currentCharacterClass as CharacterClass,
+          message,
+          dna,
+          knowledgeBaseText,
+          m4: ctx.m4,
+          knowledgeBase: ctx.knowledgeBase,
+          conversationDB: ctx.conversationDB,
+          conversationHistory: ctx.conversationHistory || [],
+          currentRPBranch: _currentRPBranch,
+          rpParamsSnapshot: _rpParamsSnapshot,
+          currentRoleplay: _currentRoleplay,
+        };
 
-      // 角色前缀丢失时重建（兜底 + 隐式扮演首次构建）
-      if (!knowledgeBaseText || !knowledgeBaseText.startsWith('【角色扮演】')) {
-        // 优先使用缓存的完整画像重建
+        const _pipelineResult = await runRoleplayPipeline(_domainCtx, _currentRPBranch);
+        knowledgeBaseText = _pipelineResult.knowledgeBaseText;
+        _currentPortrait = _pipelineResult.portrait || _currentPortrait;
+        _lastCollectedData = _pipelineResult.collectedData; // 供验证器使用
+      } catch (_e: any) {
+        console.error('[Roleplay] 管线异常，回退到内联逻辑:', _e?.message);
+        // 回退：简单重建
         if (_currentPortrait) {
           knowledgeBaseText = buildRoleplayRules(_currentRoleplay, _currentPortrait);
-          console.log('[Roleplay] 前缀丢失，从缓存画像重建');
-        } else {
-          // 🏗️ Fix-4: 首次隐式扮演的完整加载（含上下文扫描）
-          const [fc, kc, pc] = await Promise.all([
-            _loadRPFamily(_currentRoleplay).catch(function() { return ''; }),
-            _loadRPKnowledge(_currentRoleplay).catch(function() { return ''; }),
-            _loadRPPastHistory(_currentRoleplay).catch(function() { return ''; }),
-          ]);
-          const ce = scanContextForCharacter(_currentRoleplay, ctx.conversationHistory || [], 30);
-          let portrait = assembleCharacterPortrait(_currentRoleplay, {
-            fgContext: fc, kbContext: kc, historyContext: pc, contextExtract: ce,
-          });
-          _currentPortrait = portrait;
-          knowledgeBaseText = buildRoleplayRules(_currentRoleplay, portrait);
-          console.log('[Roleplay] 隐式扮演首轮构建完成: ' + _currentRoleplay);
         }
-      }
-
-      // 🔴 年龄锚点注入（放在 prefix-rebuild 之后，避免被 buildRoleplayRules 覆盖）
-      // 从 FG 主库取年龄（直接访问 m4 的原始 FG，不走分支的 getFamilyGraph）
-      let _characterAge: string | null = null;
-      if (!_characterAge) {
-        try {
-          const _mainFg = ctx.m4?.getFamilyGraph?.();
-          // 如果当前在分支模式下，getFamilyGraph 返回分支，需要直接访问主 FG
-          const _realFg = (ctx.m4 as any)?._familyGraph || _mainFg;
-          if (_realFg) {
-            const _profile = _realFg.getPersonProfile(_currentRoleplay);
-            if (_profile && _profile.age) _characterAge = String(_profile.age);
-          }
-        } catch (_) {}
-      }
-      // 从 _currentPortrait 取年龄
-      if (!_characterAge && _currentPortrait) {
-        const _am = _currentPortrait.match(/(\d+)岁/);
-        if (_am) _characterAge = _am[1];
-      }
-      // 从对话历史取年龄
-      if (!_characterAge) {
-        const _histText = ctx.conversationHistory.slice(-40).map(t => t.content).join(' ');
-        const _hm = _histText.match(new RegExp(_currentRoleplay + '.*?[' + '，, ]*(?:才|刚|今年|现在|已经|只有)?(\\d{1,2})岁'));
-        if (!_hm) {
-          const _wm = _histText.match(/(?:才|刚|今年|现在|已经|只有)(\d{1,2})岁/);
-          if (_wm && _histText.includes(_currentRoleplay)) _characterAge = _wm[1];
-        } else { _characterAge = _hm[1]; }
-      }
-      if (_characterAge && !knowledgeBaseText.includes('【年龄】')) {
-        knowledgeBaseText += '\n\n【年龄】你的年龄是' + _characterAge + '岁，不要说自己其他年龄。';
-        console.log('[Roleplay] 年龄锚点已注入: ' + _characterAge + '岁');
-      } else if (!_characterAge && !knowledgeBaseText.includes('【年龄】')) {
-        // 🔴 没有任何数据源能确定年龄——告诉LLM不知道，禁止编造
-        knowledgeBaseText += '\n\n【年龄】你不知道自己具体多少岁。⚠️ 用户没有告诉过你的年龄，绝对不能自己编造一个数字。如果有人问你"你多大了""你几岁"，回答"我也不知道，你没跟我说过"。';
-        console.log('[Roleplay] 年龄锚点: 无数据，已注入反编造指令');
-      }
-
-      // 每轮加载历史扮演对话 —— 保持上下文不中断
-      const _rpHistoryAppend = await _loadRPPastHistory(_currentRoleplay).catch(function() { return ''; });
-      if (_rpHistoryAppend && !knowledgeBaseText.includes('【历史扮演】')) {
-        knowledgeBaseText += '\n\n【历史扮演】以下是你和鸿艺之前的对话，记住这些，保持身份和上下文连贯：\n' + _rpHistoryAppend;
-      }
-
-      // 🏗️ P1-4: 主动检索 & 透传 — 每轮检查新人物/事件，从知识库增量补全
-      if (_currentRoleplay) {
-        try {
-          // ① 提取本消息中的人名实体
-          const _rpEntities = dna.entity_genes
-            .filter((g: any) => g.type === 'person' && g.name !== '我' && g.name !== _currentRoleplay)
-            .map((g: any) => g.name);
-
-          // ② FG 亲属解析（只在有 FG 分支时生效）
-          // 🔴 即使 DNA 没提取到实体，只要用户说了亲属称呼就强制解析
-          // 例：「她叫什么名字」「你姐姐在哪」中的「她」「姐姐」无法被 M1 提取为人名
-          if (_currentRPBranch && /妈妈|妈|爸爸|爸|母亲|父亲|姐姐|妹妹|哥哥|弟弟|老婆|老公/.test(message)) {
-            const _kinship = ['妈妈','妈','爸爸','爸','母亲','父亲','姐姐','妹妹','哥哥','弟弟','老婆','老公'];
-            for (const _kw of _kinship) {
-              if (message.includes(_kw)) {
-                const _resolved = _currentRPBranch.resolveKinship(_kw);
-                for (const _rn of _resolved) {
-                  if (!_rpEntities.includes(_rn)) _rpEntities.push(_rn);
-                }
-              }
-            }
-          }
-          // 🔴 代词「她」「他」或亲属称呼触发：从历史提取真实人名
-          // 例：「姐姐」不是人名，需要往前找历史中谁被叫"姐姐"→找到「徐诗雨」
-          const _onlyKinship = _rpEntities.length > 0 &&
-            _rpEntities.every(e => /姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷|老婆|老公/.test(e));
-          if ((_rpEntities.length === 0 || _onlyKinship) && ( /[她他]/.test(message) || _onlyKinship)) {
-            const _recentUser = ctx.conversationHistory.slice(-5).filter(t => t.role === 'user').map(t => t.content).join(' ');
-            // 找第一个2-4字的人名（排除亲属称呼）
-            const _allMatches = _recentUser.match(/[一-龥]{2,4}(?=[，。！？\s]|的|了|是|有|在|说)/g) || [];
-            const _realName = _allMatches.find(n => n !== _currentRoleplay && n !== '我' && n.length >= 2 &&
-              !/姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷|老婆|老公/.test(n));
-            if (_realName) {
-              _rpEntities.push(_realName);
-              console.log('[Roleplay] 代词解析: 从历史提取「' + _realName + '」');
-            }
-          }
-
-          // ③ 对每个新实体执行主动检索（FG 透传 + KB 增量 + 防重复）
-          for (const _entity of _rpEntities) {
-            // 跳过已在知识库文本中出现过的实体
-            if (knowledgeBaseText && knowledgeBaseText.includes(_entity)) continue;
-
-            // FG 透传（仅 FG 分支有效时）
-            let _transitive = '';
-            if (_currentRPBranch) {
-              _transitive = await _loadRPRelatedKB(_currentRoleplay, [_entity]);
-            }
-
-            // KB 主动检索（所有角色类型均有效）
-            if (!_transitive && ctx.knowledgeBase) {
-              try {
-                const _kbHits = await ctx.knowledgeBase.search(_entity, 1);
-                let _filteredHits = _kbHits;
-                // 知情边界过滤
-                if (_kbHits.length > 0 && _currentCharacterClass) {
-                  const _pf = PerspectiveFilter.apply({
-                    results: _kbHits,
-                    roleName: _currentRoleplay,
-                    characterClass: _currentCharacterClass,
-                    age: null,
-                    knownEntities: [_entity, _currentRoleplay],
-                  });
-                  _filteredHits = _pf.filtered;
-                }
-                if (_filteredHits.length > 0) {
-                  const _kbData = _filteredHits.map(function(k: any) {
-                    return '\u{1f4c4} ' + k.title + '\n' + (k.content || '').substring(0, 1500);
-                  }).join('\n\n');
-                  _transitive = '\n【' + _entity + '的资料】（主动检索）\n' + _kbData;
-                }
-              } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
-            }
-
-            if (_transitive && knowledgeBaseText && !knowledgeBaseText.includes(_transitive.substring(0, 30))) {
-              knowledgeBaseText += _transitive;
-              console.log('[Roleplay] 主动检索已追加: +' + _transitive.length + '字节 [' + _entity + ']');
-            }
-          }
-
-          // 🔴 ④ 反编造屏障（全面重写）：只要用户问了关于人的问题，就强制限制编造
-          const _askedAboutPerson = /谁|名字|叫.*什么|在哪|做什么|什么样|年龄|多大|几岁/.test(message) ||
-            /姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷/.test(message);
-          if (_rpEntities.length > 0 && _askedAboutPerson) {
-            // 第一级：检查是否有查询结果可用
-            const _hasData = _rpEntities.some(function(e) {
-              return knowledgeBaseText && knowledgeBaseText.includes(e);
-            });
-            // 第二级：检查是否是亲属称呼但无真实人名
-            const _onlyRel = _rpEntities.every(e => /姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷|老婆|老公|阿姨|叔叔/.test(e));
-            if (!_hasData || _onlyRel) {
-              const _peopleList = _rpEntities.join('、');
-              const _guard = '\n\n【⚠️ 反编造铁律】用户问了关于"' + _peopleList + '"的信息。但你对此人一无所知，你不知道他/她叫什么名字、长什么样、做什么工作、多少岁。请直接回答"我不知道""我不清楚"或"没听说过"。绝对禁止编造任何信息。宁可说不知道，不能说假话。';
-              knowledgeBaseText += _guard;
-              console.log('[Roleplay] ⚠️ 反编造屏障已触发: ' + _peopleList);
-            }
-          }
-        } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
       }
     }// 话题追问检测
 
@@ -2027,19 +1891,17 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
     // 🏗️ 防复发第一层: 角色扮演运行时自检
     if (_currentRoleplay) {
       checkRoleplayHealth(reply, finalKnowledgeText, enrichedHistory, _currentRoleplay);
-      // 🔴 回答后交叉验证：用户问了具体人的信息，回复是否在设定范围内
-      try {
-        const _askAboutPerson = /谁|名字|叫.*什么|在哪|做什么|什么样|年龄|多大|几岁|姐姐|妹妹|哥哥|弟弟|妈妈|爸爸/.test(message);
-        if (_askAboutPerson && reply) {
-          const _hasKnownFacts = finalKnowledgeText.includes('【角色画像】') ||
-            finalKnowledgeText.includes('【关系】') ||
-            finalKnowledgeText.includes('【年龄】') ||
-            finalKnowledgeText.includes('【近况】');
-          if (!_hasKnownFacts && reply.length < 300) {
-            console.warn('[Roleplay] ⚠️ 用户问了人物信息但设定中无相关资料，LLM可能编造');
+      // 🏗️ 角色扮演域验证器
+      if (_lastCollectedData) {
+        try {
+          const _vr = validateReply(reply, _lastCollectedData, _currentRoleplay);
+          if (!_vr.pass) {
+            const _msg = '[RoleplayValidator] ' + _vr.issues.join('; ') + ' severity=' + _vr.severity;
+            if (_vr.severity === 'error') console.error(_msg);
+            else console.warn(_msg);
           }
-        }
-      } catch (_) {}
+        } catch (_ve) { /* 验证失败不阻塞主线 */ }
+      }
     }
 
     // P0-3: 规则幻觉校验 — 提取回复中的人名对照 FamilyGraph

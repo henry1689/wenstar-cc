@@ -80,6 +80,14 @@
 
 详见 `docs/quality-improvement-workflow.md`
 
+## 🎯 预置目标指令
+
+| 命令 | 效果 |
+|:----|------|
+| `/goal` | 执行角色扮演域第一阶段：独立域框架 + 五步核心管线 + chat.ts 迁出 |
+
+详见 `docs/roleplay-pipeline-redesign.md`
+
 ## 📋 需要你主动调用的技能
 
 | 场景 | 命令 |
