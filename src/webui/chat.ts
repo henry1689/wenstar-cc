@@ -1622,10 +1622,9 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 let memoryText = memoryFragments.length > 0 ? memoryFragments.slice(0, 8).join('\n') : '';
 let finalKnowledgeText = knowledgeBaseText;
 
-// ❡ 角色扮演铁壁：_currentRoleplay 一旦设定就立刻注入身份指令（优先于后续所有操作）
-if (_currentRoleplay && !finalKnowledgeText.startsWith('【角色扮演】')) {
+// 🧬 结构化管线已包含角色扮演规则，仅对旧链路生效
+if (_currentRoleplay && !getDomainStatus().structured && !finalKnowledgeText.startsWith('【角色扮演】')) {
   finalKnowledgeText = buildRoleplayRules(_currentRoleplay) + (finalKnowledgeText ? String.fromCharCode(10,10) + finalKnowledgeText : '');
-
 }
 
 // 🎭 角色扮演注入（通过 clientMsgId 传递，确保每轮都生效）
@@ -1792,7 +1791,7 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
       finalKnowledgeText = '【用户上一句】"' + _prev.substring(0, 80) + '"（这是用户刚才说的话，现在他接着这个话题继续说。直接用这个来理解他现在的意思。）\n\n【⚠️ 反编造铁律 — 绝对禁止无中生有】\n用户刚才说：' + _prev.substring(0, 60) + '，现在接着说：' + message.substring(0, 40) + '\n你对此人此事的了解仅限于你知道其名字和基础关系。\n🚫 绝不要编造：\n- 任何具体事件、对话、去过哪里、做过什么\n- 任何人物关系（XX是你老婆/你妈/你亲戚等）\n- 任何职业、经历、喜好、细节\n- 任何"上次你说""上次你们""我记得你提过"之类的具体回忆\n✅ 如果不确定，只说"这个我不太清楚了"或"我记不太清了"\n\n' + (finalKnowledgeText || '');
       console.log('[FollowUp] prev="' + _prev.substring(0,40) + '" msg="' + message + '"');
     }    // 🧬 结构化安全网
-    if (_currentRoleplay && !finalKnowledgeText.startsWith('## 你是') && !finalKnowledgeText.startsWith('【角色扮演】')) {
+    if (_currentRoleplay && !getDomainStatus().structured && !finalKnowledgeText.startsWith('【角色扮演】')) {
             finalKnowledgeText = buildRoleplayRules(_currentRoleplay) + (finalKnowledgeText ? String.fromCharCode(10,10) + finalKnowledgeText : '');
       console.log('[Roleplay] 🛡️ 安全网触发：前缀丢失');
     }
