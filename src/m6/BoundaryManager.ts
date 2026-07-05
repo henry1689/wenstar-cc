@@ -3,8 +3,7 @@
 
 import type { Boundary } from './types/index.js';
 import { SelfModelManager } from './SelfModelManager.js';
-
-const SOFTEN_DECAY_DAYS = 90;
+import { M6_CONFIG } from '../config/M6Config.js';
 
 export class BoundaryManager {
   private manager: SelfModelManager;
@@ -44,8 +43,8 @@ export class BoundaryManager {
 
     if (wasRejected) {
       boundary.hitCount++;
-      // ≥5次触碰 + 被拒绝 → 边界强化
-      if (boundary.hitCount >= 5 && boundary.severity === 'soft') {
+      // ≥threshold次触碰 + 被拒绝 → 边界强化
+      if (boundary.hitCount >= M6_CONFIG.boundary.strengthenThreshold && boundary.severity === 'soft') {
         boundary.severity = 'hard';
       }
     } else {
@@ -65,7 +64,7 @@ export class BoundaryManager {
     for (const b of boundaries) {
       if (!b.lastHit) continue;
       const daysSince = (now - new Date(b.lastHit).getTime()) / (1000 * 86400);
-      if (daysSince >= SOFTEN_DECAY_DAYS) {
+      if (daysSince >= M6_CONFIG.boundary.decayDays) {
         b.hitCount = 0;
         this.manager.addBoundary(b);
       }

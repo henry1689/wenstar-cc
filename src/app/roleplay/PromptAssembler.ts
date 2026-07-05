@@ -1,65 +1,116 @@
 /**
  * PromptAssembler — 四层提示词装配器
  *
- * 🔴 约束4：层级顺序不可逆 Layer1→Layer2→Layer3→Layer4
- *    约束5：记忆严格控量（Top5+最近Top3取并集 ≤8条）
+ * v4.1: XML分层置顶刚性规则 + fact_database独立区块
+ * 底层检索/拓扑不动，仅调整提示结构
  */
-import type { FourLayerData } from './DataCollector.js';
-import { buildRoleplayRules } from './RoleplayPromptBuilder.js';
-import { assembleFourLayers } from '../../core/cognitive/FourLayerAssembler.js';
-import { getSessionCache } from './RoleplaySessionCache.js';
+import type { FourLayerData } from './types.js';
+import { getSessionCache, setSessionCache } from './RoleplaySessionCache.js';
 
 export interface AssembleInput {
   roleplay: string;
-  portrait: string;
   data: FourLayerData;
   styleInstruction?: string;
 }
 
 export function assemblePrompt(input: AssembleInput): string {
-  const { roleplay, portrait, data, styleInstruction } = input;
+  const { roleplay, data, styleInstruction } = input;
   const cache = getSessionCache();
 
-  // Layer1: 核心身份
-  const layer1Identity = cache?.layer1Identity ?? portrait;
+  const layer1Text = cache ? cache.layer1 : data.layer1.identityText;
+  const layer2Text = cache ? cache.layer2 : data.layer2.relationText;
+  const layer3Text = data.layer3.memoryText;
+  const layer4Text = data.layer4.knowledgeText;
 
-  // Layer2: 关系
-  const layer2Relations = cache?.layer2Relations ?? data.layer2.relations;
+  if (!cache) setSessionCache(roleplay, layer1Text, layer2Text);
 
-  // Layer3: 记忆（控量：历史40轮 + 金库Top5 + 黑钻）
-  const memoryParts: string[] = [];
-  if (data.layer3.history.length > 0) {
-    memoryParts.push('【近期对话】\n' + data.layer3.history.slice(-10).join('\n'));
+  // ─── 装配 ───
+  const parts: string[] = [];
+
+  // 1. 核心规则（最顶部，高优先级）
+  parts.push(buildCoreRules(roleplay, data));
+
+  // 2. 结构化事实库（独立区块，不与闲聊混同）
+  parts.push(buildFactDatabase(roleplay, layer1Text, layer2Text, data));
+
+  // 3. 记忆+知识
+  if (layer3Text) parts.push('【过往记忆】\n' + layer3Text);
+  if (layer4Text) parts.push('【知识背景】\n' + layer4Text);
+
+  let assembled = parts.join('\n\n---\n\n');
+
+  if (styleInstruction) assembled += '\n\n' + styleInstruction;
+  return assembled;
+}
+
+function buildCoreRules(roleplay: string, data: FourLayerData): string {
+  const lines: string[] = [];
+
+  lines.push('<core_rules priority="MAX">');
+  lines.push('1. 事实强制准则：下方【事实库】存在对应亲属、身份记录时，绝对不能回避回答。无记录才可用兜底话术。');
+  lines.push('2. 双向禁止红线：');
+  lines.push('   ① 禁止抛开人名、亲属关系写大段抒情故事，客观信息必须放在回答首句；');
+  lines.push('   ② 禁止刻意冷漠回避已有事实，不得只谈情绪不答问题。');
+  lines.push('3. 身份隔离铁律：我为' + roleplay + '，与徐诗雨为两个独立人物，双方亲属、经历完全隔离，严禁混用。');
+  lines.push('4. 输出格式硬性要求：');
+  lines.push('   用户询问家人/亲属类问题，第一行直接给出对应亲属姓名与关系。情绪描写仅做少量补充。');
+  lines.push('</core_rules>');
+
+  // 固定身份声明
+  lines.push('');
+  lines.push('<fixed_identity>');
+  lines.push('当前唯一身份：' + roleplay);
+  lines.push('我不是徐诗雨，也不是其他任何人。');
+  lines.push('</fixed_identity>');
+
+  // 已知人物列表
+  const names = collectKnownNames(data);
+  if (names.size > 1) {
+    lines.push('');
+    lines.push('【我认识的人】');
+    for (const n of names) if (n !== roleplay) lines.push('  · ' + n);
   }
-  if (data.layer3.goldMemories.length > 0) {
-    memoryParts.push(...data.layer3.goldMemories.slice(0, 5));
+
+  return lines.join('\n');
+}
+
+function buildFactDatabase(
+  roleplay: string,
+  layer1Text: string,
+  layer2Text: string,
+  data: FourLayerData,
+): string {
+  const lines: string[] = [];
+  lines.push('<fact_database>');
+
+  // 核心身份
+  if (layer1Text) {
+    lines.push('【自身档案】');
+    lines.push(layer1Text);
   }
-  if (data.layer3.diamondMemories.length > 0) {
-    memoryParts.push(...data.layer3.diamondMemories);
+
+  // 亲属拓扑
+  if (layer2Text) {
+    lines.push('【亲属关系】');
+    lines.push(layer2Text);
   }
-  const layer3Memory = memoryParts.join('\n\n');
 
-  // Layer4: 知识
-  const layer4Knowledge = data.layer4.kbEntries.join('\n\n');
+  lines.push('</fact_database>');
 
-  // 规则（前置）
-  const rules = buildRoleplayRules(roleplay, layer1Identity);
+  // 问答格式指令（紧贴事实库后）
+  lines.push('');
+  lines.push('【回答格式】');
+  lines.push('用户问亲属→第一行直接回答。例如："我妈妈是阿苏。"');
+  lines.push('用户问年龄→第一行直接回答。例如："我今年14岁。"');
+  lines.push('只有以上<fact_database>中有记录才能回答。没有任何记录时说"我不清楚，你没跟我说过"。');
+  lines.push('回答完事实后可以少量补充情绪，但情绪不能覆盖事实。');
 
-  // 用基类装配
-  const assembled = assembleFourLayers({
-    layer1Identity: rules,
-    layer2Relations,
-    layer3Memory,
-    layer4Knowledge,
-  });
+  return lines.join('\n');
+}
 
-  // 追加年龄锚点
-  const ageGuard = data.layer1.ageGuard;
-  const result = ageGuard ? assembled + '\n\n' + ageGuard : assembled;
-
-  // 追加风格
-  if (styleInstruction) {
-    return result + '\n\n' + styleInstruction;
-  }
-  return result;
+function collectKnownNames(data: FourLayerData): Set<string> {
+  const names = new Set<string>();
+  if (data.layer1.profile) names.add(data.layer1.profile.name);
+  for (const rel of data.layer2.relatives) names.add(rel.name);
+  return names;
 }

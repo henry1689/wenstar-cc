@@ -1,16 +1,20 @@
 /**
- * 时空感知层 - 顶层类型定义
+ * types.ts — Temporal 模块统一导出入口
  *
- * 统一导出所有子层类型
+ * 所有类型已合并到 global-types.ts，此文件仅做 re-export。
  */
-// base 层类型
-export type { TimePeriod, SessionState, FarewellLevel, TimerTaskStatus, TimerTriggerType } from './base/base-types.js';
-export type { TemporalContextBlock, TimerTask, TemporalConfig, FarewellRule } from './base/base-types.js';
-
-// celestial 层类型
 export type {
-  MoonPhase, SolarTerm, Season, SubSeason, StemBranch,
-  PhenologyEntry, SunCycle, CelestialContext, CelestialConfig,
-} from './celestial/celestial-types.js';
+  TimePeriod, SessionState, FarewellLevel,
+  TimerTaskStatus, TimerTriggerType,
+  TemporalContextBlock, TimerTask, TemporalConfig, FarewellRule,
+  MoonPhase, SolarTerm, Season, SubSeason,
+  StemBranch, PhenologyEntry, SunCycle,
+  CelestialContext, CelestialConfig,
+  UnifiedTemporalContext,
+  IDurationConfig, IPeriodConfig, IPromptConfig,
+} from './global-types.js';
 
-export { MOON_PHASE_LABELS, SOLAR_TERM_LABELS, SEASON_LABELS, SUB_SEASON_LABELS } from './celestial/celestial-types.js';
+export {
+  MOON_PHASE_LABELS, SOLAR_TERM_LABELS,
+  SEASON_LABELS, SUB_SEASON_LABELS,
+} from './global-types.js';

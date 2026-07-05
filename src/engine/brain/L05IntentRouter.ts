@@ -36,28 +36,17 @@ export class L05IntentRouter implements ILifecycle {
       if (matched) {
         console.log(`[L05] 命中规则: ${rule.id} -> ${rule.intent}/${rule.subIntent ?? '-'} (bypass=${rule.bypassLLM})`);
 
-        // 更新事件 payload（路由信息附加到原有事件）
-        const updated: IntentClassifiedEvent = {
-          ...event,
-          payload: {
-            ...event.payload,
-            intent: rule.intent,
-            subIntent: rule.subIntent,
-            shouldBypassLLM: rule.bypassLLM ?? false,
-          },
-        };
+        // P0-1: 修改原事件 payload，不发射新事件（防止双重发射）
+        event.payload.intent = rule.intent;
+        event.payload.subIntent = rule.subIntent;
+        event.payload.shouldBypassLLM = rule.bypassLLM ?? false;
 
-        // 如果 shouldBypassLLM，设置短路标记
         if (rule.bypassLLM) {
           (this.handleIntent as any).skipRemaining = true;
         }
-
-        this.bus?.emit(updated);
         return;
       }
     }
-
-    // 无规则命中——保持原分类不变
   };
 
   private matchRule(text: string, rule: IntentRule): boolean {

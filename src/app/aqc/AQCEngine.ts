@@ -2,21 +2,28 @@
  * AQCEngine — AQC 质检引擎（砂金质检员 + 金库质检员）
  *
  * 职责：独立于现有流程之外，只做标记和记录，不拦截、不修改、不阻塞。
- *   - SandQC（砂金质检员）: 每小时扫描最新对话，记录高质量对话
+ *   - SandQC（砂金质检员）: 每小时扫描最新对话，标记高质量对话
  *   - GoldQC（金库质检员）: 每小时扫描金库记忆，标记高质量记忆
+ *
+ * v2: 质检结果反哺晋升衰减（P2-1）— SandQC 引导优质对话加速晋升，
+ *     GoldQC 保护优质记忆减速衰减。
  *
  * 设计铁律：
  *   ① 零改动现有代码路径
- *   ② 不修改任何现有数据
- *   ③ 所有结果写入独立的 aqc_records 表
+ *   ② 所有结果写入独立的 aqc_records 表
+ *   ③ 质检反馈可关闭（通过开关控制）
  */
 import type { ConversationTurn } from '../../m5/types/index.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { promoteToBlackDiamond } from '../vault/VaultManager.js';
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
+
+// P2-1: 质检反馈开关（可关闭以恢复纯标记模式）
+const ENABLE_QC_FEEDBACK = true;
 
 // ═══════════════════════════════════════════════════════════════
 // SandQC — 砂金质检员
-// 扫描最新对话，标记高质量内容
+// 扫描最新对话，标记高质量内容，优质对话的钙化分加权
 // ═══════════════════════════════════════════════════════════════
 
 export interface SandQCResult {
@@ -25,14 +32,6 @@ export interface SandQCResult {
   pending: number;
 }
 
-/**
- * 砂金质检员 — 每小时运行
- *
- * 审核标准（满足任一即可标记）：
- *   1. 消息长度 > 30 字（有实际内容）
- *   2. 含非自我实体（提到他人/地点/事件）
- *   3. 含强烈情感词
- */
 export function runSandQC(
   sqlite: SQLiteAdapter,
   conversationHistory: ConversationTurn[],
@@ -43,7 +42,6 @@ export function runSandQC(
   let approved = 0;
   let pending = 0;
 
-  // 情感词表（轻度）
   const emotionWords = /难过|开心|伤心|生气|愤怒|感动|温暖|焦虑|紧张|担心|期待|失望|幸福|辛苦|累|烦|怕|爱|恨|想|念|喜欢|讨厌|后悔/;
 
   for (const turn of recentTurns) {
@@ -55,18 +53,12 @@ export function runSandQC(
     const snippet = text.substring(0, 80);
     let score = 0;
 
-    // 标准1：长度 > 10 字（有基本内容，门槛放低）
     if (text.length > 10) score += 0.3;
-    // 标准2：含非自我实体
     if (/妈妈|爸爸|老婆|老公|朋友|同事|客户|公司|工作|项目|家/.test(text)) score += 0.3;
-    // 标准3：含情感词
     if (emotionWords.test(text)) score += 0.3;
-    // 标准4：含任何实体或人名（来自 extractRelations 的产物）
     if (text.length > 5 && /[一-龥]{2,3}说|和[一-龥]{2,3}|找[一-龥]{2,3}/.test(text)) score += 0.2;
 
     const status = score >= 0.2 ? 'approved' : 'pending';
-
-    // 写入 aqc_records（去重：用内容前 40 字符做 ID，同内容只记录一次）
     const now = new Date().toISOString();
     const contentKey = snippet.replace(/[^一-龥a-zA-Z0-9]/g, '').substring(0, 40);
     const id = `aqc_sand_${contentKey}_${now.substring(0, 10)}`;
@@ -77,7 +69,17 @@ export function runSandQC(
          VALUES (?, 'sand', ?, ?, 0, 0, ?, ?, ?, ?)`,
         id, contentKey, snippet, score, status, now, now,
       );
-    } catch { /* 重复跳过 */ }
+
+      // P2-1: 优质对话 → 提升钙化分，加速晋升金库
+      if (ENABLE_QC_FEEDBACK && status === 'approved' && score > 0.5) {
+        const boostKey = contentKey;
+        sqlite.writeRaw(
+          `UPDATE conversations SET calcium_score = ROUND(MIN(10, COALESCE(calcium_score, 0) + 1.0), 1)
+           WHERE content LIKE ? AND is_promoted = 0`,
+          [`%${boostKey.substring(0, 20)}%`],
+        );
+      }
+    } catch { /* 跳过 */ }
 
     if (status === 'approved') approved++;
     else pending++;
@@ -88,7 +90,7 @@ export function runSandQC(
 
 // ═══════════════════════════════════════════════════════════════
 // GoldQC — 金库质检员
-// 扫描金库（M2 memories 表），标记高质量记忆
+// 扫描金库记忆，标记高质量记忆，优质记忆减速衰减
 // ═══════════════════════════════════════════════════════════════
 
 export interface GoldQCResult {
@@ -97,15 +99,6 @@ export interface GoldQCResult {
   rejected: number;
 }
 
-/**
- * 金库质检员 — 每小时运行
- *
- * 审核标准：
- *   1. recall_count ≥ 3（被多次回忆）
- *   2. calcium_level ≥ 2（高钙质）
- *   3. is_landmark = 1（已被标记为地标）
- *   满足任一即 approved，都不满足则 rejected。
- */
 export function runGoldQC(sqlite: SQLiteAdapter, limit = 50): GoldQCResult {
   let scanned = 0;
   let approved = 0;
@@ -143,14 +136,22 @@ export function runGoldQC(sqlite: SQLiteAdapter, limit = 50): GoldQCResult {
            VALUES (?, 'gold', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
           id, row.id, snippet, calcium, recall, score, status, now, now,
         );
+
+        // P2-1: 优质记忆减速衰减（提升有效强度，使其更难被衰减到0）
+        if (ENABLE_QC_FEEDBACK && status === 'approved' && score > 0.5) {
+          sqlite.writeRaw(
+            `UPDATE memories SET effective_strength = ROUND(MIN(1.0, effective_strength * 1.2), 4),
+             reinforcement_accumulator = COALESCE(reinforcement_accumulator, 0) + 0.1,
+             strength_updated_at = ?
+             WHERE id = ?`,
+            [now, row.id],
+          );
+        }
       } catch { /* 跳过 */ }
 
       if (status === 'approved') {
         approved++;
-        try {
-          
-          const r = promoteToBlackDiamond(sqlite, row.id); if (r) console.log("[GoldQC] 提升到黑钻:", row.id);
-        } catch { /* 提升失败不影响质检 */ }
+        const r = promoteToBlackDiamond(sqlite, row.id);
       } else rejected++;
     }
   } catch (err) {

@@ -55,14 +55,24 @@ export class L0Classifier implements ILifecycle {
     this.bus?.emit(classified);
   };
 
-  /** 将 L0 locus_path 映射到顶层意图 */
+  /**
+   * P0-2: 将 L0 locus_path 映射到 15 种刺激类型的标准意图
+   * 4位L0编码与刺激类型一一对应，替代硬编码默认值
+   */
   private mapL0ToIntent(locusPath: string): IntentClassifiedEvent['payload']['intent'] {
-    if (locusPath.startsWith('user.family') || locusPath.startsWith('user.work')) {
-      return 'casual_chat';
-    }
-    if (locusPath.startsWith('user.emotion')) {
-      return 'casual_chat';
-    }
+    if (locusPath === 'user.emotion.romantic') return 'emotional_sharing';
+    if (locusPath === 'user.emotion.miss_family') return 'emotional_sharing';
+    if (locusPath === 'user.emotion.positive') return 'emotional_sharing';
+    if (locusPath === 'user.emotion.negative') return 'venting';
+    if (locusPath === 'user.emotion.suppressed') return 'venting';
+    if (locusPath === 'user.family.conflict') return 'venting';
+    if (locusPath === 'user.family.care') return 'casual_chat';
+    if (locusPath.startsWith('user.work.burnout')) return 'venting';
+    if (locusPath.startsWith('user.work.stress')) return 'venting';
+    if (locusPath.startsWith('user.work')) return 'task_discussion';
+    if (locusPath.startsWith('user.health')) return 'daily_chat';
+    if (locusPath.startsWith('user.daily')) return 'daily_chat';
+    if (locusPath === 'user.misc.default') return 'casual_chat';
     return 'casual_chat';
   }
 }

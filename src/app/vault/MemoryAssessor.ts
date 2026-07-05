@@ -1,16 +1,12 @@
 /**
- * MemoryAssessor — 三库自动流转调度器（S2-2 新规格对齐）
+ * MemoryAssessor — 三库自动流转调度器
  *
- * 后台异步运行三个评估任务：
- *   ① 砂金库→金库（每 30 分钟）：calcium ≥ 1 晋升
- *   ② 金库→黑钻库（每 2 小时）：calcium ≥ 4.5 或 recall ≥ 5 晋升
- *   ③ 钙化分衰减（每 24 小时）：场景差异化衰减
- *
- * 复用 VaultManager 现有函数，只加调度逻辑。
- * 所有任务通过 setTimeout 异步执行，不阻塞主回复流程。
+ * v2: 所有硬编码阈值/周期从 MemoryConfig 读取。
+ *     新增幂等校验，防止重复晋升。
  */
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
 import { autoPromoteCandidatesV2 } from './VaultManager.js';
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 
 export class MemoryAssessor {
   private storage: FusionStorageAdapter;
@@ -24,11 +20,11 @@ export class MemoryAssessor {
   start(): void {
     if (this.started) return;
     this.started = true;
-    console.log('[MemoryAssessor] 启动三库流转调度器 (S2-2新规格)');
+    console.log('[MemoryAssessor] 启动三库流转调度器');
 
-    this.schedule('sandToGold', 30 * 60 * 1000, () => this.runSandToGold());
-    this.schedule('goldToDiamond', 2 * 60 * 60 * 1000, () => this.runGoldToDiamond());
-    this.schedule('decay', 24 * 60 * 60 * 1000, () => this.runDecay());
+    this.schedule('sandToGold', MEMORY_CONFIG.sandToGold.intervalMs, () => this.runSandToGold());
+    this.schedule('goldToDiamond', MEMORY_CONFIG.goldToDiamond.intervalMs, () => this.runGoldToDiamond());
+    this.schedule('decay', MEMORY_CONFIG.decay.intervalMs, () => this.runDecay());
   }
 
   stop(): void {
@@ -42,20 +38,21 @@ export class MemoryAssessor {
       fn().catch(err => console.warn(`[MemoryAssessor] ${name} 失败:`, err));
       this.timers.push(setTimeout(tick, interval));
     };
-    const delay = Math.random() * 60000 + 5000;
-    this.timers.push(setTimeout(tick, delay));
+    this.timers.push(setTimeout(tick, Math.random() * 60000 + 5000));
   }
 
-  // --- ① 砂金库→金库（新规格: calcium ≥ 1 晋升）---
+  // ── ① 砂金库→金库 ──
 
   private async runSandToGold(): Promise<void> {
+    const cfg = MEMORY_CONFIG.sandToGold;
     try {
       const sqlite = this.storage.getSQLite();
       const recentConvs = sqlite.queryAll(
         `SELECT id, role, content, calcium_score, entity_json, dna_root_id, timestamp
          FROM conversations
-         WHERE is_promoted = 0 AND calcium_score >= 1.0
-         ORDER BY calcium_score DESC LIMIT 30`
+         WHERE is_promoted = 0 AND calcium_score >= ?
+         ORDER BY calcium_score DESC LIMIT ?`,
+        [cfg.minCalciumScore, cfg.batchSize]
       ) as any[];
 
       if (recentConvs.length === 0) {
@@ -69,25 +66,29 @@ export class MemoryAssessor {
       for (const conv of recentConvs) {
         if (conv.role !== 'user') continue;
         const text = (conv.content || '') as string;
-        if (text.length < 10) continue;
+        if (text.length < cfg.minContentLength) continue;
 
         const dnaRootId = conv.dna_root_id || `sand_fallback_${Date.now()}`;
-        const calciumScore = conv.calcium_score || 1.0;
         const memoryId = `mem_${dnaRootId}`;
 
         try {
+          // 幂等：已存在则跳过
+          const exist = sqlite.queryAll('SELECT id FROM memories WHERE id = ? LIMIT 1', [memoryId]);
+          if (exist.length > 0) continue;
+
           sqlite.writeRaw(
-            `INSERT OR IGNORE INTO memories
-             (id, raw_input, entity_genes, created_at, calcium_score, calcium_level, effective_strength, dna_root_id, strength_updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO memories
+             (id, raw_input, entity_genes, created_at, calcium_score, calcium_level, effective_strength, dna_root_id, strength_updated_at, namespace)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [memoryId, text.substring(0, 500),
              conv.entity_json || '[]',
              new Date().toISOString(),
-             calciumScore,
-             Math.min(3, Math.floor(calciumScore)),
-             Math.min(1.0, calciumScore / 10),
+             conv.calcium_score,
+             Math.min(3, Math.floor(conv.calcium_score)),
+             Math.min(1.0, conv.calcium_score / 10),
              dnaRootId,
-             new Date().toISOString()]
+             new Date().toISOString(),
+             'default']
           );
           sqlite.writeRaw('UPDATE conversations SET is_promoted = 1 WHERE id = ?', [conv.id]);
           promoted++;
@@ -96,66 +97,70 @@ export class MemoryAssessor {
 
       sqlite.writeRaw('COMMIT');
       if (promoted > 0) {
-        console.log(`[MemoryAssessor] 砂金→金库: ${promoted} 条 (calcium>=1)`);
+        console.log(`[MemoryAssessor] 砂金→金库: ${promoted} 条 (calcium>=${cfg.minCalciumScore})`);
       }
     } catch (err) {
       console.warn('[MemoryAssessor] 砂金→金库失败:', err);
     }
   }
 
-  // --- ② 金库→黑钻（新规格: calcium ≥ 4.5 或 recall ≥ 5）---
+  // ── ② 金库→黑钻 ──
 
   private async runGoldToDiamond(): Promise<void> {
     try {
       const sqlite = this.storage.getSQLite();
-      const entries = autoPromoteCandidatesV2(sqlite, 5);
+      const entries = autoPromoteCandidatesV2(sqlite, MEMORY_CONFIG.goldToDiamond.batchSize);
       if (entries.length > 0) {
-        console.log(`[MemoryAssessor] 金库→黑钻: ${entries.length} 条 (钙化>=4.5或召回>=5)`);
+        console.log(`[MemoryAssessor] 金库→黑钻: ${entries.length} 条`);
       }
     } catch (err) {
       console.warn('[MemoryAssessor] 金库→黑钻失败:', err);
     }
   }
 
-  // --- ③ 钙化分衰减（新规格: 场景差异化）---
+  // ── ③ 钙化分衰减 ──
 
   private async runDecay(): Promise<void> {
+    const dc = MEMORY_CONFIG.decay;
     try {
       const sqlite = this.storage.getSQLite();
       const now = new Date().toISOString();
 
-      // 强烈情感记忆 (calcium >= 3) → 极慢衰减 -0.02
+      // 强烈情感记忆 (calcium >= 3) → 极慢衰减
       sqlite.writeRaw(
-        `UPDATE memories SET calcium_score = ROUND(MAX(0, calcium_score - 0.02), 1),
-         effective_strength = ROUND(MAX(0.1, effective_strength * 0.995), 4),
+        `UPDATE memories SET calcium_score = ROUND(MAX(?, calcium_score - ?), 1),
+         effective_strength = ROUND(MAX(?, effective_strength * ?), 4),
          strength_updated_at = ?
          WHERE calcium_score > 0 AND is_promoted = 0 AND calcium_score >= 3.0`,
-        [now]
+        [MEMORY_CONFIG.recall.calciumMin, dc.highCalciumDecay,
+         dc.strengthFloor, dc.highStrengthFactor, now]
       );
 
-      // 工作相关记忆 → 慢衰减 -0.05
+      // 工作相关记忆 → 慢衰减
       sqlite.writeRaw(
-        `UPDATE memories SET calcium_score = ROUND(MAX(0, calcium_score - 0.05), 1),
-         effective_strength = ROUND(MAX(0.1, effective_strength * 0.985), 4),
+        `UPDATE memories SET calcium_score = ROUND(MAX(?, calcium_score - ?), 1),
+         effective_strength = ROUND(MAX(?, effective_strength * ?), 4),
          strength_updated_at = ?
          WHERE calcium_score > 0 AND is_promoted = 0 AND calcium_score < 3.0
          AND (COALESCE(narrative_tag, '') LIKE '%工作%' OR COALESCE(narrative_tag, '') LIKE '%项目%'
               OR COALESCE(narrative_tag, '') LIKE '%公司%' OR COALESCE(narrative_tag, '') LIKE '%会议%')`,
-        [now]
+        [MEMORY_CONFIG.recall.calciumMin, dc.workDecay,
+         dc.strengthFloor, dc.workStrengthFactor, now]
       );
 
-      // 普通中性记忆 → 正常衰减 -0.10
+      // 普通中性记忆 → 正常衰减
       sqlite.writeRaw(
-        `UPDATE memories SET calcium_score = ROUND(MAX(0, calcium_score - 0.10), 1),
-         effective_strength = ROUND(MAX(0.1, effective_strength * 0.95), 4),
+        `UPDATE memories SET calcium_score = ROUND(MAX(?, calcium_score - ?), 1),
+         effective_strength = ROUND(MAX(?, effective_strength * ?), 4),
          strength_updated_at = ?
          WHERE calcium_score > 0 AND is_promoted = 0 AND calcium_score < 3.0
          AND (COALESCE(narrative_tag, '') NOT LIKE '%工作%' AND COALESCE(narrative_tag, '') NOT LIKE '%项目%'
               AND COALESCE(narrative_tag, '') NOT LIKE '%公司%' AND COALESCE(narrative_tag, '') NOT LIKE '%会议%')`,
-        [now]
+        [MEMORY_CONFIG.recall.calciumMin, dc.normalDecay,
+         dc.strengthFloor, dc.normalStrengthFactor, now]
       );
 
-      console.log('[MemoryAssessor] 钙化分衰减完成: 情感-0.02, 工作-0.05, 中性-0.10');
+      console.log('[MemoryAssessor] 钙化分衰减完成');
     } catch (err) {
       console.warn('[MemoryAssessor] 钙化分衰减失败:', err);
     }

@@ -1,11 +1,11 @@
 /**
  * TemporalContextAggregator — 时空上下文聚合器
  *
- * 合并 base 层（公历时间/会话/定时）+ celestial 层（农历/节气/月相/物候）
- * 统一输出给 PromptComposer，上层只需调一个接口。
+ * v2: 仅输出结构化数据（UnifiedTemporalContext），不拼接 Prompt 文案。
+ * Prompt 渲染已移至 TemporalPromptRenderer。
  */
-import type { TemporalContextBlock } from './types.js';
-import type { CelestialContext } from './celestial/celestial-types.js';
+import type { CelestialContext, UnifiedTemporalContext } from './global-types.js';
+import { MOON_POETIC_MAP } from './TemporalConfig.js';
 import { TemporalContextBuilder } from './base/TemporalContext.js';
 import { CalendarEngine } from './celestial/CalendarEngine.js';
 import { LunarPhaseCalc } from './celestial/LunarPhaseCalc.js';
@@ -13,18 +13,7 @@ import { PhenologyTimeline } from './celestial/PhenologyTimeline.js';
 import { NaturalCycle } from './celestial/NaturalCycle.js';
 import { TimeKeeper } from './base/TimeKeeper.js';
 import { SessionTracker } from './base/SessionTracker.js';
-import { SOLAR_TERM_LABELS } from './celestial/celestial-types.js';
-
-export interface UnifiedTemporalContext {
-  /** 基础时空块（供 PromptComposer 注入） */
-  promptBlock: string;
-  /** 完整时空元数据（供上层业务逻辑使用） */
-  celestial: CelestialContext;
-  /** 当前时间（标准格式） */
-  currentTime: string;
-  /** 复合时段标签 */
-  compositeLabel: string;
-}
+import { SOLAR_TERM_LABELS } from './global-types.js';
 
 export class TemporalContextAggregator {
   private baseContext: TemporalContextBuilder;
@@ -53,7 +42,7 @@ export class TemporalContextAggregator {
   }
 
   /**
-   * 获取完整时空上下文（一键聚合）
+   * 获取完整结构化时空上下文（纯数据，不含 Prompt 文案）
    */
   getFullContext(): UnifiedTemporalContext {
     const now = this.timeKeeper.now();
@@ -61,7 +50,6 @@ export class TemporalContextAggregator {
     const m = now.getMonth() + 1;
     const d = now.getDate();
 
-    // 天象数据
     const moonResult = this.moonCalc.compute();
     const lunar = this.calendar.getCurrentLunar();
     const term = this.calendar.getCurrentTerm();
@@ -71,7 +59,6 @@ export class TemporalContextAggregator {
     const phenologyEntry = this.phenology.getCurrent();
     const festivals = this.calendar.getFestivals(y, m, d);
 
-    // 构建 celestial context
     const celestial: CelestialContext = {
       solarDate: this.timeKeeper.dateString(),
       weekday: this.timeKeeper.weekdayLabel(),
@@ -97,9 +84,9 @@ export class TemporalContextAggregator {
       scenes: phenologyEntry.scenes,
     };
 
-    // 构建 prompt 块（base 层 + celestial 层合并）
-    const baseBlock = this.baseContext.buildPromptBlock();
-    const celestialBlock = this.buildCelestialPromptBlock(celestial, festivals);
+    // 只生成纯数据 promptBlock（基础时空+天象，由渲染器接管完整Prompt组装）
+    const baseBlock = this.baseContext.buildTimeBlock();
+    const celestialBlock = this.buildCelestialDataBlock(celestial, festivals);
     const promptBlock = baseBlock + '\n' + celestialBlock;
 
     return {
@@ -110,57 +97,25 @@ export class TemporalContextAggregator {
     };
   }
 
-  /**
-   * 构建天象物候提示块（注入 PromptComposer）
-   */
-  private buildCelestialPromptBlock(ctx: CelestialContext, festivals: string[]): string {
+  /** 生成天象数据块（仅结构化描述，无渲染文案） */
+  private buildCelestialDataBlock(ctx: CelestialContext, festivals: string[]): string {
     const parts: string[] = ['【天象】'];
-
-    // 农历
     parts.push(`农历${ctx.lunarYear} ${ctx.lunarDate}`);
-
-    // 节气
     if (ctx.currentTermLabel) {
       parts.push(`节气：${ctx.currentTermLabel}（下一个：${ctx.nextTermLabel} ${ctx.nextTermDate}）`);
     }
-
-    // 月相
-    const moonPoetic = this.getMoonPoetic(ctx.moonPhase, ctx.moonIllumination);
+    const moonPoetic = this.getMoonPoetic(ctx.moonPhase);
     parts.push(`月相：${ctx.moonPhaseLabel} ${moonPoetic}`);
-
-    // 日出日落
-    const sunDesc = this.naturalCycle.getSunDescription();
-    parts.push(`天时：${sunDesc}`);
-
-    // 物候
+    parts.push(`天时：${this.naturalCycle.getSunDescription()}`);
     parts.push(`物候：${ctx.phenology.join('，')}`);
-
-    // 花卉
-    if (ctx.flowers.length) {
-      parts.push(`当季：${ctx.flowers.join('、')}正盛`);
-    }
-
-    // 季节氛围
-    const compositeLabel = this.naturalCycle.getCompositeTimeLabel();
-    parts.push(`氛围：${compositeLabel}`);
-
-    // 节日
-    if (festivals.length) {
-      parts.push(`节日：${festivals.join('、')}`);
-    }
-
+    if (ctx.flowers.length) parts.push(`当季：${ctx.flowers.join('、')}正盛`);
+    parts.push(`氛围：${this.naturalCycle.getCompositeTimeLabel()}`);
+    if (festivals.length) parts.push(`节日：${festivals.join('、')}`);
     return parts.join(' | ');
   }
 
-  private getMoonPoetic(phase: string, illumination: number): string {
-    if (phase === 'full_moon') return '月华如水，清辉满庭。';
-    if (phase === 'new_moon') return '朔日不见月，万物始更新。';
-    if (phase === 'waxing_crescent') return '一弯蛾眉月，悄然上东楼。';
-    if (phase === 'first_quarter') return '上弦月正明，半轮悬碧空。';
-    if (phase === 'waning_gibbous' || phase === 'waxing_gibbous') return '月渐丰盈，流光徘徊。';
-    if (phase === 'last_quarter') return '下弦月西沉，残辉犹映窗。';
-    if (phase === 'waning_crescent') return '一钩残月，天色将明。';
-    return '';
+  private getMoonPoetic(phase: string): string {
+    return MOON_POETIC_MAP[phase] || '';
   }
 
   private seasonToLabel(s: string): string {

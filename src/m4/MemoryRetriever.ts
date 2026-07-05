@@ -1,5 +1,7 @@
 // MemoryRetriever — 从 M2 检索历史记忆 + 上下文压缩
 // Ref: M4-design-v1.md §4
+//
+// v2: 新增会话级缓存（P1-2）+ 双输出接口（P2-3）
 
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { KnowledgeBase } from '../m2/KnowledgeBase.js';
@@ -12,50 +14,83 @@ import { LocalCache } from '../app/tools/LocalCache.js';
 // 关键词检索缓存：相同关键词 30 秒内复用结果
 const keywordCache = new LocalCache<string, DNA[]>({ ttlMs: 30_000, namespace: 'm4_keyword' });
 
+// P1-2: 会话级缓存 — 同一会话相同 locus 复用检索结果
+const sessionCache = new LocalCache<string, DNA[]>({ ttlMs: 300_000, namespace: 'm4_session' });
+
+// P2-3: 结构化记忆条目（含完整的时空/关系/情感元数据）
+export interface StructuredMemoryItem {
+  id: string;
+  seq_pos: number;
+  created_at: string;
+  raw_input: string;
+  calcium_score: number;
+  calcium_level: number;
+  effective_strength: number;
+  recall_count: number;
+  primary_emotion?: string;
+  entity_names: string[];
+  fg_entity_names?: string;
+  time_period?: string;
+  season?: string;
+  lunar_term?: string;
+  score: number;
+}
+
 export class MemoryRetriever {
   private storage: FusionStorageAdapter;
   private knowledgeBase: KnowledgeBase | null = null;
+  // P1-2: 当前会话ID，由上层每轮注入
+  private _sessionId: string = '';
 
   constructor(storage: FusionStorageAdapter, knowledgeBase?: KnowledgeBase) {
     this.knowledgeBase = knowledgeBase ?? null;
     this.storage = storage;
   }
 
+  /** P1-2: 由上层（chat.ts/orchestrator）每轮注入当前会话ID */
+  setSessionId(sessionId: string): void {
+    this._sessionId = sessionId;
+  }
+
+  /** P1-2: 会话结束时调用，清理缓存 */
+  clearSessionCache(): void {
+    this._sessionId = '';
+    // 不清除全局 keywordCache，只清除对话级别的 sessionCache 条目
+    // 由 LocalCache 的 TTL 自动过期
+  }
+
   /**
    * 根据 M3 决策检索相关历史记忆
    *
-   * 检索策略（按优先级）：
-   * 1. 按 locus_path 话题前缀检索 — 分类树路由匹配
-   * 2. 按实体名称 + 原始输入关键词全文搜索 — 真正的内容匹配
-   * 3. 按情感相似度检索（当 entities 包含 emotion 类型时）— 跨场景同情绪记忆串联
+   * v2: 新增会话级缓存（P1-2），同一会话中相同 locus_path 复用检索结果
    */
   async retrieveMemories(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { limit?: number; perception?: Perception24D }
+    options?: { limit?: number; perception?: Perception24D; sessionId?: string }
   ): Promise<DNA[]> {
     const limit = options?.limit ?? 5;
+    const sessionId = options?.sessionId ?? this._sessionId;
 
-    // 1. 按话题前缀检索（基于分类树路由）
+    // P1-2: 会话级缓存检查
+    if (sessionId && locusPath) {
+      const cacheKey = `session:${sessionId}:${locusPath}`;
+      const cached = await sessionCache.get(cacheKey);
+      if (cached && cached.length > 0) {
+        return cached.slice(0, limit);
+      }
+    }
+
+    // ─── 1. 按话题前缀检索（基于分类树路由） ───
     const byLocus = await this.storage.findByLocus(locusPath, { limit: 20 });
 
-    // ─── 2. 关键词全文搜索（替代已废弃的 findByLocus(entity.name)） ───
-    //
-    // 之前版本使用 this.storage.findByLocus(entity.name) 来"按实体搜索"，
-    // 但 findByLocus 内部用 locus_path.startsWith(name) 过滤索引，
-    // 而所有 locus_path 都是 "user.xxx.yyy" 格式，实体名 "我"、"画" 等永远不匹配。
-    // → 实体搜索自项目诞生以来从未真正生效过。
-    //
-    // 修正：从最近记录中按 raw_input 包含关键词来筛选。
+    // ─── 2. 关键词全文搜索 ───
     const byKeyword: DNA[] = [];
     const keywords = new Set<string>();
 
-    // 实体名称作为搜索词
     for (const e of entities) {
       if (e.name && e.name.length > 0) keywords.add(e.name);
     }
-
-    // 从当前 locus_path 推断关键词（取最后一段）
     if (locusPath) {
       const segments = locusPath.split('.');
       const last = segments[segments.length - 1];
@@ -64,50 +99,40 @@ export class MemoryRetriever {
 
     if (keywords.size > 0) {
       try {
-        // P3: 关键词缓存 30 秒
         const cacheKey = [...keywords].sort().join("::");
         const _cached = await keywordCache.get(cacheKey);
         if (_cached) { byKeyword.push(..._cached); }
         else {
-        // 与 3001 MAX_SAVED_TURNS 对齐，覆盖完整对话上下文
-        // findBySeqPosRange 默认 DESC 排序，ascending 参数不被 QueryOptions 支持
-        const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200 });
-        const seen = new Set<string>();
-        for (const dna of recent) {
-          for (const kw of keywords) {
-            if (dna.raw_input.includes(kw) && !seen.has(dna.branch_id)) {
-              seen.add(dna.branch_id);
-              byKeyword.push(dna);
-              break;
+          const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200 });
+          const seen = new Set<string>();
+          for (const dna of recent) {
+            for (const kw of keywords) {
+              if (dna.raw_input.includes(kw) && !seen.has(dna.branch_id)) {
+                seen.add(dna.branch_id);
+                byKeyword.push(dna);
+                break;
+              }
             }
           }
         }
-        }
       } catch (err) {
         console.warn("[M4] 检索失败:", err);
-        // 静默失败
       }
     }
 
-    // ─── 3. 情感相似度检索（跨场景同情绪记忆串联） ───
-    //
-    // 触发条件放宽：有 emotion 实体 或 钙质≥1 且有感知数据 都触发
-    // 改前：仅 entities.some(e => e.type === 'emotion')
-    // 改后：只要情感强度足够就检索，不依赖 M1 实体提取的准确率
+    // ─── 3. 情感相似度检索 ───
     const hasEmotionType = entities.some(e => e.type === 'emotion');
     const hasMeaningfulEntity = entities.some(e => e.name.length > 0 && e.type !== 'self');
     const shouldEmotionSearch = options?.perception !== undefined && (hasEmotionType || hasMeaningfulEntity);
     const byEmotion: DNA[] = [];
     if (shouldEmotionSearch && options?.perception) {
       try {
-        // 使用情感向量相似度检索（按 valence/arousal 等 24 维坐标匹配）
         const scored = this.storage.findByEmotionalSimilarity({
           current_perception: options?.perception!,
           entities: entities.filter(e => e.type === 'emotion').map(e => e.name),
           similarity_mode: 'mood_congruent',
           limit: 10,
         });
-        // 转换 ScoredMemory[] → DNA[]
         for (const sm of scored) {
           if (sm?.record) {
             byEmotion.push({
@@ -130,7 +155,7 @@ export class MemoryRetriever {
       }
     }
 
-    // 4. 合并去重（byEmotion 优先，因为跨场景关联最为相关）
+    // 4. 合并去重
     const seen = new Set<string>();
     const merged: DNA[] = [];
     for (const dna of [...byEmotion, ...byKeyword, ...byLocus]) {
@@ -140,7 +165,7 @@ export class MemoryRetriever {
       }
     }
 
-    // P1: 知识库跨场景融合 — 当检索结果不足时补充
+    // 5. 知识库补充
     if (merged.length < limit * 0.5 && this.knowledgeBase && options?.perception) {
       try {
         const sceneTags = locusPath ? locusPath.split('.').filter(Boolean) : [];
@@ -176,7 +201,42 @@ export class MemoryRetriever {
       }
     }
 
+    // P1-2: 写入会话缓存
+    if (sessionId && locusPath && merged.length > 0) {
+      const cacheKey = `session:${sessionId}:${locusPath}`;
+      sessionCache.set(cacheKey, merged).catch(() => {});
+    }
+
     return merged;
+  }
+
+  /**
+   * P2-3: 检索记忆 + 返回结构化条目（双输出接口）
+   * 与 retrieveMemories 共享缓存，额外返回结构化元数据
+   */
+  async retrieveMemoriesStructured(
+    locusPath: string,
+    entities: Array<{ name: string; type: string }>,
+    options?: { limit?: number; perception?: Perception24D; sessionId?: string }
+  ): Promise<{ items: StructuredMemoryItem[]; summary: MemorySummary }> {
+    const dnas = await this.retrieveMemories(locusPath, entities, options);
+    const summary = this.compressMemories(dnas);
+
+    const items: StructuredMemoryItem[] = dnas.map((dna, idx) => ({
+      id: dna.branch_id,
+      seq_pos: dna.seq_pos,
+      created_at: dna.created_at || '',
+      raw_input: dna.raw_input || '',
+      calcium_score: dna.calcium_score ?? 0,
+      calcium_level: dna.calcium_level ?? 0,
+      effective_strength: (dna as any).effective_strength ?? 0.5,
+      recall_count: (dna as any).recall_count ?? 0,
+      primary_emotion: (dna as any).primary_emotion,
+      entity_names: (dna.entity_genes || []).map((g: any) => g.name).filter(Boolean),
+      score: Math.max(0, 1 - idx * 0.2),
+    }));
+
+    return { items, summary };
   }
 
   /**
@@ -197,19 +257,17 @@ export class MemoryRetriever {
         ? dna.raw_input.substring(0, 60) + '...'
         : dna.raw_input,
       calcium_level: dna.calcium_level ?? 1,
+      // P0-1: 透传根码
+      dna_root_id: (dna as any).dna_root_id || undefined,
     }));
 
-    // 统计高频实体（从 raw_input 中粗略提取）
     const freqMap = new Map<string, { type: string; count: number }>();
     for (const dna of dnas) {
       for (const gene of dna.entity_genes) {
         const key = `${gene.type}:${gene.name}`;
         const existing = freqMap.get(key);
-        if (existing) {
-          existing.count++;
-        } else {
-          freqMap.set(key, { type: gene.type, count: 1 });
-        }
+        if (existing) { existing.count++; }
+        else { freqMap.set(key, { type: gene.type, count: 1 }); }
       }
     }
 
@@ -233,4 +291,55 @@ export class MemoryRetriever {
     };
   }
 
+  // === P0: 五层串行截断检索 ===
+  async retrieveFullClue(roleplay: string, message: string, m4Ctx: any, enableTopology?: boolean, namespace?: string): Promise<FullClueResult> {
+    const layers: string[] = []; const r: any = { l1Context:[], l2Sand:[], l2Vault:[], l2Diamond:[], l3Topology:[], l4Knowledge:[], hasValidRelation:false, layersUsed:layers };
+    layers.push('L1');
+    if (m4Ctx && m4Ctx.family_context) for (const fc of m4Ctx.family_context) if (fc.entity === roleplay || fc.related_entity === roleplay) r.l1Context.push(fc.entity + '的' + fc.relation + '是' + fc.related_entity);
+    if (r.l1Context.length > 0) { r.hasValidRelation = true; return r; }
+    layers.push('L2');
+    try {
+      const sq = typeof this.storage.getSQLite === 'function' ? this.storage.getSQLite() : null;
+      if (sq && typeof sq.queryAll === 'function') {
+        const s = sq.queryAll("SELECT content FROM conversations WHERE roleplay_char=? AND is_compacted=0 AND role='user' ORDER BY timestamp DESC LIMIT 10", [roleplay]);
+        for (const x of s || []) if (x.content) r.l2Sand.push(String(x.content ?? "").substring(0, 200));
+        const v = sq.queryAll("SELECT raw_input FROM memories WHERE raw_input LIKE ? ORDER BY calcium_score DESC LIMIT 8", ['%' + roleplay + '%']);
+        for (const x of v || []) if (x.raw_input) r.l2Vault.push(String(x.raw_input ?? "").substring(0, 200));
+        const d = sq.queryAll("SELECT summary FROM black_diamond WHERE tags LIKE ? ORDER BY created_at DESC LIMIT 5", ['%rp_' + roleplay + '%']);
+        for (const x of d || []) if (x.summary) r.l2Diamond.push(String(x.summary ?? "").substring(0, 200));
+      }
+    } catch (e) {}
+    const l2 = r.l2Sand.concat(r.l2Vault).concat(r.l2Diamond).join('');
+    if (/妈妈|爸爸|姐姐|妹妹|母亲|父亲/.test(l2)) { r.hasValidRelation = true; return r; }
+    if (enableTopology || /妈妈|爸爸|姐姐|妹妹|母亲|父亲/.test(message || '')) {
+      layers.push('L3');
+      try {
+        const sq = typeof this.storage.getSQLite === 'function' ? this.storage.getSQLite() : null;
+        if (sq) {
+          const { EntityTopologyManager } = await import('./EntityTopologyManager.js');
+          const tp = new EntityTopologyManager(sq);
+          const rels = tp.queryRelatives(roleplay, 3, undefined, namespace || 'default');
+          const seen = new Set<string>();
+          const lm = { mother:'母亲', father:'父亲', elder_sister:'姐姐', younger_sister:'妹妹', sister:'姐妹', brother:'兄弟', daughter:'女儿', son:'儿子', wife:'老婆', husband:'老公', aunt:'姑姑', cousin:'表亲', niece:'侄女' };
+          for (const rel of rels) {
+            const k = rel.relation_type + ':' + rel.target_entity_id;
+            if (seen.has(k)) continue; seen.add(k);
+            r.l3Topology.push({ rootId: roleplay, targetId: rel.target_entity_id, relation: (lm as any)[rel.relation_type] || rel.relation_type, chainPath: roleplay + '→' + rel.target_entity_id, level: rel.topology_level });
+          }
+          if (r.l3Topology.length > 0) r.hasValidRelation = true;
+        }
+      } catch (e) {}
+    }
+    layers.push('L4');
+    return r;
+  }
+}
+
+export interface FullClueResult {
+  l1Context: string[];
+  l2Sand: string[]; l2Vault: string[]; l2Diamond: string[];
+  l3Topology: Array<{ rootId: string; targetId: string; relation: string; chainPath: string; level: number }>;
+  l4Knowledge: string[];
+  hasValidRelation: boolean;
+  layersUsed: string[];
 }

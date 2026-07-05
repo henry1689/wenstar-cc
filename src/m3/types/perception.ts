@@ -186,6 +186,13 @@ export interface M3Context {
     avg_pleasure: number;
     avg_arousal: number;
   };
+  /** ── P0-1: Temporal 层结构化时空数据（替代文本关键词） ── */
+  /** 当前时段：dawn/morning/midday/afternoon/evening/night/midnight */
+  time_period?: string;
+  /** 距上次对话小时数 */
+  hours_since_last_chat?: number;
+  /** 当前季节（spring/summer/autumn/winter） */
+  season?: string;
 }
 
 /**

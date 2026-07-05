@@ -3,6 +3,7 @@
 
 import type { Preference } from './types/index.js';
 import { SelfModelManager } from './SelfModelManager.js';
+import { M6_CONFIG } from '../config/M6Config.js';
 
 export class PreferenceManager {
   private manager: SelfModelManager;
@@ -47,15 +48,15 @@ export class PreferenceManager {
     this.manager.addPreference(pref);
   }
 
-  /** 偏好强度衰减（30天未提及 → 衰减20%） */
+  /** 偏好强度衰减（从 M6Config 读取参数） */
   applyDecay(): void {
     const now = Date.now();
     const prefs = this.manager.getPreferences();
     for (const p of prefs) {
       const daysSince = (now - new Date(p.lastMentioned).getTime()) / (1000 * 86400);
-      if (daysSince >= 30) {
-        p.strength *= 0.8;
-        if (p.strength < 0.1) {
+      if (daysSince >= M6_CONFIG.preference.decayDays) {
+        p.strength *= M6_CONFIG.preference.decayRate;
+        if (p.strength < M6_CONFIG.preference.minStrength) {
           this.manager.removePreference(p.name);
           continue;
         }
@@ -64,8 +65,8 @@ export class PreferenceManager {
     }
   }
 
-  /** 获取活跃偏好（强度≥0.1） */
+  /** 获取活跃偏好（强度≥minStrength） */
   getActive(): Preference[] {
-    return this.manager.getPreferences().filter(p => p.strength >= 0.1);
+    return this.manager.getPreferences().filter(p => p.strength >= M6_CONFIG.preference.minStrength);
   }
 }

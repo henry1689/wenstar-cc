@@ -30,6 +30,9 @@ import {
   reinforcementBoost,
 } from './math.js';
 import type { RetrievalWeights } from './math.js';
+import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
+import { encodeEmotionVector, computeL2Norm } from './EmotionVectorCodec.js';
+import { migrateSchema } from './MigrationManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -149,6 +152,15 @@ export class SQLiteAdapter {
     // 🏗️ Fix: ConsolidationQueue.write() 需要 dna_root_id 列
     try { this.db.run("ALTER TABLE memories ADD COLUMN dna_root_id TEXT"); } catch { /* 列已存在 */ }
     try { this.db.run("CREATE INDEX IF NOT EXISTS idx_memories_dialog_group ON memories(dialog_group_id)");
+
+    // Schema 版本迁移（v2: 编码链路 + 基建标准化）
+    try {
+      const executed = migrateSchema(this.db);
+      if (executed > 0) console.log(`[SQLiteAdapter] Schema 迁移完成: v${executed} 条`);
+    } catch (err) {
+      console.warn('[SQLiteAdapter] Schema 迁移失败（首次运行正常）:', err);
+    }
+
     // 家族图谱别名表（模糊去重）
     try {
       this.db.run("CREATE TABLE IF NOT EXISTS person_aliases (name TEXT, alias TEXT, PRIMARY KEY(name, alias))");
@@ -257,7 +269,7 @@ export class SQLiteAdapter {
   searchConversationsByEntity(entityName: string, limit = 10): Array<{ id: number; role: string; content: string; timestamp: string }> {
     this.ensureReady();
     return this.queryAll(
-      'SELECT id, role, content, timestamp FROM conversations WHERE entity_names LIKE ? AND is_summary = 0 ORDER BY timestamp DESC LIMIT ?',
+      'SELECT id, role, content, timestamp FROM conversations WHERE entity_names LIKE ? AND is_compacted = 0 ORDER BY timestamp DESC LIMIT ?',
       ['%' + entityName + '%', limit]
     );
   }
@@ -295,20 +307,14 @@ export class SQLiteAdapter {
 
   write(record: EmotionalMemoryRecord): void {
     this.ensureReady();
-    const pJson = JSON.stringify([
-      record.perception.pleasure, record.perception.arousal,
-      record.perception.dominance, record.perception.aggression,
-      record.perception.sincerity, record.perception.humor,
-      record.perception.factual, record.perception.logical,
-      record.perception.certainty, record.perception.abstract,
-      record.perception.temporal_focus, record.perception.self_ref,
-      record.perception.intimacy, record.perception.power_diff,
-      record.perception.dependency, record.perception.moral_judgment,
-      record.perception.etiquette, record.perception.belonging,
-      record.perception.sexual_attraction, record.perception.sensory_craving,
-      record.perception.energy_merge, record.perception.possessiveness,
-      record.perception.ecstasy, record.perception.safety,
-    ]);
+    // P0-2: 统一走 EmotionVectorCodec 编解码
+    const pJson = encodeEmotionVector(record.perception);
+
+    // P0-4: 钙化分边界强制校验
+    const cs = Math.max(MEMORY_CONFIG.recall.calciumMin, Math.min(MEMORY_CONFIG.recall.calciumMax, record.calcium_score));
+    const cl = record.calcium_level;
+    // P1: l2_norm 预计算
+    const l2 = computeL2Norm(record.perception);
 
     this.runSql(
       `INSERT OR REPLACE INTO memories
@@ -321,7 +327,10 @@ export class SQLiteAdapter {
        scar_type, scar_healed,
        vad_spectrum,
        primary_emotion, secondary_emotions,
-       dna_root_id)
+       dna_root_id,
+       entity_genes,
+       fg_entity_names, time_period, season, lunar_term, namespace,
+       l2_norm)
       VALUES (?, ?, ?, ?,
               ?, ?,
               ?, ?, ?,
@@ -331,10 +340,13 @@ export class SQLiteAdapter {
               ?, ?,
               ?,
               ?, ?,
+              ?,
+              ?,
+              ?, ?, ?, ?, ?,
               ?)`,
       [
         record.id, record.seq_pos, record.created_at, pJson,
-        record.calcium_score, record.calcium_level,
+        cs, cl,
         record.locus_path, record.leaf_zone, record.raw_input,
         record.recall_count, record.last_recalled_at,
         record.reinforcement_accumulator, record.effective_strength, record.strength_updated_at,
@@ -345,6 +357,13 @@ export class SQLiteAdapter {
         record.primary_emotion ?? null,
         record.secondary_emotions ? JSON.stringify(record.secondary_emotions) : null,
         record.dna_root_id ?? null,
+        record.entity_genes ? JSON.stringify(record.entity_genes) : null,
+        record.fg_entity_names ?? null,
+        record.time_period ?? null,
+        record.season ?? null,
+        record.lunar_term ?? null,
+        record.namespace ?? 'default',
+        l2,
       ],
     );
 
@@ -661,12 +680,20 @@ export class SQLiteAdapter {
   /** 批量衰减维护 */
   runDecayMaintenance(): { total: number; archived: number } {
     this.ensureReady();
-    const all = this.execSql(`SELECT * FROM memories`);
-    const records = this.rowsToRecords(all);
     const now = new Date();
     let archived = 0;
+    let total = 0;
+    const PAGE_SIZE = 500;
+    let offset = 0;
+    let pageRecords: any[];
 
-    for (const record of records) {
+    // 分页处理，避免全表加载
+    do {
+      const res = this.execSql(`SELECT * FROM memories ORDER BY id LIMIT ? OFFSET ?`, [PAGE_SIZE, offset]);
+      pageRecords = this.rowsToRecords(res);
+      if (pageRecords.length === 0) break;
+
+      for (const record of pageRecords) {
       const before = record.effective_strength;
       updateDynamics(record, now);
 
@@ -682,9 +709,12 @@ export class SQLiteAdapter {
 
       this.write(record);
       if (record.effective_strength < 0.05) archived++;
+      total++;
     }
+      offset += PAGE_SIZE;
+    } while (pageRecords.length >= PAGE_SIZE);
 
-    return { total: records.length, archived };
+    return { total, archived };
   }
 
   /** 情感相似事件增强 */

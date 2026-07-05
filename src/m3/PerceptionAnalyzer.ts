@@ -21,14 +21,22 @@
 import type { DNA } from '../m1/types/dna.js';
 import { loadSet } from '../m1/LexiconLoader.js';
 import { computeCalcium as m2ComputeCalcium } from '../m2/math.js';
+import { M3_CONFIG } from '../config/M3Config.js';
 /** 词级命中统计（用于调试 24D 感知分析 — 记录每个词在真实输入中命中了多少次） */
 const wordHitCounters = new Map<string, number>();
 const MAX_HIT_COUNTERS = 500;
 
 export function getHitReport(): Record<string, number> {
   const report = Object.fromEntries(wordHitCounters);
-  wordHitCounters.clear(); // 读取后清零，方便观测增量
+  wordHitCounters.clear();
   return report;
+}
+
+/** 获取当前内存中累计的命中词总数（不清理计数器） */
+export function getTotalHitCount(): number {
+  let total = 0;
+  for (const count of wordHitCounters.values()) total += count;
+  return total;
 }
 
 /** SP4-1: 超出上限时自动清理低频条目 */
@@ -444,10 +452,10 @@ function calculateCalcium(p: Perception24D, config?: CalciumConfig, entityGenes?
   const inBoundary = (score > 0.28 && score < 0.32) || (score > 0.58 && score < 0.62) || (score > 0.78 && score < 0.82);
   const boundaryHint = inBoundary ? 'boundary' : undefined;
 
-  // 阈值偏移
-  const t0 = 0.3 + (config?.thresholdOffset ?? 0);
-  const t1 = 0.6 + (config?.thresholdOffset ?? 0);
-  const t2 = 0.8 + (config?.thresholdOffset ?? 0);
+  // 阈值偏移（从 M3Config 读取）
+  const t0 = M3_CONFIG.calcium.level0Threshold + (config?.thresholdOffset ?? 0);
+  const t1 = M3_CONFIG.calcium.level1Threshold + (config?.thresholdOffset ?? 0);
+  const t2 = M3_CONFIG.calcium.level2Threshold + (config?.thresholdOffset ?? 0);
 
   let level: CalciumLevel;
   if (score < t0) level = 0;
@@ -525,11 +533,10 @@ export class PerceptionAnalyzer {
     const intimacy = IntimacyScorer.all(text);
     const perception: Perception24D = { ...emotion, ...cognition, ...social, ...intimacy };
 
-    // ── 场景感知基线调整（不改变核心算法，仅在基线层修正） ──
-    const tags = sceneTags ?? dna.scene_tags;
+    // ── 场景感知基线调整（基于 locus_path，使用 M1 标准分类路径） ──
     let calciumConfig: CalciumConfig | undefined;
-    if (tags && tags.length > 0) {
-      calciumConfig = this.applySceneAdjustments(perception, dna.locus_path, tags);
+    if (dna.locus_path && dna.locus_path !== 'user.misc.default') {
+      calciumConfig = this.applySceneAdjustments(perception, dna.locus_path);
     }
 
     // ── P3: 隐性情绪检测 — 显性情感词少但隐忍词命中时，调整基线 ──
@@ -593,55 +600,55 @@ export class PerceptionAnalyzer {
    *
    * @returns 钙质配置（阈值偏移 + 分数加成），用于后续钙质重算
    */
-  private applySceneAdjustments(p: Perception24D, locusPath: string, tags: string[]): CalciumConfig {
-    const tagSet = new Set(tags);
+  private applySceneAdjustments(p: Perception24D, locusPath: string, _tags?: string[]): CalciumConfig {
+    const sa = M3_CONFIG.sceneAdjustments;
     let thresholdOffset = 0;
     let scoreBonus = 0;
 
     // ── 亲密/浪漫场景 → intimacy/ecstasy 基线上调 ──
-    if (tagSet.has('亲密') || tagSet.has('浪漫')) {
-      p.intimacy = Math.min(p.intimacy + 0.2, 1.0);
-      p.ecstasy = Math.min(p.ecstasy + 0.1, 1.0);
-      thresholdOffset += 0.05; // 稍微降低阈值，感性场景更容易被重视
+    if (locusPath === 'user.emotion.romantic') {
+      p.intimacy = Math.min(p.intimacy + sa.romanticIntimacyBonus, 1.0);
+      p.ecstasy = Math.min(p.ecstasy + sa.romanticEcstasyBonus, 1.0);
+      thresholdOffset += sa.romanticThresholdOffset;
     }
 
     // ── 思念场景 → temporal_focus 偏向过去，intimacy 上调 ──
-    if (tagSet.has('思念')) {
-      p.temporal_focus = Math.min(p.temporal_focus - 0.2, -0.1);
-      p.intimacy = Math.min(p.intimacy + 0.15, 1.0);
-      scoreBonus += 0.05; // 思念类情绪稍微提升权重
+    if (locusPath === 'user.emotion.miss_family') {
+      p.temporal_focus = Math.min(p.temporal_focus + sa.missFamilyTemporalBias, -0.1);
+      p.intimacy = Math.min(p.intimacy + sa.missFamilyIntimacyBonus, 1.0);
+      scoreBonus += sa.missFamilyScoreBonus;
     }
 
     // ── 健身/运动场景 → arousal 上调 ──
-    if (tagSet.has('健身') || tagSet.has('运动')) {
-      p.arousal = Math.min(p.arousal + 0.1, 1.0);
+    if (locusPath.startsWith('user.health.fitness')) {
+      p.arousal = Math.min(p.arousal + sa.fitnessArousalBonus, 1.0);
     }
 
-    // ── 倦怠/疲惫场景 → dominance/sincerity 下调 ──
-    if (tagSet.has('倦怠') || tagSet.has('疲惫')) {
-      p.dominance = Math.max(p.dominance - 0.15, -0.5);
-      p.arousal = Math.max(p.arousal - 0.1, 0);
-      scoreBonus += 0.05; // 疲惫场景值得更多关注
+    // ── 倦怠/疲惫场景（locus: work.burnout）→ dominance/arousal 下调 ──
+    if (locusPath === 'user.work.burnout') {
+      p.dominance = Math.max(p.dominance + sa.burnoutDominancePenalty, -0.5);
+      p.arousal = Math.max(p.arousal + sa.burnoutArousalPenalty, 0);
+      scoreBonus += sa.burnoutScoreBonus;
     }
 
-    // ── 压抑/倾诉场景 → pleasure 下调，sincerity 上调 ──
-    if (tagSet.has('压抑') || tagSet.has('倾诉')) {
-      p.pleasure = Math.min(p.pleasure - 0.15, 0);
-      p.sincerity = Math.min(p.sincerity + 0.15, 1.0);
-      thresholdOffset += 0.1; // 压抑情绪很容易被低估，大幅降低阈值
+    // ── 压抑/倾诉场景（locus: emotion.suppressed）→ pleasure 下调 ──
+    if (locusPath === 'user.emotion.suppressed') {
+      p.pleasure = Math.min(p.pleasure + sa.suppressedPleasurePenalty, 0);
+      p.sincerity = Math.min(p.sincerity + sa.suppressedSincerityBonus, 1.0);
+      thresholdOffset += sa.suppressedThresholdOffset;
     }
 
     // ── 工作/开发场景 → factual/certainty 上调 ──
-    if (tagSet.has('开发') || tagSet.has('工作')) {
-      p.factual = Math.min(p.factual + 0.1, 1.0);
-      p.certainty = Math.min(p.certainty + 0.1, 1.0);
+    if (locusPath.startsWith('user.work.project') || locusPath.startsWith('user.work.general')) {
+      p.factual = Math.min(p.factual + sa.workFactualBonus, 1.0);
+      p.certainty = Math.min(p.certainty + sa.workCertaintyBonus, 1.0);
     }
 
-    // ── 家庭矛盾场景 → dominance 下调，negative 加重 ──
+    // ── 家庭矛盾场景 → dominance 下调 ──
     if (locusPath === 'user.family.conflict') {
-      p.dominance = Math.max(p.dominance - 0.1, -0.5);
-      p.aggression = Math.min(p.aggression + 0.1, 1.0);
-      scoreBonus += 0.1;
+      p.dominance = Math.max(p.dominance + sa.familyConflictDominancePenalty, -0.5);
+      p.aggression = Math.min(p.aggression + sa.familyConflictAggressionBonus, 1.0);
+      scoreBonus += sa.familyConflictScoreBonus;
     }
 
     return { thresholdOffset, scoreBonus };
@@ -650,7 +657,7 @@ export class PerceptionAnalyzer {
   /**
    * 注入决策上下文到增强型 DNA 中
    *
-   * 根据 M3Context 中的时间、地点信息，修正感知维度。
+   * v2: 优先使用 Temporal 层结构化数据，文本关键词降级为弱修正。
    *
    * Ref: M3-design-v1.md §4.2
    */
@@ -658,39 +665,60 @@ export class PerceptionAnalyzer {
     if (!context) return;
 
     const text = enhanced.raw_input;
+    const p = enhanced.perception;
 
-    // 时效性规则：时间词修正 C5 temporal_focus — 统一使用 emotion_lexicon.json 中的时间词集
-    if (text.includes('今天') || text.includes('现在')) {
-      enhanced.perception.temporal_focus = Math.max(enhanced.perception.temporal_focus, 0.2);
+    // ── 时段修正（Temporal 结构化数据优先） ──
+    if (context.time_period) {
+      // 深夜时段：下调唤醒度，上调亲密倾向
+      if (context.time_period === 'night' || context.time_period === 'midnight') {
+        p.arousal = Math.min(p.arousal, 0.5);
+        p.intimacy = Math.min(p.intimacy + 0.1, 1.0);
+      }
+      // 清晨/上午：上调唤醒度
+      if (context.time_period === 'morning' || context.time_period === 'midday') {
+        p.arousal = Math.min(p.arousal + 0.1, 1.0);
+      }
     }
-    if (text.includes('刚才') || text.includes('刚刚')) {
-      enhanced.perception.arousal = Math.min(enhanced.perception.arousal + 0.1, 1.0);
+
+    // ── 久别时长修正（结构化数据优先） ──
+    if (context.hours_since_last_chat !== undefined && context.hours_since_last_chat > 8) {
+      // 超过8小时未对话：上调亲密度（久别重逢的自然反应）
+      p.intimacy = Math.min(p.intimacy + 0.15, 1.0);
+      p.temporal_focus = Math.max(p.temporal_focus, 0.2);
+      if (context.hours_since_last_chat > 24) {
+        p.intimacy = Math.min(p.intimacy + 0.1, 1.0); // 超过一天更强烈
+      }
+    }
+
+    // ── 文本关键词弱修正（兜底，权重降低） ──
+    if (text.includes('今天') || text.includes('现在')) {
+      p.temporal_focus = Math.max(p.temporal_focus, 0.15);
     }
     if (countHits(text, TEMPORAL_FUTURE) > 0) {
-      enhanced.perception.temporal_focus = Math.max(enhanced.perception.temporal_focus, 0.3);
+      p.temporal_focus = Math.max(p.temporal_focus, 0.2);
     }
     if (countHits(text, TEMPORAL_PAST) > 0) {
-      enhanced.perception.temporal_focus = Math.min(enhanced.perception.temporal_focus, -0.2);
+      p.temporal_focus = Math.min(p.temporal_focus, -0.1);
     }
 
-    // 地点感知规则：本地地点提升 S6 belonging
+    // ── 地点感知规则 ──
     if (context.current_location) {
       const hasLocalPlace = enhanced.entity_genes.some(
         (e) => e.type === 'place' && e.name === context.current_location
       );
       if (hasLocalPlace) {
-        enhanced.perception.belonging = Math.min(enhanced.perception.belonging + 0.15, 1.0);
-        enhanced.perception.intimacy = Math.min(enhanced.perception.intimacy + 0.1, 1.0);
+        p.belonging = Math.min(p.belonging + 0.15, 1.0);
+        p.intimacy = Math.min(p.intimacy + 0.1, 1.0);
       }
     }
 
-    // 情感基线异常检测
+    // ── 情感基线异常检测 ──
     if (context.emotion_baseline) {
       const base = context.emotion_baseline;
-      const pDelta = Math.abs(enhanced.perception.pleasure - base.avg_pleasure);
-      const aDelta = Math.abs(enhanced.perception.arousal - base.avg_arousal);
+      const pDelta = Math.abs(p.pleasure - base.avg_pleasure);
+      const aDelta = Math.abs(p.arousal - base.avg_arousal);
       if (pDelta > 0.5 || aDelta > 0.4) {
-        enhanced.perception.arousal = Math.min(enhanced.perception.arousal + 0.15, 1.0);
+        p.arousal = Math.min(p.arousal + 0.15, 1.0);
       }
     }
   }
@@ -707,12 +735,16 @@ export class PerceptionAnalyzer {
 
   /**
    * P2: 从 24D 感知向量推导主情绪和次要情绪标签（30+ 规则）。
-   * 纯规则，基于各维度阈值组合判定。
-   * 注意：所有 a_safeVal 确保 NaN 不会导致规则跳过。
+   *
+   * v2: 基于 matchScore + priority 显式排序，取代代码顺序隐式判定。
+   * 返回结构化的规则匹配列表，输出 matchedRules 供调试观测。
    */
-  static deriveEmotionLabels(perception: Perception24D): { primary: string | undefined; secondary: string[] | undefined } {
+  static deriveEmotionLabels(perception: Perception24D): {
+    primary: string | undefined;
+    secondary: string[] | undefined;
+    matchedRules: Array<{ label: string; score: number; priority: number }>;
+  } {
     const p = perception;
-    // 数据安全读取（防 NaN）
     const pleasure = safeVal(p.pleasure);
     const arousal = safeVal(p.arousal);
     const intimacy = safeVal(p.intimacy);
@@ -728,117 +760,102 @@ export class PerceptionAnalyzer {
     const temporal_focus = safeVal(p.temporal_focus);
     const self_ref = safeVal(p.self_ref);
     const dependency = safeVal(p.dependency);
-    const humor = safeVal(p.humor);
+    const belonging = safeVal((p as any).belonging);
+    const etiquette = safeVal((p as any).etiquette);
 
-    const emotions: string[] = [];
+    interface EmotionRule { label: string; priority: number; match: () => number; }
+    const matched: Array<{ label: string; score: number; priority: number }> = [];
 
-    // ── 强烈负面情绪 ──
-    // 委屈：痛苦+低唤醒+高亲密（说不出的难受）
-    if (pleasure < -0.5 && arousal < 0.4 && intimacy > 0.4) emotions.push('委屈');
-    // 愤怒：痛苦+高攻击性
-    if (pleasure < -0.4 && aggression > 0.3) emotions.push('愤怒');
-    // 焦虑：痛苦+高唤醒+不安全
-    if (pleasure < -0.3 && arousal > 0.5 && safety < 0.4) emotions.push('焦虑');
-    // 不安：轻微痛苦+低安全感
-    if (pleasure < -0.2 && safety < 0.3) emotions.push('不安');
-    // 恐惧：极低安全+高唤醒
-    if (pleasure < -0.3 && safety < 0.2 && arousal > 0.5) emotions.push('恐惧');
-    // 沮丧：中等痛苦+低攻击+低唤醒+高真诚
-    if (pleasure < -0.4 && aggression < 0.2 && arousal < 0.4 && sincerity > 0.3) emotions.push('沮丧');
-    // 愧疚：痛苦+低攻击+高真诚+时间偏过去
-    if (pleasure < -0.2 && aggression < 0.1 && sincerity > 0.6 && temporal_focus < -0.2) emotions.push('愧疚');
-    // 无奈：痛苦+低唤醒+低支配
-    if (pleasure < -0.2 && arousal < 0.3 && dominance < -0.2) emotions.push('无奈');
-    // 麻木：低唤醒+低愉悦+低攻击（什么都没感觉）
-    if (pleasure < -0.1 && arousal < 0.2 && aggression < 0.05) emotions.push('麻木');
+    const check = (label: string, priority: number, match: () => number) => {
+      const score = match();
+      if (score > 0) matched.push({ label, score, priority });
+    };
+
+    // ── 强烈负面情绪（所有规则显式判定后按分排序） ──
+    check('委屈', 5, () => pleasure < -0.5 && arousal < 0.4 && intimacy > 0.4 ? 0.85 : 0);
+    check('愤怒', 5, () => pleasure < -0.4 && aggression > 0.3 ? 0.8 : 0);
+    check('焦虑', 5, () => pleasure < -0.3 && arousal > 0.5 && safety < 0.4 ? 0.8 : 0);
+    check('不安', 4, () => pleasure < -0.2 && safety < 0.3 ? 0.7 : 0);
+    check('恐惧', 5, () => pleasure < -0.3 && safety < 0.2 && arousal > 0.5 ? 0.9 : 0);
+    check('沮丧', 5, () => pleasure < -0.4 && aggression < 0.2 && arousal < 0.4 && sincerity > 0.3 ? 0.75 : 0);
+    check('愧疚', 4, () => pleasure < -0.2 && aggression < 0.1 && sincerity > 0.6 && temporal_focus < -0.2 ? 0.7 : 0);
+    check('无奈', 3, () => pleasure < -0.2 && arousal < 0.3 && dominance < -0.2 ? 0.65 : 0);
+    check('麻木', 3, () => pleasure < -0.1 && arousal < 0.2 && aggression < 0.05 ? 0.6 : 0);
 
     // ── 思念/怀旧类 ──
-    // 思念：痛苦+时间偏过去+高亲密
-    if (pleasure < -0.3 && temporal_focus < -0.2 && intimacy > 0.3) emotions.push('思念');
-    // 怀念：正面+时间偏过去
-    if (pleasure > 0.1 && temporal_focus < -0.3 && intimacy > 0.2) emotions.push('怀念');
-    // 空虚：低愉悦+低唤醒+低亲密度+低安全
-    if (pleasure < -0.1 && arousal < 0.2 && intimacy < 0.3 && safety < 0.4) emotions.push('空虚');
+    check('思念', 4, () => pleasure < -0.3 && temporal_focus < -0.2 && intimacy > 0.3 ? 0.8 : 0);
+    check('怀念', 3, () => pleasure > 0.1 && temporal_focus < -0.3 && intimacy > 0.2 ? 0.7 : 0);
+    check('空虚', 3, () => pleasure < -0.1 && arousal < 0.2 && intimacy < 0.3 && safety < 0.4 ? 0.65 : 0);
 
     // ── 强烈正面情绪 ──
-    // 快乐：高愉悦+高唤醒
-    if (pleasure > 0.5 && arousal > 0.4) emotions.push('快乐');
-    // 爱意：愉悦+高亲密
-    if (pleasure > 0.3 && intimacy > 0.5) emotions.push('爱意');
-    // 满足：愉悦+高潮/满足感
-    if (pleasure > 0.3 && ecstasy > 0.3) emotions.push('满足');
-    // 幸福：高愉悦+高亲密+高安全
-    if (pleasure > 0.5 && intimacy > 0.6 && safety > 0.6) emotions.push('幸福');
-    // 惊喜：愉悦+高唤醒+低亲密
-    if (pleasure > 0.4 && arousal > 0.5 && intimacy < 0.2) emotions.push('惊喜');
-    // 感动：愉悦+高真诚+高亲密
-    if (pleasure > 0.3 && sincerity > 0.6 && intimacy > 0.4) emotions.push('感动');
-    // 温馨：愉悦+低唤醒+高亲密
-    if (pleasure > 0.2 && arousal < 0.3 && intimacy > 0.4) emotions.push('温馨');
+    check('快乐', 5, () => pleasure > 0.5 && arousal > 0.4 ? 0.85 : 0);
+    check('爱意', 5, () => pleasure > 0.3 && intimacy > 0.5 ? 0.8 : 0);
+    check('满足', 4, () => pleasure > 0.3 && ecstasy > 0.3 ? 0.75 : 0);
+    check('幸福', 5, () => pleasure > 0.5 && intimacy > 0.6 && safety > 0.6 ? 0.9 : 0);
+    check('惊喜', 4, () => pleasure > 0.4 && arousal > 0.5 && intimacy < 0.2 ? 0.75 : 0);
+    check('感动', 4, () => pleasure > 0.3 && sincerity > 0.6 && intimacy > 0.4 ? 0.8 : 0);
+    check('温馨', 3, () => pleasure > 0.2 && arousal < 0.3 && intimacy > 0.4 ? 0.7 : 0);
 
     // ── 亲密/欲望类 ──
-    // 欲望：高性吸引+高潮感
-    if (sexual_attraction > 0.5 && ecstasy > 0.3) emotions.push('欲望');
-    // 渴望：感官渴望+高亲密+低满足
-    if (sensory_craving > 0.4 && intimacy > 0.5 && ecstasy < 0.2) emotions.push('渴望');
-    // 占有：强占有欲+高亲密
-    if (possessiveness > 0.5 && intimacy > 0.4 && pleasure > 0.1) emotions.push('占有');
-    // 依赖：高依赖度+高亲密
-    if (dependency > 0.5 && intimacy > 0.4) emotions.push('依赖');
+    check('欲望', 5, () => sexual_attraction > 0.5 && ecstasy > 0.3 ? 0.85 : 0);
+    check('渴望', 4, () => sensory_craving > 0.4 && intimacy > 0.5 && ecstasy < 0.2 ? 0.75 : 0);
+    check('占有', 4, () => possessiveness > 0.5 && intimacy > 0.4 && pleasure > 0.1 ? 0.75 : 0);
+    check('依赖', 4, () => dependency > 0.5 && intimacy > 0.4 ? 0.7 : 0);
 
     // ── 安静/中性情绪 ──
-    // 平静：低唤醒+中性愉悦+安全
-    if (arousal < 0.2 && Math.abs(pleasure) < 0.3 && safety >= 0.5) emotions.push('平静');
-    // 中性：所有维度都接近中性，无显著情绪信号
-    if (emotions.length === 0 && arousal < 0.3 && Math.abs(pleasure) < 0.2 && aggression < 0.1) emotions.push('中性');
-    // 期待：轻微愉悦+高唤醒+时间偏未来
-    if (pleasure > 0.1 && arousal > 0.3 && temporal_focus > 0.3) emotions.push('期待');
-    // 慵懒：低唤醒+低攻击+低支配
-    if (arousal < 0.2 && aggression < 0.05 && dominance < 0) emotions.push('慵懒');
+    check('期待', 3, () => pleasure > 0.1 && arousal > 0.3 && temporal_focus > 0.3 ? 0.7 : 0);
+    check('慵懒', 2, () => arousal < 0.2 && aggression < 0.05 && dominance < 0 ? 0.6 : 0);
+    check('平静', 2, () => arousal < 0.2 && Math.abs(pleasure) < 0.3 && safety >= 0.5 ? 0.65 : 0);
 
     // ── 复杂/混合情绪 ──
-    // 倾诉：负面情绪+高真诚
-    if (pleasure < -0.3 && sincerity > 0.5) emotions.push('倾诉');
-    // 失落：负面+低唤醒+高能量融合（曾拥有过）
-    if (pleasure < -0.2 && arousal < 0.3 && energy_merge > 0.3) emotions.push('失落');
-    // 矛盾：正负维度同时高
-    if (Math.abs(pleasure) < 0.2 && arousal > 0.4 && intimacy > 0.3 && safety < 0.4) emotions.push('矛盾');
-    // 释然：正面+高真诚+高安全
-    if (pleasure > 0.1 && sincerity > 0.5 && safety > 0.6 && temporal_focus > 0.1) emotions.push('释然');
-    // 警惕：低安全+低愉悦+高自我参照
-    if (safety < 0.3 && pleasure < -0.1 && self_ref > 0.4) emotions.push('警惕');
-    // 共鸣：能量融合+高亲密+高真诚
-    if (energy_merge > 0.4 && intimacy > 0.4 && sincerity > 0.5) emotions.push('共鸣');
+    check('倾诉', 4, () => pleasure < -0.3 && sincerity > 0.5 ? 0.7 : 0);
+    check('失落', 4, () => pleasure < -0.2 && arousal < 0.3 && energy_merge > 0.3 ? 0.7 : 0);
+    check('矛盾', 3, () => Math.abs(pleasure) < 0.2 && arousal > 0.4 && intimacy > 0.3 && safety < 0.4 ? 0.65 : 0);
+    check('释然', 3, () => pleasure > 0.1 && sincerity > 0.5 && safety > 0.6 && temporal_focus > 0.1 ? 0.65 : 0);
+    check('警惕', 4, () => safety < 0.3 && pleasure < -0.1 && self_ref > 0.4 ? 0.7 : 0);
+    check('共鸣', 4, () => energy_merge > 0.4 && intimacy > 0.4 && sincerity > 0.5 ? 0.75 : 0);
 
     // ── 社交类 ──
-    // 嫉妒：低愉悦+低安全+高占有
-    if (pleasure < -0.2 && safety < 0.35 && possessiveness > 0.3 && arousal > 0.3) emotions.push('嫉妒');
-    // 疏离：低亲密+低归属+高自我参照
-    if (intimacy < 0.2 && (p as any).belonging < 0.3 && self_ref > 0.5) emotions.push('疏离');
-    // 包容：高真诚+高礼仪+低攻击
-    if (sincerity > 0.4 && (p as any).etiquette > 0.4 && aggression < 0.1) emotions.push('包容');
+    check('嫉妒', 4, () => pleasure < -0.2 && safety < 0.35 && possessiveness > 0.3 && arousal > 0.3 ? 0.7 : 0);
+    check('疏离', 3, () => intimacy < 0.2 && belonging < 0.3 && self_ref > 0.5 ? 0.65 : 0);
+    check('包容', 3, () => sincerity > 0.4 && etiquette > 0.4 && aggression < 0.1 ? 0.6 : 0);
 
-    // 去重，只保留最多 4 个
-    const unique = [...new Set(emotions)];
-    return {
-      primary: unique.length > 0 ? unique[0] : undefined,
-      secondary: unique.length > 1 ? unique.slice(1, 4) : undefined,
-    };
+    // ── 中性兜底（仅当无其他匹配时） ──
+    if (matched.length === 0 && arousal < 0.3 && Math.abs(pleasure) < 0.2 && aggression < 0.1) {
+      matched.push({ label: '中性', score: 0.5, priority: 1 });
+    }
+
+    // 按 score * priority 排序（matchScore × 优先级综合排序）
+    matched.sort((a, b) => (b.score * b.priority) - (a.score * a.priority));
+
+    const primary = matched.length > 0 ? matched[0].label : undefined;
+    const secondary = matched.length > 1 ? matched.slice(1, 4).map(r => r.label) : undefined;
+
+    return { primary, secondary, matchedRules: matched };
   }
 
   /**
-   * P2: 估算情绪识别置信度（高精度版）。
-   * 基于：情绪标签数量、情感词密度、钙质强度的综合评分。
+   * P2: 估算情绪识别置信度。
+   *
+   * v2: 使用真实的词命中数（从分析过程中累计），替代布尔维度计数。
+   * 公式: 情绪标签数 × 0.25 + 命中词密度 × 0.25 + 钙质分 × 0.3 + 基数 0.2
    */
-  static estimateConfidence(emotions: string[], textLength: number, rawHits: number, calciumScore?: number): number {
+  static estimateConfidence(emotions: string[], textLength: number, realWordHits: number, calciumScore?: number): number {
     if (!textLength) return 0.3;
 
     const hasEmotion = emotions.length > 0 ? 1 : 0;
-    const density = Math.min(rawHits / Math.max(textLength, 1) * 10, 1);
-    // 有明确情绪标签 + 高密度 + 钙质加分（钙质越高说明情绪越明显）
+    // 真实命中词密度（每10字命中词数）
+    const wordDensity = Math.min(realWordHits / Math.max(textLength, 1) * 10, 1);
+
+    // 有明确情绪标签 + 真实词密度 + 钙质分 + 基准
     const calciumFactor = calciumScore !== undefined ? Math.min(calciumScore * 0.3, 0.15) : 0;
-    const base = hasEmotion * 0.35 + density * 0.3 + 0.2 + calciumFactor;
-    return Math.round(Math.min(base, 1) * 100) / 100;
+    const base = hasEmotion * 0.25 + wordDensity * 0.25 + 0.2 + calciumFactor;
+
+    // 情绪标签数量修正（多标签表示情绪特征明显）
+    const emotionCount = emotions.length;
+    const emotionBonus = emotionCount > 1 ? Math.min(emotionCount * 0.05, 0.1) : 0;
+
+    return Math.round(Math.min(base + emotionBonus, 1) * 100) / 100;
   }
 
   /** 根据感知向量重新计算钙质强度（在 injectContext 后调用） */

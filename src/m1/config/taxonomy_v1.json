@@ -1,6 +1,30 @@
 {
-  "version": "1.1",
-  "description": "认知分类树 v1.1 — 细分情感/工作/健康三个域",
+  "version": "1.2",
+  "description": "认知分类树 v1.2 — 新增 L0 分类码，用于 DNA 根码编码",
+  "codes": {
+    "family.general": "FAMG",
+    "family.care": "FAMC",
+    "family.conflict": "FAMF",
+    "emotion.positive": "EMOP",
+    "emotion.negative": "EMON",
+    "emotion.neutral": "EMEU",
+    "emotion.suppressed": "EMSP",
+    "emotion.romantic": "EMRO",
+    "emotion.miss_family": "EMMF",
+    "work.general": "WRKG",
+    "work.stress": "WRKS",
+    "work.achievement": "WRKA",
+    "work.project": "WRKP",
+    "work.meeting": "WRKM",
+    "work.burnout": "WRKB",
+    "daily.general": "DAIG",
+    "daily.creation": "DAIC",
+    "daily.entertainment": "DAIE",
+    "health.fitness": "HLFT",
+    "health.sickness": "HLSK",
+    "health.sleep": "HLSL",
+    "misc.default": "MISC"
+  },
   "tree": {
     "user": {
       "family": ["general", "conflict", "care"],

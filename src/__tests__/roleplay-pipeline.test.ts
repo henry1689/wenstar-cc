@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { clearAllTempProfiles, updateTempProfile, extractInfoPoints, getOrCreateTempProfile } from '../app/roleplay/RoleplayProfileManager.js';
-import { collectData } from '../app/roleplay/DataCollector.js';
-import type { FourLayerData } from '../app/roleplay/DataCollector.js';
+import { clearAllTempProfiles, updateTempProfile, extractInfoPoints, getOrCreateTempProfile } from '../app/roleplay-legacy/RoleplayProfileManager.js';
+import { collectData } from '../app/roleplay-legacy/DataCollector.js';
+import type { FourLayerData } from '../app/roleplay-legacy/DataCollector.js';
 
 describe('角色扮演域', () => {
   describe('三阶生长', () => {

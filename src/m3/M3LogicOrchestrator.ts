@@ -25,7 +25,7 @@ import type {
   CalciumLevel,
   EnhancedDNA,
 } from './types/perception.js';
-import { PerceptionAnalyzer } from './PerceptionAnalyzer.js';
+import { PerceptionAnalyzer, getTotalHitCount } from './PerceptionAnalyzer.js';
 
 /**
  * M3 逻辑决策层编排器
@@ -76,19 +76,12 @@ export class M3LogicOrchestrator {
     // Phase 4: 决策路由
     const actions = this.route(enhanced);
 
-    // Phase 5: P2 — 从 24D 向量推导情绪标签 + 置信度
-    const { primary, secondary } = PerceptionAnalyzer.deriveEmotionLabels(enhanced.perception);
-    const rawHits = Math.round(
-      (enhanced.perception.pleasure !== 0 ? 1 : 0) +
-      (enhanced.perception.arousal > 0 ? 1 : 0) +
-      (enhanced.perception.intimacy > 0 ? 1 : 0) +
-      (enhanced.perception.aggression > 0 ? 1 : 0) +
-      (enhanced.perception.sincerity > 0.5 ? 1 : 0) +
-      ((enhanced.perception as any).sexual_attraction > 0 ? 1 : 0) +
-      ((enhanced.perception as any).ecstasy > 0 ? 1 : 0)
-    );
+    // Phase 5: P2 — 从 24D 向量推导情绪标签 + 置信度 + 规则匹配详情
+    const { primary, secondary, matchedRules } = PerceptionAnalyzer.deriveEmotionLabels(enhanced.perception);
+    // 使用真实词命中数（从 PerceptionAnalyzer 累计的词表命中统计）
+    const realHits = getTotalHitCount();
     const emotions: string[] = [primary, ...(secondary || [])].filter((e): e is string => Boolean(e));
-    const confidence = PerceptionAnalyzer.estimateConfidence(emotions, dna.raw_input.length, rawHits, enhanced.calcium_score);
+    const confidence = PerceptionAnalyzer.estimateConfidence(emotions, dna.raw_input.length, realHits, enhanced.calcium_score);
 
     // Phase 6: 构建输出
     const reason = this.describeActions(actions, enhanced);

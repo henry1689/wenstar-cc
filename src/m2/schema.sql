@@ -1,6 +1,5 @@
--- Hermes Fusion Memory Schema v1.0
--- SQLite 作为情感记忆系统的主存储
--- JSON Zone 保留为人类可读的原文备份
+-- Hermes Fusion Memory Schema v2.0
+-- v2: 新增 P0-1 时空标签字段 + P0-4 幂等字段 + P1-4 namespace
 
 -- 核心记忆表
 CREATE TABLE IF NOT EXISTS memories (
@@ -8,10 +7,10 @@ CREATE TABLE IF NOT EXISTS memories (
     seq_pos INTEGER UNIQUE NOT NULL,
     created_at TEXT NOT NULL,
 
-    -- 24维情感向量 (JSON数组, sql.js 支持读取)
+    -- 24维情感向量 (JSON数组)
     perception_json TEXT NOT NULL,
 
-    -- 钙化（缓存加速）
+    -- 钙化
     calcium_score REAL NOT NULL,
     calcium_level INTEGER NOT NULL CHECK(calcium_level BETWEEN 0 AND 3),
 
@@ -28,7 +27,7 @@ CREATE TABLE IF NOT EXISTS memories (
     effective_strength REAL DEFAULT 1.0,
     strength_updated_at TEXT NOT NULL,
 
-    -- VAD 谱曲（情感谱曲引擎产出，JSON字符串，可为NULL表示待谱曲）
+    -- VAD 谱曲
     vad_spectrum TEXT,
 
     -- 年轮/地标
@@ -39,7 +38,22 @@ CREATE TABLE IF NOT EXISTS memories (
     scar_type TEXT,
     scar_healed INTEGER,
     primary_emotion TEXT,
-    secondary_emotions TEXT
+    secondary_emotions TEXT,
+
+    -- 三段关联
+    dna_root_id TEXT,
+    entity_genes TEXT,
+    is_promoted INTEGER DEFAULT 0,
+
+    -- P0-1: 家族图谱实体名列表（逗号分隔，用于多维检索）
+    fg_entity_names TEXT,
+    -- P0-1: 时空标签
+    time_period TEXT,
+    season TEXT,
+    lunar_term TEXT,
+
+    -- P1-4: 多租户命名空间
+    namespace TEXT DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_calcium ON memories(calcium_score DESC);
@@ -47,6 +61,13 @@ CREATE INDEX IF NOT EXISTS idx_memories_strength ON memories(effective_strength 
 CREATE INDEX IF NOT EXISTS idx_memories_locus ON memories(locus_path);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_landmarks ON memories(is_landmark) WHERE is_landmark = 1;
+CREATE INDEX IF NOT EXISTS idx_memories_calcium_strength ON memories(calcium_level, effective_strength);
+-- P0-1: 多维检索索引
+CREATE INDEX IF NOT EXISTS idx_memories_fg_entity ON memories(fg_entity_names);
+CREATE INDEX IF NOT EXISTS idx_memories_time_period ON memories(time_period);
+CREATE INDEX IF NOT EXISTS idx_memories_season ON memories(season);
+-- P1-4: 多租户索引
+CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
 
 -- 实体表
 CREATE TABLE IF NOT EXISTS entities (
@@ -66,7 +87,7 @@ CREATE TABLE IF NOT EXISTS memory_entities (
     PRIMARY KEY (memory_id, entity_id)
 );
 
--- 实体关系图（轻量级）
+-- 实体关系图
 CREATE TABLE IF NOT EXISTS entity_relations (
     entity_a_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     entity_b_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -76,7 +97,7 @@ CREATE TABLE IF NOT EXISTS entity_relations (
     PRIMARY KEY (entity_a_id, entity_b_id, relation)
 );
 
--- 高阶归纳（日/周/月摘要）
+-- 高阶归纳
 CREATE TABLE IF NOT EXISTS inductions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     period_type TEXT NOT NULL CHECK(period_type IN ('daily','weekly','monthly','hourly')),
@@ -89,7 +110,7 @@ CREATE TABLE IF NOT EXISTS inductions (
     created_at TEXT NOT NULL
 );
 
--- 知识库（上传文件 → 永久记忆）
+-- 知识库
 CREATE TABLE IF NOT EXISTS knowledge_base (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -101,7 +122,6 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     locked INTEGER DEFAULT 0,
-    -- 知识分类（铁律：无分类不检索）
     classification TEXT,
     classification_pending INTEGER DEFAULT 1,
     dna_id TEXT,
@@ -109,7 +129,6 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
     interaction_type TEXT DEFAULT 'other',
     emotion_vector TEXT
 );
-
 CREATE INDEX IF NOT EXISTS idx_knowledge_created ON knowledge_base(created_at DESC);
 
 -- 知识-记忆关联
@@ -120,7 +139,7 @@ CREATE TABLE IF NOT EXISTS knowledge_memories (
     PRIMARY KEY (knowledge_id, memory_id)
 );
 
--- 知识分块（用于向量搜索）
+-- 知识分块
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id TEXT PRIMARY KEY,
     kn_id TEXT NOT NULL REFERENCES knowledge_base(id) ON DELETE CASCADE,
@@ -128,7 +147,6 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
     chunk_text TEXT NOT NULL,
     embedding TEXT
 );
-
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_kn_id ON knowledge_chunks(kn_id);
 
 -- 衰减日志
@@ -141,10 +159,7 @@ CREATE TABLE IF NOT EXISTS decay_log (
     PRIMARY KEY (memory_id, checked_at)
 );
 
--- P0-5: 情感检索加速复合索引
-CREATE INDEX IF NOT EXISTS idx_memories_calcium_strength ON memories(calcium_level, effective_strength);
-
--- 黑钻库（精选歌单·永恒珍藏 — 景幻仙姑管理）
+-- 黑钻库
 CREATE TABLE IF NOT EXISTS black_diamond (
     id TEXT PRIMARY KEY,
     summary TEXT NOT NULL,
@@ -156,13 +171,14 @@ CREATE TABLE IF NOT EXISTS black_diamond (
     notes TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    emotion_vector TEXT DEFAULT NULL
+    emotion_vector TEXT DEFAULT NULL,
+    namespace TEXT DEFAULT 'default'
 );
-
 CREATE INDEX IF NOT EXISTS idx_black_diamond_emotion ON black_diamond(emotion_tag);
 CREATE INDEX IF NOT EXISTS idx_black_diamond_created ON black_diamond(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_black_diamond_namespace ON black_diamond(namespace);
 
--- S3-3: 黑钻倒排索引（替代 FTS5——sql.js 不内建 FTS5）
+-- 黑钻倒排索引
 CREATE TABLE IF NOT EXISTS black_diamond_terms (
     term TEXT NOT NULL,
     bd_id TEXT NOT NULL,
@@ -172,7 +188,7 @@ CREATE TABLE IF NOT EXISTS black_diamond_terms (
 CREATE INDEX IF NOT EXISTS idx_bd_terms_term ON black_diamond_terms(term);
 CREATE INDEX IF NOT EXISTS idx_bd_terms_bd_id ON black_diamond_terms(bd_id);
 
--- AQC质检表（砂金质检员 / 金库质检员 — 独立标记，不阻塞现有流程）
+-- AQC质检表
 CREATE TABLE IF NOT EXISTS aqc_records (
     id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL CHECK(source_type IN ('sand','gold')),
@@ -187,12 +203,10 @@ CREATE TABLE IF NOT EXISTS aqc_records (
     created_at TEXT NOT NULL,
     evaluated_at TEXT
 );
-
 CREATE INDEX IF NOT EXISTS idx_aqc_status ON aqc_records(status);
 CREATE INDEX IF NOT EXISTS idx_aqc_source ON aqc_records(source_type, status);
 
-
--- 景幻仙姑 · 三库操作日志（提炼追溯/批量操作审计）
+-- 三库操作日志
 CREATE TABLE IF NOT EXISTS vault_log (
     id TEXT PRIMARY KEY,
     operation TEXT NOT NULL,
@@ -204,9 +218,9 @@ CREATE TABLE IF NOT EXISTS vault_log (
 );
 CREATE INDEX IF NOT EXISTS idx_vault_log_op ON vault_log(operation);
 CREATE INDEX IF NOT EXISTS idx_vault_log_time ON vault_log(created_at);
--- ═══════════════════════════════════════════════════
--- 砂金库 — 全量对话活档案（取代内存数组+JSON）
--- ═══════════════════════════════════════════════════
+
+-- 砂金库 — 全量对话活档案
+-- P0-4: 新增 message_id 唯一索引用于幂等写入
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
@@ -218,18 +232,19 @@ CREATE TABLE IF NOT EXISTS conversations (
     perception_summary TEXT,
     calcium_score REAL DEFAULT 0,
     is_summary INTEGER DEFAULT 0,
-    summary_of_range TEXT
+    summary_of_range TEXT,
+    -- P0-4: 消息唯一ID（业务幂等键）
+    message_id TEXT UNIQUE,
+    -- P1-4: 多租户命名空间
+    namespace TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_conv_timestamp ON conversations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_conv_topic ON conversations(topic);
 CREATE INDEX IF NOT EXISTS idx_conv_seq ON conversations(seq_pos);
 CREATE INDEX IF NOT EXISTS idx_conv_summary ON conversations(is_summary);
+CREATE INDEX IF NOT EXISTS idx_conv_message_id ON conversations(message_id);
 
--- ═══════════════════════════════════════════════════
--- 主人大脑镜像 — 主人的完整个人世界
--- ═══════════════════════════════════════════════════
-
--- 主观世界：精神/内心/感官/生活/娱乐/健康/学习
+-- 主人大脑镜像
 CREATE TABLE IF NOT EXISTS master_profile (
     id TEXT PRIMARY KEY,
     category TEXT NOT NULL,
@@ -246,7 +261,6 @@ CREATE TABLE IF NOT EXISTS master_profile (
 CREATE INDEX IF NOT EXISTS idx_profile_category ON master_profile(category);
 CREATE INDEX IF NOT EXISTS idx_profile_confidence ON master_profile(confidence DESC);
 
--- 客观世界：工作/商业/事务
 CREATE TABLE IF NOT EXISTS master_affairs (
     id TEXT PRIMARY KEY,
     category TEXT NOT NULL,
@@ -265,7 +279,6 @@ CREATE TABLE IF NOT EXISTS master_affairs (
 CREATE INDEX IF NOT EXISTS idx_affairs_status ON master_affairs(status);
 CREATE INDEX IF NOT EXISTS idx_affairs_category ON master_affairs(category);
 
--- 客观世界：人脉/社交资本
 CREATE TABLE IF NOT EXISTS master_network (
     id TEXT PRIMARY KEY,
     person_name TEXT NOT NULL,
@@ -282,7 +295,6 @@ CREATE TABLE IF NOT EXISTS master_network (
 CREATE INDEX IF NOT EXISTS idx_network_name ON master_network(person_name);
 CREATE INDEX IF NOT EXISTS idx_network_importance ON master_network(importance DESC);
 
--- 客观世界：主人人生重要事件
 CREATE TABLE IF NOT EXISTS master_events (
     id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -298,7 +310,7 @@ CREATE TABLE IF NOT EXISTS master_events (
 CREATE INDEX IF NOT EXISTS idx_events_type ON master_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_date ON master_events(date);
 
--- P0-3: 幻觉校验日志（自省模块输入源）
+-- 幻觉校验日志
 CREATE TABLE IF NOT EXISTS hallucination_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     reply_hash TEXT NOT NULL,

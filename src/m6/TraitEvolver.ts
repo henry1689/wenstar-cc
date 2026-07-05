@@ -4,6 +4,7 @@
 import type { SelfModelTraits, EvolutionSignal, EvolutionDecision } from './types/index.js';
 import { DEFAULT_TRAITS } from './types/index.js';
 import { SelfModelManager } from './SelfModelManager.js';
+import { M6_CONFIG } from '../config/M6Config.js';
 
 /** 大五人格合法键白名单 */
 const VALID_TRAIT_KEYS = new Set(['openness', 'conscientiousness', 'extraversion', 'agreeableness', 'neuroticism']);
@@ -74,7 +75,7 @@ export class TraitEvolver {
 
     // 小幅自动 (≤5%)
     if (delta <= 5) {
-      if (count >= 5 && avgE1 > 0.4) {
+      if (count >= M6_CONFIG.buffer.triggerThreshold && avgE1 > 0.4) {
         const traits = this.manager.getTraits();
         const key = mappedDim as keyof SelfModelTraits;
         const oldVal = traits[key];

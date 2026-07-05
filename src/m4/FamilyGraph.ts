@@ -24,7 +24,11 @@ import type {
   InferenceResult,
   FamilySummary,
   RelationCandidate,
+  CircleLevel,
+  RelationWeights,
+  NodeType,
 } from './types/graph.js';
+import { DEFAULT_BASE_INTIMACY } from './types/graph.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -321,6 +325,25 @@ const REVERSE_RELATION: Record<string, string> = {
   close_to: 'close_to',
 };
 
+// ─── v2.0 商业组织关系映射（人物↔组织、组织↔组织） ───
+const ORG_MAP: Record<string, string> = {
+  '公司': 'org_of', '企业': 'org_of', '工厂': 'org_of',
+  '部门': 'dept_of', '研发部': 'dept_of', '生产部': 'dept_of',
+  '总经理': 'ceo_of', '老板': 'owner_of', '大股东': 'owner_of',
+};
+const ORG_REVERSE: Record<string, string> = {
+  org_of: 'member_of', dept_of: 'parent_dept_of',
+  ceo_of: 'subordinate_of', owner_of: 'subordinate_of',
+  member_of: 'org_of', parent_dept_of: 'dept_of',
+};
+
+// ─── v2.0 实体从属关系映射（人物↔物、物↔空间） ───
+const ENTITY_REL_MAP: Record<string, string> = {
+  '属于': 'belongs_to', '位于': 'located_in', '在': 'located_in',
+  '操作': 'operated_by', '使用': 'operated_by',
+  '考察': 'inspected_by', '检查': 'inspected_by', '审核': 'inspected_by',
+};
+
 /**
  * 生成简单 UUID
  */
@@ -394,7 +417,30 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.run('CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)');
     this.run('CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation)');
 
+    // v2.0: 先升级存量数据（创建新列），再建索引
+    this.migrateToV2();
+    try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_circle ON nodes(circle_level)'); } catch {}
+    try { this.run('CREATE INDEX IF NOT EXISTS idx_edges_source_rel ON edges(source_id, relation)'); } catch {}
+
     this.markDirty();
+  }
+
+  /**
+   * v2.0: 将存量数据升级到 EntityGraph v2 结构
+   * - 新增 circle_level 列
+   * - 为 edges 初始化权重默认值
+   */
+  migrateToV2(): void {
+    // 节点：新增 circle_level 列（若不存在）
+    try { this.run('ALTER TABLE nodes ADD COLUMN circle_level INTEGER DEFAULT 0'); } catch {}
+    try { this.run('ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT "[]"'); } catch {}
+
+    // 边：为新兼容字段准备 properties 默认值
+    const rows = this.query('SELECT id, properties FROM edges WHERE properties = ? OR properties IS NULL', ['{}']);
+    for (const r of rows) {
+      const props = { ...JSON.parse(r.properties || '{}'), _v2: true };
+      this.run('UPDATE edges SET properties = ? WHERE id = ?', [JSON.stringify(props), r.id]);
+    }
   }
 
   async addNode(node: GraphNode): Promise<void> {
@@ -529,7 +575,15 @@ export class FamilyGraph implements FamilyGraphInterface {
     return null;
   }
 
+  private _lastEntityHash: string | null = null;
+
   async integrateFromEntity(entities: EntityGene[], rawInput: string, selfName?: string): Promise<InferenceResult> {
+    // P1: entity_genes 无变化时跳过
+    const _hash = entities.map(e => e.name + e.type).sort().join('|');
+    if (_hash === this._lastEntityHash) {
+      return { nodes_created: 0, edges_created: 0, details: ['skip: no change'] };
+    }
+    this._lastEntityHash = _hash;
     const details: string[] = [];
     let nodesCreated = 0;
     let edgesCreated = 0;
@@ -1018,6 +1072,11 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   async getSocialSummary(): Promise<{ connections: Array<{ name: string; relation_to_user: string; note?: string }> }> {
+    // P1: 30s TTL 缓存
+    const _now = Date.now();
+    if (this._socialCache && _now - this._socialCache.ts < this.CACHE_TTL) {
+      return this._socialCache.data;
+    }
     const connections: Array<{ name: string; relation_to_user: string; note?: string }> = [];
     const meNodes = this.query('SELECT id FROM nodes WHERE name = ? AND type = ?', ['我', 'person']);
     if (meNodes.length === 0) return { connections };
@@ -1045,10 +1104,20 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
       }
     }
-    return { connections };
+    const _result = { connections };
+    this._socialCache = { data: _result, ts: Date.now() };
+    return _result;
   }
 
+  private _familyCache: { data: FamilySummary; ts: number } | null = null;
+  private _socialCache: { data: { connections: Array<{ name: string; relation_to_user: string; note?: string }> }; ts: number } | null = null;
+  private readonly CACHE_TTL = 30_000;
+
   async getFamilySummary(): Promise<FamilySummary> {
+    const now = Date.now();
+    if (this._familyCache && now - this._familyCache.ts < this.CACHE_TTL) {
+      return this._familyCache.data;
+    }
     const members: FamilySummary['members'] = [];
     const locations = new Set<string>();
 
@@ -1082,7 +1151,9 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
 
-    return { members, locations: [...locations] };
+    const result = { members, locations: [...locations] };
+    this._familyCache = { data: result, ts: Date.now() };
+    return result;
   }
 
   // ─── 辅助方法 ───
@@ -2165,6 +2236,244 @@ export class FamilyGraph implements FamilyGraphInterface {
       relation: r.relation,
       strength: 1.0,
     }));
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // v2.0: 圈层管理
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * 设置人物圈层级别
+   */
+  setCircleLevel(personName: string, level: CircleLevel, manual = true): void {
+    const nodes = this.query('SELECT id, properties FROM nodes WHERE name = ? AND type = ?', [personName, 'person']);
+    if (nodes.length === 0) return;
+    const props = JSON.parse(nodes[0].properties || '{}');
+    props.circle_level = level;
+    props.circle_locked = manual ? true : (props.circle_locked || false);
+    this.run('UPDATE nodes SET circle_level = ?, properties = ?, updated_at = ? WHERE id = ?',
+      [level, JSON.stringify(props), new Date().toISOString(), nodes[0].id]);
+    this.markDirty(true);
+  }
+
+  /** 获取人物圈层级别 */
+  getCircleLevel(personName: string): CircleLevel {
+    const rows = this.query('SELECT circle_level FROM nodes WHERE name = ? AND type = ?', [personName, 'person']);
+    if (rows.length === 0) return 0;
+    return (rows[0].circle_level as CircleLevel) || 0;
+  }
+
+  /** 按圈层批量获取人物 */
+  getPersonsByCircle(level: CircleLevel, includeAbove = false): string[] {
+    const op = includeAbove ? '>=' : '=';
+    const rows = this.query(`SELECT name FROM nodes WHERE type = ? AND circle_level ${op} ? ORDER BY circle_level`, ['person', level]);
+    return rows.map((r: any) => r.name as string);
+  }
+
+  /** 自动推算圈层（基于base_intimacy阈值） */
+  autoAssignCircle(personName: string): CircleLevel {
+    const nodes = this.query('SELECT properties FROM nodes WHERE name = ? AND type = ?', [personName, 'person']);
+    if (nodes.length === 0) return 0;
+    const props = JSON.parse(nodes[0].properties || '{}');
+    if (props.circle_locked) return props.circle_level || 0;
+
+    // 遍历所有关联边，取最高（最内层）圈层
+    const edges = this.query(`
+      SELECT e.relation FROM edges e
+      JOIN nodes n ON e.source_id = n.id OR e.target_id = n.id
+      WHERE n.name = ? AND n.type = 'person'
+    `, [personName]);
+
+    let bestLevel: CircleLevel = 5;
+    for (const e of edges) {
+      const base = DEFAULT_BASE_INTIMACY[e.relation] ?? 0.1;
+      let level: CircleLevel = 5;
+      if (base >= 0.85) level = 1;
+      else if (base >= 0.6) level = 2;
+      else if (base >= 0.3) level = 3;
+      else if (base >= 0.1) level = 4;
+      if (level < bestLevel) bestLevel = level;
+    }
+    return bestLevel;
+  }
+
+  /** 批量为所有人分配圈层（跳过已锁定的） */
+  batchAutoAssignCircles(): { assigned: number; locked: number } {
+    const persons = this.query("SELECT name FROM nodes WHERE type='person'");
+    let assigned = 0, locked = 0;
+    for (const p of persons) {
+      const props = JSON.parse((this.query('SELECT properties FROM nodes WHERE name = ?', [p.name])[0]?.properties) || '{}');
+      if (props.circle_locked) { locked++; continue; }
+      const level = this.autoAssignCircle(p.name);
+      this.run('UPDATE nodes SET circle_level = ? WHERE name = ? AND type = ?', [level, p.name, 'person']);
+      assigned++;
+    }
+    this.markDirty(true);
+    this.flush();
+    return { assigned, locked };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // v2.0: 权重管理
+  // ════════════════════════════════════════════════════════════
+
+  setRelationWeights(sourceName: string, targetName: string, weights: Partial<RelationWeights>): void {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return;
+    const props = JSON.parse(edge.properties || '{}');
+    const current: RelationWeights = props.weights || {};
+    const locked = current._locked || [];
+    for (const [k, v] of Object.entries(weights)) {
+      if (!locked.includes(k)) (current as any)[k] = v;
+    }
+    if (current.base_intimacy === undefined) {
+      current.base_intimacy = DEFAULT_BASE_INTIMACY[edge.relation] ?? 0.1;
+    }
+    props.weights = current;
+    this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(props), new Date().toISOString(), edge.id]);
+    this.markDirty(true);
+  }
+
+  getRelationWeights(sourceName: string, targetName: string): RelationWeights | null {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return null;
+    return (JSON.parse(edge.properties || '{}').weights) || null;
+  }
+
+  lockWeight(sourceName: string, targetName: string, field: string): void {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return;
+    const props = JSON.parse(edge.properties || '{}');
+    const w: RelationWeights = props.weights || {};
+    w._locked = [...(w._locked || []), field];
+    props.weights = w;
+    this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(props), new Date().toISOString(), edge.id]);
+    this.markDirty(true);
+  }
+
+  unlockWeight(sourceName: string, targetName: string, field: string): void {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return;
+    const props = JSON.parse(edge.properties || '{}');
+    const w: RelationWeights = props.weights || {};
+    w._locked = (w._locked || []).filter((f: string) => f !== field);
+    props.weights = w;
+    this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(props), new Date().toISOString(), edge.id]);
+    this.markDirty(true);
+  }
+
+  /** 每轮对话增量更新互动频次 */
+  updateInteractionFreq(sourceName: string, targetName: string): void {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return;
+    const props = JSON.parse(edge.properties || '{}');
+    const w = props.weights || {};
+    if (w._locked?.includes('interaction_freq')) return;
+    w.interaction_freq = Math.min(1.0, (w.interaction_freq ?? 0.5) + 0.05);
+    props.weights = w;
+    this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(props), new Date().toISOString(), edge.id]);
+    this.markDirty(true);
+  }
+
+  /** 从24D向量更新情绪强度 (EMA平滑) */
+  updateEmotionalIntensity(sourceName: string, targetName: string, p24d: Record<string, number>): void {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return;
+    const props = JSON.parse(edge.properties || '{}');
+    const w = props.weights || {};
+    if (w._locked?.includes('emotional_intensity')) return;
+    const p = Math.abs(p24d?.pleasure ?? 0);
+    const a = p24d?.arousal ?? 0;
+    const intensity = (p + a) / 2;
+    w.emotional_intensity = 0.7 * (w.emotional_intensity ?? 0.5) + 0.3 * intensity;
+    props.weights = w;
+    this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(props), new Date().toISOString(), edge.id]);
+    this.markDirty(true);
+  }
+
+  getEffectiveIntimacy(sourceName: string, targetName: string): number {
+    const edge = this.findEdge(sourceName, targetName);
+    if (!edge) return 0;
+    const w: RelationWeights = (JSON.parse(edge.properties || '{}').weights) || {};
+    const base = w.base_intimacy ?? DEFAULT_BASE_INTIMACY[edge.relation] ?? 0.1;
+    const freq = w.interaction_freq ?? 0.5;
+    const emotion = w.emotional_intensity ?? 0.5;
+    return base * (0.8 + 0.4 * freq) * (0.8 + 0.4 * emotion);
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // v2.0: 实体从属关系 + 商业组织集成
+  // ════════════════════════════════════════════════════════════
+
+  async addEntityRelation(entityName: string, relation: string, targetName: string, entityType: NodeType = 'thing', targetType: NodeType = 'place'): Promise<void> {
+    const eid = this.ensureNode(entityName, entityType);
+    const tid = this.ensureNode(targetName, targetType);
+    if (!eid || !tid) return;
+    const existing = this.query('SELECT id FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?', [eid, tid, relation]);
+    if (existing.length === 0) {
+      await this.addEdge({ id: uid(), source_id: eid, target_id: tid, relation });
+    }
+  }
+
+  async integrateOrgRelation(rawInput: string): Promise<InferenceResult> {
+    const details: string[] = [];
+    let edgesCreated = 0;
+    for (const [keyword, rel] of Object.entries(ORG_MAP)) {
+      const idx = rawInput.indexOf(keyword);
+      if (idx < 0) continue;
+      const before = rawInput.substring(0, idx).trim();
+      const after = rawInput.substring(idx + keyword.length).trim();
+      const personMatch = before.match(/([一-龥]{2,4})$/);
+      const orgMatch = after.match(/^([一-龥A-Za-z0-9]{2,20})/);
+      if (personMatch && orgMatch) {
+        const personId = this.ensureNode(personMatch[1], 'person');
+        const orgId = this.ensureNode(orgMatch[1], 'org');
+        if (personId && orgId) {
+          const rev = ORG_REVERSE[rel];
+          await this.addEdge({ id: uid(), source_id: personId, target_id: orgId, relation: rel });
+          if (rev) await this.addEdge({ id: uid(), source_id: orgId, target_id: personId, relation: rev });
+          edgesCreated++;
+          details.push(`${personMatch[1]} --${rel}--> ${orgMatch[1]}`);
+        }
+      }
+    }
+    return { nodes_created: 0, edges_created: edgesCreated, details };
+  }
+
+  /** 按人物检索关联记忆（对接 FusionStorageAdapter） */
+  searchMemoriesByPerson(storage: any, personName: string, limit = 10): any[] {
+    if (!storage?.findMemoriesByEntityNames) return [];
+    try { return storage.findMemoriesByEntityNames([personName], limit); }
+    catch { return []; }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // v2.0: 内部工具
+  // ════════════════════════════════════════════════════════════
+
+  private ensureNode(name: string, type: NodeType): string | null {
+    const existing = this.query('SELECT id FROM nodes WHERE name = ? AND type = ?', [name, type]);
+    if (existing.length > 0) return existing[0].id;
+    const id = uid();
+    this.run('INSERT INTO nodes (id, type, name, properties, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, type, name, '{}', new Date().toISOString(), new Date().toISOString()]);
+    return id;
+  }
+
+  findEdge(nameA: string, nameB: string): { id: string; relation: string; properties: string } | null {
+    const rows = this.query(`
+      SELECT e.id, e.relation, e.properties FROM edges e
+      JOIN nodes n1 ON e.source_id = n1.id
+      JOIN nodes n2 ON e.target_id = n2.id
+      WHERE (n1.name = ? AND n2.name = ?) OR (n1.name = ? AND n2.name = ?)
+      LIMIT 1
+    `, [nameA, nameB, nameB, nameA]);
+    return rows.length > 0 ? rows[0] as any : null;
   }
 
   private rowToNode(row: any): GraphNode {

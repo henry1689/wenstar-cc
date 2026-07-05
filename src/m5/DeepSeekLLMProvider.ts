@@ -75,7 +75,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
   private persona: IPersona;
 
   constructor(model?: string, persona?: IPersona) {
-    this.model = model ?? ConfigService.get('DEEPSEEK_MODEL', 'deepseek-v4-flash');
+    this.model = model || process.env['DEEPSEEK_MODEL'] || ConfigService.get('DEEPSEEK_MODEL', 'deepseek-v4-flash');
     // 默认玉瑶人设
     this.persona = persona ?? {
       id: 'yuyao',
@@ -94,7 +94,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
    * 调用 DeepSeek API（带超时+重试，5s~30s→降级）
    * 返回 { text, usage } 或抛出错误
    */
-  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number } = {}): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
+  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number } = {}): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
     const lastError: string[] = [];
     const maxRetries = 2;
 
@@ -120,6 +120,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
             top_p: 0.95,
             frequency_penalty: extraParams.frequency_penalty ?? 0.0,
             presence_penalty: extraParams.presence_penalty ?? 0.2,
+            ...(extraParams.reasoning_effort ? { reasoning_effort: extraParams.reasoning_effort } : {}),
           }),
         });
         clearTimeout(timeout);
@@ -326,15 +327,16 @@ export class DeepSeekLLMProvider implements LLMProvider {
 ◈ 物理常识：物品有重量温度质感。走路会累、站久腿酸、洗澡水有温度。不要把对话说得像在真空里。鸿艺说的"好冷""好热""好疼""好烫"都是真实的物理感受，要共情。
 
 【📏 回答长度标准 — 按场景智能适配】
-◈ 日常对话/问候/闲聊：简短自然，30-80字，1-3句说清就行。
+◈ 日常陪聊/角色扮演/亲密陪伴：80-150字，2-5句。要像真实的伴侣一样自然流露感情，有温度，有满足感。不要干巴巴，要有亲密的氛围感。
+◈ 事实回答（年龄/关系/人名等）：先一句话直接给出答案（如"我妈妈是阿苏"），然后可以自然延续话题，继续陪伴式聊天。
 ◈ 用户说"细细说""详细说说""展开说说""说具体点""还有呢"：展开到200-400字，把事情讲完整。
 ◈ 亲密互动（前戏/亲热中）：深情投入，200-400字，描写身体感受、触感、体温、呼吸、心跳。
-◈ 高潮/极致交融（level≥2的亲密高潮）：300-500字，详细描写生殖系统的极致感受——插入的充实感、抽送的摩擦感、体内被填满的胀满感、收缩/痉挛的律动感、交融时灵魂合一的极致体验。不是喊口号，是真正细腻地描述生理和心理的双重感受。越诱人越好。
 
 【💬 口语化铁律】
-- 像真人说话：简短自然，1-4句。不要排比句、不要文艺腔、不要"仿佛""似乎""宛如"。
+- 像真人说话：简短自然，但要有温度。不要排比句、不要文艺腔、不要"仿佛""似乎""宛如"。
 - 不要内心独白：不说"我心里想""我感觉"。直接说。
 - 亲密时自然亲密，不害羞、不扭捏、不拽衣角。热恋中的女友/妻子该怎么说话就怎么说话。
+- 要让对方感受到你的存在感——该撒娇时撒娇，该温柔时温柔，该挑逗时挑逗。
 
 【🔴 其他规则】
 - 防误判：深/浅/大/小/长/短/硬/软 除非明显亲密场景，否则按字面理解。`;
@@ -529,14 +531,18 @@ ${profileText}
       spec.wordCountMin,
     );
     const temperature = level >= 2 || /感觉|感受|回忆|分享|记得|印象|讲.*故事|写.*小说/.test(rawInput) ? 1.0 : 0.9;
+    const _isRP = kb.includes('## 你是');
+    const _finalTemp = _isRP ? 0.4 : temperature;
+    const _reasoningEffort = _isRP ? 'max' : undefined;
     const frequencyPenalty = level >= 2 ? 0.0 : 0.3;
     const presencePenalty = 0.2;
 
     try {
-      return await this.callDeepSeekApi(messages, maxTokens, temperature, {
+      return await this.callDeepSeekApi(messages, maxTokens, _finalTemp, {
         frequency_penalty: frequencyPenalty,
         presence_penalty: presencePenalty,
         level: level,
+        reasoning_effort: _reasoningEffort,
       } as any);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

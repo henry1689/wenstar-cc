@@ -15,6 +15,7 @@
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import type { ConversationTurn } from '../../m5/types/index.js';
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 
 // ─── 类型定义 ───
 
@@ -116,15 +117,16 @@ export function addBlackDiamond(
     tags?: string[];
     notes?: string;
     emotion_vector?: string;
+    dna_root_id?: string | null;
   },
 ): BlackDiamondEntry {
   const id = `bd_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
   const now = new Date().toISOString();
   const tags = params.tags || [];
-  // 黑钻上限 200 条：超出时淘汰钙化分最低的
+  // 黑钻上限（从配置读取）：超出时淘汰钙化分最低的
   try {
     const total = (sqlite.queryAll('SELECT COUNT(*) as cnt FROM black_diamond') as any[])?.[0]?.cnt || 0;
-    if (total >= 200) {
+    if (total >= MEMORY_CONFIG.blackDiamond.maxCount) {
       const lowest = sqlite.queryAll('SELECT id, calcium_level FROM black_diamond ORDER BY CAST(calcium_level AS REAL) ASC, created_at ASC LIMIT 1') as any[];
       if (lowest.length > 0) {
         const demotedId = lowest[0].id;
@@ -136,9 +138,10 @@ export function addBlackDiamond(
   } catch (_) { /* 上限检测不阻塞晋升 */ }
   // P3: mark as promoted in memories table
   sqlite.writeRaw(`UPDATE memories SET promoted_to_diamond = 1 WHERE id = ?`, [params.source_id]);
+  const dnaFullCode = params.dna_root_id ? `${params.dna_root_id}-BD-C${params.calcium_level ?? 1}` : null;
   sqlite.writeRaw(
-    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector)
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, dna_root_id, dna_full_code)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     params.summary,
     params.emotion_tag || null,
@@ -149,6 +152,8 @@ export function addBlackDiamond(
     params.emotion_vector || null,
     now,
     now,
+    params.dna_root_id || null,
+    dnaFullCode,
   );
   return getBlackDiamond(sqlite, id)!;
 }
@@ -183,7 +188,7 @@ export function deleteBlackDiamond(sqlite: SQLiteAdapter, id: string): boolean {
 }
 
 /** 搜索黑钻库 */
-const KNOWN_EMOTION_TAGS = ["中性","平静","快乐","思念","委屈","焦虑","不安","恐惧","愤怒","沮丧","愧疚","无奈","麻木","怀念","空虚","爱意","满足","幸福","惊喜","感动","温馨","欲望","渴望","占有","依赖","期待","慵懒","倾诉","失落","矛盾","释然","警惕","共鸣","嫉妒","疏离","包容","温馨","感动","幸福","疲惫"];
+const KNOWN_EMOTION_TAGS = MEMORY_CONFIG.knownEmotionTags;
 
 export function searchBlackDiamonds(sqlite: SQLiteAdapter, keyword: string, limit = 10): BlackDiamondEntry[] {
   // P4: Fast path - exact emotion_tag match (uses idx_black_diamond_emotion index)
@@ -277,7 +282,7 @@ export function promoteToBlackDiamond(sqlite: SQLiteAdapter, memoryId: string): 
   }
 
   const rows = sqlite.queryAll(
-    `SELECT id, raw_input, calcium_level, recall_count, is_landmark, scar_type, narrative_tag, perception_json
+    `SELECT id, raw_input, calcium_level, recall_count, is_landmark, scar_type, narrative_tag, perception_json, dna_root_id
      FROM memories WHERE id = ? LIMIT 1`,
     [memoryId],
   );
@@ -299,34 +304,13 @@ export function promoteToBlackDiamond(sqlite: SQLiteAdapter, memoryId: string): 
     tags,
     notes: `自动提炼于 ${new Date().toISOString()}`,
     emotion_vector: emotionVec,
+    dna_root_id: (mem as any).dna_root_id || null,
   });
 }
 
-/** 批量自动提炼：扫描金库中符合条件但尚未提炼的记忆 */
+/** 批量自动提炼（v1 兼容 — 委托 v2） */
 export function autoPromoteCandidates(sqlite: SQLiteAdapter, limit = 5): BlackDiamondEntry[] {
-  // 获取已提炼的 source_id（去重）
-  const alreadyPromoted = new Set(
-    (sqlite.queryAll('SELECT source_id FROM black_diamond WHERE source_id IS NOT NULL') as any[])
-      .map((r: any) => r.source_id as string)
-      .filter(Boolean),
-  );
-
-  const candidates = sqlite.queryAll(
-    `SELECT id, raw_input, calcium_level, recall_count, is_landmark, scar_type, narrative_tag
-     FROM memories
-     WHERE (calcium_level >= 2 AND (recall_count >= 1 OR is_landmark = 1)) OR (calcium_level >= 3)
-     ORDER BY calcium_level DESC, recall_count DESC
-     LIMIT ?`,
-    [limit],
-  ) as any[];
-
-  const results: BlackDiamondEntry[] = [];
-  for (const mem of candidates) {
-    if (alreadyPromoted.has(mem.id as string)) continue;
-    const entry = promoteToBlackDiamond(sqlite, mem.id as string);
-    if (entry) results.push(entry);
-  }
-  return results;
+  return autoPromoteCandidatesV2(sqlite, limit);
 }
 
 /**
@@ -413,7 +397,8 @@ export function compactAlluvial(sqlite: SQLiteAdapter, cutoffDays = 30): number 
   const old = sqlite.queryAll('SELECT COUNT(*) as cnt FROM conversations WHERE timestamp < ? AND is_summary = 0', [cutoff]);
   const count = Number((old[0] as any)?.cnt || 0);
   if (count > 0) {
-    sqlite.writeRaw('UPDATE conversations SET is_summary = 1 WHERE timestamp < ? AND is_summary = 0', [cutoff]);
+    // 同时更新 is_compacted（过渡兼容）
+    sqlite.writeRaw('UPDATE conversations SET is_summary = 1, is_compacted = 1 WHERE timestamp < ? AND is_summary = 0', [cutoff]);
     logVaultOperation(sqlite, 'compact', 'alluvial', undefined, undefined, `压缩 ${count} 条超过 ${cutoffDays} 天的砂金库对话`);
   }
   return count;

@@ -167,6 +167,10 @@ export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowle
 
   // 追加知识库（优先使用，自然地融入回答）
   if (knowledge) {
+    // 🔴 角色扮演检测：如果知识库内容是完整的四层装配，用它替代整个 role prompt
+    if (knowledge.startsWith('## 你是')) {
+      return knowledge + '\n';
+    }
     prompt += `\n\n${knowledge}\n`;
   }
 

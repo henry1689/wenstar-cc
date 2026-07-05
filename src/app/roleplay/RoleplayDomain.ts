@@ -1,46 +1,44 @@
 /**
  * RoleplayDomain — 角色扮演域统一入口
  *
- * chat.ts 唯一调用点，接管所有角色扮演的持续扮演逻辑。
- * 内部调用七路采集 + 四层装配 → LLM Generate → 验证
- *
- * 🔴 铁律：
- *   - 约束1：所有查询走主系统标准接口
- *   - 约束2：Layer1+Layer2 会话缓存
- *   - 约束4：层级顺序不可逆
- *   - 约束7：有开关回退兜底
+ * 🔴 架构铁律：
+ *   - 所有查询走主系统标准接口（约束1）
+ *   - Layer1+Layer2 会话缓存（约束2）
+ *   - 双标签数据隔离 source=roleplay + roleplay_id（约束3）
+ *   - 层级顺序不可逆（约束4）
+ *   - 记忆严格控量（约束5）
+ *   - 开关回退兜底（约束7）
  */
-import type { DomainContext, CharacterClass } from './types.js';
-import { collectData, type FourLayerData } from './DataCollector.js';
+import type { DomainContext, CharacterClass, FourLayerData } from './types.js';
+import { collectFourLayerData } from './FourLayerDataCollector.js';
 import { assemblePrompt } from './PromptAssembler.js';
-import { buildRoleplayRules } from './RoleplayPromptBuilder.js';
-import { syncRPConversation, generateRPId, type RPWriteInput } from './RoleplayMemorySync.js';
-import { updateTempProfile, tryPromoteProfile } from './RoleplayProfileManager.js';
-import { initSessionCache, setLayer1, setLayer2, hasLayer1, hasLayer2, clearCache as clearSessionCache } from './RoleplaySessionCache.js';
-import { reportProbe, reportMemoryRecall, reportRoleGrowth } from './RoleplayProbeReporter.js';
+import { validateReply } from './Validator.js';
+import { checkReadiness } from './ReadinessGate.js';
+import { clearSessionCache } from './RoleplaySessionCache.js';
+import { reportAssembly, reportValidation, reportGrowth } from './RoleplayProbeReporter.js';
 
-// ─── 开关（约束7） — 默认关闭，环境变量开启
 const STRUCTURED_ENABLED = process.env['ROLEPLAY_STRUCTURED_ENABLED'] === 'true';
-console.log(`[RoleplayDomain] 四层结构化装配: ${STRUCTURED_ENABLED ? '已开启' : '已关闭（旧逻辑）'}`);
 
-// ─── 模块级状态 ───
-let _cachedRoleplay: string | null = null;
-let _activeSessionId: string | null = null;
-let _seqCounter = 0;
+interface DomainState {
+  roleplay: string | null;
+  sessionId: string | null;
+  turnCounter: number;
+}
+
+let _state: DomainState = { roleplay: null, sessionId: null, turnCounter: 0 };
 
 export function getDomainStatus() {
-  return { roleplay: _cachedRoleplay, structured: STRUCTURED_ENABLED };
+  return { roleplay: _state.roleplay, structured: STRUCTURED_ENABLED, turns: _state.turnCounter };
 }
+
 export function clearCache(): void {
-  _cachedRoleplay = null;
-  _activeSessionId = null;
-  _seqCounter = 0;
+  _state = { roleplay: null, sessionId: null, turnCounter: 0 };
   clearSessionCache();
 }
-export function getSessionId(): string | null { return _activeSessionId; }
 
 /**
  * 运行角色扮演管线
+ * 返回装配后的 knowledgeBaseText（以【角色扮演】开头）
  */
 export async function runRoleplayPipeline(
   ctx: DomainContext,
@@ -48,55 +46,51 @@ export async function runRoleplayPipeline(
   dna: any,
 ): Promise<string> {
   const roleplay = ctx.currentRoleplay;
-  _cachedRoleplay = roleplay;
-  if (!_activeSessionId) _activeSessionId = generateRPId();
-  _seqCounter++;
+  if (!roleplay) return '';
 
-  updateTempProfile(roleplay, message, '', _seqCounter);
+  _state.roleplay = roleplay;
+  _state.turnCounter++;
 
-  // 🔴 开关（约束7）：关闭时回退旧逻辑
+  // 🔴 开关关闭时回退
   if (!STRUCTURED_ENABLED) {
-    return buildRoleplayRules(roleplay, '');
+    return `【角色扮演】你是${roleplay}。用${roleplay}的口吻回复。`;
   }
 
-  // ═══ 七路采集 ═══
-  const data: FourLayerData = await collectData(
+  const _t0 = Date.now();
+
+  // ═══ 七路采集 → 四层装配 ═══
+  const data: FourLayerData = await collectFourLayerData(
     ctx, message, roleplay, ctx.characterClass as CharacterClass, ctx.currentRPBranch as any,
   );
 
-  // ═══ 会话缓存（约束2） ═══
-  if (!hasLayer1()) {
-    initSessionCache(roleplay);
-  }
-  if (!hasLayer1() && data.layer1.identity) {
-    setLayer1(data.layer1.identity);
-    reportProbe('RP-H02', 1);
-  }
-  if (!hasLayer2() && data.layer2.relations) {
-    setLayer2(data.layer2.relations);
-    reportProbe('RP-H03', 1);
-  }
+  // ═══ 就绪门（修复4：传入解析实体，检测未知亲属） ═══
+  const queryEntities = [...data.parsedEntities, ...data.parsedKinshipTerms, ...(message.match(/[一-龥]{2,4}/g) || [])];
+  const readiness = checkReadiness(data, queryEntities);
 
-  reportProbe('RP-H04', data.layer3.goldMemories.length + data.layer3.diamondMemories.length);
-  reportProbe('RP-H05', data.layer4.kbEntries.length);
-
-  // ═══ 四层装配 ═══
-  const _t0 = Date.now();
+  // ═══ 提示词装配（修复4：就绪门约束注入） ═══
   const knowledgeBaseText = assemblePrompt({
     roleplay,
-    portrait: data.layer1.identity || `你是${roleplay}`,
     data,
+    // readiness removed from AssembleInput in v4.0
+
     styleInstruction: ctx.rpParamsSnapshot?.buildStyleInstruction?.(roleplay) || '',
   });
 
-  // 探针：装配总耗时
-  reportProbe('RP-H01', Date.now() - _t0);
+  // ═══ 探针上报 ═══
+  const _t1 = Date.now();
+  reportAssembly(_t1 - _t0, {
+    layer1: data.layer1.identityText.length,
+    layer2: data.layer2.relationText.length,
+    layer3: data.layer3.memoryText.length,
+    layer4: data.layer4.knowledgeText.length,
+  });
+  reportGrowth(_state.turnCounter);
 
   return knowledgeBaseText;
 }
 
 /**
- * 生成后处理：记忆同步（供 chat.ts 在 LLM 回复后调用）
+ * 生成后校验（供 chat.ts 在 LLM 回复后调用）
  */
 export async function afterGenerate(
   ctx: DomainContext,
@@ -105,16 +99,27 @@ export async function afterGenerate(
   storage: any,
 ): Promise<void> {
   const roleplay = ctx.currentRoleplay;
-  if (!roleplay || !_activeSessionId) return;
+  if (!roleplay || !STRUCTURED_ENABLED) return;
+
+  // 重新采集数据供校验（首轮已验证的Layer1+Layer2从缓存读取）
   try {
-    const input: RPWriteInput = {
-      roleplayId: _activeSessionId,
-      roleplayChar: roleplay,
-      seqPos: _seqCounter * 2,
-      message, reply,
-    };
-    await syncRPConversation(storage, input);
-  } catch (_) {}
-  updateTempProfile(roleplay, message, reply, _seqCounter);
-  reportProbe('RP-H09', _seqCounter);
+    const data = await collectFourLayerData(
+      ctx, message, roleplay, ctx.characterClass as CharacterClass, ctx.currentRPBranch as any,
+    );
+
+    const validation = validateReply(reply, data, roleplay);
+
+    // 探针上报
+    if (validation.severity !== 'pass') {
+      for (const issue of validation.issues) {
+        if (issue.startsWith('[ERR]')) reportValidation('identity', false, issue);
+        else if (issue.includes('数字') || issue.includes('事实')) reportValidation('fact', false, issue);
+        else reportValidation('boundary', false, issue);
+      }
+    } else {
+      reportValidation('identity', true);
+      reportValidation('fact', true);
+      reportValidation('boundary', true);
+    }
+  } catch { /* 校验不阻塞回复 */ }
 }

@@ -47,6 +47,8 @@ export interface StrategyConfig {
   params: {
     tone: string;
     emotion_color?: string;
+    /** P1-2: 由 M3 感知维度计算的生成温度 */
+    temperature?: number;
     max_length: number;
     include_entity: string[];
     include_history: boolean;
@@ -72,6 +74,8 @@ export interface LLMProvider {
     currentTime?: string;
     /** 用户本轮原始输入（未经过 M1-M4 管线处理，用于精确关键词匹配） */
     userMessage?: string;
+    /** P0: 角色路由结果（由 M5Orchestrator 预先计算，避免耦合在 LLM Provider 内部） */
+    role?: import('../../app/role/RoleClassifier.js').RoleType;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }>;
 
   /** 切换角色 (可选实现) */

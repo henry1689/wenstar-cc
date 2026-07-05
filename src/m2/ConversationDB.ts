@@ -120,12 +120,14 @@ export class ConversationDB {
     const timestamp = new Date().toISOString();
     const entityNames = options?.entityNames?.join(',') || '';
     const perceptionSummary = options?.perception ? JSON.stringify(options.perception) : '';
+    // is_summary 与 is_compacted 同步写入（过渡兼容，后续统一为 is_summary）
+    const compactVal = options?.isCompacted ?? 0;
     this.db.run(
-      `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, dialog_group_id, dialog_round, is_test, is_compacted, roleplay_char)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, dialog_group_id, dialog_round, is_test, is_compacted, is_summary, roleplay_char)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [role, content, timestamp, seqPos, options?.topic || '', entityNames, perceptionSummary,
        options?.calciumScore || 0, options?.dnaRootId || null, options?.dialogGroupId || null,
-       options?.dialogRound ?? null, options?.isTest ?? 0, options?.isCompacted ?? 0,
+       options?.dialogRound ?? null, options?.isTest ?? 0, compactVal, compactVal,
        options?.roleplayChar || null],
     );
     if (!this.sharedMode) this.flush();

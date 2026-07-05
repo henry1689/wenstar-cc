@@ -65,18 +65,28 @@ export async function collectData(
 
   // ── 装配四层数据 ──
 
-  // Layer1: 核心身份
-  const age = fgProfile?.age
-    ? `${roleplay}今年${fgProfile.age}岁。`
-    : null;
+  // Layer1: 核心身份 — 🔴 从FG/KB/历史多源回填年龄
+  const ageFromProfile = fgProfile?.age ? `你今年${fgProfile.age}岁。` : null;
+  const ageFromKB = extractAgeFromKB(kbHits, roleplay);
+  const ageFromHistory = extractAgeFromHistory(history, roleplay);
+  const ageText = ageFromProfile ?? ageFromKB ?? ageFromHistory;
   const identityParts: string[] = [];
   if (fgProfile?.description) identityParts.push(fgProfile.description);
   if (fgProfile?.occupation) identityParts.push(`职业：${fgProfile.occupation}`);
   if (fgProfile?.traits?.length) identityParts.push(`性格：${fgProfile.traits.join('、')}`);
+
+  // 如果FG没有画像但有KB资料，用KB回填
+  if (identityParts.length === 0 && kbHits.length > 0) {
+    const kbId = extractIdentityFromKB(kbHits, roleplay);
+    if (kbId) identityParts.push(kbId);
+  }
+
   const identity = identityParts.length > 0 ? identityParts.join('\n') : `你是${roleplay}`;
-  const ageGuard = age
-    ? `【年龄】${age}`
-    : '【年龄】你不知道自己多少岁。如果被问，说"你没告诉过我"。';
+
+  // 🔴 年龄锚点（强硬版本 — 不可被LLM忽略）
+  const ageGuard = ageText
+    ? `【年龄事实 — 不可违反】${ageText}\n如果在回复中提到年龄，必须与此一致。`
+    : '【年龄事实 — 不可违反】你不知道自己具体多少岁。如果被问到年龄，必须直接回答"你没告诉过我"或"我不太清楚"。\n🔴 不允许说"已经不年轻了"之类模糊表达。如果不知道就明确说不知道。';
 
   // Layer2: 关系
   const familyBlocks: string[] = [];
@@ -91,15 +101,19 @@ export async function collectData(
       if (fields.length > 0) familyBlocks.push(`【${name}】${fields.join(' | ')}`);
     }
   }
-  const relations = familyBlocks.length > 0 ? familyBlocks.join('\n') : '';
+  // 🔴 关系强化：从家族树中提取所有人名和关系，生成不可覆盖的声明
+  const knownRelations = extractKnownRelations(fgTree, fgFamily, rpBranch, roleplay);
+  const relations = familyBlocks.length > 0
+    ? familyBlocks.join('\n') + (knownRelations ? '\n\n' + knownRelations : '')
+    : (knownRelations || '');
 
-  // Layer3: 记忆（历史+金库+黑钻）
-  const allHistory = history.slice(-40);
+  // Layer3: 记忆（历史10轮+金库+黑钻）
+  const allHistory = history.slice(-10);
   const goldMemories: string[] = []; // 金库通过 ctx.storage 在主流程中已做
   const diamondList = diamondMemories.length > 0 ? ['【珍藏记忆】' + diamondMemories.join('\n')] : [];
 
-  // Layer4: 知识
-  const kbList = kbHits.slice(0, 8);
+  // Layer4: 知识（限2条）
+  const kbList = kbHits.slice(0, 2);
 
   return {
     layer1: { identity, ageGuard },
@@ -160,9 +174,9 @@ async function collectKB(
     if (seen.has(name)) return;
     seen.add(name);
     try {
-      const hits = await ctx.knowledgeBase.search(name, 2);
+      const hits = await ctx.knowledgeBase.search(name, 1);
       for (const h of hits) {
-        const text = `\u{1f4c4} ${h.title}\n${(h.content || '').substring(0, 1500)}`;
+        const text = `\u{1f4c4} ${h.title}\n${(h.content || '').substring(0, 300)}`;
         if (!results.includes(text)) results.push(text);
       }
     } catch (_) {}
@@ -185,8 +199,8 @@ async function collectKB(
 async function loadHistory(ctx: DomainContext, roleplay: string): Promise<string[]> {
   if (!ctx.conversationDB?.searchByRoleplay) return [];
   try {
-    const rows = ctx.conversationDB.searchByRoleplay(roleplay, 20);
-    return rows?.map((r: any) => `${r.role === 'user' ? '👤' : '💬'} ${r.content}`) ?? [];
+    const rows = ctx.conversationDB.searchByRoleplay(roleplay, 10);
+    return rows?.map((r: any) => `${r.role === 'user' ? '👤' : '💬'} ${(r.content || '').substring(0, 200)}`) ?? [];
   } catch (_) { return []; }
 }
 
@@ -246,4 +260,86 @@ async function resolveEntities(
   }
 
   return { entities, kinshipTerms, pronounTarget };
+}
+
+// ── 多源年龄回填 ──
+
+/** 从KB条目中提取角色的年龄 */
+function extractAgeFromKB(kbHits: string[], roleplay: string): string | null {
+  const agePattern = new RegExp(`${roleplay}[^。]*?(\\d{1,2})岁`);
+  for (const entry of kbHits) {
+    const m = entry.match(agePattern);
+    if (m) return `你今年${m[1]}岁。`;
+  }
+  // 有时KB标题包含年龄但不含角色名在同一句
+  const numPattern = /(\d{1,2})岁/;
+  for (const entry of kbHits) {
+    if (entry.includes(roleplay) || entry.includes('诗韵') || entry.includes('诗雨')) {
+      const m = entry.match(numPattern);
+      if (m) return `你今年${m[1]}岁。`;
+    }
+  }
+  return null;
+}
+
+/** 从对话历史中提取角色的年龄 */
+function extractAgeFromHistory(history: string[], roleplay: string): string | null {
+  const agePattern = new RegExp(`${roleplay}[^。]*?(\\d{1,2})岁`);
+  for (const entry of history.slice(-10)) {
+    const m = entry.match(agePattern);
+    if (m) return `你今年${m[1]}岁。`;
+  }
+  return null;
+}
+
+/** 从KB中提取角色身份描述（当FG画像缺失时） */
+function extractIdentityFromKB(kbHits: string[], roleplay: string): string | null {
+  for (const entry of kbHits) {
+    if (entry.includes(roleplay)) {
+      const lines: string[] = [];
+      // 取前200字符中包含的描述信息
+      const header = entry.substring(0, 300);
+      const parts: string[] = [];
+      // 提取身高、年龄、特征等
+      const heightM = header.match(/身高[\d.]+米/);
+      if (heightM) parts.push(heightM[0]);
+      const ageM = header.match(/(\d{1,2})岁[^。]*?少女|(\d{1,2})岁的/);
+      if (ageM) parts.push(ageM[0]);
+      const descM = header.match(/[，。](.{5,30}女子|.{5,30}女孩|.{5,30}样子)/);
+      if (descM) parts.push(descM[1]);
+      if (parts.length > 0) return parts.join('，');
+    }
+    // FG档案范式
+    if (entry.includes('FG') && entry.includes('档案') && (entry.includes(roleplay) || entry.includes('诗韵'))) {
+      return null; // FG范式模板不包含身份描述
+    }
+  }
+  return null;
+}
+
+/** 从家族树和profiles中提取所有已知关系，生成不容LLM覆盖的强硬声明 */
+function extractKnownRelations(
+  fgTree: string,
+  fgFamily: Record<string, any>,
+  rpBranch: FamilyGraphRoleBranch | null,
+  roleplay: string,
+): string {
+  const known: string[] = [];
+
+  // 从familyProfiles中提取（relation字段来自 profile.relation_to_user）
+  if (fgFamily && typeof fgFamily === 'object') {
+    for (const [name, pf] of Object.entries(fgFamily) as [string, any][]) {
+      const rel = pf.relation || pf.relation_to_user;
+      if (rel) {
+        // 兄弟姐妹 → 推断具体称呼
+        const label = rel === '兄弟姐妹'
+          ? (name.includes('姐') || name.includes('妹') || name.endsWith('瑜') || name.endsWith('雨') ? '姐妹' : '兄弟')
+          : rel;
+        known.push(`⬆ ${name}是你的${label}`);
+      }
+    }
+  }
+
+  if (known.length === 0) return '';
+  return '【已知亲属关系 — 必须遵守】\n' + known.join('\n') + '\n🔴 以上关系来自家族图谱，是客观事实。不得编造或更改这些关系。';
 }

@@ -1,22 +1,16 @@
-// Ref: ARCH.md §3.1 L1 分支路由码
-// Ref: ARCH.md §3.2 写入正向流 — L1 seq_pos 由时空情景区原子性分配
-
-import type { L1SequenceResult } from './types/dna.js';
-
 /**
- * L1 序列生成器
+ * L1Sequencer — 分支路由码生成器
  *
- * 生成当前会话内的临时 branch_id 和 seq_pos。
- * branch_id 格式：evt_YYYYMMDD_NNN
- * seq_pos 为会话内严格单调递增序列。
+ * v2: 计数器统一委托 GlobalSequenceCounter，移除实例级自增逻辑。
+ * seq_pos 为会话内严格单调递增序列（由调用方在 resetSession 时维护）。
  *
- * M2 会接管真正的原子性序列分配和持久化。
- * 当前实现使用内存计数器，每次创建新实例会重置。
- *
- * Ref: ARCH.md §3.1 分支路由码规范
+ * branch_id 格式：evt_YYYYMMDD_NNN（保持兼容）
+ * seq_pos 由调用方每轮对话传入。
  */
+import type { L1SequenceResult } from './types/dna.js';
+import { GlobalSequenceCounter } from './GlobalSequenceCounter.js';
+
 export class L1Sequencer {
-  private counter = 0;
   private currentDate: string;
 
   constructor() {
@@ -25,21 +19,17 @@ export class L1Sequencer {
 
   /**
    * 生成下一个序列值
-   * 每次调用返回严格递增的 (branch_id, seq_pos)
-   * 跨日期时 branch_id 的日期部分自动更新，counter 从0重新开始
+   * counter 来自 GlobalSequenceCounter（全局唯一，持久化，跨日期自动重置）
+   * seq_pos 严格按当日消息到达顺序递增
    */
   next(): L1SequenceResult {
     const today = this.getDateString();
-
-    // 如果日期变更，重置 counter
     if (today !== this.currentDate) {
       this.currentDate = today;
-      this.counter = 0;
     }
 
-    this.counter++;
-    const seq = this.counter;
-
+    // 全局计数器：按日递增，跨零点自动重置，重启不丢失
+    const seq = GlobalSequenceCounter.getInstance().next();
     const branchId = `evt_${today}_${String(seq).padStart(3, '0')}`;
 
     return {
@@ -49,18 +39,15 @@ export class L1Sequencer {
   }
 
   /**
-   * 重置序列（用于测试或新会话）
+   * 重置序列（调用前请确认是否真正需要）
+   * 注意：不会重置全局计数器（全局计数器仅跨零点重置）
    */
   reset(): void {
-    this.counter = 0;
     this.currentDate = this.getDateString();
   }
 
-  /**
-   * 获取当前计数（仅用于测试/调试）
-   */
   getCurrentCount(): number {
-    return this.counter;
+    return GlobalSequenceCounter.getInstance().current();
   }
 
   private getDateString(): string {

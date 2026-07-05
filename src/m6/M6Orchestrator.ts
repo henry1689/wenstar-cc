@@ -8,6 +8,7 @@ import { BoundaryManager } from './BoundaryManager.js';
 import { NarrativeBuilder } from './NarrativeBuilder.js';
 import type { EvolutionDecision, M6SelfModel, SelfModelTraits, Preference, Boundary, NarrativeLayer, CoreIdentityAnchors } from './types/index.js';
 import type { M8Engine } from '../m8/M8Engine.js';
+import { M6_CONFIG } from '../config/M6Config.js';
 
 export interface M6InputSignal {
   dimension: string;
@@ -85,7 +86,9 @@ export class M6Orchestrator {
           }
         }
       } catch (err) {
-        console.warn('[M6] checkConflict 失败:', err);
+        console.warn('[M6] checkConflict 失败，默认软化:', err);
+        // 异常时保守处理：限制演化幅度
+        signal.delta = Math.min(signal.delta, 1);
       }
     }
 
@@ -124,6 +127,29 @@ export class M6Orchestrator {
   maintenance(): void {
     this.prefs.applyDecay();
     this.boundaries.applyDecay();
-    this.evolver.clearBuffer();
+
+    // P1-1: 大五人格均值回归 — 向基线微幅回拉，防止单向封顶僵死
+    const traits = this.manager.getTraits();
+    const baseline = M6_CONFIG.trait.baseline;
+    const rate = M6_CONFIG.trait.regressionRate;
+    let changed = false;
+    for (const key of ['openness', 'conscientiousness', 'extraversion', 'agreeableness', 'neuroticism'] as const) {
+      const baselineVal = baseline[key];
+      const currentVal = traits[key];
+      if (currentVal === baselineVal) continue;
+      if (currentVal > baselineVal) {
+        traits[key] = Math.max(baselineVal, currentVal - rate);
+        changed = true;
+      } else {
+        traits[key] = Math.min(baselineVal, currentVal + rate);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.manager.updateTraits(traits);
+      console.log('[M6] 人格均值回归: 小幅回拉至基线');
+    }
+
+    // ⚠️ 不清空演化缓冲区：让信号自然累积到触发阈值（≥5），自动演化才真正生效
   }
 }

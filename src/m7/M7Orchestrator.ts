@@ -128,6 +128,24 @@ export class M7Orchestrator {
     return this.queue.getByStatus(status);
   }
 
+  /**
+   * P0-1: 对话触发增量归纳（由 post-process.ts 每轮高钙消息调用）
+   * 将高钙记忆推入梦境队列，下次空闲批处理时内化
+   */
+  async triggerInduction(dna: any, decision: any): Promise<void> {
+    const rawInput = dna.raw_input || '';
+    const calcium = decision.enhanced?.calcium_score || 0;
+    if (!rawInput || calcium < 2) return;
+
+    this.queue.add({
+      source: 'dialog_trigger',
+      content: rawInput.substring(0, 200),
+      affected_traits: [],
+      related_memory_id: dna.branch_id || undefined,
+    });
+    console.log(`[M7] triggerInduction: 推入梦境队列 (calcium=${calcium.toFixed(2)})`);
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // 梦境深化四模块（新增，空闲时执行）
   // ═══════════════════════════════════════════════════════════════

@@ -8,6 +8,8 @@ export interface MemorySummary {
     time: string;
     summary: string;
     calcium_level: number;
+    /** P0-1: DNA 根码，可用于反向溯源 */
+    dna_root_id?: string;
   }>;
   frequentEntities: Array<{ name: string; type: string; mentionCount: number }>;
   timeSpan: { earliest: string; latest: string };
@@ -31,5 +33,9 @@ export interface M4Context {
     total_candidates: number;
     avg_match_score: number;
     strategies_used: string[];
+    /** P0-2: Reranker 最高分 */
+    rerank_top_score?: number;
+    /** P0-3: 是否经过查询分解 */
+    has_decomposed?: boolean;
   };
 }

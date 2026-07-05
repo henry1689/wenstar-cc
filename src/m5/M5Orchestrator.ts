@@ -12,12 +12,16 @@ import { buildContextPrompt, updateAfterReply, resetContext } from './ContextMem
 import { extractAnchor, buildAnchorConstraint, validateAgainstAnchor, resetAnchor } from './SceneAnchor.js';
 import { resetMockSession } from './MockLLMProvider.js';
 import { getBufferPhrase, type BufferContext } from './BufferPhrases.js';
+import { classify, type RoleType, type RoleDecision } from '../app/role/RoleClassifier.js';
+import { evaluateTransition, createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
 
 export class M5Orchestrator {
   private assembler: CognitionAssembler;
   private selector: StrategySelector;
   private llm: LLMProvider;
   private calibrator: HumanisticCalibrator;
+  private _transitionState: TransitionState = createInitialState();
+  private _currentRole: RoleType = 'secretary';
 
   constructor(llm?: LLMProvider) {
     this.assembler = new CognitionAssembler();
@@ -34,6 +38,12 @@ export class M5Orchestrator {
    * @param userMessage 用户当前消息（用于场景记忆更新）
    */
   async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string): Promise<string> {
+    // P0-1: 提取最近一条 timeline 的 dna_root_id 完成全链路闭环
+    const dnaRootId = m4ctx.memory_summary.timeline
+      .slice(-1)
+      .map(t => (t as any).dna_root_id)
+      .filter(Boolean)[0] as string | undefined;
+
     // Step 1: 认知组装（纯函数）
     const cognition = this.assembler.assemble(m4ctx);
 
@@ -54,12 +64,29 @@ export class M5Orchestrator {
     // P1-3: 记录开始时间，用于判断是否需要过渡话术
     const _startTime = Date.now();
 
+    // === P0: 角色路由（从 LLM Provider 解耦到编排器） ===
+    const _rpInput = userMessage || cognition.current.raw_input || '';
+    try {
+      const _s = cognition.current.perception_snapshot;
+      const _rd = classify({
+        message: _rpInput,
+        perception: { ..._s, humor: 0, factual: 0, logical: 0, certainty: 0, abstract: 0, temporal_focus: 0, self_ref: 0, power_diff: 0, dependency: 0, moral_judgment: 0, etiquette: 0, belonging: 0 },
+        entities: (cognition.current.key_entities || []).map((n: string) => ({ name: n, type: 'person' as const, allele: n, phenotype: 'neutral' as const, knowledge_type: 'private' as const })),
+        previousRole: this._currentRole,
+        consecutiveIntimateCount: this._transitionState.consecutiveIntimate,
+      });
+      const _t = evaluateTransition(this._transitionState, _rd, _rpInput);
+      this._transitionState = _t.state;
+      this._currentRole = _t.newRole;
+      console.log('[M5Role] ' + this._currentRole + ' (' + _rd.rule + ')');
+    } catch (_re) {}
+
     // Step 3: LLM 受控生成（唯一LLM调用点）
     let draft: string;
     let usedMockFallback = false;
     try {
       const currentTime = new Date().toISOString();
-      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage });
+      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole });
       draft = result.text;
       // 检查是否太短或为 fallback 回复（DeepSeek API 调用失败时的降级标记）
       if (!draft || draft.length <= 6) {

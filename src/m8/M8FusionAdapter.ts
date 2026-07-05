@@ -7,6 +7,7 @@
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { EmotionalMemoryRecord } from '../m2/types/index.js';
 import type { M8Engine } from './M8Engine.js';
+import type { Perception24D } from '../m3/types/perception.js';
 import type {
   WriteParams, WriteResponse, ClueSearchParams, ClueSearchResult,
   ClueSearchResultEntry, ConflictCheckParams, ConflictCheckResult,
@@ -91,6 +92,37 @@ export class M8FusionAdapter implements M8Engine {
 
   async writeBatch(params: WriteParams[]): Promise<WriteResponse[]> {
     return Promise.all(params.map(p => this.write(p)));
+  }
+
+  /**
+   * P0-2: 年轮写入周期（由 post-process 每轮调用）
+   * 将对话周期数据写入年轮（低钙化时不写入，避免噪音）
+   */
+  async writeCycle(params: {
+    dna_root_id?: string;
+    input?: string;
+    output?: string;
+    perception?: any;
+    calcium?: number;
+    emotion?: string;
+  }): Promise<WriteResponse | null> {
+    // 低钙化对话不写入年轮（减少噪音）
+    const calcium = params.calcium ?? 0;
+    if (calcium < 0.3 || !params.perception) return null;
+
+    const perception24D = params.perception as Perception24D;
+    const tag = params.emotion || '日常';
+    const input = params.input || '';
+
+    return this.write({
+      sensory_anchor: input.substring(0, 60),
+      perception: perception24D,
+      emotional_valence: tag,
+      narrative_tag: tag,
+      raw_input: input.substring(0, 500),
+      calcium_at_event: calcium,
+      write_source: 'async',
+    });
   }
 
   // ── 检索：委托给情感检索 ──

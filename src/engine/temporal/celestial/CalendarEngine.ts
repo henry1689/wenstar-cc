@@ -9,8 +9,9 @@
  * 所有计算基于 TimeKeeper 输出的标准公历日期，单源可信。
  */
 import type { IStorageProvider } from '../../types.js';
-import type { SolarTerm, StemBranch, CelestialConfig } from './celestial-types.js';
-import { SOLAR_TERM_LABELS } from './celestial-types.js';
+import type { SolarTerm, StemBranch, CelestialConfig } from '../global-types.js';
+import { SOLAR_TERM_LABELS } from '../global-types.js';
+import { DailyCache } from './DailyCache.js';
 import { TimeKeeper } from '../base/TimeKeeper.js';
 
 const STORAGE_KEY = 'celestial_calendar';
@@ -90,6 +91,7 @@ export class CalendarEngine {
   private storage: IStorageProvider;
   private timeKeeper: TimeKeeper;
   private region: string;
+  private cache = new DailyCache();
 
   constructor(config: CelestialConfig, timeKeeper: TimeKeeper) {
     this.storage = config.storage;
@@ -165,10 +167,12 @@ export class CalendarEngine {
     };
   }
 
-  /** 获取当前农历信息 */
+  /** 获取当前农历信息（带当日缓存） */
   getCurrentLunar(): ReturnType<CalendarEngine['solarToLunar']> {
-    const now = this.timeKeeper.now();
-    return this.solarToLunar(now.getFullYear(), now.getMonth() + 1, now.getDate());
+    return this.cache.getOrSet('currentLunar', () => {
+      const now = this.timeKeeper.now();
+      return this.solarToLunar(now.getFullYear(), now.getMonth() + 1, now.getDate());
+    }, this.timeKeeper.now());
   }
 
   // ═══════════════════════════════════════════
@@ -176,6 +180,12 @@ export class CalendarEngine {
   // ═══════════════════════════════════════════
 
   getCurrentTerm(): { current: SolarTerm | null; currentLabel: string; next: SolarTerm | null; nextLabel: string; nextDate: string } {
+    return this.cache.getOrSet('currentTerm', () => {
+      return this._calcCurrentTerm();
+    }, this.timeKeeper.now());
+  }
+
+  private _calcCurrentTerm(): { current: SolarTerm | null; currentLabel: string; next: SolarTerm | null; nextLabel: string; nextDate: string } {
     const now = this.timeKeeper.now();
     const y = now.getFullYear();
     const m = now.getMonth() + 1;

@@ -51,6 +51,17 @@ export interface EmotionalMemoryRecord {
   entity_genes: EntityGene[];
   leaf_zone: string;
 
+  /** P0-1: 家族图谱实体名列表（逗号分隔，用于多维检索） */
+  fg_entity_names?: string;
+  /** P0-1: 时空标签 — 时段 (dawn/morning/midday/afternoon/evening/night/midnight) */
+  time_period?: string;
+  /** P0-1: 时空标签 — 季节 (spring/summer/autumn/winter) */
+  season?: string;
+  /** P0-1: 时空标签 — 节气 */
+  lunar_term?: string;
+  /** P1-4: 多租户命名空间，默认 'default' */
+  namespace?: string;
+
   /** ── VAD 谱曲（情感谱曲引擎产出，歌单完整性的曲谱部分）── */
   /** ── M3 情绪标签（预计算，加速检索）── */
   primary_emotion?: string;

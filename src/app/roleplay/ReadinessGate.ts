@@ -1,50 +1,69 @@
 /**
- * ReadinessGate — 数据覆盖报告
+ * ReadinessGate — 全局就绪门
  *
- * 🔴 铁律：不做任何条件判断，不猜用户意图，不注入反编造。
- *   只做一件事：汇总所有已知/未知的数据字段。
- *   最终提示词中「已知信息」和「未知边界」永远同时存在，
- *   不需要 ReadinessGate 来决定"要不要注入反编造"。
+ * 🔴 铁律：
+ *   1. 所有字段共用一套逻辑，无年龄/亲属等个案分支
+ *   2. 基于四层数据的 knownFields 自动生成约束话术
+ *   3. 不做条件判断，只做数据汇总
  *
- * 职责变化：
- *   之前 → 判断"能不能回答" → 每个新场景加一个 if
- *   现在 → 报告"有什么、没什么" → 零条件，PromptAssembler 无条件使用
+ * 修复4：新增查询实体存在校验
+ *   如果用户询问的人物不在已知亲属/人物列表中，统一输出约束
  */
-import type { CollectedData, DataCoverageReport } from './types.js';
+import type { FourLayerData, ReadinessReport } from './types.js';
 
-/**
- * 生成数据覆盖报告
- * 🔴 没有条件分支。没有意图分类。只有数据汇总。
- */
-export function coverageReport(data: CollectedData): DataCoverageReport {
-  const entities = data.context.entities;
-  const familyMembers = data.fg.familyMembers;
+export function checkReadiness(
+  data: FourLayerData,
+  queryEntities?: string[],
+): ReadinessReport {
+  const knownFields: Record<string, boolean> = {
+    ...data.layer1.knownFields,
+  };
 
-  // 排除亲属称呼后的真实实体
-  const realEntities = entities.filter(e =>
-    !/姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷|老婆|老公|阿姨|叔叔/.test(e)
-  );
+  // Layer2 关系层贡献
+  if (data.layer2.relatives.length > 0) {
+    knownFields.hasRelatives = true;
+    for (const rel of data.layer2.relatives) {
+      if (rel.relation || rel.relation_to_user) knownFields[`relation_${rel.relation || rel.relation_to_user}`] = true;
+    }
+  }
 
-  // 这些实体中有哪些在 FG/KB 中真正有数据
-  const knownPersons = realEntities.filter(e =>
-    familyMembers.includes(e) ||
-    data.kb.some(k => k.title.includes(e) || k.content.includes(e)) ||
-    data.fg.treeText.includes(e)
-  );
+  // Layer3 记忆层贡献
+  knownFields.hasMemory = data.layer3.memoryText.length > 0;
 
-  // 汇总缺失字段
+  // Layer4 知识层贡献
+  knownFields.hasKnowledge = data.layer4.knowledgeText.length > 0;
+
+  // 🔴 修复4：统计用户询问的实体是否在已知人物列表中
+  const allKnownNames = collectKnownNames(data);
+  const unknownEntities: string[] = [];
+  if (queryEntities && queryEntities.length > 0) {
+    for (const e of queryEntities) {
+      if (!allKnownNames.has(e) && !/姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|奶奶|爷爷|老婆|老公|阿姨|叔叔/.test(e)) {
+        unknownEntities.push(e);
+      }
+    }
+  }
+
+  // 全局缺失字段
   const missingFields: string[] = [];
-  if (!data.knownFields.hasAge) missingFields.push('年龄');
-  if (!data.knownFields.hasAppearance) missingFields.push('外貌');
-  if (!data.knownFields.hasOccupation) missingFields.push('职业');
-  if (!data.knownFields.hasPersonality) missingFields.push('性格');
-  if (!data.knownFields.hasRelations) missingFields.push('家族关系');
+  const expectFields = ['age', 'occupation', 'appearance', 'personality', 'birth', 'hasRelatives'];
+  for (const f of expectFields) {
+    if (!knownFields[f]) missingFields.push(f);
+  }
 
   return {
-    knownFields: { ...data.knownFields },
+    knownFields,
     missingFields,
-    knownPersons,
-    unknownEntities: realEntities.filter(e => !knownPersons.includes(e)),
-    hasAnyData: Object.values(data.knownFields).some(v => v === true),
+    hasAnyData: Object.values(knownFields).some(v => v === true),
   };
+}
+
+/** 收集四层数据中所有已知人名 */
+function collectKnownNames(data: FourLayerData): Set<string> {
+  const names = new Set<string>();
+  if (data.layer1.profile) names.add(data.layer1.profile.name);
+  for (const rel of data.layer2.relatives) {
+    names.add(rel.name);
+  }
+  return names;
 }

@@ -9,26 +9,32 @@
  * - 寒暑时令区分（暮春/盛夏/晚秋/深冬）
  * - 昼夜长短变化趋势
  */
-import type { SunCycle, Season, SubSeason, CelestialConfig } from './celestial-types.js';
-import { SEASON_LABELS, SUB_SEASON_LABELS } from './celestial-types.js';
+import type { SunCycle, Season, SubSeason, CelestialConfig } from '../global-types.js';
+import { SEASON_LABELS, SUB_SEASON_LABELS } from '../global-types.js';
+import { DEFAULT_LATITUDE } from '../TemporalConfig.js';
+import { DailyCache } from './DailyCache.js';
 import { TimeKeeper } from '../base/TimeKeeper.js';
 
 export class NaturalCycle {
   private timeKeeper: TimeKeeper;
-  /** 纬度（正=北纬），默认深圳 22.5° */
   private latitude: number;
+  private cache = new DailyCache();
 
   constructor(config: CelestialConfig, timeKeeper: TimeKeeper) {
     this.timeKeeper = timeKeeper;
-    this.latitude = config.region === 'shexian' ? 29.8 : 22.5;
+    this.latitude = config.region === 'shexian' ? 29.8 : DEFAULT_LATITUDE;
   }
 
   async init(): Promise<void> {}
   reset(): void {}
   destroy(): void {}
 
-  /** 计算当日日出日落 */
+  /** 计算当日日出日落（带当日缓存） */
   getSunCycle(): SunCycle {
+    return this.cache.getOrSet('sunCycle', () => this._calcSunCycle(), this.timeKeeper.now());
+  }
+
+  private _calcSunCycle(): SunCycle {
     const now = this.timeKeeper.now();
     const dayOfYear = this.dayOfYear(now);
     // 日出日落角近似计算
@@ -56,8 +62,12 @@ export class NaturalCycle {
     return 'winter';
   }
 
-  /** 获取当前细分季节 */
+  /** 获取当前细分季节（带当日缓存） */
   getSubSeason(): SubSeason {
+    return this.cache.getOrSet('subSeason', () => this._calcSubSeason(), this.timeKeeper.now());
+  }
+
+  private _calcSubSeason(): SubSeason {
     const month = this.timeKeeper.now().getMonth() + 1;
     const day = this.timeKeeper.now().getDate();
 

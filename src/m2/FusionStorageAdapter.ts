@@ -33,6 +33,8 @@ export class FusionStorageAdapter {
   private _conversationDB: any = null;
   /** P10: JSON Zone 备份开关（默认开启保持兼容，生产环境可关闭减少IO） */
   private enableJsonZone: boolean;
+  /** 当前时空上下文（由 chat.ts 每轮注入） */
+  private temporalContext: { period?: string; season?: string; lunarTerm?: string } = {};
 
   constructor(dataDir?: string, options?: { enableJsonZone?: boolean }) {
     this.dataDir = dataDir ?? join(PROJECT_ROOT, 'data', 'webui');
@@ -69,14 +71,27 @@ export class FusionStorageAdapter {
     const calcium = computeCalcium(perception);
     const now = new Date().toISOString();
     const strength = initialStrength(calcium.score);
+    // P0-4: 钙化分边界强制校验
+    const clampedScore = Math.max(0, Math.min(10, calcium.score));
+
+    // P0-1: 提取FG实体名列表
+    let fgNames: string | undefined;
+    if (this.familyGraph) {
+      try {
+        const personNames = (dna.entity_genes || [])
+          .filter((g: any) => g.type === 'person' && g.name !== '我' && g.name.length > 1)
+          .map((g: any) => g.name);
+        if (personNames.length > 0) fgNames = personNames.join(',');
+      } catch { /* FG 不可用时不阻塞写入 */ }
+    }
 
     const record: EmotionalMemoryRecord = {
       id: dna.branch_id,
       seq_pos: pos,
       created_at: now,
-      dna_root_id: (dna as any).dna_root_id,  // 三段关联主键
+      dna_root_id: (dna as any).dna_root_id,
       perception,
-      calcium_score: calcium.score,
+      calcium_score: clampedScore,
       calcium_level: calcium.level,
       raw_input: dna.raw_input,
       locus_path: dna.locus_path,
@@ -91,6 +106,11 @@ export class FusionStorageAdapter {
       strength_updated_at: now,
       is_landmark: false,
       landmarked_at: null,
+      // P0-1: 时空标签（由 chat.ts 每轮通过 setTemporalContext 注入）
+      fg_entity_names: fgNames,
+      time_period: this.temporalContext.period,
+      season: this.temporalContext.season,
+      lunar_term: this.temporalContext.lunarTerm,
     };
 
     // SQLite 写入（主存储）
@@ -322,6 +342,19 @@ export class FusionStorageAdapter {
 
   getFamilyGraph(): any | null {
     return this.familyGraph;
+  }
+
+  /**
+   * P0-1: 由 chat.ts 每轮对话前注入当前时空上下文
+   * 写入 memories 时自动附带 temporal 标签，无需额外计算
+   */
+  setTemporalContext(ctx: { period?: string; season?: string; lunarTerm?: string }): void {
+    this.temporalContext = ctx;
+  }
+
+  /** 清除时空上下文（跨日或会话封存时调用） */
+  clearTemporalContext(): void {
+    this.temporalContext = {};
   }
 
   // ─── SQLite 直通 ───

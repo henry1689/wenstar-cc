@@ -28,6 +28,9 @@ import http from 'node:http';
 import fs, { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
 import { DNAEncoder } from '../m1/DNAEncoder.js';
 import { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import { M3LogicOrchestrator } from '../m3/M3LogicOrchestrator.js';
@@ -762,8 +765,8 @@ async function initPipeline(): Promise<void> {
 
 import { deriveM5Strategy, getRoleplayStatus } from './chat.js';
 import { setEmotionSnapshot, setRPSnapshot } from './chat.js';
-import { EmotionSnapshot } from '../app/roleplay/EmotionSnapshot.js';
-import { RoleParamsSnapshot } from '../app/roleplay/RoleParamsSnapshot.js';
+import { EmotionSnapshot } from '../app/roleplay-legacy/EmotionSnapshot.js';
+import { RoleParamsSnapshot } from '../app/roleplay-legacy/RoleParamsSnapshot.js';
 
 // ════════════════════════════════════════════════════════
 // Chat API
@@ -1007,17 +1010,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
       if (tts && reply && reply.length < 500 && reply.length > 1) {
         try {
-          const ttsRes = await fetch(TTS_URL + '/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: reply }),
-            signal: AbortSignal.timeout(120000),
-          });
-          if (ttsRes.ok) {
-            const ttsData = await ttsRes.json();
-            // TTS 服务器返回相对路径如 /audio/xxx.mp3，文件已存到 data/webui/audio/
-            audio_url = ttsData.url || null;
-            if (audio_url) console.log('[TTS] 生成完成: ' + audio_url);
+          const _fn = 'tts_' + Date.now().toString(36) + '.mp3';
+          const _fp = path.join(DATA_DIR, 'audio', _fn);
+          const _env = { ...process.env, NO_PROXY: '*', no_proxy: '*', HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '' };
+          await execFileAsync('edge-tts', ['--text', reply, '--voice', 'zh-CN-XiaoxiaoNeural', '--write-media', _fp], { timeout: 30000, env: _env });
+          if (existsSync(_fp)) {
+            audio_url = '/audio/' + _fn;
+            console.log('[TTS] 生成完成: ' + _fn);
           }
         } catch (err) { console.warn('[TTS] 生成失败:', err); }
       }
@@ -1242,16 +1241,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         : sentences;
 
       const _slowCount = Math.min(chunks.length, Math.random() > 0.5 ? 2 : 1);
-      // 后台启动 TTS 生成（不阻塞流式输出）
+      // 后台启动 TTS 生成（直接调 edge-tts）
       const _ttsPromise = (async () => {
         try {
-          const ttsRes = await fetch(TTS_URL + '/tts', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: reply.substring(0, 500), speed: 1.0, voice: 'zh-CN-XiaoxiaoNeural' }),
-          });
-          if (ttsRes.ok) {
-            const ttsData = await ttsRes.json();
-            audio_url = ttsData.url || null;
+          const _fn2 = 'tts_' + Date.now().toString(36) + '.mp3';
+          const _fp2 = path.join(DATA_DIR, 'audio', _fn2);
+          const _env2 = { ...process.env, NO_PROXY: '*', no_proxy: '*', HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '' };
+          await execFileAsync('edge-tts', ['--text', reply.substring(0, 300), '--voice', 'zh-CN-XiaoxiaoNeural', '--write-media', _fp2], { timeout: 30000, env: _env2 });
+          if (existsSync(_fp2)) {
+            audio_url = '/audio/' + _fn2;
           }
         } catch (e: any) { console.error('[server] error:', e?.message); }
       })();
@@ -2057,8 +2055,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         m8: {
           total_entries: m8Status.landmarks,
           total_scars: landscape.scars.length,
-          healed_scars: 0,
-          unhealed_scars: landscape.scars.length,
+          healed_scars: landscape.scars.filter((s: any) => s.healed).length,
+          unhealed_scars: landscape.scars.filter((s: any) => !s.healed).length,
           recent_entries: landscape.peaks.slice(0, 5).map(p => ({
             id: p.id,
             sensory_anchor: p.snippet?.substring(0, 20) ?? '',
@@ -2523,6 +2521,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 // ── Hooks 监控看板页面 ──
 async function main(): Promise<void> {
   await initPipeline();
+  mkdirSync(path.join(DATA_DIR, 'audio'), { recursive: true });
 
   // ── AutoRec 引擎启动 ──
   try {
@@ -2624,6 +2623,25 @@ async function main(): Promise<void> {
     }
   } catch (_se) {
     console.warn('[AlignmentGuard] 启动自检失败:', (_se as Error).message);
+  }
+
+  // ─── EntityGraph v2.0: 圈层状态检查 ───
+  try {
+    const _sampleLv = familyGraph.getCircleLevel('徐诗韵');
+    console.log(`  [EntityGraph] 人物圈层已就绪 (示例: 徐诗韵=圈层${_sampleLv}) ✓`);
+  } catch (_eg) {
+    console.warn('[EntityGraph] 圈层检查失败:', (_eg as Error).message);
+  }
+
+  // ─── v3.0: 全局实体拓扑初始化 ───
+  try {
+    const { EntityTopologyManager } = await import('../m4/EntityTopologyManager.js');
+    const _topo = new EntityTopologyManager(storage.getSQLite() as any);
+    await _topo.initialize();
+    const _cnt = storage.getSQLite().queryAll('SELECT COUNT(*) as c FROM entity_topology');
+    console.log(`  [EntityTopology] 已初始化 ✓ (${_cnt?.[0]?.c || 0}条拓扑边)`);
+  } catch (_et) {
+    console.warn('[EntityTopology] 初始化失败:', (_et as Error).message);
   }
 
   // ── 关闭钩子：刷出工作记忆 ──

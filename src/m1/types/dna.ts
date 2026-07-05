@@ -130,7 +130,7 @@ export interface SelfModelV1 {
     persona: string;
     birth_date: string;
   };
-  /** 大五人格简化版，0-1浮点数 */
+  /** 大五人格 — 与 M6 SelfModelTraits 同构，口径统一 */
   traits: {
     openness: number;
     conscientiousness: number;
@@ -163,6 +163,8 @@ export interface TaxonomyTree {
 export interface L0RouteResult {
   locus_path: string;
   taxonomy_version: string;
+  /** 4位L0分类码（如 FAMG、EMOP），用于根码编码 */
+  l0_code: string;
   /** 命中的规则ID，用于审计追溯 */
   rule_id: string;
   /** 是否命中兜底分类 */
