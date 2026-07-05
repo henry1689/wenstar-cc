@@ -1331,6 +1331,19 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
         // ── 多源加载（FG + KB + 历史扮演 + 上下文扫描） ──
         // 🧬 旧多源加载已废弃（结构化管线内使用EntityTopology+MemoryRetriever替代）
+        // 🏗️ P0: 创建FG分支（角色视角家族树）
+        try {
+          if (!_currentRPBranch || _currentRPBranch.rootName !== character) {
+            try { ctx.m4?.setFamilyGraphOverride?.(null); } catch {}
+            const _fg = ctx.m4 ? ctx.m4.getFamilyGraph() : null;
+            if (_fg) {
+              _currentRPBranch = new FamilyGraphRoleBranch(_fg, character);
+              await _currentRPBranch.initialize();
+              try { ctx.m4?.setFamilyGraphOverride?.(_currentRPBranch); } catch {}
+            }
+          }
+        } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
+
         const fgContext = '', kbContext = '', pastContext = '';
         const contextExtract = { mentionCount: 0, relations: [], events: [] } as any;
         // 🧬 首条消息也走四层结构化管线
