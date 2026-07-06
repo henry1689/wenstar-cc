@@ -1240,13 +1240,20 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (nodes.length === 0) return null;
     const node = nodes[0];
     const props: Partial<PersonProfile> = node.properties ? JSON.parse(node.properties) : {};
-    return {
+    const result = {
       name: personName,
       relation_to_user: '',
       last_mentioned: '',
       mention_count: 0,
       ...props,
     } as PersonProfile;
+    // 📜 信息权威铁律 · 等级S: 记录age字段是否有效
+    if (result.age !== undefined && result.age !== null) {
+      console.log('[FG:S] getPersonProfile(' + personName + ') age=' + result.age + ' (SOURCE: nodes.properties)');
+    } else {
+      console.log('[FG:S] getPersonProfile(' + personName + ') age=MISSING');
+    }
+    return result;
   }
 
   /**

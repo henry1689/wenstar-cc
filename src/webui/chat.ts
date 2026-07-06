@@ -47,6 +47,9 @@ import type { M3Decision } from '../m3/types/perception.js';
 
 import type { SelfModelV1 } from '../m1/types/dna.js';
 
+import { EngineContext } from '../engine/EngineContext.js';
+import { ENABLE_TEMPORAL_RULE_ENGINE, worldRuleMode } from '../engine/temporal/TemporalConfig.js';
+
 import { rerank } from '../m4/Reranker.js';
 
 import { decompose, mergeDecomposedResults } from '../m4/QueryDecomposer.js';
@@ -369,6 +372,45 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 	}
 
     const dna = ctx.encoder.encodeSingle(message);
+
+    // ── 时空规则引擎：NLP提取 + 前置校验（违规时设置回复，后续不再走LLM） ──
+    let _ruleEngineBlocked = false;
+    let _ruleEngineReply = '';
+    if (ENABLE_TEMPORAL_RULE_ENGINE) {
+      try {
+        const { NLPEventExtractor } = await import('../engine/temporal/NLPEventExtractor.js');
+        const { TemporalEventArchive } = await import('../engine/temporal/TemporalEventArchive.js');
+        const { recordEventViolation } = await import('../engine/temporal/temporal_event_hook.js');
+        const engineCtx = ctx.storage?.getSQLite?.();
+        const archive = engineCtx ? new TemporalEventArchive(engineCtx) : null;
+
+        const extracted = NLPEventExtractor.extract(message, '鸿艺');
+        if (extracted) {
+          if (extracted.type === 'temporal_event' && archive && worldRuleMode === 'realistic') {
+            const { params } = extracted;
+            if (/怀孕|生孩子|分娩|妊娠|生宝宝/.test(message) || /感冒|发烧|受伤|恢复/.test(message)) {
+              const check = archive.checkEventCompliance(message, params.durationMs);
+              if (!check.valid) {
+                recordEventViolation(ctx.storage?.getSQLite?.(), message, check.reason || '');
+                _ruleEngineBlocked = true;
+                _ruleEngineReply = check.reason || '';
+              }
+            }
+            if (!_ruleEngineBlocked) {
+              archive.createEvent({
+                belongEntityId: '鸿艺',
+                eventType: params.eventType,
+                eventRawText: extracted.content,
+                startTs: params.startTs,
+                endTs: params.endTs,
+                cycleMs: params.cycleMs,
+                dnaRootId: dna.dna_root_id || 'unknown',
+              });
+            }
+          }
+        }
+      } catch (_err) { /* 规则引擎不阻塞主流程 */ }
+    }
 
     // P3: LLM 辅助实体提取（三层过滤 — prompt约束+白名单+人名正则）
     try {
@@ -1625,6 +1667,20 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 let memoryText = memoryFragments.length > 0 ? memoryFragments.slice(0, 8).join('\n') : '';
 let finalKnowledgeText = knowledgeBaseText;
 
+// ── 时空规则引擎：模式状态 + 气象上下文注入（LLM生成前） ──
+if (ENABLE_TEMPORAL_RULE_ENGINE) {
+  try {
+    if (worldRuleMode === 'roleplay_exempt') {
+      finalKnowledgeText = '【模式·自由角色扮演豁免】当前已豁免全部客观规则，可按架空剧情演绎。\n' + (finalKnowledgeText || '');
+    }
+    const weatherPerm = EngineContext.getExtra('weather_permission');
+    const weatherCurrent = EngineContext.getExtra('weather_current');
+    if (weatherPerm === 'allowed' && weatherCurrent) {
+      finalKnowledgeText = (finalKnowledgeText || '') + '\n【气象环境】' + weatherCurrent;
+    }
+  } catch (_) {}
+}
+
 // 🧬 结构化管线已包含角色扮演规则，仅对旧链路生效
 if (_currentRoleplay && !getDomainStatus().structured && !finalKnowledgeText.startsWith('【角色扮演】')) {
   finalKnowledgeText = buildRoleplayRules(_currentRoleplay) + (finalKnowledgeText ? String.fromCharCode(10,10) + finalKnowledgeText : '');
@@ -1808,7 +1864,12 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
       }
     } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
 
+// 规则引擎拦截：违规时跳过LLM生成，直接返回合规回复
+if (_ruleEngineBlocked && _ruleEngineReply) {
+  reply = _ruleEngineReply;
+} else {
 reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, knowledgeBaseText ? (knowledgeBaseText.split('\\n').filter(l => l.trim()).join('\n') + '\\n\\n' + message) : message);
+}
 
     // 🏗️ 防复发第一层: 角色扮演运行时自检
     if (_currentRoleplay) {
@@ -1855,6 +1916,27 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
         }
       }
     } catch (_ve) { /* 校验失败不阻塞主线 */ }
+
+    // 📜 信息权威铁律·第三章: LLM回复 vs FG数据冲突检测
+    try {
+      if (_currentRoleplay && reply && ctx.m4) {
+        const _fgCheck = ctx.m4.getFamilyGraph();
+        if (_fgCheck) {
+          const _ageMatches = reply.match(/(\d{1,2})[\s]*岁/g);
+          if (_ageMatches) {
+            const _profile = _fgCheck.getPersonProfile(_currentRoleplay);
+            if (_profile && _profile.age !== undefined) {
+              for (const _m of _ageMatches) {
+                const _replyAge = parseInt(_m.match(/\d+/)[0]);
+                if (_replyAge !== _profile.age) {
+                  console.log('[🏛️权威冲突] ' + _currentRoleplay + ' FG记录=' + _profile.age + '岁 但LLM回复=' + _replyAge + '岁 — 以FG为准');
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (_ce) { /* 冲突检测不阻塞 */ }
 
 
         // 候选回复生成（不阻塞主回复 — 默认不活跃，待前端请求时使用）

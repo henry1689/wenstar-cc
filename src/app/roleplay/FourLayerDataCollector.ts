@@ -65,6 +65,7 @@ export async function collectFourLayerData(
   // ── Layer1: 核心身份 ──
   const selfProfile = fgAdapter?.getPersonProfile(roleplay) || null;
   console.log('[Roleplay] Layer1 selfProfile for ' + roleplay + ': hasProfile=' + (selfProfile?.hasProfile) + ' age=' + selfProfile?.age + ' raw=' + JSON.stringify(selfProfile).substring(0,200));
+  const layer1 = buildLayer1(roleplay, selfProfile);
 
   // ── Layer2: 关系（来自FG + 拓扑） ──
   const relativeResult = await withTimeout(
