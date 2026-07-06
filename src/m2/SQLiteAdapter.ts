@@ -207,6 +207,11 @@ export class SQLiteAdapter {
         is_compacted INTEGER DEFAULT 0,
         is_test INTEGER DEFAULT 0
       )`);
+      try { this.db.run("ALTER TABLE conversations ADD COLUMN dna_root_id TEXT"); } catch { /* 列已存在 */ }
+      try { this.db.run("ALTER TABLE conversations ADD COLUMN dialog_group_id TEXT"); } catch { /* 列已存在 */ }
+      try { this.db.run("ALTER TABLE conversations ADD COLUMN dialog_round INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
+      try { this.db.run("ALTER TABLE conversations ADD COLUMN is_compacted INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
+      try { this.db.run("ALTER TABLE conversations ADD COLUMN is_test INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
       this.db.run("CREATE INDEX IF NOT EXISTS idx_conv_timestamp ON conversations(timestamp DESC)");
       this.db.run("CREATE INDEX IF NOT EXISTS idx_conv_seq ON conversations(seq_pos)");
       this.db.run("CREATE INDEX IF NOT EXISTS idx_conv_dna_root ON conversations(dna_root_id)");
@@ -218,7 +223,13 @@ export class SQLiteAdapter {
       this.db.run("CREATE VIRTUAL TABLE IF NOT EXISTS black_diamond_fts USING fts5(summary, tags, content='black_diamond', content_rowid='rowid')");
       // 同步已有数据到 FTS5 索引（首次运行时）
       this.db.run("INSERT OR IGNORE INTO black_diamond_fts(rowid, summary, tags) SELECT rowid, summary, tags FROM black_diamond");
-    } catch (e) { console.warn('[SQLite] FTS5 索引初始化失败:', e); }
+    } catch (e) {
+      if ((e as Error)?.message?.includes('no such module: fts5')) {
+        console.log('[SQLite] FTS5 不可用，跳过全文索引初始化');
+      } else {
+        console.warn('[SQLite] FTS5 索引初始化失败:', e);
+      }
+    }
 
     this.ready = true;
     console.log(`[SQLiteAdapter] 初始化完成: ${this.dbPath}`);

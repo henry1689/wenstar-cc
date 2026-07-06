@@ -57,7 +57,7 @@ export async function runRoleplayPipeline(
   updateTempProfile(roleplay, message, '', _seqCounter);
 
   // 🔴 开关（约束7）：关闭时回退旧逻辑
-  if (!STRUCTURED_ENABLED) {
+  if (!isStructuredEnabled()) {
     return buildRoleplayRules(roleplay, '');
   }
 

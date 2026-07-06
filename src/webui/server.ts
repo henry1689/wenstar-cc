@@ -345,7 +345,7 @@ async function initPipeline(): Promise<void> {
   encoder = new DNAEncoder(getSelfModel());
   storage = new FusionStorageAdapter(DATA_DIR);
   await storage.initialize();
-  yuyaoMemory = new YuyaoMemoryService(storage.getSQLite());
+  knowledgeBase = new KnowledgeBase(storage.getSQLite());
   yuyaoMemory = new YuyaoMemoryService(storage.getSQLite());
   memoryVault = new MemoryVault();
   await memoryVault.initialize();
@@ -565,7 +565,6 @@ async function initPipeline(): Promise<void> {
   workingMemory.startFlushTimer();
   console.log('  工作记忆已启动 ✓');
 
-  knowledgeBase = new KnowledgeBase(storage.getSQLite());
   // ── 初始化玉瑶本人档案（永久存入知识库 + 同步黑钻库） ──
   (async () => {
     try {
@@ -703,8 +702,6 @@ async function initPipeline(): Promise<void> {
   taskAgent = new TaskAgentEngine();
   startReminderChecker();
   try { const logs = yuyaoMemory.checkMissedOnStartup(); for (const l of logs) console.log('[Memory]', l); } catch (e) { console.warn('[Memory] 启动自检失败:', e); }
-  // 记事记忆启动自检
-  try { const logs = yuyaoMemory.checkMissedOnStartup(); for (const l of logs) console.log('[Memory]', l); } catch (e) { console.warn('[Memory] 启动自检失败:', e); }
   console.log('  任务代理已启动 ✓');
 
   clueTracker = new ClueTracker();
@@ -824,7 +821,20 @@ async function handleUserMessage(message: string, clientMsgId?: string | null, t
   try {
     // hybrid 模式：走 orchestrator（通过 LegacyAdapter 调用原 processChat）
     const reply = await orchestrator.processUserMessage(message, 'default', clientMsgId ?? undefined, testMode);
-    return { reply };
+    return {
+      reply,
+      turn_count: conversationHistory.length,
+      m1: { branch_id: '', locus_path: '', seq_pos: 0, leaf_zone: '', ref: '', entities: [], raw_input: message, entity_genes: [] },
+      m3: {
+        quadrant1: [], quadrant2: [], quadrant3: [], quadrant4: [],
+        calcium: { score: 0, level: 0, label: '粉末', breakdown: {} },
+        actions: [], reason: 'hybrid orchestrator',
+      },
+      m4: { timeline: [], total: 0, family: 0 },
+      m5: { strategy_id: 'hybrid', tone: 'default', depth: 'medium', max_length: 220, description: 'Orchestrator fallback payload' },
+      emotionalFlash: false,
+      triggeredMemoryId: null,
+    };
   } catch (err) {
     // 新链路异常 → 静默回退旧链路
     console.error('[S1] 新链路异常，回退旧链路:', (err as Error).message);
@@ -2194,6 +2204,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const entry = knowledgeBase.getById(knId);
       if (!entry || !['xlsx', 'xls', 'csv'].includes(entry.source_type)) {
         res.writeHead(400); res.end(JSON.stringify({ error: 'not found or not an excel file' }));
+        return;
       }
       try {
         // 从上传目录查找原始 Excel 文件

@@ -518,20 +518,20 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
               }
               // P1-4: 冲突检测——新旧描述矛盾时标记
               if (_prof.appearance && _app && _app !== _prof.appearance) {
-                const _oldParts = new Set(_prof.appearance.split(/[，,]/).map((s: string) => s.trim()).filter(Boolean));
+                const _oldParts = Array.from(new Set(_prof.appearance.split(/[，,]/).map((s: string) => s.trim()).filter(Boolean))) as string[];
                 const _newParts = _app.split(/[，,]/).map((s: string) => s.trim()).filter(Boolean);
                 for (const _np of _newParts) {
                   // 检测冲突：新描述中说"高"但旧描述说"矮"或反之
-                  if (/高/.test(_np) && [..._oldParts].some((o: string) => /矮/.test(o))) {
+                  if (/高/.test(_np) && _oldParts.some((o: string) => /矮/.test(o))) {
                     console.warn('[PersonProfile] CONFLICT: ' + _n + ' 身高冲突（高 vs 矮）');
                   }
-                  if (/矮/.test(_np) && [..._oldParts].some((o: string) => /高/.test(o))) {
+                  if (/矮/.test(_np) && _oldParts.some((o: string) => /高/.test(o))) {
                     console.warn('[PersonProfile] CONFLICT: ' + _n + ' 身高冲突（矮 vs 高）');
                   }
-                  if (/胖/.test(_np) && [..._oldParts].some((o: string) => /瘦/.test(o))) {
+                  if (/胖/.test(_np) && _oldParts.some((o: string) => /瘦/.test(o))) {
                     console.warn('[PersonProfile] CONFLICT: ' + _n + ' 体型冲突（胖 vs 瘦）');
                   }
-                  if (/瘦/.test(_np) && [..._oldParts].some((o: string) => /胖/.test(o))) {
+                  if (/瘦/.test(_np) && _oldParts.some((o: string) => /胖/.test(o))) {
                     console.warn('[PersonProfile] CONFLICT: ' + _n + ' 体型冲突（瘦 vs 胖）');
                   }
                 }
@@ -714,7 +714,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     let memoryFragments: string[] = [];
     // 🎭 Fix-2: 角色扮演时过滤对话历史 — 只保留角色扮演相关的轮次
     // 非角色扮演对话会混淆LLM，让LLM看到"玉瑶"的历史就会跳出角色
-    let enrichedHistory: Array<{ role: string; content: string; timestamp?: string; topic?: string }>;
+    let enrichedHistory: Array<ConversationTurn & { topic?: string; rpChar?: string }>;
     if (_currentRoleplay) {
       // 角色扮演中：只保留也属于该角色的历史（dialog_group_id 匹配或手动标记）
       enrichedHistory = ctx.conversationHistory.slice(-10).filter(function(t) {
@@ -722,7 +722,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       });
       // 如果过滤后没有历史，也至少给一条占位（避免空数组）
       if (enrichedHistory.length === 0) {
-        enrichedHistory.push({ role: 'system', content: `【当前扮演角色：${_currentRoleplay}】`, timestamp: new Date().toISOString() });
+        enrichedHistory.push({ role: 'assistant', content: `【当前扮演角色：${_currentRoleplay}】`, timestamp: new Date().toISOString() });
       }
       console.log('[Roleplay] 历史过滤: ' + ctx.conversationHistory.length + '→' + enrichedHistory.length + ' 条');
     } else {
@@ -734,7 +734,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       isLimitedRetrieval, hasNewEntity, hasPersonEntity,
       emotionalMemories, memoryGate, memoryGateFillerUsed,
     } = await runRetrieval({
-      ctx, message, dna, p, enrichedHistory, memoryFragments, _bdVecCache,
+      ctx, message, dna, p: p as unknown as Record<string, number>, enrichedHistory, memoryFragments, _bdVecCache,
     });
 	    // P0-1: 仿生智脑 + 知识库 + VAD 并行执行（三者均为异步网络调用，互不依赖）
     const _bionicPromise = fetchBionicMemories(message, isTopicShift, hasContinuationMarkers, memoryFragments, enrichedHistory, { pleasure: p.pleasure, arousal: p.arousal, intimacy: p.intimacy }, dna.scene_tags);
@@ -798,11 +798,12 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           const reranked = await ctx.hybridSearch.rerank(searchMsg || message, knResults, 5);
           if (reranked.length > 0) {
             // 保持原结构兼容性，用重排后的顺序
-            knResults = reranked.map(r => {
+            const rerankedResults = reranked.map(r => {
               const orig = knResults.find((k: any) => k.id === r.id);
               return orig ? { ...orig, matchScore: r.compositeScore, _semanticScore: r.semanticScore } : orig;
-            }).filter(Boolean);
-            console.log('[HybridSearch] 语义重排序完成: ' + knResults.length + ' 条');
+            }).filter((item): item is typeof knResults[number] & { matchScore: number; _semanticScore: number } => Boolean(item));
+            knResults = rerankedResults;
+            console.log('[HybridSearch] 语义重排序完成: ' + rerankedResults.length + ' 条');
           }
         }
       } catch (_hErr) { console.warn('[HybridSearch] 重排序失败:', _hErr); }
@@ -1413,7 +1414,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
             const _domainCtx: DomainContext = {
               roleplay: character, characterClass: _currentCharacterClass as CharacterClass,
               message, dna, knowledgeBaseText: '',
-              m4: ctx.m4, knowledgeBase: ctx.knowledgeBase, storage: (ctx as any).storage || ctx.m4?.storage,
+              m4: ctx.m4, knowledgeBase: ctx.knowledgeBase, storage: ctx.storage,
               conversationDB: ctx.conversationDB,
               conversationHistory: ctx.conversationHistory || [],
               currentRPBranch: _currentRPBranch, rpParamsSnapshot: _rpParamsSnapshot, currentRoleplay: character,
@@ -1466,7 +1467,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           knowledgeBaseText,
           m4: ctx.m4,
           knowledgeBase: ctx.knowledgeBase,
-          storage: (ctx as any).storage || ctx.m4?.storage,
+          storage: ctx.storage,
           conversationDB: ctx.conversationDB,
           conversationHistory: ctx.conversationHistory || [],
           currentRPBranch: _currentRPBranch,
@@ -1914,7 +1915,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
           roleplay: _currentRoleplay, characterClass: _currentCharacterClass,
           message: message, dna: dna, knowledgeBaseText: knowledgeBaseText,
           m4: ctx.m4, knowledgeBase: ctx.knowledgeBase,
-          storage: (ctx as any).storage || ctx.m4?.storage,
+          storage: ctx.storage,
           conversationDB: ctx.conversationDB, conversationHistory: ctx.conversationHistory || [],
           currentRPBranch: _currentRPBranch, rpParamsSnapshot: _rpParamsSnapshot,
           currentRoleplay: _currentRoleplay,
@@ -1946,7 +1947,9 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
             const _profile = _fgCheck.getPersonProfile(_currentRoleplay);
             if (_profile && _profile.age !== undefined) {
               for (const _m of _ageMatches) {
-                const _replyAge = parseInt(_m.match(/\d+/)[0]);
+                const _matchedAge = _m.match(/\d+/);
+                if (!_matchedAge) continue;
+                const _replyAge = parseInt(_matchedAge[0], 10);
                 if (_replyAge !== _profile.age) {
                   console.log('[🏛️权威冲突] ' + _currentRoleplay + ' FG记录=' + _profile.age + '岁 但LLM回复=' + _replyAge + '岁 — 以FG为准');
                 }

@@ -8,10 +8,8 @@ import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { insertEvent } from '../../hooks/backend.js';
 import type { TemporalEventArchive } from './TemporalEventArchive.js';
 
-/** 写入时序事件状态快照到Hook */
 export function snapshotTemporalEvents(sqlite: SQLiteAdapter, archive: TemporalEventArchive): void {
   const stats = archive.getStats();
-  const runningEvents = archive.getRunningEvents('鸿艺').slice(0, 5);
 
   let status: 'success' | 'fail' = 'success';
   let errorInfo = '';
@@ -32,7 +30,6 @@ export function snapshotTemporalEvents(sqlite: SQLiteAdapter, archive: TemporalE
   });
 }
 
-/** 时序事件违规记录 */
 export function recordEventViolation(sqlite: SQLiteAdapter, eventText: string, reason: string): void {
   insertEvent(sqlite, {
     operation_type: 'temporal_event_violation',

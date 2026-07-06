@@ -17,6 +17,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..');
 const LEXICON_DIR = join(PROJECT_ROOT, 'data', 'lexicons');
+const LEGACY_CONFIG_DIR = join(__dirname, 'config');
 
 /** 缓存 */
 const cache = new Map<string, any>();
@@ -29,12 +30,14 @@ let entityRulesCache: any = null;
  */
 export function loadSet(filename: string, key: string): Set<string> {
   try {
-    const path = join(LEXICON_DIR, filename);
-    if (!existsSync(path)) {
+    const primaryPath = join(LEXICON_DIR, filename);
+    const fallbackPath = join(LEGACY_CONFIG_DIR, filename);
+    const targetPath = existsSync(primaryPath) ? primaryPath : fallbackPath;
+    if (!existsSync(targetPath)) {
       console.warn(`[LexiconLoader] ${filename} not found, using empty set.`);
       return new Set();
     }
-    const data = JSON.parse(readFileSync(path, 'utf-8'));
+    const data = JSON.parse(readFileSync(targetPath, 'utf-8'));
     const arr = data[key] ?? [];
     return new Set<string>(arr);
   } catch (err) {
@@ -110,13 +113,15 @@ export function loadL0Rules(): Array<{ id: string; keywords: string[]; domain: s
   if (l0RulesCache !== null) return l0RulesCache;
 
   try {
-    const path = join(LEXICON_DIR, 'l0_routing.json');
-    if (!existsSync(path)) {
+    const primaryPath = join(LEXICON_DIR, 'l0_routing.json');
+    const fallbackPath = join(LEGACY_CONFIG_DIR, 'l0_routing.json');
+    const targetPath = existsSync(primaryPath) ? primaryPath : fallbackPath;
+    if (!existsSync(targetPath)) {
       console.warn('[LexiconLoader] l0_routing.json not found, using empty rules.');
       l0RulesCache = [];
       return l0RulesCache;
     }
-    const data = JSON.parse(readFileSync(path, 'utf-8'));
+    const data = JSON.parse(readFileSync(targetPath, 'utf-8'));
     l0RulesCache = data.rules ?? [];
     return l0RulesCache;
   } catch (err) {

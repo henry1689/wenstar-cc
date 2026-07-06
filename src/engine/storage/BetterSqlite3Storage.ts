@@ -16,7 +16,7 @@ import Database from 'better-sqlite3';
 import type { IStorageProvider } from './IStorageProvider.js';
 
 export class BetterSqlite3Storage implements IStorageProvider {
-  private db: Database.Database | null = null;
+  private db: any = null;
   private dbPath: string;
 
   constructor(dbPath: string) {
@@ -79,7 +79,7 @@ export class BetterSqlite3Storage implements IStorageProvider {
   }
 
   /** 获取底层 Database 实例（供需要直接 SQL 访问的模块使用） */
-  getNativeDb(): Database.Database | null {
+  getNativeDb(): any | null {
     return this.db;
   }
 

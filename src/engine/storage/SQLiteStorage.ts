@@ -43,9 +43,15 @@ export class SQLiteStorage implements IStorageProvider {
     } catch (err) {
       // 表不存在时自动创建
       if ((err as Error)?.message?.includes('no such table')) {
-        this.adapter.exec(
-          'CREATE TABLE IF NOT EXISTS engine_store (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)'
-        );
+        if (typeof this.adapter.exec === 'function') {
+          this.adapter.exec(
+            'CREATE TABLE IF NOT EXISTS engine_store (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)'
+          );
+        } else {
+          this.adapter.writeRaw(
+            'CREATE TABLE IF NOT EXISTS engine_store (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)'
+          );
+        }
         this.adapter.writeRaw(
           'INSERT OR REPLACE INTO engine_store (key, value, updated_at) VALUES (?, ?, ?)',
           key,

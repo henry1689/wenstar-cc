@@ -62,7 +62,7 @@ export class Orchestrator {
 
   /** 初始化所有模块 */
   async init(): Promise<void> {
-    const storage = this.config.storage ?? null;
+    const storage = this.config.storage;
 
     // 注册模块（按优先级）
     const commStore = new CommunicationModeStore();

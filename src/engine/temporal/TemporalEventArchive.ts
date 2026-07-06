@@ -26,6 +26,17 @@ export interface TemporalEvent {
   create_at: number;
 }
 
+export interface TemporalEventRecord {
+  belongEntityId: string;
+  eventType: TemporalEvent['event_type'] | string;
+  eventRawText: string;
+  startTs?: number;
+  endTs?: number;
+  cycleMs?: number;
+  dnaRootId: string;
+  parentEventId?: string;
+}
+
 export class TemporalEventArchive {
   private sqlite: SQLiteAdapter;
 
@@ -33,22 +44,16 @@ export class TemporalEventArchive {
     this.sqlite = sqlite;
   }
 
-  /** 生成唯一event_id */
   private uid(): string {
     return 'evt_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
   }
 
-  /** 创建事件 */
-  createEvent(params: {
-    belongEntityId: string; eventType: TemporalEvent['event_type'];
-    eventRawText: string; startTs?: number; endTs?: number;
-    cycleMs?: number; parentEventId?: string; dnaRootId: string;
-  }): TemporalEvent {
+  createEvent(params: TemporalEventRecord): TemporalEvent {
     const now = Date.now();
     const event: TemporalEvent = {
       event_id: this.uid(),
       belong_entity_id: params.belongEntityId,
-      event_type: params.eventType,
+      event_type: (params.eventType as TemporalEvent['event_type']) || 'custom',
       parent_event_id: params.parentEventId || null,
       event_raw_text: params.eventRawText,
       start_ts: params.startTs ?? now,
@@ -69,14 +74,12 @@ export class TemporalEventArchive {
     return event;
   }
 
-  /** 查询事件 */
   getEvent(eventId: string): TemporalEvent | null {
     const rows = this.sqlite.queryAll('SELECT * FROM temporal_events WHERE event_id = ? LIMIT 1', [eventId]);
     if (rows.length === 0) return null;
     return this.rowToEvent(rows[0] as any);
   }
 
-  /** 按实体ID查询运行中事件 */
   getRunningEvents(entityId: string): TemporalEvent[] {
     const rows = this.sqlite.queryAll(
       'SELECT * FROM temporal_events WHERE belong_entity_id = ? AND status = \'running\' ORDER BY start_ts ASC',
@@ -85,7 +88,6 @@ export class TemporalEventArchive {
     return rows.map(r => this.rowToEvent(r as any));
   }
 
-  /** 查询所有到期事件 */
   getExpiredEvents(nowTs: number): TemporalEvent[] {
     const rows = this.sqlite.queryAll(
       'SELECT * FROM temporal_events WHERE status = \'running\' AND end_ts IS NOT NULL AND end_ts <= ? ORDER BY end_ts ASC',
@@ -94,17 +96,14 @@ export class TemporalEventArchive {
     return rows.map(r => this.rowToEvent(r as any));
   }
 
-  /** 更新事件状态 */
   updateStatus(eventId: string, status: TemporalEvent['status']): void {
     this.sqlite.writeRaw('UPDATE temporal_events SET status = ? WHERE event_id = ?', [status, eventId]);
   }
 
-  /** 取消事件 */
   cancelEvent(eventId: string): void {
     this.sqlite.writeRaw('UPDATE temporal_events SET status = \'canceled\' WHERE event_id = ?', [eventId]);
   }
 
-  /** 循环事件续期 */
   renewCyclicEvent(eventId: string): TemporalEvent | null {
     const event = this.getEvent(eventId);
     if (!event || !event.is_cyclic || event.cycle_ms <= 0) return null;
@@ -119,31 +118,21 @@ export class TemporalEventArchive {
        event.event_raw_text, newStart, newEnd, event.cycle_ms,
        event.is_cyclic ? 1 : 0, event.dna_root_id, Date.now()],
     );
-    // 旧事件标记完成
     this.updateStatus(eventId, 'completed');
     return this.getEvent(newId);
   }
 
-  /** ── 公共合规校验接口 ── */
-
-  /**
-   * 校验指定事件在目标时间是否符合客观规律
-   * 前置校验：返回 { valid, reason }
-   */
   checkEventCompliance(targetEvent: string, durationMs?: number): { valid: boolean; reason?: string } {
-    // 孕育类校验
     if (/怀孕|生孩子|分娩|妊娠|生宝宝/.test(targetEvent)) {
       if (durationMs !== undefined && durationMs < EVENT_COMMON_SENSE.pregnancyDays * 86400000) {
         return { valid: false, reason: `孕育新生命需要${EVENT_COMMON_SENSE.pregnancyDays}天（约10个月），当前设定时间不足` };
       }
     }
-    // 生理周期校验
     if (/例假|生理期|月经/.test(targetEvent)) {
       if (durationMs !== undefined && durationMs < 20 * 86400000) {
-        return { valid: false, reason: `生理周期间隔不能少于20天` };
+        return { valid: false, reason: '生理周期间隔不能少于20天' };
       }
     }
-    // 伤愈恢复校验
     if (/感冒|发烧|生病|咳嗽|受伤/.test(targetEvent)) {
       if (durationMs !== undefined && durationMs < EVENT_COMMON_SENSE.coldRecoveryDays * 86400000) {
         return { valid: false, reason: `伤病恢复需要至少${EVENT_COMMON_SENSE.coldRecoveryDays}天，不应该提前完成` };
@@ -152,7 +141,6 @@ export class TemporalEventArchive {
     return { valid: true };
   }
 
-  /** 计算事件剩余时长 */
   calcRemainingTime(eventId: string): { remainingMs: number; remainingText: string } | null {
     const event = this.getEvent(eventId);
     if (!event || !event.end_ts) return null;
@@ -166,7 +154,6 @@ export class TemporalEventArchive {
     return { remainingMs: remaining, remainingText: `${minutes}分钟` };
   }
 
-  /** 获取根事件的所有子事件 */
   getChildEvents(parentId: string): TemporalEvent[] {
     const rows = this.sqlite.queryAll(
       'SELECT * FROM temporal_events WHERE parent_event_id = ? ORDER BY start_ts ASC',
@@ -175,7 +162,6 @@ export class TemporalEventArchive {
     return rows.map(r => this.rowToEvent(r as any));
   }
 
-  /** 统计 */
   getStats(): { total: number; running: number; cyclic: number } {
     const total = (this.sqlite.queryAll('SELECT COUNT(*) as c FROM temporal_events')[0] as any)?.c ?? 0;
     const running = (this.sqlite.queryAll("SELECT COUNT(*) as c FROM temporal_events WHERE status = 'running'")[0] as any)?.c ?? 0;
@@ -185,11 +171,18 @@ export class TemporalEventArchive {
 
   private rowToEvent(r: any): TemporalEvent {
     return {
-      event_id: r.event_id, belong_entity_id: r.belong_entity_id,
-      event_type: r.event_type, parent_event_id: r.parent_event_id,
-      event_raw_text: r.event_raw_text, start_ts: r.start_ts, end_ts: r.end_ts,
-      cycle_ms: r.cycle_ms, is_cyclic: r.is_cyclic === 1 || r.is_cyclic === true,
-      dna_root_id: r.dna_root_id, status: r.status, create_at: r.create_at,
+      event_id: r.event_id,
+      belong_entity_id: r.belong_entity_id,
+      event_type: r.event_type,
+      parent_event_id: r.parent_event_id,
+      event_raw_text: r.event_raw_text,
+      start_ts: r.start_ts,
+      end_ts: r.end_ts,
+      cycle_ms: r.cycle_ms,
+      is_cyclic: r.is_cyclic === 1 || r.is_cyclic === true,
+      dna_root_id: r.dna_root_id,
+      status: r.status,
+      create_at: r.create_at,
     };
   }
 }

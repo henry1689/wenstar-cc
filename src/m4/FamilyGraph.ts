@@ -46,6 +46,7 @@ const DEFAULT_DB_PATH = join(__dirname, '..', '..', 'data', 'knowledge', 'family
 interface PersonProfile {
   // ── 基础 ──
   name: string;
+  age?: number;
   relation_to_user: string;
   /** 首次提及日期 */
   first_mentioned?: string;

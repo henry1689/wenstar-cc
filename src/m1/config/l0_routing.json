@@ -1,0 +1,10 @@
+{
+  "rules": [
+    { "id": "family-conflict", "keywords": ["催婚", "结婚", "妈妈", "我妈", "烦死"], "domain": "family", "subcategory": "conflict", "priority": 1 },
+    { "id": "family-care", "keywords": ["爸爸", "母亲", "家人", "照顾"], "domain": "family", "subcategory": "care", "priority": 2 },
+    { "id": "work-stress", "keywords": ["加班", "工作压力", "老板", "任务", "同事"], "domain": "work", "subcategory": "stress", "priority": 1 },
+    { "id": "emotion-positive", "keywords": ["开心", "幸福", "高兴", "快乐"], "domain": "emotion", "subcategory": "positive", "priority": 1 },
+    { "id": "emotion-negative", "keywords": ["难过", "伤心", "孤独", "痛苦"], "domain": "emotion", "subcategory": "negative", "priority": 1 },
+    { "id": "daily-general", "keywords": ["天气", "散步", "早上好", "晚上好"], "domain": "misc", "subcategory": "default", "priority": 5 }
+  ]
+}

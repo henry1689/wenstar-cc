@@ -14,7 +14,6 @@
  * 所有解析结果统一返回 { title, content, source_type, source_name, file_size }
  */
 import mammoth from 'mammoth';
-import pdfParse from 'pdf-parse';
 import * as XLSX from 'xlsx';
 import { createWorker } from 'tesseract.js';
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -107,6 +106,8 @@ export async function parseFile(
 /** PDF 文本提取 */
 async function parsePdf(buffer: Buffer): Promise<string> {
   try {
+    const pdfParseModule = await import('pdf-parse/lib/pdf-parse.js');
+    const pdfParse = (pdfParseModule.default ?? pdfParseModule) as (data: Buffer) => Promise<{ text?: string }>;
     const data = await pdfParse(buffer);
     return data.text || '';
   } catch (err) {

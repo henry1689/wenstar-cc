@@ -24,7 +24,7 @@ export class TransformersEmbeddingEngine implements IEmbeddingEngine {
       const { pipeline } = await import('@huggingface/transformers');
       this.extractor = await pipeline('feature-extraction', this.modelId, {
         quantized: true,
-      });
+      } as any);
       this.status = 'ready';
       console.log('[Embedding] 模型加载完成');
     } catch (err) {

@@ -131,9 +131,10 @@ export class DNAEncoder {
       );
 
       if (boundary.is_new_unit) {
-        // v2: 边界只输出提示，不触发自动 flush
-        // 最终 flush() 时边界标记会作为元数据携带
-        console.log(`[DNAEncoder] 语义边界: ${boundary.boundary_type} (${boundary.confidence}) — 不切割编码序列`);
+        console.log(`[DNAEncoder] 语义边界: ${boundary.boundary_type} (${boundary.confidence}) — 自动切割并 flush`);
+        const flushed = this.flush();
+        this.buffer.push(entry);
+        return flushed;
       }
     }
 

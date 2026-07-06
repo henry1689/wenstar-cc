@@ -142,6 +142,7 @@ export interface DomainContext {
   characterClass: CharacterClass;
   message: string;
   dna: any;
+  knowledgeBaseText?: string;
   m4: any;
   knowledgeBase: any;
   storage: any;

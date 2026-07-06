@@ -12,6 +12,7 @@ import { GlobalSequenceCounter } from './GlobalSequenceCounter.js';
 
 export class L1Sequencer {
   private currentDate: string;
+  private sessionSeq = 0;
 
   constructor() {
     this.currentDate = this.getDateString();
@@ -29,12 +30,13 @@ export class L1Sequencer {
     }
 
     // 全局计数器：按日递增，跨零点自动重置，重启不丢失
-    const seq = GlobalSequenceCounter.getInstance().next();
-    const branchId = `evt_${today}_${String(seq).padStart(3, '0')}`;
+    const globalSeq = GlobalSequenceCounter.getInstance().next();
+    this.sessionSeq++;
+    const branchId = `evt_${today}_${String(globalSeq).padStart(3, '0')}`;
 
     return {
       branch_id: branchId,
-      seq_pos: seq,
+      seq_pos: this.sessionSeq,
     };
   }
 
@@ -44,6 +46,7 @@ export class L1Sequencer {
    */
   reset(): void {
     this.currentDate = this.getDateString();
+    this.sessionSeq = 0;
   }
 
   getCurrentCount(): number {
