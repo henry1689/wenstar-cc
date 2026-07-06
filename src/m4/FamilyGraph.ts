@@ -327,6 +327,15 @@ const REVERSE_RELATION: Record<string, string> = {
 };
 
 const KINSHIP_TERMS = Object.keys(KINSHIP_MAP).sort((a, b) => b.length - a.length);
+const SPECIFIC_KINSHIP_LABEL: Record<string, string> = {
+  '妈妈': '妈妈', '妈': '妈妈', '母亲': '妈妈',
+  '爸爸': '爸爸', '爸': '爸爸', '父亲': '爸爸',
+  '姐姐': '姐姐', '妹妹': '妹妹', '哥哥': '哥哥', '弟弟': '弟弟',
+  '老公': '老公', '老婆': '老婆', '丈夫': '老公', '妻子': '老婆',
+  '爷爷': '爷爷', '奶奶': '奶奶', '外公': '外公', '外婆': '外婆',
+  '儿子': '儿子', '女儿': '女儿', '孩子': '孩子', '子女': '孩子',
+  '孙子': '孙子', '孙女': '孙女',
+};
 
 // ─── v2.0 商业组织关系映射（人物↔组织、组织↔组织） ───
 const ORG_MAP: Record<string, string> = {
@@ -372,6 +381,10 @@ function isLikelyPlaceName(value: string): boolean {
 
 function isInvalidProfileSnippet(value: string): boolean {
   return /^(叫|什么|哪|哪里|哪儿|谁)/.test(value) || /什么|哪上班|哪里上班|是谁/.test(value);
+}
+
+function isSpecificRelationLabel(value?: string): boolean {
+  return !!value && /^(妈妈|爸爸|姐姐|妹妹|哥哥|弟弟|老公|老婆|爷爷|奶奶|外公|外婆|儿子|女儿|孩子|孙子|孙女)$/.test(value);
 }
 
 /**
@@ -642,7 +655,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     const merged: Partial<PersonProfile> = { ...sourceProfile, ...targetProfile };
 
     merged.name = targetName;
-    merged.relation_to_user = targetProfile.relation_to_user || sourceProfile.relation_to_user || '';
+    merged.relation_to_user = isSpecificRelationLabel(targetProfile.relation_to_user)
+      ? targetProfile.relation_to_user
+      : isSpecificRelationLabel(sourceProfile.relation_to_user)
+        ? sourceProfile.relation_to_user
+        : targetProfile.relation_to_user || sourceProfile.relation_to_user || '';
     merged.first_mentioned = targetProfile.first_mentioned || sourceProfile.first_mentioned;
     merged.last_mentioned = targetProfile.last_mentioned || sourceProfile.last_mentioned || new Date().toISOString();
     merged.mention_count = (targetProfile.mention_count || 0) + (sourceProfile.mention_count || 0);
@@ -749,6 +766,7 @@ export class FamilyGraph implements FamilyGraphInterface {
         const isSenior = SENIOR_KINSHIP.has(kinshipWord);
         const canonicalName = namedKinship.get(kinshipWord) || person.name;
         const aliasCandidates = canonicalName === person.name ? [] : [person.name, kinshipWord];
+        const relationLabel = SPECIFIC_KINSHIP_LABEL[kinshipWord] || this.describeRelation(relation);
 
         // 创建或查找该人名的节点
         const existing = this.findPersonNodeByNameOrAlias(canonicalName);
@@ -764,7 +782,7 @@ export class FamilyGraph implements FamilyGraphInterface {
           nodesCreated++;
           details.push(`创建节点: ${canonicalName} (${kinshipWord})`);
           // P1: 自动创建人物画像
-          await this.updatePersonProfile(canonicalName, { relation_to_user: this.describeRelation(relation) } as any);
+          await this.updatePersonProfile(canonicalName, { relation_to_user: relationLabel } as any);
         } else {
           personId = existing.id;
           await this.ensurePersonAliases(personId, aliasCandidates);
@@ -773,7 +791,7 @@ export class FamilyGraph implements FamilyGraphInterface {
             const merged = this.findPersonNodeByNameOrAlias(canonicalName);
             if (merged?.id) personId = merged.id;
           }
-          await this.updatePersonProfile(canonicalName, { relation_to_user: this.describeRelation(relation) } as any);
+          await this.updatePersonProfile(canonicalName, { relation_to_user: relationLabel } as any);
         }
 
         // 长辈称谓反转方向：用户说"我妈妈"→ 妈妈--[mother_of]-->我 + 我--[child_of]-->妈妈
@@ -1277,9 +1295,10 @@ export class FamilyGraph implements FamilyGraphInterface {
         // 只保留有家族关系边的人（排除纯社交联系人）
         const familyEdge = edges.find(e => familyRels.has(e.relation));
         if (!familyEdge) continue;
+        const profile = this.getPersonProfile(node.name);
         members.push({
           name: node.name,
-          relation_to_user: this.describeRelation(familyEdge.relation),
+          relation_to_user: profile?.relation_to_user || this.describeRelation(familyEdge.relation),
           aliases: JSON.parse(node.aliases ?? '[]'),
         });
       }
