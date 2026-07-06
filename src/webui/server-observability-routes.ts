@@ -9,6 +9,7 @@ import http from 'node:http';
 import { existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bionic } from '../adapter/bionic-adapter.js';
 
 export type ObservabilityRouteDeps = {
   req: http.IncomingMessage;
@@ -30,6 +31,9 @@ export type ObservabilityRouteDeps = {
   sseClients: Set<http.ServerResponse>;
   /** 🏗️ 防复发第二层: 角色扮演状态 */
   getRoleplayStatus?: () => { active: boolean; role: string | null; class: string | null; turns: number };
+  orchestrator?: { getMode: () => string } | null;
+  hybridSearch?: { getDiagnostics?: () => { ready: boolean; embedderStatus: string }; isReady?: () => boolean } | null;
+  enableNewArch?: boolean;
 };
 
 export async function handleObservabilityRoutes(
@@ -40,6 +44,7 @@ export async function handleObservabilityRoutes(
     storage, familyGraph, conversationHistory, maintenance,
     m6, m7, m8, clueTracker, topicTracker, alignmentGuard,
     inductionScheduler, masterProfile, getSelfModel, sseClients,
+    orchestrator, hybridSearch, enableNewArch,
   } = deps;
 
   // ── SSE 实时推送 ──
@@ -60,10 +65,19 @@ export async function handleObservabilityRoutes(
   if (req.method === 'GET' && url.pathname === '/api/status') {
     const storageStatus = await storage.getStatus().catch(() => null);
     const familySummary = await familyGraph.getFamilySummary().catch(() => ({ members: [], locations: [] }));
+    const hybrid = hybridSearch?.getDiagnostics?.() ?? {
+      ready: hybridSearch?.isReady?.() ?? false,
+      embedderStatus: 'unknown',
+    };
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       status: 'running', version: '0.1.0',
       conversation_turns: Math.floor(conversationHistory.length / 2),
+      runtime: {
+        enable_new_arch: !!enableNewArch,
+        orchestrator_mode: orchestrator?.getMode?.() ?? null,
+        hybrid_search: hybrid,
+      },
       storage: storageStatus ? {
         total_records: storageStatus.totalRecords,
         zone_counts: storageStatus.zoneCounts,
@@ -109,6 +123,19 @@ export async function handleObservabilityRoutes(
         _rpStatus = { active: _rps.active, role: _rps.role, class: _rps.class, turns: _rps.turns };
       }
     } catch (_rpe) { /* roleplay status not critical */ }
+    const hybrid = hybridSearch?.getDiagnostics?.() ?? {
+      ready: hybridSearch?.isReady?.() ?? false,
+      embedderStatus: 'unknown',
+    };
+    let bionicStatus = bionic.getHealthSnapshot();
+    if (bionicStatus.reachable === null) {
+      const reachable = await bionic.health().catch(() => false);
+      bionicStatus = {
+        reachable,
+        cached: true,
+        lastCheckedAt: Date.now(),
+      };
+    }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       ...health,
@@ -117,6 +144,12 @@ export async function handleObservabilityRoutes(
       persistence: _pSimple,
       chatFileAlert: _chatAlert,
       roleplay: _rpStatus,
+      runtime: {
+        enableNewArch: !!enableNewArch,
+        orchestratorMode: orchestrator?.getMode?.() ?? null,
+        hybridSearch: hybrid,
+        bionic: bionicStatus,
+      },
     }));
     return true;
   }

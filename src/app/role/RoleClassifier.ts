@@ -27,6 +27,8 @@ export interface RoleClassifierInput {
   consecutiveIntimateCount: number;
 }
 
+const ROLEPLAY_COMMAND = /(?:^|[，。！？、\s])(?:扮演(?:一下)?|模仿|演一下|cos)(?:了)?[一-龥]{1,8}/;
+
 // ─── 工作关键词（38+ 技术词） ───
 const WORK_KEYWORDS = /工作|项目|客户|会议|方案|报告|公司|合同|预算|数据|分析|策略|设计|电机|采购|成本|温升|版本|产品|技术|报价|订单|生产|测试|样品|图纸|规格|性能|参数|工程|研发|工艺|质量|供应商|业务|跟单|交货|协调|对接|审核|审批|流程/;
 
@@ -48,7 +50,7 @@ export function classify(input: RoleClassifierInput): RoleDecision {
   const p = perception;
 
   // ① 角色扮演检测（最高优先级）
-  if (/扮演|模仿|演/.test(message)) {
+  if (ROLEPLAY_COMMAND.test(message)) {
     return { role: 'recaller', confidence: 0.9, rule: 'roleplay_detected' };
   }
 

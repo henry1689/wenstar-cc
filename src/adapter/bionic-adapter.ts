@@ -116,6 +116,7 @@ async function bionicFetch<T>(
 
 class BionicAdapter {
   private healthCache: { ok: boolean; expiresAt: number } | null = null;
+  private lastHealthCheckedAt: number | null = null;
 
   /** 仿生智脑是否在线 */
   async health(): Promise<boolean> {
@@ -124,11 +125,20 @@ class BionicAdapter {
     }
     const r = await bionicFetch<any>('/health', { quiet: true }, 1500);
     const ok = r?.status === 'ok';
+    this.lastHealthCheckedAt = Date.now();
     this.healthCache = {
       ok,
       expiresAt: Date.now() + (ok ? 30_000 : 60_000),
     };
     return ok;
+  }
+
+  getHealthSnapshot(): { reachable: boolean | null; cached: boolean; lastCheckedAt: number | null } {
+    return {
+      reachable: this.healthCache ? this.healthCache.ok : null,
+      cached: !!this.healthCache && this.healthCache.expiresAt > Date.now(),
+      lastCheckedAt: this.lastHealthCheckedAt,
+    };
   }
 
   /** 检索相关记忆（同步，对话回复前调用，带 30 秒缓存） */

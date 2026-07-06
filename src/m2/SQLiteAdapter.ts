@@ -75,6 +75,7 @@ export class SQLiteAdapter {
   private db: SqlJsDatabase | null = null;
   private dbPath: string;
   private ready = false;
+  private blackDiamondFtsReady = false;
   /** 批量 flush：累计写次数，每 N 次或每 T 秒才落盘 */
   private _dirtyCount = 0;
   private _flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -223,7 +224,9 @@ export class SQLiteAdapter {
       this.db.run("CREATE VIRTUAL TABLE IF NOT EXISTS black_diamond_fts USING fts5(summary, tags, content='black_diamond', content_rowid='rowid')");
       // 同步已有数据到 FTS5 索引（首次运行时）
       this.db.run("INSERT OR IGNORE INTO black_diamond_fts(rowid, summary, tags) SELECT rowid, summary, tags FROM black_diamond");
+      this.blackDiamondFtsReady = true;
     } catch (e) {
+      this.blackDiamondFtsReady = false;
       if ((e as Error)?.message?.includes('no such module: fts5')) {
         console.log('[SQLite] FTS5 不可用，跳过全文索引初始化');
       } else {
@@ -237,6 +240,10 @@ export class SQLiteAdapter {
 
   /** 获取原始 sql.js 实例（供 ConversationDB 共享） */
   getDb(): any { return this.db; }
+
+  isBlackDiamondFTSReady(): boolean {
+    return this.blackDiamondFtsReady;
+  }
 
   close(): void {
     if (this.db) this.db.close();

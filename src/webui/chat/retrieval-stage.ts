@@ -206,13 +206,20 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         const _kw = message.replace(/[？！！。、，：；s]/g, '').trim();
         if (_kw.length > 1) {
           let _rows: Array<{ id: string; summary: string; emotion_tag: string; tags: string }> = [];
-          try {
-            const _ftsR = _sqlite.queryAll('SELECT rowid FROM black_diamond_fts WHERE black_diamond_fts MATCH ? LIMIT 2', [_kw.replace(/[^\w一-鿿]/g, '')]);
-            if (_ftsR.length > 0) {
-              const _ids = _ftsR.map((r: any) => r.rowid).join(',');
-              _rows = _sqlite.queryAll('SELECT id, summary, emotion_tag, tags FROM black_diamond WHERE rowid IN (' + _ids + ') ORDER BY created_at DESC LIMIT 2');
+          const _ftsEnabled = typeof _sqlite.isBlackDiamondFTSReady === 'function'
+            ? _sqlite.isBlackDiamondFTSReady()
+            : false;
+          if (_ftsEnabled) {
+            try {
+              const _ftsR = _sqlite.queryAll('SELECT rowid FROM black_diamond_fts WHERE black_diamond_fts MATCH ? LIMIT 2', [_kw.replace(/[^\w一-鿿]/g, '')]);
+              if (_ftsR.length > 0) {
+                const _ids = _ftsR.map((r: any) => r.rowid).join(',');
+                _rows = _sqlite.queryAll('SELECT id, summary, emotion_tag, tags FROM black_diamond WHERE rowid IN (' + _ids + ') ORDER BY created_at DESC LIMIT 2');
+              }
+            } catch (e: any) {
+              console.warn('[Retrieval] black_diamond_fts 查询失败，回退 LIKE:', e?.message);
             }
-          } catch (e: any) { console.error('[Retrieval] error:', e?.message); }
+          }
           if (_rows.length === 0) {
             _rows = _sqlite.queryAll(
               'SELECT id, summary, emotion_tag, tags FROM black_diamond WHERE summary LIKE ? OR tags LIKE ? ORDER BY created_at DESC LIMIT 2',

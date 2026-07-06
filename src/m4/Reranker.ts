@@ -51,6 +51,7 @@ export function rerank(
   // 为每条结果计算额外加分
   for (const item of results) {
     const raw = item.record.raw_input?.toLowerCase() ?? '';
+    const entityGenes = Array.isArray(item.record.entity_genes) ? item.record.entity_genes : [];
     let bonus = 0;
 
     // 1. 因果关联提权
@@ -75,9 +76,9 @@ export function rerank(
 
     // 3. 实体深度匹配加分
     //    不只是简单重叠，而是看实体在记忆中是否处于"关键位置"（即 phenotype=enhance）
-    const currentEntityNames = extractEntities(currentInput, item.record.entity_genes);
+    const currentEntityNames = extractEntities(currentInput, entityGenes);
     if (currentEntityNames.length > 0) {
-      const deepMatches = item.record.entity_genes.filter(
+      const deepMatches = entityGenes.filter(
         g => currentEntityNames.includes(g.name) && g.phenotype === 'enhance',
       ).length;
       if (deepMatches > 0) {

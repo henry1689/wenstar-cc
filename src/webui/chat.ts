@@ -305,6 +305,101 @@ export interface ChatResponse {
   riskFlag?: string;
 }
 
+type FactSnapshot = {
+  selfName?: string;
+  kinshipFacts: Record<string, { name?: string; location?: string; occupation?: string }>;
+};
+
+function isSelfNameQuestion(message: string): boolean {
+  return /(?:^|你还记得|还记得)我(?:叫什么|名字(?:是什么|叫啥|叫什么)?)(?:吗|呢|么|嘛)?[？?]?$/.test(message.trim()) &&
+    !/我(?:姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|老婆|老公|女友|男友)/.test(message);
+}
+
+function collectFactSnapshot(texts: string[]): FactSnapshot {
+  const snapshot: FactSnapshot = { kinshipFacts: {} };
+  const kinships = ['姐姐', '妹妹', '哥哥', '弟弟', '妈妈', '爸爸', '老婆', '老公', '女友', '男友'];
+  for (const text of texts) {
+    if (!snapshot.selfName) {
+      const selfMatch = text.match(/我叫([A-Za-z0-9_\-\u4e00-\u9fa5]{2,12})/);
+      if (selfMatch) snapshot.selfName = selfMatch[1];
+    }
+    for (const kinship of kinships) {
+      const current = snapshot.kinshipFacts[kinship] || {};
+      const nameMatch = text.match(new RegExp(`我${kinship}叫([^，。！？\\s]{1,12})`));
+      if (nameMatch && isValidPersonName(nameMatch[1])) current.name = nameMatch[1];
+      const locationMatch = text.match(new RegExp(`我${kinship}.*?在([^，。！？\\s]{2,10})(?:上班|工作|住)`));
+      if (locationMatch && !/哪|哪里|哪儿|什么/.test(locationMatch[1])) current.location = locationMatch[1];
+      const occupationMatch = text.match(new RegExp(`我${kinship}.*?(?:是|做)([^，。！？\\s]{1,12})(?:的)?`));
+      if (occupationMatch && !/姐姐|妹妹|哥哥|弟弟|妈妈|爸爸|老婆|老公|女友|男友|什么|哪/.test(occupationMatch[1])) {
+        current.occupation = occupationMatch[1];
+      }
+      if (current.name || current.location || current.occupation) {
+        snapshot.kinshipFacts[kinship] = current;
+      }
+    }
+  }
+  return snapshot;
+}
+
+function buildDirectFactReply(message: string, snapshot: FactSnapshot): string | null {
+  if (isSelfNameQuestion(message) && snapshot.selfName) {
+    return `你叫${snapshot.selfName}。`;
+  }
+
+  const kinships = Object.keys(snapshot.kinshipFacts);
+  const targetKinship = kinships.find((kinship) => message.includes(kinship));
+  if (!targetKinship) return null;
+
+  const fact = snapshot.kinshipFacts[targetKinship];
+  if (!fact) return null;
+
+  const wantsName = /叫什么|叫啥|名字|是谁/.test(message);
+  const wantsLocation = /在哪|哪里|哪儿|上班|工作|住哪/.test(message);
+  const wantsOccupation = /做什么|干什么|职业|工作/.test(message);
+  const parts: string[] = [];
+
+  if (wantsName && fact.name) parts.push(`你${targetKinship}叫${fact.name}`);
+  if (wantsLocation && fact.location) parts.push(`在${fact.location}${fact.occupation ? `做${fact.occupation}` : '上班'}`);
+  else if (wantsOccupation && fact.occupation) parts.push(`做${fact.occupation}`);
+  else if (wantsOccupation && fact.location) parts.push(`在${fact.location}上班`);
+
+  if (parts.length === 0) return null;
+  return parts.join('，') + '。';
+}
+
+function buildFactStatementAck(message: string, snapshot: FactSnapshot): string | null {
+  if (/[？?]/.test(message)) return null;
+
+  const statements: string[] = [];
+  if (snapshot.selfName && /我叫/.test(message)) {
+    statements.push(`你叫${snapshot.selfName}`);
+  }
+
+  for (const [kinship, fact] of Object.entries(snapshot.kinshipFacts)) {
+    if (!message.includes(kinship)) continue;
+    const parts: string[] = [];
+    if (fact.name) parts.push(`你${kinship}叫${fact.name}`);
+    if (fact.location && fact.occupation) parts.push(`在${fact.location}做${fact.occupation}`);
+    else if (fact.location) parts.push(`在${fact.location}上班`);
+    else if (fact.occupation) parts.push(`做${fact.occupation}`);
+    if (parts.length > 0) {
+      statements.push(parts.join('，'));
+    }
+  }
+
+  if (statements.length === 0) return null;
+  return `记住了，${statements.join('；')}。`;
+}
+
+function collectFactLookupTerms(message: string): string[] {
+  const terms = ['姐姐', '妹妹', '哥哥', '弟弟', '妈妈', '爸爸', '老婆', '老公', '女友', '男友']
+    .filter((kinship) => message.includes(kinship));
+  if (/我.*叫什么|我叫什么|我名字|我叫/.test(message)) {
+    terms.push('我叫');
+  }
+  return [...new Set(terms)];
+}
+
 
 
 
@@ -1498,9 +1593,26 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
     // 感受分享检测
 
+    const asksSelfName = isSelfNameQuestion(message);
+    const asksFactIntent =
+      /还记得|记得|叫什么|叫啥|名字|是谁|哪儿|在哪|哪里|住哪|做什么|干什么|什么工作|做哪行|职业|关系|几岁|年龄|长什么样/.test(message);
+    const hasQuestionTone =
+      /[？?]/.test(message) ||
+      /(?:吗|呢|么|嘛)$/.test(message.trim()) ||
+      asksSelfName ||
+      asksFactIntent;
+    const isFactualRecallQuery =
+      !_currentRoleplay &&
+      hasQuestionTone &&
+      (
+        asksSelfName ||
+        hasPersonEntity ||
+        /妈妈|妈|爸爸|爸|姐姐|妹妹|哥哥|弟弟|老婆|老公|女友|男友|同事|朋友|客户|老师|医生/.test(message)
+      );
+
     let feelingGuard = '';
 
-    if (/感觉|感受|分享|讲讲|说说|回忆|记得.*吗|怎样/.test(message) && !rpMatch) {
+    if (/感觉|感受|分享|讲讲|说说|回忆|记得.*吗|怎样/.test(message) && !rpMatch && !isFactualRecallQuery) {
 
       feelingGuard = '📖【鸿艺在问你感受。请用300-500字充分展开，详细描述身体感觉和心情。不要简短回答。】';
 
@@ -1510,6 +1622,13 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
     let dailyGuard = '';
     let intimacyFilter = '';
+    let factualRecallGuard = '';
+
+    if (isFactualRecallQuery) {
+      factualRecallGuard = '【事实问答模式】用户在确认人物、关系、地点、职业、年龄等事实信息。先直接给出事实答案，再补一句自然说明即可。禁止加入身体接触、喘息、贴靠、气味、欲望、调情、撒娇式转移话题。如果事实不确定，就明确说不记得或不知道，绝对不要编造。';
+      intimacyFilter = '【⚠️ 事实优先】当前问题是事实回忆/人物信息确认。回复必须简洁、准确、克制，优先使用秘书式陈述语气。';
+      _currentRole = 'secretary';
+    }
 
     if (/工作|项目|客户|会议|方案|报告|公司|合同|预算|数据|分析|策略|设计|电机|采购|成本|温升|版本|产品|技术|报价|订单|生产|测试|样品|图纸|规格|性能|参数|方案|工程|研发|工艺|质量|供应商/.test(message)) {
       const recentHistory = ctx.conversationHistory.filter(t => t.role === 'user').slice(-3).map(t => t.content).join('');
@@ -1584,9 +1703,9 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     } catch (err) { console.warn('[Classify] 分类反问失败:', err); }
 
     const _appearanceGuard = '【强制规则·人物外貌】如果有人问你"长什么样""什么样子"，你只能回答上面【人物档案】中写明的外貌和身体特征。身高厘米数、脸型、眼镜、发型、肤色等没写的细节你一概不知道，直接说"这个你没跟我说过"。绝对禁止编造。';
-    const allGuardMsgs = [hallucinationGuard, repeatHint, feelingGuard, dailyGuard, timeGuard, classificationGuard, intimacyFilter, _appearanceGuard].filter(Boolean).join('\n');
+    const allGuardMsgs = [hallucinationGuard, repeatHint, factualRecallGuard, feelingGuard, dailyGuard, timeGuard, classificationGuard, intimacyFilter, _appearanceGuard].filter(Boolean).join('\n');
 
-    let reply: string;
+    let reply = '';
 
     if (clueReply) {
 
@@ -1619,6 +1738,62 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         const hour12 = h > 12 ? h - 12 : h === 0 ? 12 : h;
         reply = '（看了眼手机）现在' + ampm + hour12 + '点' + (m > 0 ? m + '分' : '') + '。' + (now.getMonth() + 1) + '月' + now.getDate() + '日，星期' + weekdays[now.getDay()] + '。';
       } else {
+        const factStatementAck = buildFactStatementAck(message, collectFactSnapshot([message]));
+        if (factStatementAck) {
+          reply = factStatementAck;
+        }
+      }
+
+      if (!reply && isFactualRecallQuery) {
+        const factTexts = new Set<string>();
+        for (const turn of ctx.conversationHistory.filter((t) => t.role === 'user')) {
+          if (turn.content) factTexts.add(turn.content);
+        }
+        for (const memory of emotionalMemories) {
+          const raw = String(memory?.record?.raw_input || '');
+          if (raw) factTexts.add(raw);
+        }
+        const factTerms = collectFactLookupTerms(message);
+        if (factTerms.length > 0) {
+          try {
+            const sqlite = ctx.storage.getSQLite?.();
+            if (sqlite && typeof sqlite.queryAll === 'function') {
+              for (const term of factTerms) {
+                const rows = sqlite.queryAll(
+                  'SELECT raw_input FROM memories WHERE raw_input LIKE ? ORDER BY created_at DESC LIMIT 8',
+                  ['%' + term + '%']
+                );
+                for (const row of rows as Array<{ raw_input?: string }>) {
+                  if (row?.raw_input) factTexts.add(String(row.raw_input));
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('[FactRecall] memories 查询失败:', (err as Error).message);
+          }
+          try {
+            for (const term of factTerms) {
+              const rows = ctx.conversationDB?.queryAll?.(
+                "SELECT content FROM conversations WHERE role = 'user' AND content LIKE ? ORDER BY timestamp DESC LIMIT 8",
+                ['%' + term + '%']
+              ) || [];
+              for (const row of rows as Array<{ content?: string }>) {
+                if (row?.content) factTexts.add(String(row.content));
+              }
+            }
+          } catch (err) {
+            console.warn('[FactRecall] conversations 查询失败:', (err as Error).message);
+          }
+        }
+        const factReply = buildDirectFactReply(message, collectFactSnapshot([...factTexts]));
+        if (factReply) {
+          reply = factReply;
+        } else {
+          reply = '';
+        }
+      }
+
+      if (!reply) {
 
         // 🏗️ Fix-3: 角色扮演时构建纯净的历史上下文
         // enrichedHistory 已在入口处过滤过（Fix-2），这里再做一次兜底
@@ -1681,6 +1856,10 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
 let memoryText = memoryFragments.length > 0 ? memoryFragments.slice(0, 8).join('\n') : '';
 let finalKnowledgeText = knowledgeBaseText;
+
+if (isFactualRecallQuery) {
+  finalKnowledgeText = factualRecallGuard + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
+}
 
 // ── 时空规则引擎：模式状态 + 气象上下文注入（LLM生成前） ──
 if (ENABLE_TEMPORAL_RULE_ENGINE) {

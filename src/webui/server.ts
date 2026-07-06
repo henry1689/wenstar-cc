@@ -934,6 +934,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     m6, m7, m8, clueTracker, topicTracker, alignmentGuard,
     inductionScheduler, masterProfile, getSelfModel, sseClients,
     getRoleplayStatus,
+    orchestrator,
+    hybridSearch,
+    enableNewArch: ENABLE_NEW_ARCH,
   })) return;
 
   // 记忆路由（已拆分至 server-memory-routes.ts）

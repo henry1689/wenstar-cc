@@ -36,6 +36,13 @@ export class HybridSearchEngine {
 
   isReady(): boolean { return this.ready; }
 
+  getDiagnostics(): { ready: boolean; embedderStatus: string } {
+    return {
+      ready: this.ready,
+      embedderStatus: this.embedder.getStatus(),
+    };
+  }
+
   /**
    * 混合检索：对 weightedSearch 的结果做语义重排序
    *
