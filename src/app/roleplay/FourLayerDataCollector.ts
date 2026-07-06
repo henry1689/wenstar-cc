@@ -32,8 +32,10 @@ export async function collectFourLayerData(
   rpBranch: FamilyGraphRoleBranch | null,
 ): Promise<FourLayerData> {
   const roleplayId = generateRoleplayId();
-  const fg = ctx.m4?.getFamilyGraph?.();
-  const fgAdapter = fg ? new FamilyGraphAdapter(fg, roleplayId) : null;
+  // 📜 信息权威铁律: 同时获取FG（override=角色分支）和主FG（全局查询）
+  const _overrideFg = ctx.m4?.getFamilyGraph?.();
+  const _realMainFg = ctx.m4?.getRealFamilyGraph?.();
+  const fgAdapter = _overrideFg ? new FamilyGraphAdapter(_overrideFg, roleplayId, _realMainFg) : null;
 
   console.log('[Roleplay] 串行检索开始');
   // ═══ 串行5层检索 ═══
@@ -87,6 +89,7 @@ export async function collectFourLayerData(
     undefined, undefined,
     clueResult?.l3Topology || [],
   );
+  console.log('[📜Layer2] relatives=' + relativeResult.relatives.length + ' content=' + (layer2.relationText || '').substring(0, 200));
 
   // ── Layer3: 记忆（串行结果） ──
   const sandEntries: MemoryEntry[] = (clueResult?.l2Sand || []).map((t, i) => ({

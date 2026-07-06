@@ -56,6 +56,11 @@ export class M4Orchestrator {
     return this._familyGraphOverride || this.familyGraph;
   }
 
+  /** 📜 信息权威铁律: 获取真实FG（绕过override，用于全局查询如getRelatedPersonsN） */
+  getRealFamilyGraph(): any {
+    return this.familyGraph;
+  }
+
   /**
    * 对 M3 决策执行完整的 M4 知识融合流程
    */

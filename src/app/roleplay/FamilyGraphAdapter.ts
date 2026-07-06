@@ -16,22 +16,23 @@ export interface RelativeProfileResult {
 
 export class FamilyGraphAdapter {
   private fg: any;
+  /** 📜 主FG引用（不受override影响，用于全局查询如getRelatedPersonsN） */
+  private mainFg: any;
   public roleplayId: string;
   public source: 'roleplay' | 'main';
 
-  constructor(fg: any, roleplayId: string) {
+  constructor(fg: any, roleplayId: string, mainFg?: any) {
     this.fg = fg;
+    this.mainFg = mainFg || fg;
     this.roleplayId = roleplayId;
     this.source = 'roleplay';
   }
 
   getPersonProfile(personName: string): PersonStructProfile | null {
-    if (!this.fg?.getPersonProfile) return null;
-    try {
-      const raw = this.fg.getPersonProfile(personName);
-      if (!raw) return null;
-      return mapProfile(raw);
-    } catch { return null; }
+    // 📜 信息权威铁律: 优先from FG override（角色分支），降级到主FG
+    const raw = this.fg?.getPersonProfile?.(personName) || this.mainFg?.getPersonProfile?.(personName);
+    if (!raw) return null;
+    return mapProfile(raw);
   }
 
   getFullProfile(personName: string): any | null {
@@ -47,37 +48,48 @@ export class FamilyGraphAdapter {
     const relatives: PersonStructProfile[] = [];
     const knownFields: Record<string, boolean> = { ...rootProfile.knownFields };
 
-    // 合并两个数据源：rpBranch角色视角 + FG 全局N跳遍历
-    // 角色分支可能缺母亲/父亲节点，必须合并全局图谱确保完整
+    // 📜 信息权威铁律: 合并两个数据源
+    // 1. rpBranch（角色视角，可能不全）
+    // 2. mainFg（主FG全局N跳遍历，绕过override）
     const nameSet = new Set<string>();
     if (rpBranch && typeof rpBranch.getAllNames === 'function') {
       for (const n of rpBranch.getAllNames() || []) {
         if (n !== rootName && n !== '我') nameSet.add(n);
       }
     }
-    if (this.fg?.getRelatedPersonsN) {
+    if (this.mainFg?.getRelatedPersonsN) {
       try {
-        const related = this.fg.getRelatedPersonsN([rootName], maxHop as 1|2|3, 0.3);
+        const related = this.mainFg.getRelatedPersonsN([rootName], maxHop as 1|2|3, 0.3);
         for (const r of related || []) {
           if (r.name !== rootName && r.name !== '我') nameSet.add(r.name);
         }
-      } catch {}
+      } catch (e: any) {
+        console.log('[📜S] getRelatedPersonsN失败: ' + (e?.message || 'unknown'));
+      }
     }
     const relativeNames = [...nameSet];
+    console.log('[📜listRelativeProfiles] root=' + rootName + ' found ' + relativeNames.length + ' relatives: ' + JSON.stringify(relativeNames));
 
     for (const name of relativeNames) {
       if (name === rootName || name === '我') continue;
-      const fgSource = rpBranch ?? this.fg;
-      const raw = fgSource?.getPersonProfile?.(name);
+      // 📜 信息权威铁律·等级S: 优先从rpBranch视角获取画像
+      // 但rpBranch可能不含该人物（分支隔离限制），此时降级到主FG
+      const raw = rpBranch?.getPersonProfile?.(name) || this.mainFg?.getPersonProfile?.(name);
       if (raw) {
         const p = mapProfile(raw);
         if (!p.relation && rpBranch?.getRelationToRoot) {
           p.relation = rpBranch.getRelationToRoot(name) || 'known';
         }
         relatives.push(p);
+        // 📜 记录数据来源：来自rpBranch还是主FG降级
+        if (!rpBranch?.getPersonProfile?.(name) && this.mainFg?.getPersonProfile?.(name)) {
+          console.log('[📜S→FG降级] ' + name + ' 不在角色分支中，从主FG获取画像');
+        }
         for (const [k, v] of Object.entries(p.knownFields)) {
           if (v) knownFields[k] = true;
         }
+      } else {
+        console.log('[📜S] ' + name + ' 在rpBranch和主FG都无画像');
       }
     }
     knownFields.hasRelatives = relatives.length > 0;
