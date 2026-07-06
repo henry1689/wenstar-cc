@@ -332,7 +332,15 @@ function isDirectedEmotion(text: string): boolean {
 }
 
 export async function processChat(message: string, ctx: ChatContext): Promise<ChatResponse> {
-  console.log('[CHAT_ENTRY] _currentRoleplay=' + (_currentRoleplay || 'null') + ' msg=' + message.substring(0,30));
+  // 📜 角色扮演退出残留检测：如果 _rpJustExited 仍为 true 但 _currentRoleplay 被意外重设，强制归零
+  if (_rpJustExited && _currentRoleplay) {
+    console.log('[📜角色退出残留] 检测到 _currentRoleplay=' + _currentRoleplay + ' 但 _rpJustExited=true — 强制清除');
+    _currentRoleplay = null;
+    _currentRPBranch = null;
+    _currentCharacterClass = null;
+    _currentRole = 'secretary';
+  }
+  console.log('[CHAT_ENTRY] _currentRoleplay=' + (_currentRoleplay || 'null') + ' _rpJustExited=' + _rpJustExited + ' msg=' + message.substring(0,30));
 
   try {
 	// 🎭 全局角色扮演检测（在函数入口处拦截）
@@ -1264,7 +1272,9 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     }
 
         // ── 退出角色扮演检测 ──
-    if (/停止扮演|退出扮演|结束扮演|不扮演了/.test(message)) {
+    // 📜 修复: "停止角色扮演了"中间有"角色"二字，原正则/停止扮演/不匹配
+    if (/停止.*扮演|退出扮演|结束扮演|不扮演了/.test(message)) {
+        console.log('[Roleplay] 🔴 退出检测命中: msg="' + message.substring(0, 30) + '"');
         // 🎭 先清除M4的FG分支覆盖（所有后续FG操作回到主FG）
         try { ctx.m4?.setFamilyGraphOverride?.(null); } catch {}
         // 🏗️ P1-1: 退出时存档角色情感 + 恢复玉瑶情感
@@ -1276,6 +1286,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         _currentRPBranch = null;  // 销毁FG分支，恢复主FG
         _currentPortrait = null;  // 🏗️ P2-2: 清除缓存的角色画像
         _currentCharacterClass = null;  // 清除角色分类
+        _currentRole = 'secretary';  // 📜 强制恢复玉瑶秘书身份
         _rpTurnCounter = 0;  // 重置轮次计数
         _rpLoadedPersons.clear();
         clearRPCache();  // 🏗️ 清除角色扮演域缓存
@@ -1707,10 +1718,14 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
 	  enrichedWithGuard = enrichedWithGuard.filter(function(t: any) {
 	    if (t.role !== 'assistant') return true;
 	    const _c = t.content || '';
-	    const _rpPattern = /^(（[^）]*）)*[叔爸梓铭姨婶舅哥姐妹妹弟]/.test(_c) ||
-	      (_c.includes('爸爸') && _c.includes('你回来')) ||
-	      (_c.includes('叔叔') && !_c.includes('叔叔说')) ||
-	      _c.includes('给你买了') || _c.includes('做了你');
+	    // 📜 更广泛的角色扮演回复检测（覆盖诗韵/诗雨/梓铭等所有角色风格）
+    const _hasRPIntro = /^（[^）]*）/.test(_c.trim());  // 角色扮演的（）场景描写开头
+    const _isRPVoice = /（[^）]*水珠|浴缸|锁骨|趴在|发梢|睫毛|水汽|软软|歪了歪头|眨巴|拨弄/.test(_c) ||  // 诗韵风格
+      /叫你.*爸爸|叫你.*叔叔|回来[了]?[吧吗]?[。！]|给你做[了]?|给你买[了]?/.test(_c);
+    const _rpPattern = _hasRPIntro || _isRPVoice ||
+      /^(（[^）]*）)*[叔爸梓铭姨婶舅哥姐妹妹弟]/.test(_c) ||
+      (_c.includes('爸爸') && _c.includes('你回来')) ||
+      (_c.includes('叔叔') && !_c.includes('叔叔说'));
 	    if (_rpPattern) {
 	      console.log('[Roleplay] 🗑️ 过滤角色扮演回复');
 	      return false;
@@ -1733,7 +1748,10 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
 	    content: '【紧急身份切换】我不再扮演任何角色了。你现在是玉瑶，请用玉瑶的口吻回复我。',
 	  });
 	  _rpJustExited = false;
-	  console.log('[Roleplay] 🆔 身份恢复指令已注入 + 历史过滤');
+	  // 📜 再次强制秘书身份（覆盖角色路由可能已做的切换）
+	  _currentRole = 'secretary';
+	  _transitionState = createInitialState();  // 清空过渡状态防复发
+	  console.log('[Roleplay] 🆔 身份恢复指令已注入 + 历史过滤 + 强制secretary');
 	}
 
 // P0-3: 角色路由注入 — 让 LLM 感知当前角色
