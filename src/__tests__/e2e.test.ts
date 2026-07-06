@@ -109,17 +109,17 @@ describe('E2E: 完整流水线 M1→M2→M3→M4→M5', () => {
     expect(reply.length).toBeGreaterThan(0);
   });
 
-  it('Case 3: 简短输入（粉末级）→ 忽略/简短回应', async () => {
+  it('Case 3: 简短输入（统一钙化后液体级）→ 记忆/简短回应', async () => {
     const dna = encoder.encodeSingle('嗯');
     await storage.write(dna, neutralPerception());
 
     const decision = m3.decide(dna);
-    expect(decision.actions).toContain('ignore');
+    expect(decision.actions).toContain('memorize');
 
     const ctx = await m4.orchestrate(decision);
     const reply = await m5.orchestrate(ctx);
     expect(reply).toBeTruthy();
-    // 粉末级回应应该非常简短
+    // 短输入的回应仍应非常简短
     expect(reply.length).toBeLessThan(50);
   });
 
