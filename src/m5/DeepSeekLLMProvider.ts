@@ -19,9 +19,9 @@ import { renderIntimateResponse } from './expression/IntimateRenderer.js';
 import type { IntimateSceneType } from './expression/IntimateRenderer.js';
 import type { IPersona } from '../app/persona/types.js';
 import { getKeyValue } from '../app/shared/ApiKeyStorage.js';
-import { classify, type RoleType, type RoleDecision } from '../app/role/RoleClassifier.js';
+import { type RoleType } from '../app/role/RoleClassifier.js';
 import { buildRoleSystemPrompt } from '../app/role/RoleProfiles.js';
-import { evaluateTransition, createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
+import { createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
 import { validateRoleOutput, getFallbackRole } from '../app/role/RoleGuard.js';
 
 // 改造④：不在模块级读 process.env，构造函数中通过 ConfigService 运行时获取
