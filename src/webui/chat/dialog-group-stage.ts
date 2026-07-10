@@ -113,20 +113,9 @@ export async function flushDialogGroup(
     const uniqueE = [...new Set(emotions)].slice(0, 3).join('→');
     console.log('[DG] 闭组: ' + dg.id + ' (' + dg.rounds.length + '轮, 锚点轮#' + anchorIdx + ', 情感:' + uniqueE + (dg.rpChar ? ', 角色扮演:' + dg.rpChar : '') + ')');
 
-    // 黑钻晋升（以锚点钙化分为基准）
-    // ⚠️ H3 遗留：阈值 4.5 属于旧的 [0,10] 钙化标度，而 anchorCalcium 已统一为引擎级 [0,1] 分值，
-    //    故此分支恒不触发（自本代码引入以来一直是死路）。黑钻实际由 VaultManager 晋升产出。
-    //    是否让"闭组共同回忆"独立产出黑钻，是一个涉及黑钻库(永久·珍藏)写入的产品决策，
-    //    需单独确认后再改阈值（如 >= 0.8 = 晶体级），此处保持原行为不动，避免重复黑钻。
-    if (anchorCalcium >= 4.5) {
-      const bdId = dg.id + '_BD';
-      const title = '共同回忆·' + (dg.topic || '').split('.').pop() || '对话';
-      sql.writeRaw(
-        "INSERT OR IGNORE INTO black_diamond (id, summary, emotion_tag, emotion_vector, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-        bdId, '【' + title + '】' + combined.substring(0, 180), 'shared_memory', pVec, now, now
-      );
-      console.log('[DG] 黑钻共同回忆: ' + title);
-    }
+    // 黑钻晋升由 VaultManager 统一负责（金库→黑钻，以"被反复召回"为准）。
+    // 闭组锚点已作为普通 memories 行写入，若日后被反复想起会自然经 VaultManager 晋升；
+    // 此处不再另开一条闭组直出黑钻的路径，避免与 VaultManager 产生重复/语义分裂的黑钻。
 
     // 图谱实体同步 + 档案提取（角色扮演时走真实FG，确保自学习不丢失）
     if (ctx.m4 && dg.entities.length > 0) {
