@@ -142,18 +142,23 @@ export async function flushDialogGroup(
       } catch (e: any) { console.error('[DialogGroup] error:', e?.message); }
     }
 
-    // 闭组回填：将对话组内所有原始对话关联上 dialog_group_id
+    // 闭组回填：用真实 seq_pos 关联 conversations 表
+    //    原实现用 -(rounds+100)..-(rounds) 的负数范围做 BETWEEN，但 conversations 表
+    //    seq_pos 全是正数（1-1654），负数范围永远匹配 0 行 — 回填功能从诞生起从未生效。
+    //    修复：遍历每轮的真实 seqPos（用户消息）+ seqPos+1（助手回复），精确 UPDATE。
     try {
       const convDB = ctx.conversationDB;
-      const dnaRootId = (dna as any).dna_root_id;
-      if (convDB && dg.rounds.length > 0 && dnaRootId) {
-        const firstSeq = -(dg.rounds.length + 100);
-        const lastSeq = -dg.rounds.length;
-        convDB.writeRaw(
-          "UPDATE conversations SET dialog_group_id = ?, dialog_round = CASE WHEN role='user' THEN seq_pos - ? + 1 ELSE seq_pos - ? + 1 END WHERE seq_pos BETWEEN ? AND ? AND dna_root_id = ? AND dialog_group_id IS NULL",
-          [dg.id, lastSeq, lastSeq, lastSeq, firstSeq, dnaRootId]
-        );
-        console.log('[三段回填] 对话组 ' + dg.id + ' 已回填 ' + dg.rounds.length + ' 轮');
+      if (convDB && dg.rounds.length > 0) {
+        let updated = 0;
+        for (let i = 0; i < dg.rounds.length; i++) {
+          const r = dg.rounds[i];
+          convDB.writeRaw(
+            "UPDATE conversations SET dialog_group_id = ?, dialog_round = ? WHERE (seq_pos = ? OR seq_pos = ?) AND dialog_group_id IS NULL",
+            [dg.id, i + 1, r.seqPos, r.seqPos + 1],
+          );
+          updated += 2;
+        }
+        console.log('[三段回填] 对话组 ' + dg.id + ' 已关联 ' + dg.rounds.length + ' 轮 (' + updated + ' 条对话)');
       }
     } catch (_e) { console.warn('[三段回填] 失败:', _e); }
   } catch (err) {
