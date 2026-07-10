@@ -1893,6 +1893,10 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
 
 let memoryText = memoryFragments.length > 0 ? memoryFragments.slice(0, 8).join('\n') : '';
+// 剥离场景描写：raw_input 里存着 LLM 自己生成的"（我趴在浴缸边…）"等动作描写，
+// 原样注入回去会让 LLM 读到自己的场景文本并自动进入那个场景——形成循环引用。
+// 场景是生成的产物，不是记忆的内容。只保留语义/对话内容，不留场景。
+memoryText = memoryText.replace(/（[^）]*）/g, '');
 let finalKnowledgeText = knowledgeBaseText;
 
 if (isFactualRecallQuery) {
