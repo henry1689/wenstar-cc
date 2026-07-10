@@ -249,7 +249,13 @@ export class DeepSeekLLMProvider implements LLMProvider {
       s.energy_merge, s.possessiveness, s.ecstasy, s.arousal,
       s.aggression, s.sincerity, s.dominance, rawInput,
     );
-    const level = bp.level;
+    let level = bp.level;
+    // 📜 日常话题守卫：用户问天气/时间/工作等正常内容时，不因感知残留而抬高级别
+    const _isDailyTopic = /天气|下雨|晴天|温度|几度|时间|几点|星期|日期|工作|项目|开会|吃饭|睡觉|在哪|干嘛|忙什么/.test(rawInput);
+    const _hasIntimateWords = /高潮|操|干|插|顶|射|丢|想要|给我|亲我|吻我|抱我|摸我|奶子|胸|屁股|硬了|湿了|进去了|受不了/.test(rawInput);
+    if (_isDailyTopic && !_hasIntimateWords && level >= 1) {
+      level = 0;
+    }
 
     // ── 表达规格控制（ExpressionSpecController 激活） ──
     const spec = calcExpressionSpec({
