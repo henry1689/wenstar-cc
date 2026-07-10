@@ -10,6 +10,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bionic } from '../adapter/bionic-adapter.js';
+import { logger } from '../common/utils/logger.js';
 
 export type ObservabilityRouteDeps = {
   req: http.IncomingMessage;
@@ -1128,6 +1129,16 @@ export async function handleObservabilityRoutes(
       res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ status: 'error', message: (err as Error).message }));
     }
+    return true;
+  }
+
+  // ── 日志端点 ──
+  if (req.method === 'GET' && url.pathname === '/api/logs') {
+    const limit = parseInt(url.searchParams?.get?.('limit') ?? '50') ?? 50;
+    const level = url.searchParams?.get?.('level');
+    const entries = level ? logger.filter(level as any, limit) : logger.recent(limit);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ count: entries.length, entries }));
     return true;
   }
 

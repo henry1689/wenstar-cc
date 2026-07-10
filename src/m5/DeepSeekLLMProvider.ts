@@ -10,6 +10,7 @@
  */
 import type { LLMProvider, StrategyConfig, CognitionObject, ConversationTurn } from './types/index.js';
 import { buildSystemPrompt, STYLE_ANCHORS } from './persona/lover-persona.js';
+import { selectLLMConfig, getScenarioConfig } from '../common/const/llm-config.js';
 import { isDeepIntimate, isAcademic, isMoan } from '../common/utils/is-intimate.js';
 import { calcLevel } from './expression/TierVocabMap.js';
 import { calcExpressionSpec } from './expression/ExpressionSpecController.js';
@@ -31,13 +32,6 @@ const MAX_HISTORY_TURNS = 200;
 function getHistoryLimit(txt: string): number {
   if (/工作|项目|客户|会议|方案|报告|公司|合同|预算|数据|分析|策略|设计|电机|采购|成本|温升|版本|产品|技术|报价|订单|生产|测试|样品|图纸|规格|性能|参数|工程|研发|工艺|质量|供应商/.test(txt)) return 10;
   return MAX_HISTORY_TURNS;
-}
-
-/** P3: 分级超时 — 日常10s / 冲突15s / 亲密20s */
-function getTieredTimeout(level: number): number {
-  if (level >= -1 && level <= 0) return 10000;  // 日常
-  if (level <= -2) return 15000;                // 冲突
-  return 20000;                                  // 亲密
 }
 
 interface DeepSeekMessage {
@@ -102,7 +96,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const _dl = (extraParams as any).level ?? 0;
-        const _timeoutMs = getTieredTimeout(_dl);
+        // timeout from config center
+      const _llmTimed = selectLLMConfig(_dl, rawInput, params.role);
+      const _timeoutMs = _llmTimed.timeoutMs;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), _timeoutMs);
 
@@ -236,7 +232,8 @@ export class DeepSeekLLMProvider implements LLMProvider {
       }
       messages.push({ role: 'user', content: sanitize(rawInput) });
       try {
-        return await this.callDeepSeekApi(messages, 1500, 0.95, { frequency_penalty: 0.1, presence_penalty: 0.5 });
+        const _rpCfg = getScenarioConfig('roleplay');
+      return await this.callDeepSeekApi(messages, _rpCfg.maxTokens, _rpCfg.temperature, { frequency_penalty: _rpCfg.frequencyPenalty, presence_penalty: _rpCfg.presencePenalty, reasoning_effort: _rpCfg.reasoningEffort });
       } catch (err) {
         console.error('[Roleplay]', err instanceof Error ? err.message : err);
         return { text: '…' };
@@ -501,19 +498,16 @@ ${profileText}
       : `${contextBlock}
 鸿艺: ${rawInput}`;
     messages.push({ role: 'user', content: userMsgContent });
-    const maxTokens = Math.max(
-      /讲(个|一)?故事|写(个|一)?小说|写(个|一)?故事/.test(rawInput) ? 1800
-      : /感觉|感受|回忆|分享|记得|印象|那时|那次/.test(rawInput) ? 1500
-      : level >= 2 ? 2500
-      : 1200,
-      spec.wordCountMin,
-    );
-    const temperature = level >= 2 || /感觉|感受|回忆|分享|记得|印象|讲.*故事|写.*小说/.test(rawInput) ? 1.0 : 0.9;
+    // LLM params from config center
     const _isRP = kb.includes('## 你是') || kb.includes('【角色扮演】');
-    const _finalTemp = _isRP ? 0.4 : temperature;
-    const _reasoningEffort = _isRP ? 'max' : undefined;
-    const frequencyPenalty = level >= 2 ? 0.0 : 0.3;
-    const presencePenalty = 0.2;
+    const _llmCfg = _isRP
+      ? getScenarioConfig('roleplay')
+      : selectLLMConfig(level, rawInput, params.role);
+    const maxTokens = Math.max(_llmCfg.maxTokens, spec.wordCountMin);
+    const temperature = _llmCfg.temperature;
+    const _reasoningEffort = _isRP ? 'max' : _llmCfg.reasoningEffort;
+    const frequencyPenalty = _llmCfg.frequencyPenalty;
+    const presencePenalty = _llmCfg.presencePenalty;
 
     try {
       return await this.callDeepSeekApi(messages, maxTokens, _finalTemp, {
