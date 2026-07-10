@@ -40,6 +40,7 @@ import type { DeepSeekLLMProvider } from '../m5/DeepSeekLLMProvider.js';
 import type { M8FusionAdapter } from '../m8/M8FusionAdapter.js';
 
 import type { SimilarityMode, ScoredMemory } from '../m2/types/index.js';
+import { runChatEntry } from './chat/ChatEntry.js';
 
 import type { ConversationTurn } from '../m5/types/index.js';
 
@@ -433,145 +434,22 @@ function isDirectedEmotion(text: string): boolean {
 }
 
 export async function processChat(message: string, ctx: ChatContext): Promise<ChatResponse> {
-  // 📜 角色扮演退出残留检测：如果 _rpJustExited 仍为 true 但 _currentRoleplay 被意外重设，强制归零
-  if (_rpJustExited && _currentRoleplay) {
-    console.log('[📜角色退出残留] 检测到 _currentRoleplay=' + _currentRoleplay + ' 但 _rpJustExited=true — 强制清除');
-    _currentRoleplay = null;
-    _currentRPBranch = null;
-    _currentCharacterClass = null;
-    _currentRole = 'secretary';
-  }
-  console.log('[CHAT_ENTRY] _currentRoleplay=' + (_currentRoleplay || 'null') + ' _rpJustExited=' + _rpJustExited + ' msg=' + message.substring(0,30));
-
   try {
-	// 🎭 全局角色扮演检测（在函数入口处拦截）
-	// Fix-1: 显式扮演检测（"扮演诗韵"）
-	const _rpEntry = message.match(/(?:扮演(?:一下)?|模仿|演一下|cos)[了]?([一-龥]{2,8})/);
-	if (_rpEntry && _rpEntry[1].trim().length >= 2) {
-	  _currentRoleplay = _rpEntry[1].replace(/[吧呗了试试看看一下玩玩]$/, '').trim();
-	  console.log('[Roleplay] 🔒 入口锁定: ' + _currentRoleplay);
-	}
+    // ChatEntry — entry guard pipeline
+    const _entryState = {
+      _currentRoleplay, _currentRPBranch, _currentCharacterClass,
+      _currentRole, _rpJustExited,
+    };
+    const entryResult = await runChatEntry(message, ctx, _entryState);
+    _currentRoleplay = _entryState._currentRoleplay;
+    _currentRPBranch = _entryState._currentRPBranch;
+    _currentCharacterClass = _entryState._currentCharacterClass;
+    _currentRole = _entryState._currentRole;
+    _rpJustExited = _entryState._rpJustExited;
+    const dna = entryResult.dna;
+    let _ruleEngineBlocked = entryResult.ruleEngineBlocked;
+    let _ruleEngineReply = entryResult.ruleEngineReply;
 
-	// Fix-1b: 隐式扮演检测 — 消息以已知角色名开头且跟在"呢/呀/啊/吗/哈"后，视为对该角色说话
-	// 模式：诗韵，你怎么... / 诗韵你是不是... / 梓铭，帮我...
-	if (!_rpEntry && !_currentRoleplay && ctx.m4) {
-	  try {
-	    const fg = ctx.m4.getFamilyGraph();
-	    const allNames = fg ? fg.getAllPersonNames() : [];
-	    // 加上最近对话中出现过的人名
-	    for (const turn of ctx.conversationHistory.slice(-10)) {
-	      const namesInHistory = turn.content.match(/[一-龥]{2,4}(?=[，,、。]|$)/g);
-	      if (namesInHistory) {
-	        for (const n of namesInHistory) {
-	          if (n.length >= 2 && !allNames.includes(n)) allNames.push(n);
-	        }
-	      }
-	    }
-	    const COMMON_PHRASES = new Set(['不用了', '知道了', '好了', '对了', '行了', '没事', '好的',
-	      '好吧', '是的', '嗯嗯', '谢谢', '不用谢', '不客气', '不会的', '可以的', '没关系']);
-	    const allNamesFiltered = allNames.filter(function(n) { return !COMMON_PHRASES.has(n); });
-	    for (const name of allNamesFiltered) {
-	      if (name === '我' || name.length < 2) continue;
-	      // 消息以"X，"/"X "/"X:"开头，或"X呢/呀/啊/吗/哈"结尾
-	      if (message.startsWith(name + '，') || message.startsWith(name + ',') ||
-	          message.startsWith(name + ' ') || message.startsWith(name + ':')) {
-	        _currentRoleplay = name;
-	        console.log('[Roleplay] 🔒 隐式锁定: ' + name + ' (消息开头称呼)');
-	        break;
-	      }
-	    }
-	  } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
-	}
-
-    const dna = ctx.encoder.encodeSingle(message);
-
-    // ── 时空规则引擎：NLP提取 + 前置校验（违规时设置回复，后续不再走LLM） ──
-    let _ruleEngineBlocked = false;
-    let _ruleEngineReply = '';
-    if (ENABLE_TEMPORAL_RULE_ENGINE) {
-      try {
-        const { NLPEventExtractor } = await import('../engine/temporal/NLPEventExtractor.js');
-        const { TemporalEventArchive } = await import('../engine/temporal/TemporalEventArchive.js');
-        const { recordEventViolation } = await import('../engine/temporal/temporal_event_hook.js');
-        const engineCtx = ctx.storage?.getSQLite?.();
-        const archive = engineCtx ? new TemporalEventArchive(engineCtx) : null;
-
-        const extracted = NLPEventExtractor.extract(message, '鸿艺');
-        if (extracted) {
-          if (extracted.type === 'temporal_event' && archive && worldRuleMode === 'realistic') {
-            const { params } = extracted;
-            if (/怀孕|生孩子|分娩|妊娠|生宝宝/.test(message) || /感冒|发烧|受伤|恢复/.test(message)) {
-              const check = archive.checkEventCompliance(message, params.durationMs);
-              if (!check.valid) {
-                recordEventViolation(ctx.storage?.getSQLite?.(), message, check.reason || '');
-                _ruleEngineBlocked = true;
-                _ruleEngineReply = check.reason || '';
-              }
-            }
-            if (!_ruleEngineBlocked) {
-              archive.createEvent({
-                belongEntityId: '鸿艺',
-                eventType: params.eventType,
-                eventRawText: extracted.content,
-                startTs: params.startTs,
-                endTs: params.endTs,
-                cycleMs: params.cycleMs,
-                dnaRootId: dna.dna_root_id || 'unknown',
-              });
-            }
-          }
-        }
-      } catch (_err) { /* 规则引擎不阻塞主流程 */ }
-    }
-
-    // P3: LLM 辅助实体提取（三层过滤 — prompt约束+白名单+人名正则）
-    try {
-      const { extractEntitiesLLM } = await import('../m1/LLMEntityExtractor.js');
-      const llmGenerate = async (prompt: string) => {
-        const r = await (ctx.llmProvider).generate({
-          strategy: { strategy_id: 'entity-extraction', params: { tone: 'neutral', depth: 'shallow', max_length: 256 } } as any,
-          cognition: { current: { perception_snapshot: { pleasure: 0, arousal: 0, intimacy: 0 }, raw_input: prompt, calcium: 0 } } as any,
-          userMessage: prompt,
-        });
-        return r.text;
-      };
-      const llmEntities = await extractEntitiesLLM(message, llmGenerate);
-      // 以LLM为基准，规则仅补充LLM未命中的非person实体
-      if (llmEntities.length > 0) {
-        const llmNames = new Set(llmEntities.map(e => e.name));
-        // 规则提取的person实体只有LLM也确认才保留（消除"家里""贝安"等误报）
-        const keptRules = dna.entity_genes.filter((g: any) =>
-          g.type !== 'person' || g.name === '我' || llmNames.has(g.name)
-        );
-        const existingNames = new Set(keptRules.map(e => e.name));
-        for (const le of llmEntities) {
-          if (!existingNames.has(le.name)) {
-            existingNames.add(le.name);
-            keptRules.push({ name: le.name, type: le.type, allele: le.name, phenotype: 'neutral', knowledge_type: 'private' } as any);
-          }
-        }
-        dna.entity_genes = keptRules;
-        console.log('[LLMEntity] 提取: ' + llmEntities.map(e => e.name).join(','));
-      }
-    } catch (_err) {
-      console.warn('[LLMEntity] 提取失败:', (_err as Error).message);
-    }
-
-    // 家族图谱兜底：M1+LLM没提到时直接从图谱匹配
-    try {
-      const _hp = dna.entity_genes.some((g: any) => g.type === "person" && g.name !== "我" && g.name.length > 1);
-      if (!_hp && ctx.m4) {
-        const _fg = ctx.m4.getFamilyGraph();
-        if (_fg) {
-          for (const _n of _fg.getAllPersonNames()) {
-            if (_n !== "我" && _n.length > 1 && message.includes(_n)) {
-              dna.entity_genes.push({ name: _n, type: "person", allele: _n, phenotype: "neutral", knowledge_type: "private" });
-              console.log("[FamilyGraph] 图谱匹配: " + _n);
-            }
-          }
-        }
-      }
-    } catch (_fe) { console.warn("[FamilyGraph] 图谱匹配失败:", _fe); }
 
     // 📸 人物全方位档案提取
     console.log('[PersonProfile] 检查开始, ctx.m4=' + (!!ctx.m4) + ' m4类型=' + (typeof ctx.m4));
