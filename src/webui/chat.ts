@@ -2644,52 +2644,31 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
 
     try {
 
+      // 📜 M6/M8 异步化：不阻塞 LLM 回复主线
       if (ctx.m6) {
-
         const dimensions = dna.entity_genes.filter(g => g.type !== 'self').map(g => g.name).filter(Boolean);
-
         const dim = dimensions[0]?.substring(0, 30);
-
         if (dim) {
-
           const deltaMap = [0, 3, 8, 15];
-
-          await ctx.m6.processSignal({
-
+          ctx.m6.processSignal({
             dimension: dim, direction: p.pleasure > 0 ? 'increase' : 'decrease',
-
             delta: deltaMap[decision.enhanced.calcium_level] ?? 3,
-
             e1_pleasure: p.pleasure, i2_intimacy: p.intimacy,
-
             c1_conflict: Math.max(0, p.aggression + (1 - p.safety)),
-
             calcium: decision.enhanced.calcium_level, triggerEvent: message.substring(0, 40),
-
-          });
-
+          }).catch(() => {});
         }
-
-        // ① M8 情感共鸣巩固: 高钙事件触发年轮写入
         if (ctx.m8 && decision.enhanced.calcium_level >= 3) {
-          try {
-            const m8Result = await ctx.m8.write({
-              sensory_anchor: message.substring(0, 30),
-              perception: p,
-              emotional_valence: decision.primary_emotion || '强烈',
-              narrative_tag: dna.locus_path || 'general',
-              raw_input: message,
-              calcium_at_event: decision.enhanced.calcium_score,
-              write_source: 'emergency',
-            });
-            if (m8Result.ritual_phrase) {
-              console.log('[M8] 锚定话术:', m8Result.ritual_phrase);
-            }
-          } catch (err) {
-            console.warn('[M8] 情感共鸣巩固失败:', err);
-          }
+          ctx.m8.write({
+            sensory_anchor: message.substring(0, 30),
+            perception: p,
+            emotional_valence: decision.primary_emotion || '强烈',
+            narrative_tag: dna.locus_path || 'general',
+            raw_input: message,
+            calcium_at_event: decision.enhanced.calcium_score,
+            write_source: 'emergency',
+          }).then(r => { if (r.ritual_phrase) console.log('[M8] 锚定话术:', r.ritual_phrase); }).catch(() => {});
         }
-
       }
 
     } catch (err) { console.warn('[M6Evol] 失败:', err); }
