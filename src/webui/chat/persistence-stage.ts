@@ -77,8 +77,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   const rp = input.currentRoleplay || null;
   let hadError = false;
 
-  // ── Step 1: conversationHistory（内存） ──
-  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic } as any);
+  // ── Step 1: conversationHistory（内存）──
+  //    rpChar 标记角色扮演来源——非角色模式时 enrichedHistory 按此排除角色对话
+  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic, rpChar: rp } as any);
   input.ctx.saveConversationHistory();
   if (input.ctx.conversationHistory.length > 500) {
     input.ctx.conversationHistory.splice(0, input.ctx.conversationHistory.length - 500);
@@ -181,7 +182,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   // ── 更新内存 ──
-  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic } as any);
+  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic, rpChar: rp } as any);
   input.ctx.saveConversationHistory();
 
   if (hadError) {

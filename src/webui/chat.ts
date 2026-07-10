@@ -734,7 +734,8 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       }
       console.log('[Roleplay] 历史过滤: ' + ctx.conversationHistory.length + '→' + enrichedHistory.length + ' 条');
     } else {
-      enrichedHistory = ctx.conversationHistory.slice(-40);
+      // 非角色模式：排除角色扮演期间的对话（按 persistence-stage 写入时的 rpChar 标记过滤）
+      enrichedHistory = ctx.conversationHistory.slice(-40).filter(function(t: any) { return !t.rpChar; });
     }
         // ── 记忆检索：时间导航 + 情感检索 + 黑钻检索（已拆分至 retrieval-stage） ──
     let {
