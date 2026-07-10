@@ -2033,9 +2033,11 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
             finalKnowledgeText = '【不知道】这个问题我确实不知道答案。我不想编造，所以诚实地告诉你我不清楚。\n\n' + (finalKnowledgeText || '');
           }
         }
-        // ① 历史场景衔接：将记忆碎片作为【历史关联】注入 finalKnowledgeText
+        // ① 过往记忆参考：作为情感背景注入，但不强制 LLM 在当前回复中复述
+        //    原来"用自然的方式在回复中提及这段过往"导致 LLM 把上一轮的场景(浴缸等)强行带回本轮——即使话题已切换。
+        //    改为"如果相关可以自然参考，不要强行衔接"——记忆是背景，不是剧本。
         if (memoryText && !_currentRoleplay && !finalKnowledgeText.includes('【相关记忆】')) {
-          const historyLink = '【历史关联】' + memoryText + '\n（用自然的方式在回复中提及这段过往，不要说"根据历史记录"）';
+          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（这些是你以前的记忆片段。如果当前话题自然关联到了，可以轻轻带一笔；如果话题完全不相关，不要强行衔接，更不要复述记忆里的场景）';
           finalKnowledgeText = historyLink + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
         }
         // 家族/社交铁律注入 — 只在消息提到已知人物 或 事实查询时注入
