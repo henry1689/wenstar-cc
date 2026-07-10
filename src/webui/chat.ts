@@ -165,9 +165,10 @@ let _currentRPBranch: FamilyGraphRoleBranch | null = null;  // 角色扮演FG分
 let _rpJustExited = false;  // 角色扮演刚退出标记（需强制恢复玉瑶身份）
 
 // 🏗️ P0：角色扮演稳定机制状态
-let _rpTurnCounter = 0;       // 距离上次完整重注入的轮数
-let _currentCharacterClass: 'A'|'B'|'C'|null = null;  // 角色分类
-let _currentPortrait: string | null = null;  // 缓存当前完整画像（用于周期性重注入）
+let _rpTurnCounter = 0;
+let _currentCharacterClass: 'A'|'B'|'C'|null = null;
+let _currentPortrait: string | null = null;
+let _lastRpInteractionTime = 0;  // 📜 上次角色扮演互动时间（用于15分钟超时自动退出）
 
 // 🏗️ P1-1: 角色情感快照隔离
 import { EmotionSnapshot } from '../app/roleplay-legacy/EmotionSnapshot.js';
@@ -434,13 +435,26 @@ function isDirectedEmotion(text: string): boolean {
 }
 
 export async function processChat(message: string, ctx: ChatContext): Promise<ChatResponse> {
-  // 📜 角色扮演退出残留检测：如果 _rpJustExited 仍为 true 但 _currentRoleplay 被意外重设，强制归零
+  // 📜 角色扮演退出残留检测
   if (_rpJustExited && _currentRoleplay) {
     console.log('[📜角色退出残留] 检测到 _currentRoleplay=' + _currentRoleplay + ' 但 _rpJustExited=true — 强制清除');
     _currentRoleplay = null;
     _currentRPBranch = null;
     _currentCharacterClass = null;
     _currentRole = 'secretary';
+  }
+  // 📜 角色扮演超时自动退出：15分钟无角色扮演互动，自动切回玉瑶
+  if (_currentRoleplay && !_rpJustExited) {
+    const _sinceRp = Date.now() - _lastRpInteractionTime;
+    if (_sinceRp > 15 * 60 * 1000) {
+      console.log('[📜角色超时退出] 距上次角色扮演互动' + Math.round(_sinceRp / 60000) + '分钟，自动切回玉瑶');
+      try { ctx.m4?.setFamilyGraphOverride?.(null); } catch {}
+      _currentRoleplay = null;
+      _currentRPBranch = null;
+      _currentCharacterClass = null;
+      _currentRole = 'secretary';
+      _rpTurnCounter = 0;
+    }
   }
   console.log('[CHAT_ENTRY] _currentRoleplay=' + (_currentRoleplay || 'null') + ' _rpJustExited=' + _rpJustExited + ' msg=' + message.substring(0,30));
 
@@ -456,6 +470,8 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     _currentCharacterClass = _entryState._currentCharacterClass;
     _currentRole = _entryState._currentRole;
     _rpJustExited = _entryState._rpJustExited;
+    // 更新角色扮演互动时间戳
+    if (_currentRoleplay) _lastRpInteractionTime = Date.now();
     const dna = entryResult.dna;
     let _ruleEngineBlocked = entryResult.ruleEngineBlocked;
     let _ruleEngineReply = entryResult.ruleEngineReply;
@@ -1281,11 +1297,12 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           console.log('[EmotionSnapshot] 退出角色扮演，已存档情感+恢复玉瑶');
         }
         _currentRoleplay = null;
-        _currentRPBranch = null;  // 销毁FG分支，恢复主FG
-        _currentPortrait = null;  // 🏗️ P2-2: 清除缓存的角色画像
-        _currentCharacterClass = null;  // 清除角色分类
-        _currentRole = 'secretary';  // 📜 强制恢复玉瑶秘书身份
-        _rpTurnCounter = 0;  // 重置轮次计数
+        _currentRPBranch = null;
+        _currentPortrait = null;
+        _currentCharacterClass = null;
+        _currentRole = 'secretary';
+        _rpTurnCounter = 0;
+        _lastRpInteractionTime = 0;  // 📜 重置超时计时器
         _rpLoadedPersons.clear();
         clearRPCache();  // 🏗️ 清除角色扮演域缓存
         _rpJustExited = true;  // 🎭 标记：本轮需强制恢复玉瑶身份
@@ -1420,6 +1437,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         }
         _currentRoleplay = character;
         _rpTurnCounter = 0;
+        _lastRpInteractionTime = Date.now();  // 📜 记录角色扮演开始时间
         // 🏗️ P1-1: 进入角色时存档玉瑶情感 + 加载角色情感
         if (!_rpSwitching && _emotionSnapshot) {
           _emotionSnapshot.enterRoleplay(character);
@@ -1505,6 +1523,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     // ── 跨轮次角色扮演锁定（通过角色扮演域管线） ──
     if (_currentRoleplay && !rpMatch) {
       _rpTurnCounter++;
+      _lastRpInteractionTime = Date.now();  // 📜 刷新互动时间戳防止超时退出
       console.log('[Roleplay] 持续扮演: ' + _currentRoleplay + ' (轮' + _rpTurnCounter + ')');
 
       // 🏗️ 调用角色扮演域五步管线
