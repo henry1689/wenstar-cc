@@ -132,6 +132,7 @@ export class MemoryRetriever {
           entities: entities.filter(e => e.type === 'emotion').map(e => e.name),
           similarity_mode: 'mood_congruent',
           limit: 10,
+          excludeRoleplay: true,  // 正常检索排除角色扮演记忆
         });
         for (const sm of scored) {
           if (sm?.record) {
@@ -147,7 +148,10 @@ export class MemoryRetriever {
               created_at: sm.record.created_at ?? '',
               calcium_score: sm.record.calcium_score,
               calcium_level: sm.record.calcium_level,
-            });
+              // 携带检索隔离字段，供合并时按规则过滤
+              memory_kind: sm.record.memory_kind,
+              memory_type: (sm.record as any).memory_type,
+            } as any);
           }
         }
       } catch (err) {
@@ -163,6 +167,20 @@ export class MemoryRetriever {
         seen.add(dna.branch_id);
         merged.push(dna);
       }
+    }
+
+    // 5. 检索规则：正常模式排除角色扮演记忆（memory_kind='roleplay' 或 memory_type='rp_dialog'）
+    //    角色扮演记忆只属于角色扮演检索管线(retrieveFullClue)，不应污染正常对话的检索结果。
+    const _filtered = merged.filter(dna => {
+      const kind = (dna as any).memory_kind;
+      const mtype = (dna as any).memory_type;
+      if (kind === 'roleplay' || mtype === 'rp_dialog') return false;
+      return true;
+    });
+    if (_filtered.length < merged.length) {
+      console.log(`[M4] 正常检索过滤 ${merged.length - _filtered.length} 条角色扮演记忆`);
+      merged.length = 0;
+      merged.push(..._filtered);
     }
 
     // 5. 知识库补充

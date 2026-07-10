@@ -764,14 +764,8 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
     } catch (err) { console.warn('[SomaticContext] 注入失败:', err); }
 
-    // 🎭 正常模式隔离：排除角色扮演记忆（角色扮演中的金库记忆在正常对话中不可见）
-    if (!_currentRoleplay && emotionalMemories.length > 0) {
-      const _before = emotionalMemories.length;
-      emotionalMemories = emotionalMemories.filter(function(m: any) { return m.record?.memory_type !== 'rp_dialog'; });
-      if (emotionalMemories.length < _before) {
-        console.log('[MemoryIsolation] 过滤 ' + (_before - emotionalMemories.length) + ' 条角色扮演记忆');
-      }
-    }
+    // 🎭 角色扮演记忆隔离：检索层 (MemoryRetriever.retrieveMemories) 已按 memory_kind/memory_type
+    //    在合并结果时排除角色扮演记忆。此处不再重复过滤。
 
     // 知识库检索（由 MemoryGate 管控）
 

@@ -636,8 +636,12 @@ export class SQLiteAdapter {
     );
 
     // P6: Tier 1 — landmark fast path (is_landmark = 1, typically < 10 records)
+    // 检索规则：角色扮演记忆仅在角色扮演检索中可见。正常检索时在查询层排除 roleplay 记忆。
+    const rpExclude = query.excludeRoleplay
+      ? " AND (memory_kind IS NULL OR (memory_kind != 'roleplay' AND memory_type != 'rp_dialog'))"
+      : "";
     const landmarkRows = this.execSql(
-      `SELECT * FROM memories WHERE is_landmark = 1 ORDER BY calcium_score DESC LIMIT 20`,
+      `SELECT * FROM memories WHERE is_landmark = 1${rpExclude} ORDER BY calcium_score DESC LIMIT 20`,
     );
     let landmarkRecords = this.rowsToRecords(landmarkRows)
       .filter(r => r.effective_strength >= 0.05);
@@ -655,7 +659,7 @@ export class SQLiteAdapter {
     // If not enough results from landmarks, do Tier 2: recent memory scan
     if (allScored.length < query.limit) {
       const all = this.execSql(
-        `SELECT * FROM memories ORDER BY seq_pos DESC LIMIT 200`,
+        `SELECT * FROM memories WHERE 1=1${rpExclude} ORDER BY seq_pos DESC LIMIT 200`,
       );
       const records = this.rowsToRecords(all)
         .filter(r => r.effective_strength >= 0.05 && !landmarkIds.has(r.id));

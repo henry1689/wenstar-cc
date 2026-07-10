@@ -130,6 +130,8 @@ export interface RetrievalQuery {
   limit: number;
   /** P1: 对话组检索模式 — 'all'（默认，同组全返回）｜'first-per-group'（同组只返回锚点） */
   dialogGroupMode?: 'all' | 'first-per-group';
+  /** 排除角色扮演记忆：true 时不返回 memory_kind='roleplay' 或 memory_type='rp_dialog' 的记录 */
+  excludeRoleplay?: boolean;
 }
 
 /** 评分后的记忆 */
