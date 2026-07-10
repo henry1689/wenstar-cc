@@ -183,7 +183,6 @@ function buildLayer2(
     elder_sister_of: '姐姐', younger_sister_of: '妹妹',
     sibling_of: '姐妹/兄弟', child_of: '孩子', parent_of: '父母',
     aunt_of: '姑姑', cousin_of: '表亲', niece_of: '侄女',
-    elder_sister_of: '姐姐', younger_sister_of: '妹妹',
     elder_brother_of: '哥哥', younger_brother_of: '弟弟',
   };
 

@@ -414,6 +414,7 @@ export class FamilyGraph implements FamilyGraphInterface {
   /** P4: 批量落盘 — 减少IO */
   private _dirty = false;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private ready = false;
 
   constructor(dbPath?: string) {
     this.dbPath = dbPath ?? DEFAULT_DB_PATH;
@@ -469,6 +470,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     try { this.run('CREATE INDEX IF NOT EXISTS idx_edges_source_rel ON edges(source_id, relation)'); } catch {}
 
     this.markDirty();
+    this.ready = true;
 
     // FG基建加固：启动时自动备份 + "我"节点完整性检查
     this._ensureBackup();
@@ -2111,7 +2113,7 @@ export class FamilyGraph implements FamilyGraphInterface {
                    || matchSubj(`.*?(?:家|住的地方|住址)(?:在|是)([^，。！？]{2,30})`);
     if (addrMatch && addrMatch[1] && !/什么|哪里|哪儿|哪/.test(addrMatch[1])) {
       const addr = addrMatch[1].trim().substring(0, 30);
-      if (!profile.address || profile.address !== addr) {
+      if (!(profile as any).address || (profile as any).address !== addr) {
         await this.updatePersonProfile(personName, { address: addr } as any, { countMention: false });
         extracted++;
       }

@@ -13,6 +13,7 @@ import { extractAnchor, buildAnchorConstraint, validateAgainstAnchor, resetAncho
 import { resetMockSession } from './MockLLMProvider.js';
 import { getBufferPhrase, type BufferContext } from './BufferPhrases.js';
 import { classify, type RoleType, type RoleDecision } from '../app/role/RoleClassifier.js';
+import { isIntimate } from '../common/utils/is-intimate.js';
 import { evaluateTransition, createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
 
 export class M5Orchestrator {

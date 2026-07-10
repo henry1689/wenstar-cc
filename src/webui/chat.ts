@@ -892,7 +892,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
       try {
 
-        const entityNames = dna.entity_genes.map(e => e.name);
+        const entityNames = dna.entity_genes.map((e: any) => e.name);
 
         if (entityNames.length > 0) {
 
@@ -1181,7 +1181,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         }
         // 象限4: 实体匹配 → 关联知识
         else if (dna.entity_genes.length > 0) {
-          var _pe = dna.entity_genes.filter(function(g){return g.type !== 'self'}).map(function(g){return g.name}).filter(Boolean);
+          var _pe = dna.entity_genes.filter(function(g: any){return g.type !== 'self'}).map(function(g: any){return g.name}).filter(Boolean);
           if (_pe.length > 0) { _pushKeywords = _pe[0]; _pushSource = '实体: ' + _pe[0]; }
         }
 
@@ -1767,7 +1767,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     } catch (err) { console.warn('[Classify] 分类反问失败:', err); }
 
     // 仅当存在人物档案数据时才注入外貌规则，日常聊天空时不注入
-    const _hasPeopleData = (ctx_m4?.family_context?.length > 0 || ctx_m4?.social_context?.length > 0);
+    const _hasPeopleData = ((ctx_m4?.family_context?.length ?? 0) > 0 || (ctx_m4?.social_context?.length ?? 0) > 0);
     const _appearanceGuard = _hasPeopleData
       ? '【强制规则·人物外貌】如果有人问你"长什么样""什么样子"，你只能回答上面【人物档案】中写明的外貌和身体特征。没写的细节你一概不知道，直接说不知道。绝对禁止编造。'
       : '';
@@ -2592,7 +2592,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
 
       // 📜 M6/M8 异步化：不阻塞 LLM 回复主线
       if (ctx.m6) {
-        const dimensions = dna.entity_genes.filter(g => g.type !== 'self').map(g => g.name).filter(Boolean);
+        const dimensions = dna.entity_genes.filter((g: any) => g.type !== 'self').map((g: any) => g.name).filter(Boolean);
         const dim = dimensions[0]?.substring(0, 30);
         if (dim) {
           const deltaMap = [0, 3, 8, 15];
@@ -2715,7 +2715,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
       const tags = dna.scene_tags || [];
       if (tags.length > 0) {
         const replyLower = (reply || '').toLowerCase();
-        const matchCount = tags.filter(t => replyLower.includes(t)).length;
+        const matchCount = tags.filter((t: string) => replyLower.includes(t)).length;
         sceneFitScore = Math.round(50 + (matchCount / tags.length) * 50);
       }
     } catch (e) { /* 评分失败不影响主线 */ }
@@ -2819,7 +2819,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
 
       vad_spectrum: vadSpectrum,
 
-      m1: { branch_id: dna.branch_id, locus_path: dna.locus_path, seq_pos: seqPos, leaf_zone: dna.leaf_zone, ref: `seq_${String(seqPos).padStart(6, '0')}`, entities: dna.entity_genes.map(e => ({ name: e.name, type: e.type })), raw_input: dna.raw_input, entity_genes: dna.entity_genes, scene_tags: dna.scene_tags, ambiguity_score: dna.ambiguity_score },
+      m1: { branch_id: dna.branch_id, locus_path: dna.locus_path, seq_pos: seqPos, leaf_zone: dna.leaf_zone, ref: `seq_${String(seqPos).padStart(6, '0')}`, entities: dna.entity_genes.map((e: any) => ({ name: e.name, type: e.type })), raw_input: dna.raw_input, entity_genes: dna.entity_genes, scene_tags: dna.scene_tags, ambiguity_score: dna.ambiguity_score },
 
       m3: { quadrant1: allDims.filter((d: any) => d.q === 1), quadrant2: allDims.filter((d: any) => d.q === 2), quadrant3: allDims.filter((d: any) => d.q === 3), quadrant4: allDims.filter((d: any) => d.q === 4), calcium: { score: Number(decision.enhanced.calcium_score.toFixed(3)), level: cl, label: LEVEL_NAMES[cl] ?? '?', breakdown: { base_core: 0, emotional_boost: 0, threat_bonus: 0 } }, actions: decision.actions, reason: decision.reason, primary_emotion: decision.primary_emotion, secondary_emotions: decision.secondary_emotions, confidence: decision.confidence },
 
