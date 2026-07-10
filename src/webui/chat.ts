@@ -2100,12 +2100,37 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
               if (_pp.length) _selfBlocks.push('【我的偏好】' + _pp.join('；'));
             }
 
-            // 3) 核心身份叙事（仅第1层）— 不注入高钙化角色扮演片段
-            //    自传叙事层含角色扮演对话（诗韵等），注入到正常聊天语境会污染 LLM 上下文、
-            //    导致回复循环或人格分裂。角色扮演自有四层管线注入身份，此处只需"我是谁"的根基。
+            // 3) 过往记忆 — 高钙化叙事，按当前消息中提到的人物做门控
+            //    框架标注为"过往记忆"而非"自我认知"：让 LLM 理解为"发生过的事"而不是"现在的身份"，
+            //    避免角色扮演叙事（诗韵的亲密对话）在与其他人物（鸿艺等）对话时造成人格分裂。
+            //    门控：叙事中提到的人物必须在当前消息的 entity_genes 中出现过（不是全 FG）。
+            //    全部内容（含亲密表达）原样保留——这是她的私人记忆，不过滤内容。
             const _layers = ctx.m6.getNarrativeLayers?.() || [];
-            if (_layers.length > 0 && _layers[0]?.text) {
-              _selfBlocks.push('【我的核心身份】' + _layers[0].text);
+            if (_layers.length > 0) {
+              // 当前消息中提到的人名（M1 实体提取）
+              const _msgPersons = (dna.entity_genes || [])
+                .filter((g: any) => g.type === 'person' && g.name !== '我' && g.name.length > 1)
+                .map((g: any) => g.name);
+              const _gateOn = _msgPersons.length > 0;
+              const _story: string[] = [];
+              // 第1层（核心身份）总是保留 — 她是玉瑶，这是一个正在生长中的认知生命体
+              if (_layers[0]?.text) _story.push(_layers[0].text);
+              // 其余层：只注入与当前消息提到的人物相关的
+              for (let i = 1; i < _layers.length; i++) {
+                const _txt = (_layers[i]?.text || '').trim();
+                if (!_txt) continue;
+                if ((_layers[i].calcium_at_event ?? 0) < 2) continue;
+                if (_gateOn) {
+                  const _mentioned = _msgPersons.filter((n: string) => _txt.includes(n));
+                  if (_mentioned.length === 0) continue; // 叙事里没有当前消息提到的人 → 跳过
+                }
+                _story.push(_txt);
+              }
+              // 最多保留 4 条（第1层 + 最近3条相关的）
+              const _top = _story.slice(0, 1).concat(_story.slice(1).slice(-3));
+              if (_top.length > 0) {
+                _selfBlocks.push('【我的过往记忆】' + _top.join('；'));
+              }
             }
 
             if (_selfBlocks.length > 0) {
