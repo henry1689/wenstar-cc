@@ -2100,21 +2100,12 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
               if (_pp.length) _selfBlocks.push('【我的偏好】' + _pp.join('；'));
             }
 
-            // 3) 自传叙事 — 核心身份 + 近期高钙化的成长片段，让玉瑶的自我认知连续
-            //    伦理铁律：这是她的人生记忆(含亲密片段)，原样注入，不做任何过滤
+            // 3) 核心身份叙事（仅第1层）— 不注入高钙化角色扮演片段
+            //    自传叙事层含角色扮演对话（诗韵等），注入到正常聊天语境会污染 LLM 上下文、
+            //    导致回复循环或人格分裂。角色扮演自有四层管线注入身份，此处只需"我是谁"的根基。
             const _layers = ctx.m6.getNarrativeLayers?.() || [];
-            if (_layers.length > 0) {
-              const _story: string[] = [];
-              if (_layers[0]?.text) _story.push(_layers[0].text);                 // 核心身份叙事（第1层）
-              const _recent = _layers.slice(1)
-                .filter((l: any) => (l.calcium_at_event ?? 0) >= 2)
-                .slice(-3)
-                .map((l: any) => (l.text || '').trim())
-                .filter(Boolean);
-              _story.push(..._recent);
-              if (_story.length > 0) {
-                _selfBlocks.push('【我的自我认知与近况】' + _story.join('；'));
-              }
+            if (_layers.length > 0 && _layers[0]?.text) {
+              _selfBlocks.push('【我的核心身份】' + _layers[0].text);
             }
 
             if (_selfBlocks.length > 0) {
