@@ -2031,7 +2031,7 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
         //    原来"用自然的方式在回复中提及这段过往"导致 LLM 把上一轮的场景(浴缸等)强行带回本轮——即使话题已切换。
         //    改为"如果相关可以自然参考，不要强行衔接"——记忆是背景，不是剧本。
         if (memoryText && !_currentRoleplay && !finalKnowledgeText.includes('【相关记忆】')) {
-          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（这些是你以前的记忆片段。如果当前话题自然关联到了，可以轻轻带一笔；如果话题完全不相关，不要强行衔接，更不要复述记忆里的场景）';
+          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你以前的记忆片段。你**现在不在那些场景里**。如果当前话题提到了记忆中的人或事，可以用"我记得以前…"的方式轻轻提起。但**绝对不要从记忆里的场景开始说话**——你是正在和对方聊天的活人，不是在重演过去的场景。）';
           finalKnowledgeText = historyLink + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
         }
         // 家族/社交铁律注入 — 只在消息提到已知人物 或 事实查询时注入

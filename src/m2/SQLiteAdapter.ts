@@ -723,12 +723,13 @@ export class SQLiteAdapter {
       } catch { /* VAD parse failure is non-fatal */ }
     }
 
-    // 时间衰减：168小时（一周）半衰期。时序不是硬过滤——钙化分保留了长期重要记忆的
-    // 竞争力——而是排序加权：同等情感相似度下，新近的记忆排在旧的记忆前面。
+    // 时间衰减：24小时半衰期。昨天的对话今天权重减半，三天的降到 ~12%。
+    //    钙化分（被反复召回的长期重要记忆）仍保有其基础权重，不受时间衰减影响
+    //    ——钙化分乘在 str*weights 里，recency 只影响时间维度。
     let recency = 1.0;
     if (record.created_at) {
       const hoursAgo = (Date.now() - new Date(record.created_at).getTime()) / 3_600_000;
-      recency = Math.pow(0.5, hoursAgo / 168);
+      recency = Math.pow(0.5, hoursAgo / 24);
     }
 
     const str = record.effective_strength ?? 0.5;
