@@ -279,9 +279,12 @@ for (const _d of HOOK_DEFS) {
     _m.lastHeartbeat = _now0;
   }
 }
-// 🏗️ 角色扮演域全链路探针桥接：hookMonitor → RoleplayProbeReporter
+// 🏗️ 角色扮演域全链路探针桥接：RoleplayProbeReporter → hookMonitor
+// RoleplayProbeReporter 发送 RP-H01..RP-H09，hookMonitor 存储为 H15..H23。
+// 映射：RP-H{N} → H{N+14}，使 RP 管线的 9 个探针获得真实遥测数据。
 setProbeWriter((id, durationMs, error) => {
-  const _m = hookMonitor.get(id);
+  const mappedId = id.startsWith('RP-H') ? 'H' + (parseInt(id.slice(3)) + 14) : id;
+  const _m = hookMonitor.get(mappedId);
   if (_m) {
     _m.callCount++;
     _m.lastHeartbeat = Date.now();
