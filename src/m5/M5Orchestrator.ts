@@ -51,8 +51,11 @@ export class M5Orchestrator {
     // Step 2: 策略选择（规则引擎）
     const strategy = this.selector.select(cognition);
 
-    // Step 2.5: 提取场景锚点 → 生成强制约束
-    extractAnchor(conversationHistory, userMessage);
+    // Step 2.5: 提取场景锚点 → 用对话历史中最近的用户真实消息（非知识注入文本）
+    //    userMessage 在 chat.ts 调用方被拼接了 knowledgeBaseText → 含记忆/黑钻等内容，
+    //    这些内容中的亲密关键词会把锚点错置为"教室/性交/裸体2"，污染后续所有正常对话。
+    const _realLastMsg = (conversationHistory || []).filter(t => t.role === 'user').slice(-1)[0]?.content || userMessage || '';
+    extractAnchor(conversationHistory, _realLastMsg);
     const anchorConstraint = buildAnchorConstraint();
 
     // Step 2.6: 注入场景上下文记忆

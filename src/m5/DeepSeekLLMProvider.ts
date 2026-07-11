@@ -289,6 +289,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
     const _role = params.role || DeepSeekLLMProvider._currentRole;
     const _effectiveRole = (_strategyMaxLen > 0 && _strategyMaxLen <= 30) ? 'secretary' : _role;
     const systemPrompt = buildCoreSystemPrompt(timeStr, buildRoleSystemPrompt(_effectiveRole, level as -2|-1|0|1|2, params.knowledgeBase));
+    console.log("==SPLIT=="); console.log(systemPrompt.substring(0,500)); console.log("==SPLIT_END==");
+    const _kb = params.knowledgeBase || '';
+    console.log('[DIAG] role=' + _effectiveRole + ' level=' + level + ' anchor=' + (_kb.includes('裸') || _kb.includes('性交') ? 'DIRTY' : 'clean') + ' kb_start=' + _kb.substring(0,200).replace(/\n/g,' '));
     // 构建上下文提示词
     const dimContext = [
       `pleasure=${s.pleasure.toFixed(2)}`,

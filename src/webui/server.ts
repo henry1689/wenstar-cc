@@ -150,8 +150,8 @@ function loadConversationHistory(): void {
       // 尝试从独立的 conversations.db 加载
       const recent = conversationDB.getRecentConversations(30);
       if (recent.length > 0) {
-        conversationHistory = recent.map(r => ({ role: r.role as 'user' | 'assistant', content: r.content, timestamp: r.timestamp }));
-        console.log('  从融合库加载了 ' + conversationHistory.length + ' 条对话记忆 ✓');
+        conversationHistory = recent.filter((r: any) => !r.roleplay_char).map(r => ({ role: r.role as 'user' | 'assistant', content: r.content, timestamp: r.timestamp }));
+        console.log('  从融合库加载了 ' + conversationHistory.length + ' 条对话记忆 ✓（已排除角色扮演）');
       }
     }
     // 后备: 从旧的 fusion_memory.db 加载（conversationDB修复前的存量数据）

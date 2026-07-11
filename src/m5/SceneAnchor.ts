@@ -38,7 +38,11 @@ export function extractAnchor(conversationHistory?: ConversationTurn[], userMess
     for (const t of last4) recent.push(t);
   }
   _prevTurns = recent;
-  const text = recent.map(t => t.content).join(' ');
+  // 剥离注入的知识/记忆/场景标记，只保留原始语义内容做锚点提取。
+  // 否则"【珍藏记忆】诗雨是谁"这类带知识标签的文本可能触发残留的亲密场景关键词。
+  const _stripKnowledge = (s: string) => s.replace(/【[^】]*】/g, '').trim();
+  const _rawText = recent.map(t => _stripKnowledge(t.content)).filter(Boolean).join(' ');
+  const text = _rawText || recent.map(t => t.content).join(' ');  // 兜底：全部被strip时回退
 
   // 地点提取
   let location = '';
@@ -72,8 +76,13 @@ export function extractAnchor(conversationHistory?: ConversationTurn[], userMess
   else if (/散步|公园|出门|运动|跑步|健身/.test(text)) action = '户外';
   else action = '聊天';
 
-  // 裸露度：渐进式追踪
+  // 裸露度：渐进式追踪 + 自然衰减
   let nudity = _anchor.nudity;
+  // 衰减：当前文本无任何亲密关键词时，nudity 每轮 -1（2→1→0）。
+  // 原来 nudity 升到2后永不下降（除非"穿上"），导致角色扮演退出后常态对话仍带裸体场景。
+  const _hasIntimate = /操|插入|做爱|抽插|高潮|前戏|舔|裸|脱|抚摸|揉|淫|性交|吻|一丝不挂/.test(text);
+  if (!_hasIntimate && nudity > 0) { nudity = Math.max(0, nudity - 1); }
+  // 原有渐进式追踪
   if (/一丝不挂|全裸|光着身子|什么都没穿|赤裸/.test(text)) nudity = 3;
   else if (/脱光|衣服.*脱|褪尽|全部脱/.test(text)) nudity = 3;
   else if (/只剩下|只穿着|内衣|内裤|bra|胸罩/.test(text)) nudity = 2;

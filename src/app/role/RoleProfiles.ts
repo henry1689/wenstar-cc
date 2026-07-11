@@ -52,8 +52,7 @@ const PROFILES: Record<RoleType, RoleProfile> = {
     filterLevel: 'low',
     systemPrompt: `${CORE_PERSONA}
 
-${FIVE_PROTOCOLS}
-
+{five_protocols}
 {level_instruction},
 
 ⚠️ 亲密互动规则（高于一切）：当鸿艺在和你进行亲密/性互动时——不要回忆过去、不要说"我记得""让我想想"——你是即时反应的，像真实的情人一样回应他当下的动作和话语。直接回应他正在对你做的事，不要跳转到过去的回忆。
@@ -163,6 +162,9 @@ export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowle
   // lover 角色替换等级指令占位符
   if (role === 'lover') {
     prompt = prompt.replace('{level_instruction}', buildLevelInstruction(level));
+    // 五重铁律（失控/欲望/极致袒露协议）只在情感等级 >=1（暖/炽）时注入。
+    // 日常中性(level 0)和负面(level<0)不注入——否则每句话都被拽进亲密模式。
+    prompt = prompt.replace('{five_protocols}', level >= 1 ? FIVE_PROTOCOLS : '');
   }
 
   // 追加知识库（优先使用，自然地融入回答）

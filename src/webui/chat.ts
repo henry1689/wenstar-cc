@@ -142,7 +142,7 @@ import type { DomainContext, CharacterClass } from '../app/roleplay/types.js';
 
 
 // P0-1: 角色路由模块级状态（函数外，跨轮次持久化）
-let _currentRole: RoleType = 'lover';
+let _currentRole: RoleType = 'secretary';  // 默认秘书——日常对话从专业模式开始，情感上升后自动切换
 let _transitionState: TransitionState = createInitialState();
 
 // 对话组状态（跨轮次持久化）
@@ -1228,12 +1228,10 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     let familyConstraint = '';
     try {
       // 合并家族+社交上下文（后者可能因前者有数据而被skipping，需要合并）
-      const allEntities = [
-        ...(ctx_m4.family_context || []),
-        ...(ctx_m4.social_context || []),
-      ].filter((p: any, i: number, arr: any[]) =>
-        p && p.entity && arr.findIndex((x: any) => x.entity === p.entity) === i
-      );
+      // familyConstraint 只从 family_context 构建（真实家族关系）。
+      //    角色人物(徐诗韵/徐诗雨等)在 social_context 中，不属于玉瑶的家庭关系。
+      const allEntities = (ctx_m4.family_context || [])
+        .filter((p: any) => p && p.entity);
       if (allEntities.length > 0) {
         const knownList = allEntities.map((p: any) => {
           let profileText = '  - ' + p.entity + '（' + p.relation + '）';
@@ -2035,8 +2033,11 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
           const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你以前的记忆片段。你**现在不在那些场景里**。如果当前话题提到了记忆中的人或事，可以用"我记得以前…"的方式轻轻提起。但**绝对不要从记忆里的场景开始说话**——你是正在和对方聊天的活人，不是在重演过去的场景。）';
           finalKnowledgeText = historyLink + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
         }
-        // 家族/社交铁律注入 — 只在消息提到已知人物 或 事实查询时注入
-        const _allKnownNames = [...new Set([...(ctx_m4?.family_context || []).map((p: any) => p.entity), ...(ctx_m4?.social_context || []).map((p: any) => p.entity)].filter(Boolean))];
+        // 家族/社交铁律注入 — 只在消息提到已知家庭人物时注入
+        //    门控只用 family_context（真实家族关系：mother_of/sibling_of 等）。
+        //    social_context（acquaintance_of熟人/角色人物）不触发注入——角色扮演中
+        //    创建的角色人物(徐诗韵/徐诗雨/熊梓铭)全在 social_context，与玉瑶本人无关。
+        const _allKnownNames = [...new Set((ctx_m4?.family_context || []).map((p: any) => p.entity).filter(Boolean))];
         const _msgMentionsFamily = _allKnownNames.some((n: string) => n.length > 1 && message.includes(n));
         if (familyConstraint && !_currentRoleplay && (_msgMentionsFamily || isFactualRecallQuery)) {
           finalKnowledgeText = familyConstraint + '\n\n' + finalKnowledgeText;
