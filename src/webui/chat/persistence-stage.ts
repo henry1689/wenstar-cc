@@ -93,6 +93,8 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       perception: { pleasure: input.p.pleasure, arousal: input.p.arousal, intimacy: input.p.intimacy },
       calciumScore: input.decision.enhanced.calcium_score,
       dnaRootId: (input.dna as any).dna_root_id,
+      globalUid: input.dna.global_uid || (input.dna as any).dna_root_id,
+      locationFingerprint: input.dna.location_fingerprint || '',
       isTest: input.ctx.testMode ? 1 : 0,
       roleplayChar: rp || undefined,
     });
@@ -100,6 +102,8 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       seqPos: input.seqPos + 1, topic,
       calciumScore: input.decision.enhanced.calcium_score,
       dnaRootId: (input.dna as any).dna_root_id,
+      globalUid: input.dna.global_uid || (input.dna as any).dna_root_id,
+      locationFingerprint: input.dna.location_fingerprint || '',
       roleplayChar: rp || undefined,
     });
   } catch (e: any) {
@@ -131,6 +135,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       stabilityScore: calciumLevel >= 2 ? 0.45 : 0.2,
       threadId: rpTag ?? (input.dna as any).dna_root_id ?? idUser,
       sourceConversationIds: [input.seqPos],
+      globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
       dialogGroupId: rpTag, topicLabel: null,
     })) {
       hadError = true;
@@ -153,6 +158,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       stabilityScore: calciumLevel >= 2 ? 0.45 : 0.2,
       threadId: rpTag ?? (input.dna as any).dna_root_id ?? idAssist,
       sourceConversationIds: [input.seqPos + 1],
+      globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
       dialogGroupId: rpTag, topicLabel: null,
     })) {
       hadError = true;

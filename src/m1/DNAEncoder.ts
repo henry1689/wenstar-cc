@@ -291,6 +291,8 @@ export class DNAEncoder {
       ambiguity_score: l0Result!.ambiguity_score,
       warnings: warnings.length > 0 ? warnings : undefined,
       dna_root_id,
+      global_uid: DNAEncoder.generateGlobalUID('MM', l1Result.seq_pos, 0, ''),
+      location_fingerprint: '0'.repeat(32),  // 瑶光空白期全0, G2全PASS
     };
 
     return dna;
@@ -313,6 +315,8 @@ export class DNAEncoder {
       created_at: new Date().toISOString(),
       scene_tags: [],
       dna_root_id,
+      global_uid: DNAEncoder.generateGlobalUID('MM', l1Result.seq_pos, 0, ''),
+      location_fingerprint: '0'.repeat(32),
       warnings: ['empty_input'],
     };
   }

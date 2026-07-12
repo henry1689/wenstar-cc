@@ -154,6 +154,29 @@ const MIGRATIONS: Migration[] = [
       } catch (e) { /* 日志不影响迁移 */ }
     },
   },
+  // v5: memories 表补全局字段 — global_uid + location_fingerprint (蓝皮书 §3.1-3.3)
+  {
+    version: 5,
+    description: 'memories 表新增 global_uid / location_fingerprint 字段',
+    apply: (db: any) => {
+      try { db.run("ALTER TABLE memories ADD COLUMN global_uid TEXT"); } catch {}
+      try { db.run("ALTER TABLE memories ADD COLUMN location_fingerprint TEXT"); } catch {}
+      try { db.run("CREATE INDEX IF NOT EXISTS idx_memories_global_uid ON memories(global_uid)"); } catch {}
+      try { db.run("CREATE INDEX IF NOT EXISTS idx_memories_loc_fp ON memories(location_fingerprint)"); } catch {}
+      console.log('[Migration] v5 ✅ memories+global_uid+location_fingerprint');
+    },
+  },
+  // v6: conversations 表补全局字段
+  {
+    version: 6,
+    description: 'conversations 表新增 global_uid / location_fingerprint 字段',
+    apply: (db: any) => {
+      try { db.run("ALTER TABLE conversations ADD COLUMN global_uid TEXT"); } catch {}
+      try { db.run("ALTER TABLE conversations ADD COLUMN location_fingerprint TEXT"); } catch {}
+      try { db.run("CREATE INDEX IF NOT EXISTS idx_conv_global_uid ON conversations(global_uid)"); } catch {}
+      console.log('[Migration] v6 ✅ conversations+global_uid+location_fingerprint');
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

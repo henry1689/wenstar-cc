@@ -463,6 +463,7 @@ export class SQLiteAdapter {
     perceptionJson: string; calciumScore: number; calciumLevel: number;
     locusPath: string; leafZone: string; rawInput: string;
     primaryEmotion: string; memoryType: string;
+    globalUid?: string; locationFingerprint?: string;
     memoryKind?: string; lifecycleState?: string;
     confidenceScore?: number; stabilityScore?: number;
     threadId?: string | null; sessionId?: string | null;
@@ -477,8 +478,9 @@ export class SQLiteAdapter {
          locus_path, leaf_zone, raw_input, memory_kind, lifecycle_state,
          confidence_score, stability_score, thread_id, session_id, source_conversation_ids,
          recall_count, promoted_to_diamond, strength_updated_at, effective_strength,
-         is_landmark, primary_emotion, memory_type, dialog_group_id, topic_label)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?)`,
+         is_landmark, primary_emotion, memory_type, dialog_group_id, topic_label,
+         global_uid, location_fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?)`,
         [
           opts.id, opts.seqPos, opts.createdAt, opts.perceptionJson,
           opts.calciumScore, opts.calciumLevel,
@@ -490,9 +492,10 @@ export class SQLiteAdapter {
           opts.threadId ?? opts.dialogGroupId ?? opts.id,
           opts.sessionId ?? null,
           opts.sourceConversationIds ? JSON.stringify(opts.sourceConversationIds) : null,
-          opts.createdAt,  // strength_updated_at
+          opts.createdAt,
           opts.primaryEmotion, opts.memoryType || 'dialog',
           opts.dialogGroupId ?? null, opts.topicLabel ?? null,
+          opts.globalUid ?? null, opts.locationFingerprint ?? null,
         ],
       );
       this.save();

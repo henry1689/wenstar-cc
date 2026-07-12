@@ -74,6 +74,19 @@ export interface DNA {
    * 一个对话一个根码，全链路数据绑定此码
    */
   dna_root_id?: string;
+
+  /**
+   * P0 蓝皮书合规: GlobalUID (23字符, 白皮书 V2.0 §3.1)
+   * 格式: MM0001A3BF1A0C4DE6F7
+   * 双螺旋三底座仅通过 GlobalUID 关联
+   */
+  global_uid?: string;
+
+  /**
+   * P0 蓝皮书合规: 区位指纹 (location_fingerprint)
+   * 瑶光空白期为32位全0
+   */
+  location_fingerprint?: string;
 }
 
 /**
