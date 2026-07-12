@@ -1108,136 +1108,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // ── 候选回复偏好记录
     // ── 候选回复偏好记录（用户选择了哪个候选，记录到 M6） ──
-    if (req.method === 'POST' && url.pathname === '/api/chat/prefer-candidate') {
-      try {
-        const body = JSON.parse(await readBody(req));
-        const tags = body.tags;
-        if (m6 && tags && Array.isArray(tags)) {
-          for (const tag of tags) {
-            m6.prefs.recordMention(tag, 0.8);
-          }
-          console.log('[Preference] 候选偏好已记录:', tags.join(', '));
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (err) {
-        console.error('[Preference] 记录失败:', err);
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: false }));
-      }
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // ── 聊天 SSE 流式输出（先发头再处理，避免 EventSource 超时） ──
-    if (req.method === 'GET' && url.pathname === '/api/chat/stream') {
-      const rawMessage = url.searchParams.get('message') || '';
-      if (!rawMessage) { res.writeHead(400); res.end(JSON.stringify({error:'message required'})); return; }
-
-      // 先发响应头，保持连接不超时
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-      });
-
-      // 发送 keepalive，让 EventSource 确认连接成功
-      res.write(`: keepalive\n\n`);
-      res.flushHeaders?.();
-
-      // 再处理聊天（LLM 调用约 1.5~2s）
-            const result = await handleUserMessage(rawMessage.trim());
-      const reply = result.reply || '';
-
-      // 探针心跳更新（stream 入口同 POST 入口保持一致）
-      try {
-        const _ht = Date.now();
-        for (const _d of HOOK_DEFS) {
-          const _m = hookMonitor.get(_d.id);
-          if (_m) { _m.callCount++; _m.lastHeartbeat = _ht; _m.lastStatus = 'green'; }
-        }
-      } catch (_: any) {}
-      let audio_url: string | null = null;
-
-      // 元数据
-      res.write(`data: ${JSON.stringify({ type: 'meta', turn_count: result.turn_count, emotionalFlash: result.emotionalFlash, triggeredMemoryId: result.triggeredMemoryId })}
-
-`);
-
-            // 逐块发送文本（模拟人说话的自然节奏）
-      const sentences = reply.split(/(?<=[。！？\n])/g).filter(Boolean).map((s: string) => s.trim()).filter(Boolean);
-      // 如果句号拆出的句子太少（<=2句），改用逗号/省略号拆分
-      const useCommaSplit = sentences.length <= 2;
-      const chunks = useCommaSplit
-        ? reply.split(/(?<=[，……])/g).filter(Boolean).map((s: string) => s.trim()).filter(Boolean)
-        : sentences;
-
-      const _slowCount = Math.min(chunks.length, Math.random() > 0.5 ? 2 : 1);
-      // 后台启动 TTS 生成（直接调 edge-tts）
-      const _ttsPromise = (async () => {
-        try {
-          const _fn2 = 'tts_' + Date.now().toString(36) + '.mp3';
-          const _fp2 = path.join(DATA_DIR, 'audio', _fn2);
-          const _env2 = { ...process.env, NO_PROXY: '*', no_proxy: '*', HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '' };
-          await execFileAsync('edge-tts', ['--text', reply.substring(0, 300), '--voice', 'zh-CN-XiaoxiaoNeural', '--write-media', _fp2], { timeout: 30000, env: _env2 });
-          if (existsSync(_fp2)) {
-            audio_url = '/audio/' + _fn2;
-          }
-        } catch (e: any) { console.error('[server] error:', e?.message); }
-      })();
-      for (let i = 0; i < chunks.length; i++) {
-        if (i < _slowCount) {
-          // 前 1-2 句：逐句发送 + 0.4-0.6s 时延
-          res.write(`data: ${JSON.stringify({ type: 'text', content: chunks[i] })}\n\n`);
-          await new Promise(r => setTimeout(r, 400 + Math.random() * 200));
-        } else {
-          // 剩余合并为一大段，正常速度发送
-          const rest = chunks.slice(i).join('');
-          res.write(`data: ${JSON.stringify({ type: 'text', content: rest })}\n\n`);
-          break;
-        }
-      }
-// 等 TTS 完成（最多等 5s）
-      await Promise.race([_ttsPromise, new Promise(r => setTimeout(r, 5000))]);
-
-      const _fullText = chunks.join('');
-
-      res.write(`data: ${JSON.stringify({ type: 'done', content: _fullText, audio_url: audio_url })}\n\n`);
-      res.end();
-      return;
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // ── 重置 ──
-    if (req.method === 'POST' && url.pathname === '/api/reset') {
-      // 停止所有定时器，防止泄漏
-      maintenance.stop();
-      inductionScheduler?.stop();
-      consolidationQueue?.stop();
-      if (m7Timer) { clearInterval(m7Timer); m7Timer = null; }
-      if (m6Timer) { clearInterval(m6Timer); m6Timer = null; }
-      clearAllTimers();  // Q4: 清空 addTimer 注册表中的所有句柄
-      resetConversationHistory();
-      // Q3: initPipeline 内部先关旧 sql.js 实例再新建
-      await initPipeline();
-      res.writeHead(200); res.end(JSON.stringify({status:'ok',message:'已重置'}));
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // ── 状态（含M2存储+家族） ──
-    if (req.method === 'GET' && url.pathname === '/api/status') {
-      const storageStatus = await storage.getStatus().catch(() => null);
-      const familySummary = await familyGraph.getFamilySummary().catch(() => ({ members: [], locations: [] }));
-      // persistence handled in server-observability-routes.ts
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        status: 'running', version: '0.1.0',
-        conversation_turns: Math.floor(conversationHistory.length / 2),
-        storage: storageStatus ? {
-          total_records: storageStatus.totalRecords,
-          zone_counts: storageStatus.zoneCounts,
-          seq_pos: storageStatus.currentSeqPos,
-        } : null,
-        family: { members: familySummary.members.map((m: any) => ({ name: m.name, relation: m.relation_to_user })), total: familySummary.members.length },
-      }));
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // ── 健康检查（含维护指标） ──
     if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -1348,24 +1228,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       res.end(JSON.stringify({ status: 'ok', ...result }));
     }
     // ── 对话历史 ──
-    if (req.method === 'GET' && url.pathname === '/api/conversation') {
-      try {
-        const sqlite = storage?.getSQLite();
-        if (sqlite) {
-          const rows = sqlite.queryAll("SELECT role, content, timestamp FROM conversations WHERE is_test = 0 OR is_test IS NULL ORDER BY rowid DESC LIMIT 200");
-          if (rows.length > 0) {
-            const turns = rows.reverse().map(r => ({ role: r.role, content: r.content, timestamp: r.timestamp }));
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ turns }));
-          }
-        }
-      } catch (e: any) { console.error('[server] error:', e?.message); }
-      // 兜底：从内存加载
-      const turns = conversationHistory.filter((t) => !(t as any)?.isTest).slice(-100);
-      // persistence handled in server-observability-routes.ts
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ turns }));
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // (P2) 对话组统计
     if (req.method === 'GET' && url.pathname === '/api/dialog-group/stats') {
@@ -1389,14 +1252,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
 
     // ── 清除聊天记录（轻量版，仅清对话不关服务） ──
-    if (req.method === 'POST' && url.pathname === '/api/chat/clear') {
-      conversationHistory = [];
-      /* CONV_LOG_PATH 已废弃 — 砂金库 SQLite 接管 */
-      flushConversationHistory();
-      // persistence handled in server-observability-routes.ts
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ status: 'ok' }));
-    }
+// ── (已迁移至 server-chat-routes.ts) ──
 
     // ── SP1-1: VAD 健康缓存手动重置 ──
     if (req.method === 'POST' && url.pathname === '/api/admin/reset-vad') {
