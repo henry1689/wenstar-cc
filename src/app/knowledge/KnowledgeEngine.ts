@@ -128,9 +128,10 @@ function rowToEntry(r: Record<string, any>): KnowledgeItem {
   };
 }
 
-/** 确保向量索引已加载（懒加载） */
+/** 确保向量索引已加载（懒加载，轻量模式跳过） */
 function ensureIndex(sqlite: SQLiteAdapter): void {
   if (_indexReady) return;
+  if (process.env['TIANQUAN_LITE'] === 'true') { _indexReady = true; return; }
   try {
     const rows = sqlite.queryAll(
       `SELECT id, kn_id, chunk_text, embedding FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 5000`,
@@ -157,6 +158,7 @@ async function indexContent(
   content: string,
 ): Promise<void> {
   ensureIndex(sqlite);
+  if (process.env['TIANQUAN_LITE'] === 'true') return; // 轻量模式跳过向量索引
   const chunkResult = fileChunker.chunkWithSummary({ text: content, source: knId });
   if (chunkResult.chunks.length === 0) return;
 

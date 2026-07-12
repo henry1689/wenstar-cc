@@ -366,12 +366,15 @@ async function initPipeline(): Promise<void> {
   knowledgeBase = new KnowledgeBase(storage.getSQLite());
   yuyaoMemory = new YuyaoMemoryService(storage.getSQLite());
 
-  // ── 天权调度器 ──
-  try {
-    masterHarris = await initMasterHarris();
-    specLoadResults = await loadDomainSpecs(knowledgeBase);
-    console.log(`  [MasterHarris] 5层调度器已启动 ✓ (tianquan=${masterHarris.tianquanReady})`);
-  } catch (e) { console.warn('[MasterHarris] 初始化失败（降级运行）:', (e as Error).message); masterHarris = null; }
+  // ── 天权调度器 (后台启动，不阻塞 HTTP) ──
+  initMasterHarris().then(mh => {
+    masterHarris = mh;
+    return loadDomainSpecs(knowledgeBase);
+  }).then(specResults => {
+    specLoadResults = specResults;
+    console.log(`  [MasterHarris] 5层调度器已启动 ✓ (tianquan=${masterHarris?.tianquanReady})`);
+  }).catch(e => { console.warn('[MasterHarris] 初始化失败（降级运行）:', (e as Error).message); masterHarris = null; });
+
   memoryVault = new MemoryVault();
   await memoryVault.initialize();
   familyGraph = new FamilyGraph(DB_PATH);

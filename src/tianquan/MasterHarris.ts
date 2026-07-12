@@ -49,6 +49,10 @@ export function classifyIntent(message: string): IntentClassification {
   if (/日志|log|错误频率|error.*frequency|异常检测|anomaly/.test(l)) return { domain: TaskDomain.TIANQUAN, routeTag: RouteTag.LOG_ANALYSIS, confidence: 0.8, reason: '日志分析' };
   if (/配置|config|\.env|环境变量|漂移|drift|一致性/.test(l)) return { domain: TaskDomain.TIANQUAN, routeTag: RouteTag.CONFIG_DRIFT, confidence: 0.8, reason: '配置漂移' };
   if (/资源|泄露|leak|句柄|handle.*leak|内存|memory.*scan|timer.*leak/.test(l)) return { domain: TaskDomain.TIANQUAN, routeTag: RouteTag.RESOURCE_SCAN, confidence: 0.8, reason: '资源扫描' };
+  // ── 瑶灵域: 躯体感知 ──
+  if (/身体|躯体|体感|知觉|心率|血压|内分泌|触觉|生理|器官|肌肉|疼痛|代谢|本能|欲望|依恋|亲密|心跳|激素/.test(l)) return { domain: TaskDomain.YAOLING, routeTag: RouteTag.SENSATION_PIPELINE, confidence: 0.7, reason: '躯体感知' };
+  // ── 瑶光域: 世界模型 ──
+  if (/环境|温度|光线|噪声|噪音|指纹|时空|场景|采集|采样|天气|季节|空间|周围|湿度|光照|位置/.test(l)) return { domain: TaskDomain.YAOGUANG, routeTag: RouteTag.TIME_TICK, confidence: 0.7, reason: '环境感知' };
   return { domain: TaskDomain.TIANQUAN, routeTag: RouteTag.CODE_REVIEW, confidence: 0.3, reason: '默认工程路由' };
 }
 
@@ -98,9 +102,19 @@ export class MasterHarris extends EventEmitter {
   async dispatch(task: MasterTask): Promise<DispatchResult> {
     const t0 = Date.now(); this._dispatchCount++;
     const intent = classifyIntent(task.userMessage);
-    const route = ROUTE_TABLE.find(r => r.tag === intent.routeTag && r.domain === intent.domain);
+
+    // 约束域覆盖: 用户显式指定 domain/routeTag 时优先
+    const overrideDomain = task.constraints?.domain as string || '';
+    const overrideTag = task.constraints?.route_tag as string || '';
+    const finalDomain = (overrideDomain === 'yaoling' ? TaskDomain.YAOLING : overrideDomain === 'yaoguang' ? TaskDomain.YAOGUANG : intent.domain) as TaskDomain;
+    const finalTag = (overrideTag as RouteTag) || intent.routeTag;
+
+    // 查找匹配路由 (优先精确匹配 domain+tag)
+    let route = ROUTE_TABLE.find(r => r.tag === finalTag && r.domain === finalDomain);
+    // 降级: 只匹配 tag
+    if (!route) route = ROUTE_TABLE.find(r => r.tag === finalTag && r.active);
     if (!route || !route.active) {
-      return { success: false, domain: intent.domain, routeTag: intent.routeTag, result: null, elapsedMs: Date.now() - t0 };
+      return { success: false, domain: finalDomain, routeTag: finalTag, result: null, elapsedMs: Date.now() - t0 };
     }
 
     try {
