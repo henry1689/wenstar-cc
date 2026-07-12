@@ -161,7 +161,7 @@ export class MemoryRetriever {
 
     // 4. 合并去重
     const seen = new Set<string>();
-    const merged: DNA[] = [];
+    let merged: DNA[] = [];
     for (const dna of [...byEmotion, ...byKeyword, ...byLocus]) {
       if (!seen.has(dna.branch_id) && merged.length < limit) {
         seen.add(dna.branch_id);
