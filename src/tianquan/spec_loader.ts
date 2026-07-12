@@ -47,6 +47,12 @@ export class SpecLoader {
     this._kb = kb; const results: SpecLoadResult[] = [];
     console.log('[SpecLoader] 开始加载三域规范...');
     for (const { domain, fileName, version } of DOMAIN_SPEC_FILES) {
+      // 轻量模式仅加载天权规范
+      if (process.env['TIANQUAN_LITE'] === 'true' && domain !== 'tianquan') {
+        console.log(`[SpecLoader] ${domain} 规范跳过 (轻量模式)`);
+        results.push({ domain, success: true, sectionsLoaded: 0, knowledgeIds: [] });
+        continue;
+      }
       try {
         const fp = join(this._path, `domain_${domain}`, fileName);
         if (!existsSync(fp)) { console.log(`[SpecLoader] ${domain} 规范不存在，跳过`); results.push({ domain, success: true, sectionsLoaded: 0, knowledgeIds: [] }); continue; }

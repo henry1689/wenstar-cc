@@ -24,10 +24,11 @@ if (fs.existsSync(envPath)) {
 }
 
 // 启动 server.ts
+const memLimit = process.env.TIANQUAN_LITE === 'true' ? '--max-old-space-size=10240' : '--max-old-space-size=12288';
 const child = spawn('npx', ['tsx', 'src/webui/server.ts'], { shell: true,
   cwd: __dirname,
   stdio: 'inherit',
-  env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=6144' },
+  env: { ...process.env, NODE_OPTIONS: memLimit },
 });
 
 child.on('exit', (code) => {

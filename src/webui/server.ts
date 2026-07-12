@@ -1906,7 +1906,8 @@ async function main(): Promise<void> {
 
   console.log('  玉瑶 · 太虚境 WebUI 初始化完成 ✓');
 
-  // ═══ S1 新架构：空初始化验证（不挂载消息入口，只验证骨架初始化） ═══
+  // ═══ S1 新架构：空初始化验证 (轻量模式下跳过) ═══
+  if (process.env['TIANQUAN_LITE'] !== 'true') {
   try {
     const sqliteStorage = new SQLiteStorage(storage.getSQLite() as any);
     orchestrator = new Orchestrator({
@@ -1929,16 +1930,24 @@ async function main(): Promise<void> {
       console.log('  [RPSnapshot] 角色参数快照已就绪 ✓');
     } catch (_es) { console.warn('  [RoleSnapshot] 初始化失败（不影响主流程）'); }
 
-    // S3 混合检索引擎初始化
-    try {
-      const { HybridSearchEngine } = await import('../engine/storage/HybridSearch.js');
-      hybridSearch = new HybridSearchEngine();
-      await hybridSearch.init();
-    } catch (err) { console.warn('[HybridSearch] 初始化失败（不影响主流程）:', (err as Error).message); }
+    // S3 混合检索引擎初始化 (轻量模式下跳过)
+    if (process.env['TIANQUAN_LITE'] !== 'true') {
+      try {
+        const { HybridSearchEngine } = await import('../engine/storage/HybridSearch.js');
+        hybridSearch = new HybridSearchEngine();
+        await hybridSearch.init();
+      } catch (err) { console.warn('[HybridSearch] 初始化失败（不影响主流程）:', (err as Error).message); }
+    } else {
+      console.log('  [HybridSearch] 轻量模式跳过 ✓');
+    }
 
   } catch (err) {
     console.warn('[S1] 编排器初始化失败（不影响主流程）:', (err as Error).message);
     orchestrator = null;
+  }
+  } else {
+    orchestrator = null;
+    console.log('  [S1] 轻量模式跳过编排器初始化 ✓');
   }
 
   // 🛡️ 向量对齐启动自检
@@ -1975,7 +1984,8 @@ async function main(): Promise<void> {
     console.warn('[EntityGraph] 圈层检查失败:', (_eg as Error).message);
   }
 
-  // ─── v3.0: 全局实体拓扑初始化 ───
+  // ─── v3.0: 全局实体拓扑初始化 (轻量模式跳过) ───
+  if (process.env['TIANQUAN_LITE'] !== 'true') {
   try {
     const { EntityTopologyManager } = await import('../m4/EntityTopologyManager.js');
     const _topo = new EntityTopologyManager(storage.getSQLite() as any);
@@ -1984,6 +1994,9 @@ async function main(): Promise<void> {
     console.log(`  [EntityTopology] 已初始化 ✓ (${_cnt?.[0]?.c || 0}条拓扑边)`);
   } catch (_et) {
     console.warn('[EntityTopology] 初始化失败:', (_et as Error).message);
+  }
+  } else {
+    console.log('  [EntityTopology] 轻量模式跳过 ✓');
   }
 
   // ── 关闭钩子：刷出工作记忆 ──
