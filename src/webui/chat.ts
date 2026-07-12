@@ -108,22 +108,14 @@ let _lastValidation: any = null;
 // S3-2: 从 guard-builder 导入角色路由和守卫
 import { flushDialogGroup, persistConversation, runRetrieval } from './chat/index.js';
 
-// 🏗️ 改造①：集中式角色扮演指令构建器（取代 4 处内联规则副本）
-import { buildRoleplayRules } from '../app/roleplay-legacy/RoleplayPromptBuilder.js';
-
-// 🏗️ P0-1: 角色画像动态构建器（上下文扫描 + 未知边界 + 画像装配）
+// 🏗️ roleplay/ 统一入口 (阶段 3 迁移桥, 功能与 legacy 完全相同)
 import {
-  scanContextForCharacter,
-  assembleCharacterPortrait,
-  type CharacterExtract,
-  type CharacterPortraitSources,
-} from '../app/roleplay-legacy/CharacterProfileScanner.js';
-
-// 🏗️ P1-3: 角色知情边界过滤器（防上帝视角）
-import { PerspectiveFilter } from '../app/roleplay-legacy/PerspectiveFilter.js';
+  buildRoleplayRules, scanContextForCharacter, assembleCharacterPortrait,
+  PerspectiveFilter, RoleParamsSnapshot, checkRoleplayHealth, EmotionSnapshot,
+  type CharacterExtract, type CharacterPortraitSources, type RoleParams,
+} from '../app/roleplay/bridges.js';
 
 // 🏗️ P1-5: 角色参数快照（独立语气/风格覆写）
-import { RoleParamsSnapshot, type RoleParams } from '../app/roleplay-legacy/RoleParamsSnapshot.js';
 let _rpParamsSnapshot: RoleParamsSnapshot | null = null;
 export function setRPSnapshot(snap: RoleParamsSnapshot): void { _rpParamsSnapshot = snap; }
 
@@ -133,7 +125,6 @@ export function getRoleplayStatus(): { active: boolean; role: string | null; cla
 }
 
 // 🏗️ 防复发第一层: 角色扮演运行时自检
-import { checkRoleplayHealth } from '../app/roleplay-legacy/RoleplayHealthGuard.js';
 
 // 🏗️ 角色扮演域统一入口（四层结构化装配）
 import { runRoleplayPipeline, clearCache as clearRPCache, afterGenerate, getDomainStatus } from '../app/roleplay/RoleplayDomain.js';
@@ -171,7 +162,7 @@ let _currentPortrait: string | null = null;
 let _lastRpInteractionTime = 0;  // 📜 上次角色扮演互动时间（用于15分钟超时自动退出）
 
 // 🏗️ P1-1: 角色情感快照隔离
-import { EmotionSnapshot } from '../app/roleplay-legacy/EmotionSnapshot.js';
+
 import { runChatEntry } from './chat/ChatEntry.js';
 let _emotionSnapshot: EmotionSnapshot | null = null;
 export function setEmotionSnapshot(snapshot: EmotionSnapshot): void {

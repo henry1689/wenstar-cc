@@ -91,6 +91,9 @@ import { Orchestrator } from '../engine/orchestrator.js';
 import { setProbeWriter } from '../app/roleplay/RoleplayProbeReporter.js';
 import { SQLiteStorage } from '../engine/storage/SQLiteStorage.js';
 import type { ChatContext } from './chat.js';
+import { handleTianquanRoutes } from './server-tianquan-routes.js';
+import { MasterHarris, initMasterHarris, loadDomainSpecs } from '../tianquan/index.js';
+import type { SpecLoadResult } from '../tianquan/index.js';
 
 // ── 路径 ──
 const __filename = fileURLToPath(import.meta.url);
@@ -314,6 +317,9 @@ let memoryVault: MemoryVault;
 let orchestrator: Orchestrator | null = null;
 /** 新架构开关：默认关闭 */
 const ENABLE_NEW_ARCH = (process.env["ENABLE_NEW_ARCH"] || "false") === "true";
+/** 天权调度器 */
+let masterHarris: MasterHarris | null = null;
+let specLoadResults: SpecLoadResult[] = [];
 let hybridSearch: any = null;
 /** 计算下一次重复提醒时间 */
 function calcNextRepeat(currentRemindAt: string, rule: string): string | null {
@@ -356,6 +362,13 @@ async function initPipeline(): Promise<void> {
   await storage.initialize();
   knowledgeBase = new KnowledgeBase(storage.getSQLite());
   yuyaoMemory = new YuyaoMemoryService(storage.getSQLite());
+
+  // ── 天权调度器 ──
+  try {
+    masterHarris = await initMasterHarris();
+    specLoadResults = await loadDomainSpecs(knowledgeBase);
+    console.log(`  [MasterHarris] 5层调度器已启动 ✓ (tianquan=${masterHarris.tianquanReady})`);
+  } catch (e) { console.warn('[MasterHarris] 初始化失败（降级运行）:', (e as Error).message); masterHarris = null; }
   memoryVault = new MemoryVault();
   await memoryVault.initialize();
   familyGraph = new FamilyGraph(DB_PATH);
@@ -771,8 +784,7 @@ async function initPipeline(): Promise<void> {
 
 import { deriveM5Strategy, getRoleplayStatus } from './chat.js';
 import { setEmotionSnapshot, setRPSnapshot } from './chat.js';
-import { EmotionSnapshot } from '../app/roleplay-legacy/EmotionSnapshot.js';
-import { RoleParamsSnapshot } from '../app/roleplay-legacy/RoleParamsSnapshot.js';
+import { EmotionSnapshot, RoleParamsSnapshot } from '../app/roleplay/bridges.js';
 
 // ════════════════════════════════════════════════════════
 // Chat API
@@ -971,6 +983,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (await handleKnowledgeFileRoutes({
     req, res, url, knowledgeBase, readBody, dataDir: DATA_DIR,
   })) return;
+
+  if (await handleTianquanRoutes({
+    masterHarris, specLoadResults, projectRoot: PROJECT_ROOT, readBody,
+  }, req, res, url)) return;
 
   try {
     // ── 首页 ──
@@ -1369,6 +1385,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         persistence: _pSimple,
         chatTsSizeKB: Math.round(_chatTsSize / 1024),
         chatFileOk: !_chatTooBig,
+        tianquan: masterHarris ? masterHarris.getStatus() : { started: false },
       }));
     }
 
@@ -2386,6 +2403,7 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error('[Server] 刷出失败:', err);
     }
+    if (masterHarris) { try { await masterHarris.stop(); } catch (e) { /* ignore */ } }
     // 确保数据落盘
     flushConversationHistory();
     try { storage?.getSQLite()?.flush(); } catch (e: any) { console.error('[server] error:', e?.message); }
@@ -2413,9 +2431,11 @@ async function main(): Promise<void> {
     console.log(`  ║   http://localhost:${PORT}               ║`);
     console.log('  ║                                      ║');
     console.log('  ║   /api/chat   聊天+M1-M5数据         ║');
-
+    console.log('  ║                                      ║');
+    console.log('  ║   /api/tianquan/status  天权调度器    ║');
+    console.log('  ║   /api/tianquan/dispatch 工作流调度   ║');
+    console.log('  ║                                      ║');
     console.log('  ║   /events    SSE实时推送            ║');
-
     console.log('  ║   /api/memory 金库记忆管理            ║');
     console.log('  ║   /api/mirror 主人镜像               ║');
 

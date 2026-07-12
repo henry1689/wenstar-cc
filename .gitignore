@@ -31,3 +31,5 @@ voxcpm2/
 __m7_test_*.db
 undefined/
 .claude/
+.claude-sessions/
+.claude-data/
