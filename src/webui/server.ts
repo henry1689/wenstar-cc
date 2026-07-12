@@ -370,7 +370,7 @@ async function initPipeline(): Promise<void> {
   initMasterHarris().then(mh => {
     masterHarris = mh;
     return loadDomainSpecs(knowledgeBase);
-  }).then(specResults => {
+  }).then(async specResults => {
     specLoadResults = specResults;
     console.log(`  [MasterHarris] 5层调度器已启动 ✓ (tianquan=${masterHarris?.tianquanReady})`);
 
