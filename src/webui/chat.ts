@@ -877,7 +877,9 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
     // 🎭 角色扮演时传递分支FG，使家族关系写入分支而非主FG
     // ── BIOS 核: 五级闸门过滤 (蓝皮书 §1.1, §4.1) ──
+    // ⚠️ 默认关闭 — 需 G2区位指纹+G3衰减数据上线后开启
     let biosGatedMemories = emotionalMemories;
+    if (process.env['ENABLE_FIVE_STAGE_GATE'] === 'true') {
     try {
       const { runBIOSPhase } = await import('../m1/DualCorePipeline.js');
       const { getFiveStageGate } = await import('../m3/FiveStageGate.js');
@@ -889,6 +891,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       }, getFiveStageGate());
       biosGatedMemories = biosResult.gatedMemories as any;
     } catch (e) { console.warn('[BIOS] 闸门跳过:', (e as Error).message); }
+    }
 
     const ctx_m4 = await ctx.m4.orchestrate(decision, biosGatedMemories);
 
