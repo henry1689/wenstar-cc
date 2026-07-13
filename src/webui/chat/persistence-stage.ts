@@ -188,6 +188,25 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     try { dhsqlite.flush(); } catch { /* flush optional */ }
   }
 
+  // ── Step 3.6: Transcoder 序列化验证 (蓝皮书 §8.3, P4 前置) ──
+  if (input.dna.global_uid && input.dna.entity_genes) {
+    try {
+      const { encodeFleshContainer, computeCRC32 } = await import('../../m2/Transcoder.js');
+      encodeFleshContainer({
+        global_uid: input.dna.global_uid,
+        raw_text: input.message,
+        tokens: [],
+        entity_genes: input.dna.entity_genes.map((g: any) => ({
+          name: g.name || '', type: g.type || 'object',
+          phenotype: g.phenotype, knowledge_type: g.knowledge_type,
+        })),
+        locus_path: input.dna.locus_path || 'chat',
+        leaf_zone: (input.dna as any).leaf_zone || 'language_semantic_zone',
+        calcium_score: input.decision.enhanced.calcium_score ?? 0,
+      });
+    } catch (e) { /* Transcoder P4 正式启用, 当前仅验证可调通 */ }
+  }
+
   // ── Step 4: 写后读验证（改造③ — 彻底杜绝静默数据丢失） ──
   try {
     const verifySqlite = input.ctx.storage.getSQLite();

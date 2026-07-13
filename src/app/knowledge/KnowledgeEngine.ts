@@ -101,7 +101,10 @@ ${entry.source_name ? `source_name: "${entry.source_name}"\n` : ''}${entry.file_
 }
 
 // ── 模块级单例（跨多次 createKnowledgeEngine 调用持久化） ──
-const vectorStore = new VectorStore();
+// P2 切换: 替换为 ZvecAdapter
+//   import { getZvecAdapter } from '../../m2/ZvecAdapter.js';
+//   const vectorStore = getZvecAdapter();  // HNSW + RaBitQ 32×压缩 + WAL持久化
+const vectorStore = new VectorStore();  // 当前: 内存Map, 重启丢失
 /** P2: 检索缓存（30秒TTL） */
 const searchCache = new LocalCache<string, KnowledgeItem[]>({ ttlMs: 30_000, namespace: 'kb_search' });
 const embedProvider = createLocalEmbedding();
