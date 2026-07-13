@@ -18,8 +18,8 @@ export async function handleTianquanRoutes(deps: TianquanRouteDeps, req: Incomin
   // ── 状态 ──
   if (req.method === 'GET' && url.pathname === '/api/tianquan/status') {
     if (!masterHarris) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'unavailable', error: 'MasterHarris 未初始化' }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'initializing', error: 'MasterHarris 启动中，请等待30秒后刷新', tianquanReady: false, busConnected: false }));
       return true;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
