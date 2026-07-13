@@ -56,6 +56,7 @@ class NativeZvecAdapter implements IZvecAdapter {
   private _coll: any = null;
   private _zvec: any = null;
   private _path: string;
+  private _memFallback: InMemoryZvecAdapter | null = null;
 
   constructor(zvecPath: string) {
     this._path = zvecPath;
@@ -63,7 +64,7 @@ class NativeZvecAdapter implements IZvecAdapter {
 
   async init(): Promise<void> {
     try {
-      this._zvec = require('@zvec/zvec');
+      this._zvec = await import('@zvec/zvec');
       this._zvec.ZVecInitialize({ logLevel: 2 }); // WARN level
 
       const { ZVecCollectionSchema, ZVecDataType, ZVecIndexType, ZVecMetricType } = this._zvec;
@@ -85,13 +86,16 @@ class NativeZvecAdapter implements IZvecAdapter {
       console.log(`[ZvecAdapter] ✅ HNSW+COSINE 就绪 (${this._coll.stats.docCount} docs)`);
 
     } catch (e) {
-      console.warn('[ZvecAdapter] Zvec native 加载失败, 降级为内存模式:', (e as Error).message);
+      console.warn('[ZvecAdapter] Zvec native 不可用 → 内存降级:', (e as Error).message.substring(0,80));
       this._coll = null;
       this._zvec = null;
+      this._memFallback = new InMemoryZvecAdapter();
+      await this._memFallback.init();
     }
   }
 
   async upsert(id: string, vector: Float32Array | number[], fields?: Record<string, string>): Promise<void> {
+    if (this._memFallback) return this._memFallback.upsert(id, vector, fields);
     if (!this._coll) return;
     const arr = vector instanceof Float32Array ? Array.from(vector) : vector as number[];
     const doc: any = { id, vectors: { embedding: arr } };
@@ -105,6 +109,7 @@ class NativeZvecAdapter implements IZvecAdapter {
   }
 
   async search(query: Float32Array | number[], limit: number, filterField?: string, filterValue?: string): Promise<SearchResult[]> {
+    if (this._memFallback) return this._memFallback.search(query, limit, filterField, filterValue);
     if (!this._coll) return [];
     const arr = query instanceof Float32Array ? Array.from(query) : query as number[];
     const params: any = { fieldName: 'embedding', vector: arr, topk: limit };
@@ -122,16 +127,12 @@ class NativeZvecAdapter implements IZvecAdapter {
   }
 
   async upsertBatch(entries: Array<{ id: string; vector: Float32Array | number[]; fields?: Record<string, string> }>): Promise<void> {
+    if (this._memFallback) return this._memFallback.upsertBatch(entries);
     if (!this._coll) return;
     const docs = entries.map(e => {
       const arr = e.vector instanceof Float32Array ? Array.from(e.vector) : e.vector as number[];
       const doc: any = { id: e.id, vectors: { embedding: arr } };
-      if (e.fields) {
-        doc.title = e.fields.title || '';
-        doc.content = e.fields.content || '';
-        doc.classification = e.fields.classification || '';
-        doc.tags = Array.isArray(e.fields.tags) ? (e.fields.tags as string[]).join(',') : (e.fields.tags || '');
-      }
+      if (e.fields) { doc.title = e.fields.title || ''; doc.content = e.fields.content || ''; doc.classification = e.fields.classification || ''; doc.tags = Array.isArray(e.fields.tags) ? (e.fields.tags as string[]).join(',') : (e.fields.tags || ''); }
       return doc;
     });
     if (docs.length === 1) this._coll.insertSync(docs[0]);
@@ -139,11 +140,13 @@ class NativeZvecAdapter implements IZvecAdapter {
   }
 
   async remove(id: string): Promise<void> {
+    if (this._memFallback) return this._memFallback.remove(id);
     if (!this._coll) return;
     try { this._coll.deleteByIdSync(id); } catch { /* ignore */ }
   }
 
   async removeByPrefix(prefix: string): Promise<number> {
+    if (this._memFallback) return this._memFallback.removeByPrefix(prefix);
     if (!this._coll) return 0;
     try {
       const all = this._coll.querySync({ filter: `title LIKE "${prefix}%"`, limit: 10000, outputFields: ['id'] });
@@ -153,18 +156,17 @@ class NativeZvecAdapter implements IZvecAdapter {
     } catch { return 0; }
   }
 
-  get size(): number { return this._coll?.stats?.docCount ?? 0; }
+  get size(): number { return this._memFallback ? this._memFallback.size : (this._coll?.stats?.docCount ?? 0); }
 
   async flush(): Promise<void> {
+    if (this._memFallback) return this._memFallback.flush();
     if (!this._coll) return;
     try { (this._coll as any).flushSync?.(); } catch { /* optional */ }
   }
 
   async close(): Promise<void> {
-    if (this._coll) {
-      try { (this._coll as any).closeSync?.(); } catch { /* optional */ }
-      this._coll = null;
-    }
+    if (this._memFallback) { await this._memFallback.close(); this._memFallback = null; return; }
+    if (this._coll) { try { (this._coll as any).closeSync?.(); } catch { } this._coll = null; }
   }
 }
 
@@ -223,13 +225,8 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 /** 创建 Zvec 适配器 (自动尝试 native, 失败则内存降级) */
 export function createZvecAdapter(zvecPath?: string): IZvecAdapter {
   const path = zvecPath || join('data', 'zvec_knowledge');
-  try {
-    require('@zvec/zvec');
-    return new NativeZvecAdapter(path);
-  } catch {
-    console.log('[ZvecAdapter] @zvec/zvec 不可用, 使用内存模式');
-    return new InMemoryZvecAdapter();
-  }
+  // NativeZvecAdapter.init() handles async import+fallback internally
+  return new NativeZvecAdapter(path);
 }
 
 let _instance: IZvecAdapter | null = null;
