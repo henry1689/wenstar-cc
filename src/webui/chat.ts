@@ -2974,6 +2974,11 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
       }
     } catch (_pfc2Err) { /* PFC 复盘不阻塞 */ }
 
+	    // V4.0 Phase 4: 躯体反馈 — 记录注入后用户情绪变化
+	    if (ctx.somaticMemory && typeof ctx.somaticMemory.recordSomaticOutcome === 'function') {
+	      try { ctx.somaticMemory.recordSomaticOutcome(p.pleasure || 0); } catch {}
+	    }
+
 (globalThis as any).__hippocampusCoordinator?.afterResponse();
 
     return {

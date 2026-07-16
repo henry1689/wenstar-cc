@@ -294,9 +294,35 @@ export class SomaticMemory {
   /** 获取当前活跃的躯体模式 (用于注入 LLM 上下文) */
   getActiveSomaticContext(): string | null {
     if (!this.activePatternId) return null;
+    // V4.0 Phase 4: 连续 3 次注入无情绪改善 → 停止注入该类型躯体上下文
+    if (this._checkSomaticFatigue()) return null;
     const pattern = this.patterns.find(p => p.id === this.activePatternId);
     if (!pattern) return null;
     return pattern.emotionalTone;
+  }
+
+  // V4.0 Phase 4: 躯体反馈 — 记录注入后的用户情绪变化，连续3次无改善则停止
+  private _somaticInjections = new Map<string, { count: number; lastPleasure: number; ineffectiveStreak: number }>();
+  private _checkSomaticFatigue(): boolean {
+    if (!this.activePatternId) return false;
+    let rec = this._somaticInjections.get(this.activePatternId);
+    if (!rec) { this._somaticInjections.set(this.activePatternId, { count: 1, lastPleasure: 0, ineffectiveStreak: 0 }); return false; }
+    return rec.ineffectiveStreak >= 3;
+  }
+  /** 记录躯体注入后的用户反馈（由 chat.ts afterResponse 调用）
+   *  @param afterPleasure 本轮回复后的用户 pleasure 值 (0-1) */
+  recordSomaticOutcome(afterPleasure: number): void {
+    if (!this.activePatternId) return;
+    let rec = this._somaticInjections.get(this.activePatternId);
+    if (!rec) { rec = { count: 0, lastPleasure: 0, ineffectiveStreak: 0 }; this._somaticInjections.set(this.activePatternId, rec); }
+    rec.count++;
+    // 与上次注入后相比，pleasure 改善 <0.05 → 视为无效
+    const improved = (afterPleasure - rec.lastPleasure) >= 0.05;
+    rec.lastPleasure = afterPleasure;
+    rec.ineffectiveStreak = improved ? 0 : rec.ineffectiveStreak + 1;
+    if (rec.ineffectiveStreak >= 3) {
+      console.log(`[Somatic] ⚠️ 连续 ${rec.ineffectiveStreak} 次注入无改善，暂停: ${this.activePatternId}`);
+    }
   }
 
   /** 获取躯体强度 0-1 (用于 3D 粒子反馈) */

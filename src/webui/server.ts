@@ -88,6 +88,7 @@ import { handleOpsRoutes } from './server-ops-routes.js';
 import { handleKnowledgeRoutes } from './server-knowledge-routes.js';
 import { handleKnowledgeFileRoutes } from './server-knowledge-file-routes.js';
 import { handleBrainRoutes } from './server-brain-routes.js';
+import { handleWikiRoutes } from './server-wiki-routes.js';
 import { handleFGRoutes } from './server-fg-routes.js';
 import { exportHookMonitor, importHookMonitor, startBackupDaemon } from '../hooks/backup-daemon.js';
 import { Orchestrator } from '../engine/orchestrator.js';
@@ -1185,6 +1186,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (await handleBrainRoutes({
     req, res, url, knowledgeBase, storage, masterProfile, readBody,
   })) return;
+
+  // V4.0 Phase 4: 第二大脑 Wiki API
+  if (handleWikiRoutes({ res, url })) return;
 
   if (await handleFGRoutes({
     req, res, url, storage, readBody,
