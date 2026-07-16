@@ -89,7 +89,7 @@ export function runSandQC(
   try {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     sqlite.writeRaw("DELETE FROM aqc_records WHERE source_type='sand' AND created_at < ?", cutoff);
-  } catch {}
+  } catch (e) { console.warn(`[AQCEngine] 操作失败`, (e as Error)?.message || e); }
 
   return { scanned, approved, pending };
 }
@@ -168,7 +168,7 @@ export function runGoldQC(sqlite: SQLiteAdapter, limit = 50): GoldQCResult {
   try {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     sqlite.writeRaw("DELETE FROM aqc_records WHERE source_type='gold' AND created_at < ?", cutoff);
-  } catch {}
+  } catch (e) { console.warn(`[AQCEngine] 操作失败`, (e as Error)?.message || e); }
 
   return { scanned, approved, rejected };
 }

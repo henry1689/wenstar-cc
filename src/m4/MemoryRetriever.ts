@@ -395,7 +395,7 @@ export class MemoryRetriever {
             try {
               const orig = JSON.parse((mem as any).perception_json || '{}');
               if (typeof orig.arousal === 'number') origArousal = orig.arousal;
-            } catch {}
+            } catch (e) { console.warn(`[MemoryRetriever] 操作失败`, (e as Error)?.message || e); }
             const arousalDiff = Math.abs((currentPerception.arousal || 0) - origArousal);
             const matchScore = Math.max(0, 1 - arousalDiff);
             const newStrength = oldStrength * 0.95 + 0.05 * matchScore;

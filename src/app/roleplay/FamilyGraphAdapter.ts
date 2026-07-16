@@ -108,7 +108,7 @@ export class FamilyGraphAdapter {
 
   updateInteractionFreq(sourceName: string, targetName: string): void {
     if (!this.fg?.updateInteractionFreq) return;
-    try { this.fg.updateInteractionFreq(sourceName, targetName); } catch {}
+    try { this.fg.updateInteractionFreq(sourceName, targetName); } catch (e) { console.warn(`[FamilyGraphAdapter] 操作失败`, (e as Error)?.message || e); }
   }
 
   /** 构建家庭关系网：亲属之间的关联描述 */
@@ -133,7 +133,7 @@ export class FamilyGraphAdapter {
           } else {
             lines.push(allNames[i] + '是' + allNames[j] + '的' + label);
           }
-        } catch {}
+        } catch (e) { console.warn(`[FamilyGraphAdapter] 操作失败`, (e as Error)?.message || e); }
       }
     }
     return lines;

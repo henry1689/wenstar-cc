@@ -106,7 +106,7 @@ export class ProspectiveSimulator {
             outcomes.push({ scene, trend, delta: avgDelta });
             result.basisMemories.push(memId);
           }
-        } catch {}
+        } catch (e) { console.warn(`[ProspectiveSimulator] 操作失败`, (e as Error)?.message || e); }
       }
 
       if (outcomes.length === 0) return result;
@@ -178,7 +178,7 @@ export class ProspectiveSimulator {
             );
             computed++;
           }
-        } catch {}
+        } catch (e) { console.warn(`[ProspectiveSimulator] 操作失败`, (e as Error)?.message || e); }
       }
       return computed;
     } catch { return 0; }

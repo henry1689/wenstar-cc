@@ -73,10 +73,6 @@ export const MEMORY_CONFIG = {
     surpriseThreshold: 0.3,
     /** 惊讶度钙化 boost 系数 */
     surpriseBoostFactor: 0.5,
-    /** 金库→黑钻晋升钙化分 */
-    goldToDiamondCalcium: 4.5,
-    /** 金库→黑钻晋升最低召回次数 */
-    goldToDiamondMinRecall: 5,
     /** 情景→语义归纳批量上限 */
     semanticInductionBatchSize: 200,
     /** 语义归纳最低提及次数(实体) */
@@ -85,6 +81,14 @@ export const MEMORY_CONFIG = {
     semanticMinWordMentions: 5,
     /** 语义归纳最低钙化均值 */
     semanticMinAvgCalcium: 0.25,
+    /** 语义归纳钙化高关注度线 */
+    semanticCalciumHigh: 0.6,
+    /** 语义归纳钙化中度关注线 */
+    semanticCalciumMid: 0.4,
+    /** 语义归纳跨会话最低天数 */
+    semanticCrossSessionMinDays: 2,
+    /** 语义归纳主题筛选最低天数 */
+    semanticTopicFilterMinDays: 3,
     /** 跨session关联搜索范围 */
     crossSessionBatchSize: 500,
     /** 遗忘执行强度降为 */

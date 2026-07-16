@@ -65,7 +65,7 @@ export class SleepTimeConsolidator {
         "INSERT OR REPLACE INTO engine_store (key, value) VALUES ('last_active_time', ?)",
         [String(now)]
       );
-    } catch {}
+    } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
   }
 
   /**
@@ -81,7 +81,7 @@ export class SleepTimeConsolidator {
           return (Date.now() - lastActive) / (1000 * 60 * 60);
         }
       }
-    } catch {}
+    } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
     return 24; // 默认认为已过24h，运行全阶段
   }
 
@@ -229,7 +229,7 @@ export class SleepTimeConsolidator {
               entityNames.filter((n: string) => typeof n === 'string' && n.length > 1 && n !== '我')
             ).size;
           }
-        } catch {}
+        } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
 
         const diversityBoost = 1 + uniquePersons * 0.1;
         const calcium = (row as any).calcium_score || 0.5;
@@ -279,19 +279,18 @@ export class SleepTimeConsolidator {
               [surprise * 0.5, (row as any).id]);
             highSurprise++;
           }
-        } catch {}
+        } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
       }
       if (highSurprise > 0) console.log(`[SleepTime] 惊讶度提升: ${highSurprise} 条`);
-    } catch {}
+    } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
   }
 
   /** ③ 金库→黑钻晋升 */
   private async _promoteGoldToDiamond(sqlite: any): Promise<number> {
     try {
-      const _cfg3 = MEMORY_CONFIG.sleepConsolidation;
       const rows = sqlite.queryAll(
         `SELECT id, raw_input, calcium_score, recall_count FROM memories
-         WHERE promoted_to_diamond = 0 AND (calcium_score >= ${_cfg3.goldToDiamondCalcium} OR recall_count >= ${_cfg3.goldToDiamondMinRecall})
+         WHERE promoted_to_diamond = 0 AND (calcium_score >= ${MEMORY_CONFIG.goldToDiamond.minCalciumScore} OR recall_count >= ${MEMORY_CONFIG.goldToDiamond.minRecallCount})
          LIMIT ${MEMORY_CONFIG.goldToDiamond.batchSize}`
       );
       let count = 0;
@@ -344,7 +343,7 @@ export class SleepTimeConsolidator {
             entry.calciumTotal += cal;
             if (entry.snippets.length < 4) entry.snippets.push(text.substring(0, 80));
           }
-        } catch {}
+        } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
       }
 
       // ── 策略② 按中文词组补充未被 M1 标注的主题 ──
@@ -369,7 +368,7 @@ export class SleepTimeConsolidator {
       // ── 从实体聚类生成语义记忆 ──
       for (const [name, data] of entityMentions) {
         const avgCal = data.calciumTotal / data.count;
-        const isCrossSession = data.days.size >= 2;
+        const isCrossSession = data.days.size >= MEMORY_CONFIG.sleepConsolidation.semanticCrossSessionMinDays;
         // 实体被提及 3+ 次且有跨天出现，或提及 5+ 次
         const isSignificant = (data.count >= 3 && isCrossSession) || data.count >= 5;
         if (!isSignificant || avgCal < 0.25) continue;
@@ -460,7 +459,7 @@ export class SleepTimeConsolidator {
     if (/睡|失眠|熬夜|困|累|疲惫/.test(text)) return '健康关注';
     if (/开心|难过|焦虑|压力|烦|生气/.test(text)) return '情绪模式';
     if (/买|钱|价格|贵|便宜/.test(text)) return '消费习惯';
-    if (data.days.size >= 3) return '跨会话模式';
+    if (data.days.size >= MEMORY_CONFIG.sleepConsolidation.semanticTopicFilterMinDays) return '跨会话模式';
     return '行为归纳';
   }
 
@@ -471,7 +470,8 @@ export class SleepTimeConsolidator {
     category: string,
     avgCal: number
   ): string {
-    const avgCalStr = avgCal >= 0.6 ? '高关注度' : avgCal >= 0.4 ? '中度关注' : '一般关注';
+    const avgCalStr = avgCal >= MEMORY_CONFIG.sleepConsolidation.semanticCalciumHigh ? '高关注度'
+      : avgCal >= MEMORY_CONFIG.sleepConsolidation.semanticCalciumMid ? '中度关注' : '一般关注';
     return [
       `在 ${data.days.size} 天内的 ${data.count} 次对话中反复提及「${name}」（${avgCalStr}，平均钙化 ${avgCal.toFixed(2)}）。`,
       '',
@@ -501,7 +501,7 @@ export class SleepTimeConsolidator {
             if (!entitySessions.has(name)) entitySessions.set(name, new Set());
             entitySessions.get(name)!.add(day);
           }
-        } catch {}
+        } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
       }
 
       let links = 0;
@@ -515,14 +515,14 @@ export class SleepTimeConsolidator {
               await fg.searchPersonWithMemories(name);
               links++;
             }
-          } catch {}
+          } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
         }
       }
 
       // 无 FG 时，将关联信息写入 dream_logs 作为备选
       if (!fg && links === 0) {
         const topEntities = [...entitySessions.entries()]
-          .filter(([, days]) => days.size >= 3)
+          .filter(([, days]) => days.size >= MEMORY_CONFIG.sleepConsolidation.semanticTopicFilterMinDays)
           .sort((a, b) => b[1].size - a[1].size)
           .slice(0, 5);
         for (const [name, days] of topEntities) {
@@ -729,7 +729,7 @@ export class SleepTimeConsolidator {
             [new Date().toISOString(), sig]
           );
           reinforced++;
-        } catch {}
+        } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
       }
 
       // 2. 将 top-5 高钙化记忆摘要写入 knowledge_base（皮层学习）
@@ -757,7 +757,7 @@ export class SleepTimeConsolidator {
         const { HippocampalIndex } = require('./HippocampalIndex.js') as typeof import('./HippocampalIndex.js');
         const idx = new HippocampalIndex(sqlite);
         idx.runDailyMaintenance();
-      } catch {}
+      } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
 
       if (reinforced > 0) console.log(`[SleepTime] 系统巩固: 强化 ${reinforced} 条稀疏索引 + ${top5.length} 条皮层学习`);
     } catch (err) {

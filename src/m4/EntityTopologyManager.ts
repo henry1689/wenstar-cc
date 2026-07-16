@@ -101,10 +101,10 @@ export class EntityTopologyManager {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`);
-    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_root ON entity_topology(root_entity_id, topology_level)'); } catch {}
-    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_target ON entity_topology(target_entity_id, topology_level)'); } catch {}
-    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_type ON entity_topology(relation_type)'); } catch {}
-    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_ns ON entity_topology(namespace)'); } catch {}
+    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_root ON entity_topology(root_entity_id, topology_level)'); } catch (e) { console.warn(`[EntityTopology] 操作失败`, (e as Error)?.message || e); }
+    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_target ON entity_topology(target_entity_id, topology_level)'); } catch (e) { console.warn(`[EntityTopology] 操作失败`, (e as Error)?.message || e); }
+    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_type ON entity_topology(relation_type)'); } catch (e) { console.warn(`[EntityTopology] 操作失败`, (e as Error)?.message || e); }
+    try { this.sqlite.writeRaw('CREATE INDEX IF NOT EXISTS idx_topology_ns ON entity_topology(namespace)'); } catch (e) { console.warn(`[EntityTopology] 操作失败`, (e as Error)?.message || e); }
   }
 
   // ─── 双向写入 ───

@@ -119,7 +119,7 @@ export function extractPersonProfiles(
                               [_personEntity[0].id, _featId, new Date().toISOString()]
                             );
                             // (FG-迁移) 同步写入 FamilyGraph 特征边（角色扮演时跳过）
-                            if (!_currentRoleplay) try { ctx.m4?.getFamilyGraph()?.addFeatureEdge(_n, _featName, 'appearance').catch(() => {}); } catch {}
+                            if (!_currentRoleplay) try { ctx.m4?.getFamilyGraph()?.addFeatureEdge(_n, _featName, 'appearance').catch(() => {}); } catch (e) { console.warn(`[ChatProfiles] 操作失败`, (e as Error)?.message || e); }
                           }
                         }
                       } catch (e: any) { console.error('[chat] error:', e?.message); }

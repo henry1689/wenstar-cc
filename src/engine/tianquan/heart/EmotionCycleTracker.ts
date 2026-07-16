@@ -113,7 +113,7 @@ export class EmotionCycleTracker {
         const p = this._moodToPleasure(ind.dominant_mood);
         dayMap.get(day)!.pleasures.push(p);
         dayMap.get(day)!.arousals.push(p > 0.3 ? 0.6 : p < -0.3 ? 0.3 : 0.5);
-      } catch {}
+      } catch (e) { console.warn(`[EmotionCycleTracker] 操作失败`, (e as Error)?.message || e); }
     }
 
     const patterns: WeekdayPattern[] = [];
@@ -141,7 +141,7 @@ export class EmotionCycleTracker {
         if (!hourBuckets.has(h)) hourBuckets.set(h, { pleasures: [], arousals: [] });
         hourBuckets.get(h)!.pleasures.push(perc.pleasure);
         hourBuckets.get(h)!.arousals.push(perc.arousal || 0.5);
-      } catch {}
+      } catch (e) { console.warn(`[EmotionCycleTracker] 操作失败`, (e as Error)?.message || e); }
     }
 
     // 同时从 inductions 的时间段补充
@@ -153,7 +153,7 @@ export class EmotionCycleTracker {
         if (!hourBuckets.has(h)) hourBuckets.set(h, { pleasures: [], arousals: [] });
         hourBuckets.get(h)!.pleasures.push(p);
         hourBuckets.get(h)!.arousals.push(p > 0.3 ? 0.6 : 0.5);
-      } catch {}
+      } catch (e) { console.warn(`[EmotionCycleTracker] 操作失败`, (e as Error)?.message || e); }
     }
 
     const patterns: TimeOfDayPattern[] = [];
@@ -179,7 +179,7 @@ export class EmotionCycleTracker {
         const p = this._moodToPleasure(ind.dominant_mood);
         monthMap.get(m)!.pleasures.push(p);
         monthMap.get(m)!.arousals.push(p > 0.3 ? 0.6 : 0.5);
-      } catch {}
+      } catch (e) { console.warn(`[EmotionCycleTracker] 操作失败`, (e as Error)?.message || e); }
     }
 
     const patterns: MonthlyPattern[] = [];
@@ -223,7 +223,7 @@ export class EmotionCycleTracker {
     for (const f of files.slice(-100)) { // 最近100个
       try {
         records.push(JSON.parse(readFileSync(`${dir}/${f}`, 'utf-8')));
-      } catch {}
+      } catch (e) { console.warn(`[EmotionCycleTracker] 操作失败`, (e as Error)?.message || e); }
     }
     return records;
   }

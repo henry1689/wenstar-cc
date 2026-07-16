@@ -80,7 +80,7 @@ export class EmotionRegulator {
         if (mem.raw_input && snippets.length < 3) {
           snippets.push(mem.raw_input.substring(0, 60));
         }
-      } catch {}
+      } catch (e) { console.warn(`[EmotionRegulator] 操作失败`, (e as Error)?.message || e); }
     }
 
     // ── 2. 判断是否过激 ──

@@ -50,7 +50,7 @@ export class TianquanRPCClient extends EventEmitter {
       this._process = spawn(pythonPath, [serverScript], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, RUN_MODE: 'prod', PYTHONUNBUFFERED: '1' } });
       const rl = createInterface({ input: this._process.stdout! });
       rl.on('line', (line: string) => {
-        try { this._handleMessage(JSON.parse(line.trim())); } catch {}
+        try { this._handleMessage(JSON.parse(line.trim())); } catch (e) { console.warn(`[TianquanRPC] 操作失败`, (e as Error)?.message || e); }
       });
       this._process.stderr?.on('data', (chunk: Buffer) => {
         if (this._config.debug) console.log(`[Python] ${chunk.toString().trim()}`);
@@ -111,7 +111,7 @@ export class TianquanRPCClient extends EventEmitter {
   private _scheduleReconnect() {
     if (this._shuttingDown || this._reconnectAttempts >= this._config.maxReconnectAttempts) { if (this._reconnectAttempts >= this._config.maxReconnectAttempts) this.emit('dead'); return; }
     this._reconnectAttempts++;
-    this._reconnectTimer = setTimeout(async () => { try { await this.start(); } catch {} }, this._config.reconnectDelay);
+    this._reconnectTimer = setTimeout(async () => { try { await this.start(); } catch (e) { console.warn(`[TianquanRPC] 操作失败`, (e as Error)?.message || e); } }, this._config.reconnectDelay);
   }
 }
 

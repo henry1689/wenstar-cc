@@ -202,7 +202,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     if (params.role) {
       DeepSeekLLMProvider._currentRole = params.role;
     }
-    try { const { WorkingMemory } = await import('../m9/WorkingMemory.js'); WorkingMemory.currentTag = DeepSeekLLMProvider._currentRole; } catch {}
+    try { const { WorkingMemory } = await import('../m9/WorkingMemory.js'); WorkingMemory.currentTag = DeepSeekLLMProvider._currentRole; } catch (e) { console.warn(`[DeepSeekLLMProvider] 操作失败`, (e as Error)?.message || e); }
 
     // 📖 本地回复：KB内容含敏感词时绕过API过滤，基于知识库原文直接回答
     if (kb.startsWith('【本地回复】')) {

@@ -442,7 +442,7 @@ export async function buildCommandCenterSnapshot(
   try {
     const report = alignmentGuard.getCachedReport();
     if (report) alignmentSummary = { score: report.score, status: report.status };
-  } catch {}
+  } catch (e) { console.warn(`[server-obs] 操作失败`, (e as Error)?.message || e); }
 
   let persistence = { userCount: 0, assistantCount: 0, ratio: '0' };
   try {
@@ -451,7 +451,7 @@ export async function buildCommandCenterSnapshot(
     const userCount = Number((userRows[0] as any)?.cnt ?? 0);
     const assistantCount = Number((assistantRows[0] as any)?.cnt ?? 0);
     persistence = { userCount, assistantCount, ratio: assistantCount > 0 ? (userCount / assistantCount).toFixed(2) : '0' };
-  } catch {}
+  } catch (e) { console.warn(`[server-obs] 操作失败`, (e as Error)?.message || e); }
 
   let roleplay: { active: boolean; role: string | null; class: string | null; turns: number } = {
     active: false,
@@ -461,7 +461,7 @@ export async function buildCommandCenterSnapshot(
   };
   try {
     if (getRoleplayStatus) roleplay = getRoleplayStatus();
-  } catch {}
+  } catch (e) { console.warn(`[server-obs] 操作失败`, (e as Error)?.message || e); }
 
   const noteRows = sqlite.queryAll(
     `SELECT COALESCE(sub_type, 'unknown') as sub_type, COUNT(*) as cnt
@@ -752,7 +752,7 @@ export async function buildCommandCenterSnapshot(
       events: sqlite.queryAll('SELECT COUNT(*) as cnt FROM master_events')[0]?.cnt ?? 0,
       aboutYou: masterProfile.retrieveAboutYou(10).length,
     };
-  } catch {}
+  } catch (e) { console.warn(`[server-obs] 操作失败`, (e as Error)?.message || e); }
 
   return {
     generatedAt: new Date(now).toISOString(),

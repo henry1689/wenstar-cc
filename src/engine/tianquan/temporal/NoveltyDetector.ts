@@ -89,7 +89,7 @@ export class NoveltyDetector {
           method: 'index_lookup',
         };
       }
-    } catch {}
+    } catch (e) { console.warn(`[NoveltyDetector] 操作失败`, (e as Error)?.message || e); }
     return null;
   }
 
@@ -129,7 +129,7 @@ export class NoveltyDetector {
           method: 'content_similarity',
         };
       }
-    } catch {}
+    } catch (e) { console.warn(`[NoveltyDetector] 操作失败`, (e as Error)?.message || e); }
     return { novelty: 1, nearestMatchId: null, similarity: 0, calciumMultiplier: 1.5, method: 'fallback' };
   }
 
@@ -157,7 +157,7 @@ export class NoveltyDetector {
           method: 'entity_overlap',
         };
       }
-    } catch {}
+    } catch (e) { console.warn(`[NoveltyDetector] 操作失败`, (e as Error)?.message || e); }
     return { novelty: 1, nearestMatchId: null, similarity: 0, calciumMultiplier: 1.5, method: 'fallback' };
   }
 

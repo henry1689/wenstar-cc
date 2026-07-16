@@ -238,7 +238,7 @@ function _lazyTemporalFire(message: string, ctx: any): void {
         "INSERT OR REPLACE INTO engine_store (key, value) VALUES ('last_time_query', ?)",
         [new Date(now).toISOString()]
       );
-    } catch {}
+    } catch (e) { console.warn('[chat::LazyTemporal] 时间查询存储失败', (e as Error)?.message || e); }
     console.log(`[LazyTemporal] 🕐 时间查询触发 ${deltaStr}`);
   }
 
@@ -252,7 +252,7 @@ function _lazyTemporalFire(message: string, ctx: any): void {
           [new Date(now).toISOString()]
         );
       }
-    } catch {}
+    } catch (e) { console.warn('[chat::LazyTemporal] 天气查询存储失败', (e as Error)?.message || e); }
     console.log('[LazyTemporal] 🌤 天气查询触发');
   }
 
@@ -266,7 +266,7 @@ function _lazyTemporalFire(message: string, ctx: any): void {
           [new Date(now).toISOString()]
         );
       }
-    } catch {}
+    } catch (e) { console.warn('[chat::LazyTemporal] 生理查询存储失败', (e as Error)?.message || e); }
     console.log('[LazyTemporal] 💓 生理查询触发');
   }
 
@@ -612,7 +612,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         const _nresult = _nd.assess(dna);
         _noveltyMultiplier = _nresult.calciumMultiplier;
       }
-    } catch {} /* 新颖度检测失败不阻塞 */
+    } catch (e) { console.warn('[chat::NoveltyDetector] 新颖度检测失败', (e as Error)?.message || e); }
 
     const decision = ctx.m3.decide(dna, { current_time: new Date().toISOString(), current_location: '深圳' });
 
@@ -1262,7 +1262,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         _rpLoadedPersons.clear();
         clearRPCache();  // 🏗️ 清除角色扮演域缓存
         // 恢复 CoreMemory 的玉瑶 persona
-        try { (globalThis as any).__coreMemory?.clearRoleplayOverride?.(); } catch {}
+        try { (globalThis as any).__coreMemory?.clearRoleplayOverride?.(); } catch (e) { console.warn('[chat::Roleplay] CoreMemory角色覆写清理失败', (e as Error)?.message || e); }
         _rpJustExited = 3;  // 🎭 三轮冷却：每次递减，退出后持续3轮注入身份恢复
         console.log('[Roleplay] 退出角色扮演，完整清理完成');
     }
@@ -1379,7 +1379,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       if (character.length >= 2) {
         // FG真人禁止扮演（读 getPersonProfile.roleplay_forbidden）
         let _rpForbidden = false;
-        try { const _fp = ctx.m4?.getFamilyGraph?.()?.getPersonProfile(character); if ((_fp as any)?.roleplay_forbidden) _rpForbidden = true; } catch {}
+        try { const _fp = ctx.m4?.getFamilyGraph?.()?.getPersonProfile(character); if ((_fp as any)?.roleplay_forbidden) _rpForbidden = true; } catch (e) { console.warn('[chat::Roleplay] FG角色禁止检查失败', (e as Error)?.message || e); }
         if (_rpForbidden) {
           console.log('[Roleplay] 🚫 禁止扮演FG真人: ' + character);
           _currentRoleplay = null;
@@ -1880,7 +1880,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             (globalThis as any).__sleepTimeConsolidator || new SleepTimeConsolidator(ctx.storage);
           (globalThis as any).__sleepTimeConsolidator.recordActivity();
         }
-      } catch {} /* 记录失败不阻塞 */
+      } catch (e) { console.warn('[chat::RecordActivity] 活动记录失败', (e as Error)?.message || e); }
 
       try {
         const { CoreMemoryManager } = await import('../app/brain/CoreMemoryManager.js');
@@ -1902,7 +1902,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
           (globalThis as any).__pfcCoreCtx = _rpCoreCtx;
           // V4.0 Phase 3: CoreMemory 改由 PFC 组装，此处仅暂存值
         }
-      } catch {} /* Core Memory 不可用不阻塞 */
+      } catch (e) { console.warn('[chat::CoreMemory] CoreMemory初始化/刷新失败', (e as Error)?.message || e); }
 
       // 🧠 海马体经验摘要 (V4.0 @deprecated: 已迁入 KnowledgeAccessFacade)，注入 LLM 上下文
       try {
@@ -1917,7 +1917,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             (globalThis as any).__pfcExp = _exp || null;
           }
         }
-      } catch {} /* 经验摘要不可用不阻塞 */
+      } catch (e) { console.warn('[chat::ExperienceSummary] 经验摘要查询失败', (e as Error)?.message || e); }
 
       // 🧠 V3.1 记忆驱动情绪调节 (V4.0 @deprecated: 长期迁移到 SceneSnapshotBuilder.attachEmotionRegulation): 查相似经验→输出安抚建议→注入LLM柔性调节
       try {
@@ -1933,7 +1933,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             } else { (globalThis as any).__pfcReg = null; }
           }
         }
-      } catch {} /* 情绪调节不可用不阻塞 */
+      } catch (e) { console.warn('[chat::EmotionRegulator] 情绪调节失败', (e as Error)?.message || e); }
 
       // 🔥 选择性遗忘: 检测用户"忘掉""不提""删除"指令 (V3.0: 模糊搜索匹配)
       try {
@@ -1950,7 +1950,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             }
           }
         }
-      } catch {} /* 遗忘指令检测失败不阻塞 */
+      } catch (e) { console.warn('[chat::ForgettingEngine] 遗忘指令检测失败', (e as Error)?.message || e); }
 
 
       // ================================================================
@@ -2072,7 +2072,7 @@ if (ctx.clientMsgId && typeof ctx.clientMsgId === 'string' && ctx.clientMsgId.st
   const _rpChar = _rpParts[0].replace('【角色扮演】', '');
   // FG真人禁止扮演
   let _rpForbidden2 = false;
-  try { const _p2 = ctx.m4?.getFamilyGraph?.()?.getPersonProfile(_rpChar); if ((_p2 as any)?.roleplay_forbidden) _rpForbidden2 = true; } catch {}
+  try { const _p2 = ctx.m4?.getFamilyGraph?.()?.getPersonProfile(_rpChar); if ((_p2 as any)?.roleplay_forbidden) _rpForbidden2 = true; } catch (e) { console.warn('[chat::ChatRP] FG角色禁止检查失败', (e as Error)?.message || e); }
   if (_rpForbidden2) {
     console.log('[ChatRP] 🚫 禁止扮演FG真人: ' + _rpChar);
     _currentRoleplay = null;
@@ -2976,7 +2976,7 @@ reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, 
 
 	    // V4.0 Phase 4: 躯体反馈 — 记录注入后用户情绪变化
 	    if (ctx.somaticMemory && typeof ctx.somaticMemory.recordSomaticOutcome === 'function') {
-	      try { ctx.somaticMemory.recordSomaticOutcome(p.pleasure || 0); } catch {}
+	      try { ctx.somaticMemory.recordSomaticOutcome(p.pleasure || 0); } catch (e) { console.warn('[chat::SomaticOutcome] 躯体反馈记录失败', (e as Error)?.message || e); }
 	    }
 
 (globalThis as any).__hippocampusCoordinator?.afterResponse();

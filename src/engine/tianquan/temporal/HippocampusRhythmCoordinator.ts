@@ -279,7 +279,7 @@ export class HippocampusRhythmCoordinator {
         "INSERT OR REPLACE INTO engine_store (key, value) VALUES ('last_active_time', ?)",
         [String(this._lastUserMessage)]
       );
-    } catch {}
+    } catch (e) { console.warn(`[HippocampusRhythm] 操作失败`, (e as Error)?.message || e); }
   }
 
   private _restoreLastActive(): void {
@@ -291,7 +291,7 @@ export class HippocampusRhythmCoordinator {
         const ts = Number((rows[0] as any).value);
         if (ts > 0) this._lastUserMessage = ts;
       }
-    } catch {}
+    } catch (e) { console.warn(`[HippocampusRhythm] 操作失败`, (e as Error)?.message || e); }
   }
 }
 

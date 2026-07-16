@@ -127,7 +127,7 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
         distillYield = metrics.distillYield;
         decayRate = metrics.decayRate;
         growthLog = await logger.query({ limit: 10 });
-      } catch {}
+      } catch (e) { console.warn(`[server-knowledge] 操作失败`, (e as Error)?.message || e); }
       const rows = items.map(function(i: any) {
         return '<tr><td>' + (i.title || '').substring(0, 40) + '</td><td style="color:#7a6a80">' + ((i as any).classification || '-') + '</td></tr>';
       }).join('');

@@ -476,14 +476,14 @@ async function loadM68(){
   try{
     const r=await fetch('/api/status');
     if(r.ok)renderM2((await r.json()).storage);
-  }catch{}
+  }catch(e){console.warn(`[webui-index] 操作失败`,e)}
   try{
     const r=await fetch('/api/modules');
     if(r.ok){
       const d=await r.json();
       renderM6(d.m6);renderM7(d.m7);renderM8(d.m8);
     }
-  }catch{}
+  }catch(e){console.warn(`[webui-index] 操作失败`,e)}
 }
 
 // ── Render M1 DNA ──
@@ -807,7 +807,7 @@ async function loadPersona(){
     document.getElementById('psel').value=d.active;
     const p=d.list.find(x=>x.id===d.active);
     if(p){document.getElementById('pname').textContent=p.name.split('·')[0].trim()}
-  }catch{}
+  }catch(e){console.warn(`[webui-index] 操作失败`,e)}
 }
 
 async function switchPersona(id){

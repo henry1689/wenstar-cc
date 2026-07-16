@@ -44,7 +44,7 @@ export async function handleOpsRoutes(deps: OpsRouteDeps): Promise<boolean> {
         : 'N/A';
       const backupDirPath = path.join(projectRoot, 'data', 'backups');
       let backupFiles: string[] = [];
-      try { backupFiles = fs.readdirSync(backupDirPath).filter((f) => f.endsWith('.db')); } catch {}
+      try { backupFiles = fs.readdirSync(backupDirPath).filter((f) => f.endsWith('.db')); } catch (e) { console.warn(`[server-ops] 操作失败`, (e as Error)?.message || e); }
       report.backup = {
         lastBackupTime: backupStats.lastBackupTime,
         backupSuccessRate: successRate,

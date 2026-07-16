@@ -144,7 +144,7 @@ export class HippocampalIndex {
               "UPDATE hippocampal_index SET calcium_boost = MIN(5.0, calcium_boost + 0.1), last_activated_at = ? WHERE context_signature = ?",
               [new Date().toISOString(), contextSignature]
             );
-          } catch {}
+          } catch (e) { console.warn(`[HippocampalIndex] 操作失败`, (e as Error)?.message || e); }
         });
         return summary;
       }

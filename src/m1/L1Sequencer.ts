@@ -4,7 +4,7 @@
  * v2: 计数器统一委托 GlobalSequenceCounter，移除实例级自增逻辑。
  * seq_pos 为会话内严格单调递增序列（由调用方在 resetSession 时维护）。
  *
- * branch_id 格式：evt_YYYYMMDD_NNN（保持兼容）
+ * branch_id 格式：evt_YYYYMMDD_N{3,4}（全局序列号，跨零点重置）
  * seq_pos 由调用方每轮对话传入。
  */
 import type { L1SequenceResult } from './types/dna.js';

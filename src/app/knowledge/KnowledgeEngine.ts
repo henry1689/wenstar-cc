@@ -529,7 +529,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
           const newScore = _impressionModel.onRecalled(curScore, recallCount + 1);
           sqlite.writeRaw('UPDATE knowledge_base SET impression_score = ?, recall_count = COALESCE(recall_count, 0) + 1, last_recalled_at = ? WHERE id = ?', [newScore, new Date().toISOString(), r.id]);
         }
-      } catch {} /* 印象值更新不阻塞 */
+      } catch (e) { console.warn(`[KnowledgeEngine] 操作失败`, (e as Error)?.message || e); } /* 印象值更新不阻塞 */
     }
 
     searchCache.set(cacheKey, [...results]).catch(() => {});

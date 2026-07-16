@@ -466,8 +466,8 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     // v2.0: 先升级存量数据（创建新列），再建索引
     this.migrateToV2();
-    try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_circle ON nodes(circle_level)'); } catch {}
-    try { this.run('CREATE INDEX IF NOT EXISTS idx_edges_source_rel ON edges(source_id, relation)'); } catch {}
+    try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_circle ON nodes(circle_level)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
+    try { this.run('CREATE INDEX IF NOT EXISTS idx_edges_source_rel ON edges(source_id, relation)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
 
     this.markDirty();
     this.ready = true;
@@ -562,8 +562,8 @@ export class FamilyGraph implements FamilyGraphInterface {
    */
   migrateToV2(): void {
     // 节点：新增 circle_level 列（若不存在）
-    try { this.run('ALTER TABLE nodes ADD COLUMN circle_level INTEGER DEFAULT 0'); } catch {}
-    try { this.run('ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT "[]"'); } catch {}
+    try { this.run('ALTER TABLE nodes ADD COLUMN circle_level INTEGER DEFAULT 0'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
+    try { this.run('ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT "[]"'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
 
     // 边：为新兼容字段准备 properties 默认值
     const rows = this.query('SELECT id, properties FROM edges WHERE properties = ? OR properties IS NULL', ['{}']);

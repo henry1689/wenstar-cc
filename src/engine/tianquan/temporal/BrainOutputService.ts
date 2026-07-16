@@ -101,7 +101,7 @@ export class BrainOutputService {
         lines.push('---');
         lines.push('📋 根据你平时的关注领域，这份报告已按你的思维习惯整理。');
       }
-    } catch {}
+    } catch (e) { console.warn(`[BrainOutputService] 操作失败`, (e as Error)?.message || e); }
 
     return { title, content: lines.join('\n'), sources: topItems.length };
   }
