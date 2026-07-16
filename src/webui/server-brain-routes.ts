@@ -107,5 +107,26 @@ export async function handleBrainRoutes(deps: BrainRouteDeps): Promise<boolean> 
     return true;
   }
 
+  // ── V4.0 Phase 4: 玉瑶最近学习 ──
+  if (req.method === 'GET' && url.pathname === '/api/brain/recent-learnings') {
+    try {
+      const sqlite = storage?.getSQLite?.();
+      if (!sqlite) { res.writeHead(500); res.end(JSON.stringify({ error: 'storage unavailable' })); return true; }
+      const limit = parseInt(url.searchParams.get('limit') || '20', 10);
+      const rows = sqlite.queryAll(
+        "SELECT id, raw_input, created_at, calcium_score, recall_count, effective_strength FROM memories WHERE source_type = 'knowledge_vault' AND lifecycle_state = 'active' ORDER BY created_at DESC LIMIT ?",
+        [limit]
+      );
+      const items = (rows || []).map((r: any) => ({
+        id: r.id, summary: (r.raw_input || '').substring(0, 120),
+        createdAt: r.created_at, calcium: r.calcium_score,
+        recalled: r.recall_count, strength: r.effective_strength,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ total: items.length, items }));
+    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: (e as Error).message })); }
+    return true;
+  }
+
   return false;
 }

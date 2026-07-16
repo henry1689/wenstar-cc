@@ -133,6 +133,18 @@ export class PrefrontalCortex {
       }
     } catch { /* 模拟不可用不阻塞 */ }
 
+    // V4.0 Phase 4: 推送 PFC 事件到 SSE 客户端
+    if (typeof (globalThis as any).broadcastEvent === 'function') {
+      (globalThis as any).broadcastEvent('pfc-directive', {
+        type: directive.type,
+        priority: directive.priority,
+        intent,
+        constraints: constraints.passed ? 'passed' : 'violated',
+        violations: constraints.violations.length,
+        time: new Date().toISOString(),
+      });
+    }
+
     // V4.0 Phase 2: 发布前额指令事件，打通 TianquanEventBus 正向流
     this.bus?.emit?.({
       type: 'prefrontal:directive_issued',
