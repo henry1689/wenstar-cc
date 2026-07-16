@@ -165,6 +165,18 @@ export interface PrefrontalInput {
   snapshot: SceneSnapshot;
   sessionId: string;
   rawInput: string;
+  /** V4.0 Phase 3: 外部上下文块（CoreMemory/经验/情绪/时空等），PFC 组装后返回 */
+  contextBlocks?: ContextBlock[];
+}
+
+/** V4.0 Phase 3: 上下文块 — PFC 组装 LLM 上下文的标准化输入 */
+export interface ContextBlock {
+  /** 块来源标签 */
+  source: 'core_memory' | 'experience' | 'emotion_regulation' | 'forgetting' | 'temporal' | 'guard' | 'somatic';
+  /** 块内容 */
+  content: string;
+  /** 优先级 0-100（越高越靠前） */
+  priority: number;
 }
 
 /** PrefrontalCortex 处理输出 */

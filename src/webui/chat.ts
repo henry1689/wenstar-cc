@@ -2002,15 +2002,32 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             };
           }
 
+          // V4.0 Phase 3: 收集所有上下文块交由 PFC 统一组装
+          const _ctxBlocks: any[] = [];
+          // CoreMemory（由下方 ad-hoc 路径提前计算，此处只做标记，PFC 合并时用 priority=100）
+          // 海马体经验（priority=80）
+          // 情绪调节（priority=75）
+          // 时空规则（priority=50）
+          // 这些块由 PFC 内部的 directive.payload.assembledContext 统一组装
+
           const _pfcInput = { snapshot: _snap, sessionId: String(seqPos) || '', rawInput: message };
           const _pfcResult = await _pfc.process(_pfcInput, decision);
           (globalThis as any).__pfcDirective = _pfcResult?.directive || null;
 
-          // 补充 PFC 守卫消息（与现有 allGuardMsgs 叠加，不替换）
-          if (_pfcResult?.directive?.constraints?.violations?.length > 0) {
-            const _pfcGuards = _pfcResult.directive.constraints.violations.join('\n');
-            if (_pfcGuards) {
-              finalKnowledgeText = _pfcGuards + '\n\n' + (finalKnowledgeText || '');
+          // V4.0 Phase 3: PFC 守卫消息 + assembledContext 替代手动拼装
+          // 如果 PFC 返回了 assembledContext，用它的；否则继续走旧的 ad-hoc 拼装
+          const _assembledCtx = _pfcResult?.directive?.payload?.['assembledContext'] as string | undefined;
+          const _guardMsgs = _pfcResult?.directive?.payload?.['guardMessages'] as string | undefined;
+          if (_assembledCtx || _guardMsgs) {
+            // PFC 统一组装的上下文优先（逐步替代 ad-hoc 拼装）
+            finalKnowledgeText = [_guardMsgs, _assembledCtx, finalKnowledgeText].filter(Boolean).join('\n\n');
+          } else {
+            // Fallback: V4.0 Phase 1 行为 — 仅注入 PFC 违规
+            if (_pfcResult?.directive?.constraints?.violations?.length > 0) {
+              const _pfcGuards = _pfcResult.directive.constraints.violations.join('\n');
+              if (_pfcGuards) {
+                finalKnowledgeText = _pfcGuards + '\n\n' + (finalKnowledgeText || '');
+              }
             }
           }
         }

@@ -193,6 +193,23 @@ function createHippocampalIndexMaintenance(storage: FusionStorageAdapter): Rhyth
   return {
     name: 'HippocampalIndex',
     tasks: [
+      // V4.0 Phase 3: 记忆自省 — 每周扫描幻觉日志+矛盾检测+过期关系
+      {
+        name: 'selfReview.weekly',
+        rhythm: HippocampusRhythm.DELTA,
+        intervalMs: 7 * 24 * 3600_000, // 每周
+        execute: async () => {
+          try {
+            const { MemorySelfReview } = await import('../../../app/selfreview/MemorySelfReview.js');
+            const reviewer = new MemorySelfReview(storage);
+            const report = await reviewer.review();
+            if (report.conflicts > 0 || report.hallucinationPatterns.length > 0) {
+              console.log('[SelfReview] 周度自省: ' + report.conflicts + ' 冲突, ' + report.hallucinationPatterns.length + ' 幻觉模式');
+            }
+            return report.conflicts;
+          } catch { return 0; }
+        },
+      },
       {
         name: 'hippocampalIndex.dailyMaintenance',
         rhythm: HippocampusRhythm.DELTA,

@@ -95,6 +95,17 @@ export class PrefrontalCortex {
       this.goalStack.getState(),
     );
 
+    // V4.0 Phase 3: 组装上下文 — 将 PFC 守卫消息 + 外部上下文块合并为 assembledContext
+    const pfcGuards = this.constraintValidator.buildGuardMessages(constraints, constraintInput);
+    if (pfcGuards) {
+      directive.payload['guardMessages'] = pfcGuards;
+    }
+    // 合并外部上下文块（CoreMemory / 经验 / 情绪 / 时空），按 priority 降序排列
+    if (input.contextBlocks && input.contextBlocks.length > 0) {
+      const sorted = [...input.contextBlocks].sort((a, b) => b.priority - a.priority);
+      directive.payload['assembledContext'] = sorted.map(b => b.content).join('\n\n');
+    }
+
     // V4.0 Phase 2: 发布前额指令事件，打通 TianquanEventBus 正向流
     this.bus?.emit?.({
       type: 'prefrontal:directive_issued',
