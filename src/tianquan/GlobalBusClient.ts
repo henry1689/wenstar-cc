@@ -58,6 +58,10 @@ export class GlobalBusClient extends EventEmitter {
 
   get connected() { return this._connected; }
 
+  private _reconnectAttempts = 0;
+  private readonly MAX_RECONNECT = 5;
+  private readonly RECONNECT_DELAY = 3000;
+
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const sock = createConnection({ host: this._cfg.host, port: this._cfg.port }, async () => {
@@ -69,6 +73,7 @@ export class GlobalBusClient extends EventEmitter {
           await this._request({ type: 'subscribe', channels: this._cfg.channels });
         }
         this._connected = true;
+    this._reconnectAttempts = 0;
         this._log(`已连接 ${this._cfg.host}:${this._cfg.port}`);
         this.emit('connected');
         resolve();

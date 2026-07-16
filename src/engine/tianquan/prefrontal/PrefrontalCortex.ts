@@ -146,6 +146,8 @@ export class PrefrontalCortex {
     }
 
     // V4.0 Phase 2: 发布前额指令事件，打通 TianquanEventBus 正向流
+    // V4.0 Phase 5: 同步推送到 GlobalBus (:9100)，打通PFC→yaoling下行链路
+    try { const _gb = (globalThis as any).__globalBusClient; if (_gb && typeof _gb.publish === "function") { _gb.publish('prefrontal:directive', { directive: directive.type, intent, priority: directive.priority, sessionId: input.sessionId, timestamp: Date.now() }).catch(() => {}); } } catch { /* GlobalBus不可用不阻塞 */ }
     this.bus?.emit?.({
       type: 'prefrontal:directive_issued',
       traceId: `pfc_${Date.now().toString(36)}`,
@@ -259,6 +261,7 @@ export class PrefrontalCortex {
   /** 意图推断（Phase 1 增强，Phase 4 建议与 MasterHarris.classifyIntent 统一）
    *  @note MasterHarris 决定"发往哪个域"，PFC 决定"用什么策略处理"。
    *  建议合并为 IntentClassifier → {targetDomain, processingStrategy, confidence} */
+  /** @deprecated Phase 6: 统一到 MasterHarris.classifyIntent — 三套分类器合并为 IntentClassifier */
   private _inferIntent(rawInput: string): string {
     if (/^(你好|嗨|哈[喽啰]|hi|hello)/i.test(rawInput)) return '问候';
     if (/[？?]/.test(rawInput) && /什么|怎么|为什么|谁|哪|多少|如何/.test(rawInput)) return '回答问题';
