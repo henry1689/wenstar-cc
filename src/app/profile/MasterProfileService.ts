@@ -231,4 +231,39 @@ export class MasterProfileService {
     if (lines.length === 0) return '';
     return '【关于你】我知道的你：\n' + lines.slice(0, limit).join('\n') + '\n';
   }
+
+  /**
+   * 轻量写入（供 SleepTimeConsolidator 语义归纳回写用户画像）
+   * 仅写 master_profile 表，去重 + 置信度递增
+   */
+  upsert(params: {
+    category: string;
+    subcategory?: string;
+    content: string;
+    source?: string;
+    confidence?: number;
+  }): void {
+    const { category, subcategory, content, source, confidence } = params;
+    if (!category || !content) return;
+    const now = new Date().toISOString();
+    const existing = this.sqlite.queryAll(
+      'SELECT id, mention_count, confidence FROM master_profile WHERE category = ? AND content LIKE ? ORDER BY last_seen DESC LIMIT 1',
+      [category, '%' + content.substring(0, 30) + '%']
+    );
+    if (existing.length > 0) {
+      this.sqlite.writeRaw(
+        'UPDATE master_profile SET mention_count = mention_count + 1, confidence = MIN(1.0, confidence + ?), last_seen = ? WHERE id = ?',
+        confidence || 0.05, now, existing[0].id
+      );
+    } else {
+      const id = 'prof_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+      try {
+        this.sqlite.writeRaw(
+          'INSERT INTO master_profile (id, category, subcategory, content, source, confidence, calcium_score, mention_count, first_seen, last_seen, tags) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)',
+          id, category, subcategory || '', content, source || 'sleep_consolidation', confidence || 0.5, now, now,
+          JSON.stringify(['auto_inducted', source || 'sleep_consolidation'])
+        );
+      } catch (e) { console.warn('[MasterProfile] upsert失败', category, e instanceof Error ? e.message : String(e)); }
+    }
+  }
 }

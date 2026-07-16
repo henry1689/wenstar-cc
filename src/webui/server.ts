@@ -75,6 +75,7 @@ import { listKeys, setKey, deleteKey, getKeyValue } from '../app/shared/ApiKeySt
 import { SomaticMemory } from '../app/somatic/SomaticMemory.js';
 import { MemoryVault } from '../app/memory-vault/MemoryVault.js';
 import { alignmentGuard } from '../app/alignment/VectorAlignmentGuard.js';
+import { ConfigService } from '../config/ConfigService.js';
 import type { SimilarityMode, ScoredMemory } from '../m2/types/index.js';
 import type { SelfModelV1 } from '../m1/types/dna.js';
 import type { ConversationTurn } from '../m5/types/index.js';
@@ -111,7 +112,7 @@ const DATA_DIR = path.join(PROJECT_ROOT, 'data', 'webui');
 const DB_PATH = path.join(DATA_DIR, 'knowledge', 'family_graph.db');
 const HTML_PATH = path.join(__dirname, 'index.html');
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const WS_DEBUG_MODE = process.env['WS_DEBUG_MODE'] === 'true';
+const WS_DEBUG_MODE = ConfigService.getBool('WS_DEBUG_MODE');
 // 🔋 Token节省模式 — 所有后台定时器/心跳/节律默认关闭，仅在用户问及时间/天气/生理时按需一枪式启动
 const WS_LAZY_TIMERS = true; // 始终为 true：所有 setInterval/setTimeout 轮询永不启动
 if (WS_DEBUG_MODE) console.log('[启动] 🔧 调试模式 — 自动定时器/心跳/后台LLM已全部禁用');
@@ -329,7 +330,7 @@ let memoryVault: MemoryVault;
 /** 新架构编排器 */
 let orchestrator: Orchestrator | null = null;
 /** 新架构开关：默认关闭 */
-const ENABLE_NEW_ARCH = (process.env["ENABLE_NEW_ARCH"] || "false") === "true";
+const ENABLE_NEW_ARCH = ConfigService.getBool('ENABLE_NEW_ARCH');
 /** 天权调度器 */
 let masterHarris: MasterHarris | null = null;
 let specLoadResults: SpecLoadResult[] = [];
@@ -911,6 +912,7 @@ async function initPipeline(): Promise<void> {
   console.log('  知识库已启动 ✓');
 
   masterProfile = new MasterProfileService(storage.getSQLite());
+  (globalThis as any).__masterProfile = masterProfile;  // V4.0 Phase 5: 供 SleepTimeConsolidator 语义归纳回写
   console.log('  主人镜像已启动 ✓');
 
   // 注册任务代理工具
@@ -2120,11 +2122,11 @@ async function main(): Promise<void> {
   console.log('  玉瑶 · 太虚境 WebUI 初始化完成 ✓');
 
   // ═══ S1 新架构：空初始化验证 (轻量模式下跳过) ═══
-  if (process.env['TIANQUAN_LITE'] !== 'true') {
+  if (!ConfigService.getBool("TIANQUAN_LITE")) {
   try {
     const sqliteStorage = new SQLiteStorage(storage.getSQLite() as any);
     orchestrator = new Orchestrator({
-      mode: (process.env['ENABLE_NEW_ARCH'] || 'false') === 'true' ? 'hybrid' : 'legacy',
+      mode: ConfigService.getBool("ENABLE_NEW_ARCH") ? 'hybrid' : 'legacy',
       traceEnabled: true,
       storage: sqliteStorage,
     });
@@ -2144,7 +2146,7 @@ async function main(): Promise<void> {
     } catch (_es) { console.warn('  [RoleSnapshot] 初始化失败（不影响主流程）'); }
 
     // S3 混合检索引擎初始化 (轻量模式下跳过)
-    if (process.env['TIANQUAN_LITE'] !== 'true') {
+    if (!ConfigService.getBool("TIANQUAN_LITE")) {
       try {
         const { HybridSearchEngine } = await import('../engine/storage/HybridSearch.js');
         hybridSearch = new HybridSearchEngine();
@@ -2198,7 +2200,7 @@ async function main(): Promise<void> {
   }
 
   // ─── v3.0: 全局实体拓扑初始化 (轻量模式跳过) ───
-  if (process.env['TIANQUAN_LITE'] !== 'true') {
+  if (!ConfigService.getBool("TIANQUAN_LITE")) {
   try {
     const { EntityTopologyManager } = await import('../m4/EntityTopologyManager.js');
     const _topo = new EntityTopologyManager(storage.getSQLite() as any);

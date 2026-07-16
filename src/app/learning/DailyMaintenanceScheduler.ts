@@ -168,14 +168,48 @@ export class DailyMaintenanceScheduler {
           }
           const top10 = [...words.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
           if (top10.length > 0) {
-            const summary = `本月对话主题 Top10:\\n${top10.map(([w, c], i) => `${i + 1}. ${w} (${c}次)`).join('\\n')}`;
+            const summary = `本月对话主题 Top10:\n${top10.map(([w, c], i) => `${i + 1}. ${w} (${c}次)`).join('\n')}`;
+            const monthStr = new Date().toISOString().substring(0, 7);
+            const knId = `topic_${monthStr.replace('-', '')}`;
+            sqlite.writeRaw(
+              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, classification, classification_pending)
+               VALUES (?, ?, ?, 'monthly_topic', ?, datetime('now'), datetime('now'), '对话主题月报', 0)`,
+              [knId, `对话主题月报 ${monthStr}`, summary,
+               JSON.stringify(['monthly_topic', monthStr, ...top10.slice(0, 5).map(([w]) => w)])]
+            );
             sqlite.writeRaw(
               "INSERT OR REPLACE INTO engine_store (key, value) VALUES (?, ?)",
               [_lastTopicRunKey, String(_days)]
             );
-            console.log('[DailyMaintenance] 月度主题: ' + top10.map(([w]) => w).join(', '));
+            console.log('[DailyMaintenance] 📊 月度主题: ' + top10.map(([w]) => w).join(', '));
           }
         } catch { /* 月度主题提取失败不阻塞 */ }
+      });
+    }
+
+    // V4.0 Phase 5: 周度记忆自省（每7天一次，扫描矛盾/编造模式/过期关系）
+    const _lastReviewKey = 'last_weekly_selfreview';
+    const _prevReview = (() => {
+      try {
+        const r = this.storage.getSQLite()?.queryAll(
+          "SELECT value FROM engine_store WHERE key = ? LIMIT 1", [_lastReviewKey]
+        );
+        return r?.[0] ? parseInt((r[0] as any).value || '0', 10) : 0;
+      } catch { return 0; }
+    })();
+    if (_days - _prevReview >= 7) {
+      setImmediate(async () => {
+        try {
+          const { MemorySelfReview } = await import('../../app/selfreview/MemorySelfReview.js');
+          const sr = new MemorySelfReview(this.storage);
+          const srReport = await sr.review();
+          const sqlite = this.storage.getSQLite();
+          sqlite?.writeRaw(
+            "INSERT OR REPLACE INTO engine_store (key, value) VALUES (?, ?)",
+            [_lastReviewKey, String(_days)]
+          );
+          console.log('[DailyMaintenance] 🔍 周度自省:', srReport.actions.join('; '));
+        } catch (e) { console.warn('[DailyMaintenance] 周度自省失败', (e as Error)?.message || e); }
       });
     }
 

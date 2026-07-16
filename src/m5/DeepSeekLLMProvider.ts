@@ -27,7 +27,7 @@ import { validateRoleOutput, getFallbackRole } from '../app/role/RoleGuard.js';
 // 改造④：不在模块级读 process.env，构造函数中通过 ConfigService 运行时获取
 import { ConfigService } from '../config/ConfigService.js';
 
-const BASE_URL = process.env['LLM_API_BASE_URL'] || 'https://api.deepseek.com/v1';
+const BASE_URL = ConfigService.get('LLM_API_BASE_URL', 'https://api.deepseek.com/v1');
 const MAX_HISTORY_TURNS = 200;
 // FIX-3: 工作消息时缩减历史（防止亲密历史污染工作上下文）
 function getHistoryLimit(txt: string): number {

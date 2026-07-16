@@ -13,6 +13,7 @@ import type { DomainContext, CharacterClass, FourLayerData } from './types.js';
 import { collectFourLayerData } from './FourLayerDataCollector.js';
 import { assemblePrompt } from './PromptAssembler.js';
 import { validateReply } from './Validator.js';
+import { ConfigService } from '../../config/ConfigService.js';
 import { checkReadiness } from './ReadinessGate.js';
 import { clearSessionCache } from './RoleplaySessionCache.js';
 import { reportAssembly, reportValidation, reportGrowth } from './RoleplayProbeReporter.js';
@@ -20,7 +21,7 @@ import { buildRoleplayRules } from './bridges.js';
 
 // 🔴 运行时检测：ESM 模块级代码在 .env 加载前执行，必须用函数而非常量
 function isStructuredEnabled(): boolean {
-  return process.env['ROLEPLAY_STRUCTURED_ENABLED'] === 'true';
+  return ConfigService.getBool("ROLEPLAY_STRUCTURED_ENABLED");
 }
 export { isStructuredEnabled };
 
@@ -58,7 +59,7 @@ export async function runRoleplayPipeline(
 
   // 🔴 运行时检测（ESM 安全）
   const _enabled = isStructuredEnabled();
-  console.log('[RoleplayDomain] runRoleplayPipeline: role=' + roleplay + ' structured=' + _enabled + ' env=' + process.env['ROLEPLAY_STRUCTURED_ENABLED']);
+  console.log('[RoleplayDomain] runRoleplayPipeline: role=' + roleplay + ' structured=' + _enabled + ' env=' + ConfigService.get("ROLEPLAY_STRUCTURED_ENABLED"));
   if (!_enabled) {
     return buildRoleplayRules(roleplay) + '\n' + `【当前身份】${roleplay} — 你不是玉瑶，不是任何其他人。忘记你原来叫玉瑶。`;
   }

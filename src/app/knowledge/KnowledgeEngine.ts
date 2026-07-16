@@ -11,6 +11,7 @@ import type { KnowledgeItem } from './types.js';
 import type { Perception24D } from '../../m3/types/perception.js';
 import { parseFile } from './FileUploadService.js';
 import { FileChunker } from '../tools/FileChunker.js';
+import { ConfigService } from '../../config/ConfigService.js';
 
 // 文件切片器实例（段落策略，每块 500 字符，50 重叠）
 const fileChunker = new FileChunker({ strategy: 'paragraph', chunkSize: 500, overlap: 50, minChunkLen: 20 });
@@ -151,7 +152,7 @@ function rowToEntry(r: Record<string, any>): KnowledgeItem {
 /** 确保向量索引已加载（懒加载，轻量模式跳过） */
 async function ensureIndex(sqlite: SQLiteAdapter): Promise<void> {
   if (_indexReady) return;
-  if (process.env['TIANQUAN_LITE'] === 'true') { _indexReady = true; return; }
+  if (ConfigService.getBool("TIANQUAN_LITE")) { _indexReady = true; return; }
   try {
     const rows = sqlite.queryAll(
       `SELECT id, kn_id, chunk_text, embedding FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 5000`,
@@ -178,7 +179,7 @@ async function indexContent(
   content: string,
 ): Promise<void> {
   await ensureIndex(sqlite);
-  if (process.env['TIANQUAN_LITE'] === 'true') return; // 轻量模式跳过向量索引
+  if (ConfigService.getBool("TIANQUAN_LITE")) return; // 轻量模式跳过向量索引
   const chunkResult = fileChunker.chunkWithSummary({ text: content, source: knId });
   if (chunkResult.chunks.length === 0) return;
 
