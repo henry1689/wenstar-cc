@@ -1142,5 +1142,28 @@ export async function handleObservabilityRoutes(
     return true;
   }
 
+  // ── V4.0 Phase 4: 系统健康检查 — 各模块可用性状态 ──
+  if (req.method === 'GET' && url.pathname === '/api/system/health') {
+    const pfc = (globalThis as any).__prefrontalCortex;
+    const bus = (globalThis as any).__tianquanBus;
+    const gw = (globalThis as any).__secondBrainGateway;
+    const sim = (globalThis as any).__prospectiveSimulator;
+    const hr = (globalThis as any).__hippocampusCoordinator;
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      modules: {
+        prefrontalCortex: pfc ? { status: 'active', busReady: pfc.getStatus?.().busReady } : { status: 'inactive' },
+        tianquanBus: !!bus,
+        secondBrain: gw ? { files: gw.scanWikiMDFiles?.().length || 0 } : { status: 'inactive' },
+        prospectiveSimulator: !!sim,
+        hippocampusCoordinator: hr ? { rhythm: hr.getReport?.().currentRhythm } : { status: 'inactive' },
+        coreMemory: !!(globalThis as any).__coreMemory,
+      },
+      pfcStatus: pfc ? pfc.getStatus() : null,
+    }));
+    return true;
+  }
+
   return false;
 }
