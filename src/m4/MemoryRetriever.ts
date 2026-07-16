@@ -71,6 +71,7 @@ export class MemoryRetriever {
     options?: { limit?: number; perception?: Perception24D; sessionId?: string }
   ): Promise<DNA[]> {
     const limit = options?.limit ?? 5;
+    const startTs = Date.now();
     const sessionId = options?.sessionId ?? this._sessionId;
 
     // P1-2: 会话级缓存检查
@@ -356,6 +357,18 @@ export class MemoryRetriever {
     if (merged.length > 0) {
       setImmediate(() => this._reconsolidateAsync(merged, options?.perception));
     }
+
+    // V4.0 Phase 5: 检索策略质量日志 — 积累数据供离线A/B分析
+    try {
+      const _logSqlite = (this.storage as any).getSQLite?.();
+      if (_logSqlite) {
+        const _latency = Date.now() - startTs;
+        _logSqlite.writeRaw(
+          `INSERT INTO retrieval_log (strategy, locus_path, latency_ms, result_count, entity_count, hit_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ['retrieveMemories', locusPath, _latency, merged.length, entities.length, indexHit ? 1 : 0, new Date().toISOString()]
+        );
+      }
+    } catch (e) { /* 日志不可用不影响主流程 */ }
 
     return merged;
   }

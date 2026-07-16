@@ -378,3 +378,15 @@ CREATE INDEX IF NOT EXISTS idx_memories_source_type ON memories(source_type);
 
 -- V4.0 Phase 5: 黑钻库 status 索引
 CREATE INDEX IF NOT EXISTS idx_bd_status ON black_diamond(status);
+
+-- V4.0 Phase 5: 检索策略质量日志
+CREATE TABLE IF NOT EXISTS retrieval_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy TEXT NOT NULL DEFAULT "retrieveMemories",
+  locus_path TEXT,
+  latency_ms INTEGER,
+  result_count INTEGER DEFAULT 0,
+  entity_count INTEGER DEFAULT 0,
+  hit_index INTEGER DEFAULT 0,
+  created_at TEXT
+);

@@ -40,6 +40,29 @@ export function jsonErr(res: ServerResponse, e: unknown, context?: string): void
 }
 
 /** 读取请求 body */
+
+/** Phase 5: 统一路由包装器 — CORS + JSON parse + try/catch → 500
+ *  使用: wrapRoute(res, async () => { ... return data; })
+ *  或: wrapRoute(res, () => { ... return data; }, '模块名') */
+export async function wrapRoute<T>(res: ServerResponse, handler: () => Promise<T> | T, context?: string): Promise<void> {
+  try {
+    const data = await handler();
+    if (data !== undefined) {
+      res.writeHead(200, JSON_HEADER);
+      res.end(JSON.stringify(data));
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (context) console.warn(`[${context}]`, msg);
+    res.writeHead(500, JSON_HEADER);
+    res.end(err(msg));
+  }
+}
+
+/** Phase 5: 同步版本 — 提供 JSON 响应 + 自动 CORS/错误处理 */
+export function wrapSync<T>(res: ServerResponse, fn: () => T, context?: string): void {
+  wrapRoute(res, async () => fn(), context);
+}
 export function readBody(req: any): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];

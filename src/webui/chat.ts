@@ -24,7 +24,8 @@ import type { M6Orchestrator } from '../m6/M6Orchestrator.js';
 
 import type { M7Orchestrator } from '../m7/M7Orchestrator.js';
 
-import type { WorkingMemory } from '../m9/WorkingMemory.js';
+// MemoryWriteBuffer renamed from WorkingMemory (避免与PFC冲突)
+import type { MemoryWriteBuffer } from '../m9/WorkingMemory.js';
 
 import type { KnowledgeBase } from '../m2/KnowledgeBase.js';
 
@@ -299,7 +300,7 @@ export interface ChatContext {
 
   masterProfile?: MasterProfileService;
 
-  workingMemory: WorkingMemory;
+  workingMemory: MemoryWriteBuffer;
 
   knowledgeBase: KnowledgeBase;
 
@@ -1904,13 +1905,33 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
         }
       } catch (e) { console.warn('[chat::CoreMemory] CoreMemory初始化/刷新失败', (e as Error)?.message || e); }
 
-      // 🧠 海马体经验摘要 (V4.0 @deprecated: 已迁入 KnowledgeAccessFacade)，注入 LLM 上下文
+      // V4.0 Phase 5: KnowledgeAccessFacade 统一查询 — 替换下方分散的四路查询
+      //   Facade 内部并行执行知识库检索 + 记忆检索 + 经验摘要 + 情绪调节
+      //   成功时填充 __pfcExp / __pfcReg，跳过下方的独立查询块
+      let _facadeUsed = false;
+      try {
+        const _facade = (globalThis as any).__knowledgeAccessFacade;
+        if (_facade && typeof _facade.queryByContext === 'function') {
+          const _entityNames = (message.match(/[一-龥]{2,4}/g) || []).filter((w: string) => w.length >= 2);
+          const _facadeResult = await _facade.queryByContext({
+            message, entities: _entityNames.length > 0 ? _entityNames.slice(0, 5) : [message.substring(0, 4)],
+            perception: { pleasure: p?.pleasure ?? 0, arousal: p?.arousal ?? 0, intimacy: p?.intimacy ?? 0 },
+            sceneTags: dna.scene_tags, topK: 5,
+          });
+          if (_facadeResult?.experienceSummary) {
+            (globalThis as any).__pfcExp = _facadeResult.experienceSummary;
+            _facadeUsed = true;
+          }
+        }
+      } catch (e) { /* Facade失败→下方独立查询兜底 */ }
+
+      // 🧠 海马体经验摘要 (Facade成功时跳过，失败时独立查询兜底)
+      if (!_facadeUsed) {
       try {
         const _eSqlite = ctx.storage.getSQLite?.();
         if (_eSqlite && message) {
           const { HippocampalIndex } = await import('../app/brain/HippocampalIndex.js');
           const _hIdx = new HippocampalIndex(_eSqlite);
-          // 用消息中首个有区分度的词查经验摘要
           const _firstWord = (message.match(/[一-龥]{2,4}/g) || []).find((w: string) => w.length >= 2 && !'的了在是我有不和就'.includes(w));
           if (_firstWord) {
             const _exp = _hIdx.lookupExperienceByKeyword(_firstWord);
@@ -1918,6 +1939,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
           }
         }
       } catch (e) { console.warn('[chat::ExperienceSummary] 经验摘要查询失败', (e as Error)?.message || e); }
+      }
 
       // 🧠 V3.1 记忆驱动情绪调节 (V4.0 @deprecated: 长期迁移到 SceneSnapshotBuilder.attachEmotionRegulation): 查相似经验→输出安抚建议→注入LLM柔性调节
       try {
@@ -1984,21 +2006,38 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
             });
           }
           // Builder 不可用（无检索记忆、sqlite 未就绪）时降级到轻量快照
+          // V4.0 Phase 5: 优先用 SceneSnapshotBuilder 构建，保留钙化/新颖度精确计算
           if (!_snap) {
-            _snap = {
-              snapshotId: 'pfc_' + Date.now().toString(36),
-              contextSignature: (dna.locus_path || 'root') + '|' + (p.pleasure > 0.2 ? 'pos' : (p.pleasure < -0.2 ? 'neg' : 'neu')),
-              temporal: { createdAt: new Date().toISOString(), sessionId: String(seqPos) || '', timeOfDay: 'morning', dayOfWeek: new Date().getDay() },
-              spatial: { sceneLabel: '对话中' },
-              entities: { persons: (dna.entity_genes || []).filter((g: any) => g.type === 'person' && g.name !== '我').map((g: any) => g.name), topics: [], objects: [] },
-              experienceSummary: (memoryFragments || []).join(' | ').substring(0, 200) || '(无)',
-              emotion: { pleasure: p.pleasure || 0, arousal: p.arousal || 0, intimacy: p.intimacy || 0, trend: 'stable' },
-              memoryPointers: emotionalMemories.map((m: any) => m?.record?.id || '').filter(Boolean),
-              knowledgeRefs: [] as string[],
-              fgEventRefs: [] as string[],
-              calciumScore: decision.enhanced?.calcium_score || 0.5,
-              novelty: { level: 'routine', similarity: 0.5, multiplier: 1.0 },
-            };
+            const _builder = (globalThis as any).__snapshotBuilder;
+            const _entities = (dna.entity_genes || []).filter((g: any) => g.type === 'person' && g.name !== '我').map((g: any) => ({ name: g.name, type: g.type }));
+            if (_builder && typeof _builder.build === 'function') {
+              try {
+                _snap = _builder.build({
+                  memories: (ctx_m4 as any)?.retrievalSnapshot?.memories || emotionalMemories,
+                  m4Context: (ctx_m4 as any) || { decision, summary: '', family_context: [] },
+                  perception: p,
+                  sessionId: String(seqPos),
+                  rawInput: message,
+                  entities: _entities.length > 0 ? _entities : [{ name: '用户', type: 'self' }],
+                });
+              } catch (e) { /* Builder失败→用轻量快照 */ }
+            }
+            if (!_snap) {
+              _snap = {
+                snapshotId: 'pfc_' + Date.now().toString(36),
+                contextSignature: (dna.locus_path || 'root') + '|' + (p.pleasure > 0.2 ? 'pos' : (p.pleasure < -0.2 ? 'neg' : 'neu')),
+                temporal: { createdAt: new Date().toISOString(), sessionId: String(seqPos) || '', timeOfDay: 'morning', dayOfWeek: new Date().getDay() },
+                spatial: { sceneLabel: '对话中' },
+                entities: { persons: _entities.map((e: any) => e.name), topics: [], objects: [] },
+                experienceSummary: (memoryFragments || []).join(' | ').substring(0, 200) || '(无)',
+                emotion: { pleasure: p.pleasure || 0, arousal: p.arousal || 0, intimacy: p.intimacy || 0, trend: 'stable' },
+                memoryPointers: emotionalMemories.map((m: any) => m?.record?.id || '').filter(Boolean),
+                knowledgeRefs: [] as string[],
+                fgEventRefs: [] as string[],
+                calciumScore: decision.enhanced?.calcium_score || 0.5,
+                novelty: { level: 'routine', similarity: 0.5, multiplier: 1.0 },
+              };
+            }
           }
 
           // V4.0 Phase 3: 收集上下文块 — 传递给 PFC 统一组装

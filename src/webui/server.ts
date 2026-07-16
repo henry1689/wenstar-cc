@@ -52,7 +52,7 @@ import { computeCalcium } from '../m2/math.js';
 import { getHitReport } from '../m3/PerceptionAnalyzer.js';
 import { rerank } from '../m4/Reranker.js';
 import { decompose, mergeDecomposedResults } from '../m4/QueryDecomposer.js';
-import { WorkingMemory } from '../m9/WorkingMemory.js';
+import { MemoryWriteBuffer } from '../m9/WorkingMemory.js';
 import { PersonaRegistry } from '../app/persona/PersonaRegistry.js';
 import { yuyaoPersona } from '../app/persona/built-in/yuyao/index.js';
 import { secretaryPersona } from '../app/persona/built-in/secretary/index.js';
@@ -315,7 +315,7 @@ let consolidationQueue: ConsolidationQueue;
 let m7: M7Orchestrator;
 let m7Timer: ReturnType<typeof setInterval> | null = null;
 let m6Timer: ReturnType<typeof setInterval> | null = null;
-let workingMemory: WorkingMemory;
+let workingMemory: MemoryWriteBuffer;
 let knowledgeBase: KnowledgeBase;
 let masterProfile: MasterProfileService;
 let clueTracker: ClueTracker;
@@ -575,6 +575,15 @@ async function initPipeline(): Promise<void> {
     setGlobal("knowledgeAccessFacade", knowledgeAccessFacade);
     console.log('  天权海马域知识查询门面已就绪 ✓');
 
+    // ③b 场景快照构建器（V4.0 Phase 5 — 替代 chat.ts 手写轻量快照）
+    try {
+      const { SceneSnapshotBuilder } = await import('../engine/tianquan/temporal/SceneSnapshotBuilder.js');
+      const snapshotBuilder = new SceneSnapshotBuilder(storage.getSQLite()!);
+      (globalThis as any).__snapshotBuilder = snapshotBuilder;
+      
+      console.log('  天权场景快照构建器已就绪 ✓');
+    } catch (e) { console.warn('[启动] 快照构建器未就绪，降级到手写快照'); }
+
     // ④ 前额叶决策域装配
     const { assemblePrefrontal } = await import('../engine/tianquan/prefrontal/assemblePrefrontal.js');
     const prefrontalCortex = assemblePrefrontal({
@@ -782,7 +791,7 @@ async function initPipeline(): Promise<void> {
   if (WS_LAZY_TIMERS) console.log('  统一备份引擎 — Token节省模式，未启动 ✓');
   else console.log('  统一备份引擎已启动 ✓ (15min首执行, 30min周期)');
 
-  workingMemory = new WorkingMemory(storage, 50);
+  workingMemory = new MemoryWriteBuffer(storage, 50);
   workingMemory.startFlushTimer();
   console.log('  工作记忆已启动 ✓');
 

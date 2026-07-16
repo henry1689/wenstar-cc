@@ -27,7 +27,7 @@ interface WorkingEntry {
   secondaryEmotions?: string[];
 }
 
-export class WorkingMemory {
+export class MemoryWriteBuffer {
   /** R6: 当前对话角色标签（用于记忆定向过滤） */
   static currentTag: string | null = null;
 
@@ -215,3 +215,6 @@ export class WorkingMemory {
     return results;
   }
 }
+
+/** @deprecated 使用 MemoryWriteBuffer，避免与 prefrontal/WorkingMemory 混淆 */
+export { MemoryWriteBuffer as WorkingMemory };

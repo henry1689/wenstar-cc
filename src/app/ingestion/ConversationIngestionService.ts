@@ -88,7 +88,7 @@ const rulePreference: Rule = (msg) => {
     title: `喜好: ${pref}`,
     content: `用户喜欢${pref}`,
     source_type: 'conversation',
-    tags: ['auto-ingested', 'preference'],
+    tags: ['auto-ingested', 'preference'], ingestion_batch_id: _currentIngestionBatch,
     interaction_type: 'preference',
     scene_tags: ['偏好'],
     classification: '用户偏好',
@@ -107,7 +107,7 @@ const ruleHabit: Rule = (msg) => {
     title: `习惯: ${clean.substring(0, 20)}`,
     content: `用户${m[0]}`,
     source_type: 'conversation',
-    tags: ['auto-ingested', 'habit'],
+    tags: ['auto-ingested', 'habit'], ingestion_batch_id: _currentIngestionBatch,
     interaction_type: 'conversation',
     scene_tags: ['日常', '习惯'],
     classification: '生活记录',
@@ -125,7 +125,7 @@ const rulePlan: Rule = (msg) => {
     title: `计划: ${plan.substring(0, 20)}`,
     content: `用户计划${m[0]}`,
     source_type: 'conversation',
-    tags: ['auto-ingested', 'plan'],
+    tags: ['auto-ingested', 'plan'], ingestion_batch_id: _currentIngestionBatch,
     interaction_type: 'conversation',
     scene_tags: ['计划'],
     confident: false,
@@ -145,7 +145,7 @@ const ruleIdentity: Rule = (msg) => {
     title: `用户信息: ${identity.substring(0, 20)}`,
     content: identity,
     source_type: 'conversation',
-    tags: ['auto-ingested', 'identity'],
+    tags: ['auto-ingested', 'identity'], ingestion_batch_id: _currentIngestionBatch,
     interaction_type: 'profile',
     scene_tags: ['个人'],
     classification: '用户资料',
@@ -163,7 +163,7 @@ const ruleMemory: Rule = (msg) => {
     title: `回忆: ${memory.substring(0, 20)}`,
     content: m[0],
     source_type: 'conversation',
-    tags: ['auto-ingested', 'memory'],
+    tags: ['auto-ingested', 'memory'], ingestion_batch_id: _currentIngestionBatch,
     interaction_type: 'conversation',
     scene_tags: ['回忆'],
     confident: false,
@@ -221,6 +221,9 @@ export function extractCandidates(message: string, sceneTags?: string[]): Ingest
  * 提取并直接存入知识库（由 chat.ts 在对话结束后调用）。
  * 防线①: 感知级过滤在函数入口执行
  */
+let _currentIngestionBatch = "";
+export function getCurrentIngestionBatch(): string { return _currentIngestionBatch; }
+
 export async function ingestFromConversation(
   message: string,
   knowledgeEngine: any,
@@ -228,6 +231,8 @@ export async function ingestFromConversation(
   perception?: { pleasure: number; arousal: number; intimacy: number },
   dnaId?: string,
 ): Promise<number> {
+  const batchId = "ing_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 6);
+  _currentIngestionBatch = batchId;
   // 🔴 防线①: 感知级过滤 — 从配置读取阈值
   if (perception) {
     const p = perception as any;
