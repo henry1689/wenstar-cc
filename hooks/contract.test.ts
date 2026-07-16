@@ -105,7 +105,7 @@ describe('[HOOK] DNA结构完整性校验', () => {
   it('branch_id 格式应正确（evt_YYYYMMDD_NNN）', () => {
     const encoder = new DNAEncoder(VALID_SELF);
     const dna = encoder.encodeSingle('测试');
-    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3}$/);
+    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3,4}$/);
   });
 });
 

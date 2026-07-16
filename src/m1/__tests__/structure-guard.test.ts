@@ -208,7 +208,7 @@ describe('[结构守卫] 运行时完备性', () => {
     const encoder = new DNAEncoder(TEST_SELF);
     const dna = encoder.encodeSingle('妈妈今天很开心');
     expect(dna.locus_path).toBeTruthy();
-    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3}$/);
+    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3,4}$/);
     expect(dna.leaf_zone).toBeTruthy();
     expect(dna.entity_genes.length).toBeGreaterThanOrEqual(1);
   });

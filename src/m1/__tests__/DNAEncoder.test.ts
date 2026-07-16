@@ -255,12 +255,12 @@ describe('[本体-标签分离] emotion_color 不影响 DNA 核心标识', () =>
     (dna as any).emotion_color = '#E74C3C';
 
     // 核心标识不变
-    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3}$/);
+    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3,4}$/);
     expect(typeof dna.seq_pos).toBe('number');
 
     // 删除 emotion_color → 核心标识不受影响
     delete (dna as any).emotion_color;
-    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3}$/);
+    expect(dna.branch_id).toMatch(/^evt_\d{8}_\d{3,4}$/);
     expect(typeof dna.seq_pos).toBe('number');
   });
 

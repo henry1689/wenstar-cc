@@ -75,6 +75,7 @@ import { AsyncTaskQueue } from '../app/tools/AsyncTaskQueue.js';
 import { fetchBionicMemories, getVadToneHint, pushToVadCache, isVadAvailable } from './chat/retrieval.js';
 import { ingestFromConversation } from '../app/ingestion/ConversationIngestionService.js';
 import { INGESTION_GUARD } from '../config/ingestion-guard.js';
+import { ConfigService } from '../config/ConfigService.js';
 // P0-1: 角色路由静态导入
 import { classify, type RoleType } from '../app/role/RoleClassifier.js';
 import { evaluateTransition, createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
@@ -1011,7 +1012,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     // ── BIOS 核: 五级闸门过滤 (蓝皮书 §1.1, §4.1) ──
     // 🔴 V3.0: 闸门默认激活，不可关闭。仅 ENABLE_FIVE_STAGE_GATE='false' 时可紧急降级
     let biosGatedMemories = emotionalMemories;
-    if (process.env['ENABLE_FIVE_STAGE_GATE'] !== 'false') {
+    if (ConfigService.getBool('ENABLE_FIVE_STAGE_GATE', true)) {
       try {
         const { runBIOSPhase } = await import('../m1/DualCorePipeline.js');
         const { getFiveStageGate } = await import('../m3/FiveStageGate.js');
@@ -1107,7 +1108,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
         memoryFragments,
 
-        enableSemanticFusion: process.env["ENABLE_SEMANTIC_FUSION"] === "true",
+        enableSemanticFusion: ConfigService.getBool('ENABLE_SEMANTIC_FUSION'),
 
       });
 
@@ -1963,7 +1964,7 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
       //   旧 ad-hoc 路径全部保留为 fallback，PFC 不可用时不影响对话
       //   环境变量 WS_DISABLE_PFC=true 可一键回退到旧路径
       // ================================================================
-      const _pfcEnabled = !process.env['WS_DISABLE_PFC'];
+      const _pfcEnabled = !ConfigService.getBool('WS_DISABLE_PFC');
       (globalThis as any).__pfcDirective = null;
       if (_pfcEnabled) try {
         const _pfc = (globalThis as any).__prefrontalCortex;

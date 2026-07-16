@@ -574,6 +574,7 @@ async function initPipeline(): Promise<void> {
       storage,
       familyGraph,
       knowledgeBase,
+      eventBus: tianquanBus,  // V4.0: 传入事件总线，激活 MetacognitionReview.submitToDreamEngine
     });
     console.log('  天权前额叶决策域已启动 ✓');
 

@@ -1,3 +1,5 @@
+-- @deprecated: 历史参考，权威 schema 见 schema.sql
+--
 -- Schema v2 — M2 存储层编码链路+基建标准化
 -- 向前兼容，不破坏现有数据
 

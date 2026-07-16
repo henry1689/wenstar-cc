@@ -1,3 +1,5 @@
+-- @deprecated: 历史参考，权威 schema 见 schema.sql
+--
 -- Schema v3 — 时空环境规则引擎（temporal event + ambient weather）
 -- 向前兼容，不破坏现有数据
 

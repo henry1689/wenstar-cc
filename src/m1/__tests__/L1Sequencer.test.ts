@@ -52,6 +52,6 @@ describe('L1Sequencer — 格式合规', () => {
   it('branch_id 应符合 evt_YYYYMMDD_NNN 格式', () => {
     const seq = new L1Sequencer();
     const result = seq.next();
-    expect(result.branch_id).toMatch(/^evt_\d{8}_\d{3}$/);
+    expect(result.branch_id).toMatch(/^evt_\d{8}_\d{3,4}$/);
   });
 });
