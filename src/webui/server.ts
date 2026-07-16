@@ -579,8 +579,14 @@ async function initPipeline(): Promise<void> {
       storage,
       familyGraph,
       knowledgeBase,
-      eventBus: tianquanBus,  // V4.0: 传入事件总线，激活 MetacognitionReview.submitToDreamEngine
+      eventBus: tianquanBus,
     });
+    // V4.0 Phase 4: 前瞻模拟器 — 供 PFC 在 novel 场景调用
+    try {
+      const { ProspectiveSimulator } = await import('../engine/tianquan/temporal/ProspectiveSimulator.js');
+      const sim = new ProspectiveSimulator(storage.getSQLite()!);
+      (globalThis as any).__prospectiveSimulator = sim;
+    } catch { /* 可选 */ }
     console.log('  天权前额叶决策域已启动 ✓');
 
     // ⑤ 第二大脑 Gateway 初始化 (V4.0 Phase 2)

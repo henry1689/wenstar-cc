@@ -77,6 +77,9 @@ export class PrefrontalCortex {
     input: PrefrontalInput,
     decision?: M3Decision | null,
   ): Promise<PrefrontalOutput> {
+    // V4.0 Phase 3: recordActivity — 从 chat.ts 迁移到 PFC 统一编排
+    (globalThis as any).__sleepTimeConsolidator?.recordActivity?.();
+
     // ① 加载场景快照到工作记忆
     this.workingMemory.load(input.snapshot);
 
@@ -105,6 +108,30 @@ export class PrefrontalCortex {
       const sorted = [...input.contextBlocks].sort((a, b) => b.priority - a.priority);
       directive.payload['assembledContext'] = sorted.map(b => b.content).join('\n\n');
     }
+
+    // V4.0 Phase 4: 前瞻模拟 — 新颖场景时预判用户可能反应
+    try {
+      const novelty = input.snapshot?.novelty;
+      if (novelty && novelty.multiplier > 1.0) {
+        const sim = (globalThis as any).__prospectiveSimulator;
+        if (sim && typeof sim.simulate === 'function') {
+          const persons = input.snapshot?.entities?.persons || [];
+          const emotionTag = (input.snapshot?.emotion?.pleasure ?? 0) > 0.2 ? 'pos'
+            : (input.snapshot?.emotion?.pleasure ?? 0) < -0.2 ? 'neg' : 'neu';
+          const simResult = sim.simulate(
+            { topic: intent, entities: persons, emotion: emotionTag },
+            input.rawInput.substring(0, 30)
+          );
+          if (simResult.confidence > 0.3 && simResult.matchedScenes >= 2) {
+            const simCtx = `【前瞻模拟】相似场景: ${simResult.matchedScenes}个 | `
+              + `预测趋势: ${simResult.predictedOutcome || '不确定'} `
+              + `(置信${Math.round(simResult.confidence * 100)}%) | `
+              + `备选: ${(simResult.alternatives || []).join(' / ') || '无'}`;
+            directive.payload['simulation'] = simCtx;
+          }
+        }
+      }
+    } catch { /* 模拟不可用不阻塞 */ }
 
     // V4.0 Phase 2: 发布前额指令事件，打通 TianquanEventBus 正向流
     this.bus?.emit?.({

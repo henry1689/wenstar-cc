@@ -1945,8 +1945,8 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
           if (_intent) {
             // V3.0: 使用 forgetByKeyword 模糊搜索 → 实际匹配并遗忘
             const _result = await _fe.forgetByKeyword(_intent.target, _intent.action);
-            if (_result.forgotten > 0 && typeof finalKnowledgeText === 'string') {
-              finalKnowledgeText = `【系统】${_result.summary}。` + String.fromCharCode(10,10) + (finalKnowledgeText || '');
+            if (_result.forgotten > 0) {
+              (globalThis as any).__pfcForget = `【系统】${_result.summary}`;
             }
           }
         }
@@ -2007,6 +2007,9 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
           // 情绪调节（priority=75）
           const _pfcReg = (globalThis as any).__pfcReg;
           if (_pfcReg) _ctxBlocks.push({ source: 'emotion_regulation', content: _pfcReg, priority: 75 });
+          // 遗忘指令（priority=90）
+          const _pfcForget = (globalThis as any).__pfcForget;
+          if (_pfcForget) _ctxBlocks.push({ source: 'forgetting', content: _pfcForget, priority: 90 });
 
           const _pfcInput = { snapshot: _snap, sessionId: String(seqPos) || '', rawInput: message, contextBlocks: _ctxBlocks.length > 0 ? _ctxBlocks : undefined };
           const _pfcResult = await _pfc.process(_pfcInput, decision);
