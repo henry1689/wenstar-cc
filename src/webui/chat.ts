@@ -1960,6 +1960,11 @@ memoryText = memoryText.replace(/（[^）]*）/g, '');let finalKnowledgeText = k
       // ================================================================
       const _pfcEnabled = !ConfigService.getBool('WS_DISABLE_PFC');
       (globalThis as any).__pfcDirective = null;
+      // V4.0: 每轮重置上下文块，防止上轮旧值泄漏
+      (globalThis as any).__pfcCoreCtx = null;
+      (globalThis as any).__pfcExp = null;
+      (globalThis as any).__pfcReg = null;
+      (globalThis as any).__pfcForget = null;
       if (_pfcEnabled) try {
         const _pfc = (globalThis as any).__prefrontalCortex;
         if (_pfc && typeof _pfc.process === 'function') {
