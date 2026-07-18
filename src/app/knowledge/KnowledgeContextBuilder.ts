@@ -20,7 +20,6 @@ export interface PreM4Input {
   dna: DNA;
   p: any;
   decision: any;
-  _currentRoleplay: string | null;
   ctx: {
     knowledgeBase: any;
     storage: any;
@@ -49,7 +48,6 @@ export interface PostM4Input {
   message: string;
   dna: DNA;
   p: any;
-  _currentRoleplay: string | null;
   ctx: { knowledgeBase: any; storage: any; conversationDB?: any; };
   ctx_m4: any;
   knowledgeBaseText: string;
@@ -68,7 +66,7 @@ export interface PostM4Output {
 // ═══════════════════════════════════════════════════════
 
 export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output> {
-  const { message, dna, p, decision, _currentRoleplay, ctx } = input;
+  const { message, dna, p, decision, ctx } = input;
   let knowledgeBaseText = input.knowledgeBaseText;
   const memoryFragments = [...input.memoryFragments];
   const { emotionalMemories } = input;
@@ -256,8 +254,8 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
   // ── 线索助理 ──
   let clueReply: string | null = null;
   try {
-    if (!_currentRoleplay) {
-      const clueResult = await ctx.clueAssistant?.processUserInput({
+    // V4.0: 角色扮演已移除，线索助理始终运行
+    const clueResult = await ctx.clueAssistant?.processUserInput({
         originalQuery: message, perception: p, m8Engine: ctx.m8,
         bionicMemories: bionicMemories,
       });
@@ -266,7 +264,6 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
       } else if (clueResult?.isReady && clueResult?.searchResult?.entries?.length) {
         memoryFragments.push('【线索参考】用户可能在回忆某件事，但如果你不确定具体内容就说不记得了');
       }
-    }
   } catch (err: any) { console.warn('[ClueAssistant] 失败:', err); }
 
   // ── BIOS 五级闸门 ──
@@ -279,7 +276,7 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
         message, dna, decision, perception: p,
         emotionalMemories: emotionalMemories as any,
         locationFingerprint: (dna as any).location_fingerprint,
-        currentRoleplay: _currentRoleplay,
+        currentRoleplay: null,
       }, getFiveStageGate());
       biosGatedMemories = biosResult.gatedMemories as any;
     } catch (e: any) { console.warn('[BIOS] 闸门异常，降级使用原记忆:', e.message); }

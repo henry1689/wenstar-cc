@@ -16,7 +16,7 @@
  * - 升级免疫：修改 PAE 代码必须通过 integrity guard 前后对比
  */
 
-import { PAE_CONFIG, PAE_INTEGRITY_CHECKS } from '../config/profile-acquisition-guard.js';
+import { PAE_CONFIG, PAE_INTEGRITY_CHECKS, REGISTRATION_FIELD_MAP, PRIORITY_THRESHOLDS, FORMAT_VALIDATORS, resolveRegistrationDef } from '../../config/profile-acquisition-guard.js';
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserMessage,
@@ -24,6 +24,7 @@ import {
 } from './prompts/profile-extraction.js';
 import type { PersonProfile, PersonDossier, PendingItem } from './FamilyGraph.js';
 import type { FamilyGraph } from './FamilyGraph.js';
+import { dossierRead } from './shared/DossierPath.js';
 
 // ── 类型定义 ──
 
@@ -109,12 +110,26 @@ interface CommitResult {
 // ── 字段验证器（从原 extractProfileFromText 26 条规则转换）──
 
 const FIELD_VALIDATORS: Record<string, (value: any) => boolean> = {
+  // P0 身份证级
   'basicInfo.birthYear': (v) =>
-    typeof v === 'number' ? v >= 1900 && v <= 2020 : /^(19|20)\d{2}$/.test(String(v)) && +v >= 1900 && +v <= 2020,
+    typeof v === 'number' ? v >= 1900 && v <= new Date().getFullYear() : /^(19|20)\d{2}$/.test(String(v)) && +v >= 1900 && +v <= new Date().getFullYear(),
   'basicInfo.gender': (v) => ['男', '女'].includes(String(v)),
+  'basicInfo.ethnicity': (v) => typeof v === 'string' && v.trim().length >= 2,
+  'basicInfo.birthPlace': (v) => typeof v === 'string' && v.trim().length >= 2,
+  // P1 户口本级
+  'basicInfo.education': (v) => typeof v === 'string' && v.trim().length >= 2,
+  'basicInfo.maritalStatus': (v) => typeof v === 'string' && v.trim().length >= 2,
+  // P2 联系方式
   'contact.phone': (v) => /^1[3-9]\d{9}$/.test(String(v).replace(/\s|-/g, '')),
   'contact.wechat': (v) => /^[a-zA-Z0-9_-]{4,30}$/.test(String(v)),
   'contact.email': (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v)),
+  // V6 路径兼容
+  'socialIdentity.currentOccupation': (v) => {
+    const s = String(v).trim();
+    return s.length >= 2 && s.length <= 30 && !/^(叫|什么|哪|哪里|哪儿|谁|吗|呢|吧|啊|呀)/.test(s);
+  },
+  'socialIdentity.currentWorkplace': (v) => typeof v === 'string' && v.trim().length >= 2,
+  // 旧路径兼容
   'occupation': (v) => {
     const s = String(v).trim();
     return s.length >= 2 && s.length <= 30 && !/^(叫|什么|哪|哪里|哪儿|谁|吗|呢|吧|啊|呀)/.test(s);
@@ -123,28 +138,42 @@ const FIELD_VALIDATORS: Record<string, (value: any) => boolean> = {
     const s = String(v).trim();
     return s.length >= 2 && s.length <= 200;
   },
+  // selfProfile
+  'selfProfile.healthCondition': (v) => {
+    const s = String(v).trim();
+    return s.length >= 2 && s.length <= 200;
+  },
 };
 
-/** 验证单字段值是否合法 */
-function validateFieldValue(fieldPath: string, value: any): boolean {
+/** 验证单字段值是否合法（含户籍登记卡格式验证） */
+function validateFieldValue(fieldKey: string, fieldPath: string, value: any): { valid: boolean; reason?: string } {
   // 通用检查
-  if (value === null || value === undefined) return false;
+  if (value === null || value === undefined) return { valid: false, reason: 'null_or_undefined' };
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    if (trimmed.length < 1 || trimmed.length > 500) return false;
-    // 过滤 LLM 对话文本污染（复用 _isValidPendingValue 逻辑）
-    if (/^\s*[\n\r：:玉]/.test(trimmed)) return false;
-    if (/\(.*(?:听到|突然|叫出|心想|嘀咕|小声|低声|默默)/.test(trimmed)) return false;
+    if (trimmed.length < 1 || trimmed.length > 500) return { valid: false, reason: 'length_out_of_range' };
+    // 过滤 LLM 对话文本污染
+    if (/^\s*[\n\r：:玉]/.test(trimmed)) return { valid: false, reason: 'llm_contamination' };
+    if (/\(.*(?:听到|突然|叫出|心想|嘀咕|小声|低声|默默)/.test(trimmed)) return { valid: false, reason: 'narrative_text' };
     if (/^[\d\s,.，。、！？!?]+$/.test(trimmed) && trimmed.replace(/[\d\s,.，。、！？!?]/g, '').length === 0)
-      return false;
+      return { valid: false, reason: 'punctuation_only' };
   }
 
-  // 特定字段验证器
-  const validator = FIELD_VALIDATORS[fieldPath];
-  if (validator) return validator(value);
+  // V3.3: 户籍登记卡格式验证（比正则验证更严格）
+  const formatValidator = FORMAT_VALIDATORS[fieldKey];
+  if (formatValidator) {
+    const result = formatValidator(value);
+    if (!result.valid) return result;
+  }
 
-  // 默认通过（值非空）
-  return true;
+  // 特定字段最终路径验证器
+  const pathValidator = FIELD_VALIDATORS[fieldPath];
+  if (pathValidator && !pathValidator(value)) {
+    return { valid: false, reason: 'field_validator_failed' };
+  }
+
+  // 默认通过
+  return { valid: true };
 }
 
 // ── 限流器 ──
@@ -256,11 +285,24 @@ export class ProfileAcquisitionEngine {
         } else {
           // LLM 提取
           const fgKnownPersons = this.familyGraph.getAllPersonNames?.() || [];
+
+          // V3.3: 获取每个人的待采集字段清单
+          const pendingFieldsMap = new Map<string, string[]>();
+          for (const personName of batch) {
+            try {
+              const status = (this.familyGraph as any).getRegistrationStatus?.(personName);
+              if (status?.pendingFields && status.pendingFields.length > 0) {
+                pendingFieldsMap.set(personName, status.pendingFields);
+              }
+            } catch { /* 非关键 */ }
+          }
+
           const rawResults = await this.extractWithLLM(
             conversationText.substring(0, PAE_CONFIG.maxInputLength),
             batch,
             options,
-            fgKnownPersons
+            fgKnownPersons,
+            pendingFieldsMap
           );
           results = rawResults;
           this.extractionCache.set(cacheKey, { result: results, timestamp: Date.now() });
@@ -319,7 +361,8 @@ export class ProfileAcquisitionEngine {
     conversationText: string,
     persons: string[],
     options: AcquisitionOptions,
-    fgKnownPersons: string[]
+    fgKnownPersons: string[],
+    pendingFieldsMap?: Map<string, string[]>
   ): Promise<ExtractionResult[]> {
     // 构建 system prompt
     const systemPrompt = buildExtractionSystemPrompt();
@@ -333,12 +376,14 @@ export class ProfileAcquisitionEngine {
         ? summarizeExistingProfile(profile, PAE_CONFIG.maxProfileSummaryLength)
         : '';
 
+      const pendingFields = pendingFieldsMap?.get(personName) || [];
       userMessageParts.push(
         buildExtractionUserMessage({
           conversationText,
           personName,
           existingProfileSummary: existingSummary,
           fgKnownPersons,
+          pendingFields: pendingFields.length > 0 ? pendingFields : undefined,
         })
       );
     }
@@ -510,16 +555,8 @@ export class ProfileAcquisitionEngine {
       return profile[flatFields[fieldPath]];
     }
 
-    // Dossier 字段按路径查
-    if (profile.dossier) {
-      const parts = fieldPath.split('.');
-      let target: any = profile.dossier;
-      for (const key of parts) {
-        if (target === undefined || target === null) return undefined;
-        target = target[key];
-      }
-      return target;
-    }
+    // Dossier 字段按路径查（委托 shared/DossierPath）
+    if (profile.dossier) return dossierRead(profile.dossier, fieldPath);
 
     return undefined;
   }
@@ -537,23 +574,50 @@ export class ProfileAcquisitionEngine {
     field: ExtractionField,
     options: AcquisitionOptions
   ): Promise<CommitResult> {
-    // Step 1: 验证
-    if (!validateFieldValue(field.fieldPath, field.value)) {
-      return { committed: false, fieldPath: field.fieldPath, reason: 'validation_failed' };
+    // V3.3: 解析登记卡字段定义（LLM 输出的是 fieldKey，需要映射到 dossier path）
+    const resolved = resolveRegistrationDef(field.fieldPath);
+    const fieldKey = resolved?.key || field.fieldPath;
+    const registryDef = resolved?.def;
+
+    // V3.3: 确定写入路径
+    const writePath = registryDef?.path || field.fieldPath;
+    if (!writePath || writePath === 'edges') {
+      // edges 类字段（如 relationToUser）不通过 PAE 写入，由 edges 系统管理
+      return { committed: false, fieldPath: field.fieldPath, reason: 'managed_by_edges_system' };
+    }
+
+    // Step 1: 验证（含户籍登记卡格式验证）
+    const validation = validateFieldValue(fieldKey, writePath, field.value);
+    if (!validation.valid) {
+      return { committed: false, fieldPath: field.fieldPath, reason: `validation_failed:${validation.reason}` };
     }
 
     // Step 2: 置信度评分
     const confidence = this.computeConfidence(field);
 
-    // AI 回复来源 → 更高的阈值 + 只写 pending
+    // V3.3: 优先级自适应门槛
+    let effectiveDirectThreshold: number = PAE_CONFIG.directWriteThreshold;
+    let effectivePendingThreshold: number = PAE_CONFIG.pendingThreshold;
+
+    // AI 回复来源 → 更高阈值
     const isAssistantSource = options.source === 'assistant_response' || options.mode === 'post_generation';
-    const directThreshold = isAssistantSource
-      ? PAE_CONFIG.assistantResponseThreshold
-      : PAE_CONFIG.directWriteThreshold;
+    if (isAssistantSource) {
+      effectiveDirectThreshold = PAE_CONFIG.assistantResponseThreshold as number;
+    }
+
+    // 登记卡字段：按优先级调整门槛
+    if (registryDef) {
+      const priorityThreshold: number = PRIORITY_THRESHOLDS[registryDef.priority];
+      effectiveDirectThreshold = isAssistantSource
+        ? Math.max(priorityThreshold, PAE_CONFIG.assistantResponseThreshold as number)
+        : priorityThreshold;
+      effectivePendingThreshold = Math.max(0.3, priorityThreshold - 0.2);
+    }
+
     const canDirectWrite = !isAssistantSource || PAE_CONFIG.assistantResponseDirectWrite;
 
-    if (confidence < PAE_CONFIG.pendingThreshold) {
-      return { committed: false, fieldPath: field.fieldPath, reason: `low_confidence(${confidence})` };
+    if (confidence < effectivePendingThreshold) {
+      return { committed: false, fieldPath: field.fieldPath, reason: `low_confidence(${confidence}<${effectivePendingThreshold})` };
     }
 
     // Step 3: 获取写入锁（按人物串行化）
@@ -598,30 +662,26 @@ export class ProfileAcquisitionEngine {
 
       // Step 7: 写入
       try {
-        if (confidence >= directThreshold && canDirectWrite) {
+        if (confidence >= effectiveDirectThreshold && canDirectWrite) {
           // 直接写入 dossier
-          await this.familyGraph.setDossierField(personName, field.fieldPath, field.value);
+          await this.familyGraph.setDossierField(personName, writePath, field.value);
         } else {
           // 写入 pendingItems
           const source = `${options.source || 'conversation'} | ${field.evidence.substring(0, 80)}`;
-          await this.familyGraph.addPendingItem(
-            personName,
-            field.fieldPath,
-            typeof field.value === 'string' ? field.value : String(field.value),
-            source
-          );
+          const valueStr = typeof field.value === 'string' ? field.value : JSON.stringify(field.value);
+          await this.familyGraph.addPendingItem(personName, writePath, valueStr, source);
         }
 
         // Step 8: 写后验证
         const updatedProfile = this.familyGraph.getPersonProfile(personName);
         if (updatedProfile) {
-          const writtenValue = this.getExistingFieldValue(updatedProfile, field.fieldPath);
+          const writtenValue = this.getExistingFieldValue(updatedProfile, writePath);
           const valueWritten =
             writtenValue !== undefined &&
             (JSON.stringify(writtenValue) === JSON.stringify(field.value) ||
               String(writtenValue) === String(field.value));
 
-          if (!valueWritten && confidence >= directThreshold && canDirectWrite) {
+          if (!valueWritten && confidence >= effectiveDirectThreshold && canDirectWrite) {
             // 直接写入验证失败 → 回滚
             if (snapshot) {
               const node = (this.familyGraph as any).findPersonNodeByNameOrAlias?.(personName);
@@ -636,7 +696,7 @@ export class ProfileAcquisitionEngine {
           }
         }
 
-        const writeType = confidence >= directThreshold && canDirectWrite ? 'direct' : 'pending';
+        const writeType = confidence >= effectiveDirectThreshold && canDirectWrite ? 'direct' : 'pending';
         return { committed: true, fieldPath: field.fieldPath, reason: `${writeType}:${confidence}` };
       } catch (err) {
         // 写入异常 → 尝试回滚
@@ -779,6 +839,32 @@ export class ProfileAcquisitionEngine {
         detail: orphanCount === 0 ? '无孤儿 dossier 子对象' : `${orphanCount} 个孤儿子对象`,
       });
 
+      // ⑦ V3.3: 户籍登记卡格式合规 — P0/P1 字段值是否符合格式要求
+      let formatViolations = 0;
+      for (const p of allPersons) {
+        const props = p.properties ? JSON.parse(p.properties) : {};
+        const dossier = props.dossier;
+        if (!dossier) continue;
+        for (const [fieldKey, def] of Object.entries(REGISTRATION_FIELD_MAP)) {
+          if (!def.path || def.storage !== 'dossier') continue;
+          const value = this.getFieldValueByPath(dossier, def.path);
+          if (value === undefined || value === null || value === '') continue;
+          const validator = FORMAT_VALIDATORS[fieldKey];
+          if (validator) {
+            const result = validator(value);
+            if (!result.valid) {
+              formatViolations++;
+              if (formatViolations <= 5) errors.push(`登记卡格式: ${p.name}.${fieldKey} — ${result.reason}`);
+            }
+          }
+        }
+      }
+      checks.push({
+        name: PAE_INTEGRITY_CHECKS[6],
+        passed: formatViolations === 0,
+        detail: formatViolations === 0 ? '所有登记卡字段格式合规' : `${formatViolations} 个格式异常`,
+      });
+
     } catch (err) {
       errors.push(`完整性检查异常: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -801,6 +887,11 @@ export class ProfileAcquisitionEngine {
         this.checkDossierNulls(val, path, onNull);
       }
     }
+  }
+
+  /** V3.3: 按点号路径从对象中取值（委托 shared/DossierPath） */
+  private getFieldValueByPath(obj: any, path: string): any {
+    return dossierRead(obj, path);
   }
 
   // ═══════════════════════════════════════════════════════════════

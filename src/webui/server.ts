@@ -40,10 +40,10 @@ import { M5Orchestrator } from '../m5/M5Orchestrator.js';
 import { DeepSeekLLMProvider, isAvailable as deepseekAvailable } from '../m5/DeepSeekLLMProvider.js';
 import { MockLLMProvider } from '../m5/MockLLMProvider.js';
 import type { LLMProvider } from '../m5/types/index.js';
-import { FamilyGraph } from '../m4/FamilyGraph.js';
-import { ProfileAcquisitionEngine } from '../m4/ProfileAcquisitionEngine.js';
-import { UUIDGatekeeper } from '../m4/UUIDGatekeeper.js';
-import { RelationHeatTracker } from '../m4/RelationHeatTracker.js';
+import { FamilyGraph } from '../m4/household/FamilyGraph.js';
+import { ProfileAcquisitionEngine } from '../m4/household/ProfileAcquisitionEngine.js';
+import { UUIDGatekeeper } from '../m4/household/UUIDGatekeeper.js';
+import { RelationHeatTracker } from '../m4/household/RelationHeatTracker.js';
 import { MaintenanceService } from './maintenance.js';
 import { InductionScheduler } from '../m7/InductionScheduler.js';
 import { ConsolidationQueue } from '../m7/ConsolidationQueue.js';
@@ -95,6 +95,7 @@ import { handleKnowledgeFileRoutes } from './server-knowledge-file-routes.js';
 import { handleBrainRoutes } from './server-brain-routes.js';
 import { handleWikiRoutes } from './server-wiki-routes.js';
 import { handleFGRoutes } from './server-fg-routes.js';
+import { handleHouseholdRoutes } from './server-household-routes.js';
 import { exportHookMonitor, importHookMonitor, startBackupDaemon } from '../hooks/backup-daemon.js';
 import { Orchestrator } from '../engine/orchestrator.js';
 import { setProbeWriter } from '../app/roleplay/RoleplayProbeReporter.js';
@@ -248,6 +249,7 @@ let familyGraph: FamilyGraph;
 let pae: ProfileAcquisitionEngine | undefined;
 let gatekeeper: UUIDGatekeeper | undefined;
 let heatTracker: RelationHeatTracker | undefined;
+let entityMeeting: any = undefined;
 let m4: M4Orchestrator;
 let m5: M5Orchestrator;
 
@@ -428,6 +430,12 @@ async function initPipeline(): Promise<void> {
     else console.log('  FG 血缘传递推理: 已完整 ✓');
   } catch (e) { console.warn('  FG 边补全/推理失败:', e); }
 
+  // V6: 家族户/社团成员名单一次性全量同步到 dossier
+  try {
+    const { families, socialGroups } = await familyGraph.syncHouseholdsToDossier();
+    console.log(`  V6 家族户/社团同步到 dossier: ${families}族 + ${socialGroups}社 ✓`);
+  } catch (e) { console.warn('  V6 dossiery 同步失败:', e); }
+
   // 🏛️ §十四: 为所有人建立档案骨架（家族向量+时间线+寻址链——首次启动自动生成）
   try {
     const { enriched } = familyGraph.ensureAllPersonProfiles();
@@ -557,11 +565,18 @@ async function initPipeline(): Promise<void> {
     pae = undefined;
   }
 
-  // ── V3.2 户籍门阀过滤器初始化 ──
+  // ── V4.0 户籍门阀过滤器初始化（三层白名单·始终激活）──
   try {
     gatekeeper = new UUIDGatekeeper(familyGraph);
+    // V4.0: 基础层白名单 — server.ts 直接查询 UUID 传入
+    const baseUUIDs: string[] = [];
+    const meUUID = familyGraph.getUUIDByName('我');
+    const yuyaoUUID = familyGraph.getUUIDByName('玉瑶');
+    if (meUUID) baseUUIDs.push(meUUID);
+    if (yuyaoUUID) baseUUIDs.push(yuyaoUUID);
+    gatekeeper.initBase(baseUUIDs);
     m4.setGatekeeper(gatekeeper);  // 注入 M4 检索层
-    console.log('  户籍门阀 (UUIDGatekeeper) 就绪 ✓ (默认未激活)');
+    console.log(`  户籍门阀 (UUIDGatekeeper) 就绪 ✓ (基础层: ${baseUUIDs.length}人, 始终激活)`);
   } catch (e) {
     console.warn('  门阀初始化失败:', (e as Error).message);
     gatekeeper = undefined;
@@ -574,6 +589,20 @@ async function initPipeline(): Promise<void> {
   } catch (e) {
     console.warn('  热力追踪初始化失败:', (e as Error).message);
     heatTracker = undefined;
+  }
+
+  // ── V4.0 实体会晤管理器 + 会议纪要存储 ──
+  try {
+    const { EntityMeeting } = await import('../m4/household/EntityMeeting.js');
+    const { MeetingMinutesStore } = await import('../m4/household/MeetingMinutesStore.js');
+    entityMeeting = new EntityMeeting(familyGraph);
+    if (gatekeeper) entityMeeting.setGatekeeper(gatekeeper);
+    const minutesStore = new MeetingMinutesStore(familyGraph);
+    entityMeeting.setMinutesStore(minutesStore);
+    console.log('  实体会晤管理器 (EntityMeeting) 就绪 ✓ (含会议纪要)');
+  } catch (e) {
+    console.warn('  实体会晤初始化失败:', (e as Error).message);
+    entityMeeting = undefined;
   }
 
   loadConversationHistory();
@@ -1093,9 +1122,7 @@ async function initPipeline(): Promise<void> {
   }, 30 * 60 * 1000));
 }
 
-import { deriveM5Strategy, getRoleplayStatus } from './chat.js';
-import { setEmotionSnapshot, setRPSnapshot } from './chat.js';
-import { EmotionSnapshot, RoleParamsSnapshot } from '../app/roleplay/bridges.js';
+import { deriveM5Strategy } from './chat.js';
 
 // ════════════════════════════════════════════════════════
 // Chat API
@@ -1148,6 +1175,7 @@ async function processChat(message: string, clientMsgId?: string | null, testMod
     _profileAcquisitionEngine: pae,
     _gatekeeper: gatekeeper,
     _relationHeatTracker: heatTracker,
+    _entityMeeting: entityMeeting,
     clientMsgId: clientMsgId || null,
     testMode: testMode || false,
   });
@@ -1162,10 +1190,7 @@ async function processChat(message: string, clientMsgId?: string | null, testMod
  * 3. 新链路异常 → 静默回退旧链路，用户无感知
  */
 async function handleUserMessage(message: string, clientMsgId?: string | null, testMode?: boolean): Promise<ChatResponse> { console.log('[HUM] message=' + message.substring(0,20) + ' clientMsgId=' + (clientMsgId||'').substring(0,20) + ' ENABLE_NEW_ARCH=' + ENABLE_NEW_ARCH + ' orch=' + !!orchestrator);
-  // 🎭 角色扮演检测：有扮演意图时强制走旧链路（chat.ts 有完整的角色扮演管线）
-  const _hasRoleplayIntent = /(?:扮演(?:一下)?|模仿|演一下|cos)[了]?[一-龥]{2,8}/.test(message) ||
-    (clientMsgId && clientMsgId.startsWith('【角色扮演】'));
-  if (_hasRoleplayIntent || !ENABLE_NEW_ARCH || !orchestrator) { 
+  if (!ENABLE_NEW_ARCH || !orchestrator) {
     return processChat(message, clientMsgId, testMode);
   }
 
@@ -1274,7 +1299,6 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     m6, m7, m8, clueTracker, topicTracker, alignmentGuard,
     inductionScheduler, masterProfile, getSelfModel, sseClients,
     hookMonitor, hookDefs: HOOK_DEFS, orchestrator,
-    getRoleplayStatus,
     hybridSearch,
     enableNewArch: ENABLE_NEW_ARCH,
   })) return;
@@ -1304,6 +1328,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (handleWikiRoutes({ res, url })) return;
 
   if (await handleFGRoutes({
+    req, res, url, storage, readBody,
+  })) return;
+
+  if (await handleHouseholdRoutes({
     req, res, url, storage, readBody,
   })) return;
 
@@ -2245,17 +2273,6 @@ async function main(): Promise<void> {
     orchestrator.setProcessChat(processChat as any);
     await orchestrator.init();
     console.log(`  [S1] 新架构编排器已初始化 ✓ (mode=${orchestrator.getMode()})`);
-
-    // 🏗️ P1-1 + P1-5: 初始化角色情感快照 + 参数快照
-    try {
-      const heartStore = orchestrator.getHeartStore();
-      const snapshot = new EmotionSnapshot(heartStore);
-      setEmotionSnapshot(snapshot);
-      console.log('  [EmotionSnapshot] 角色情感快照已就绪 ✓');
-      const paramSnap = new RoleParamsSnapshot();
-      setRPSnapshot(paramSnap);
-      console.log('  [RPSnapshot] 角色参数快照已就绪 ✓');
-    } catch (_es) { console.warn('  [RoleSnapshot] 初始化失败（不影响主流程）'); }
 
     // S3 混合检索引擎初始化 (轻量模式下跳过)
     if (!ConfigService.getBool("TIANQUAN_LITE")) {

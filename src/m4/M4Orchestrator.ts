@@ -15,7 +15,7 @@ import type { DNA } from "../m1/types/dna.js";
 import type { ScoredMemory } from '../m2/types/index.js';
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import { MemoryRetriever } from './MemoryRetriever.js';
-import { FamilyGraph } from './FamilyGraph.js';
+import { FamilyGraph } from './household/FamilyGraph.js';
 import { rerank } from './Reranker.js';
 import { decompose } from './QueryDecomposer.js';
 
@@ -40,7 +40,6 @@ let _lastEntitySet: Set<string> = new Set();
 export class M4Orchestrator {
   private memoryRetriever: MemoryRetriever;
   private familyGraph: FamilyGraph;
-  private _familyGraphOverride: any = null;
   /** V3.2: 户籍门阀过滤器 */
   private _gatekeeper: any = null;
   /** P0-3: 记忆检索回调（激活新引擎再巩固） */
@@ -50,20 +49,13 @@ export class M4Orchestrator {
   /** Phase B: 最近一次检索的材料（供 retrieveAsSnapshot 使用） */
   private _lastRetrieveMaterials: { locusPath: string; entities: Array<{ name: string; type: string }>; rawInput: string } | null = null;
 
-  constructor(storage: FusionStorageAdapter, familyGraph?: FamilyGraph, knowledgeBase?: any) {
+  constructor(storage: FusionStorageAdapter, familyGraph: FamilyGraph, knowledgeBase?: any) {
     this.memoryRetriever = new MemoryRetriever(storage, knowledgeBase);
-    this.familyGraph = familyGraph ?? new FamilyGraph();
+    this.familyGraph = familyGraph;
   }
 
   async initialize(): Promise<void> {
     await this.familyGraph.initialize();
-  }
-
-  setFamilyGraphOverride(override: any): void {
-    this._familyGraphOverride = override;
-    // 切换 FG 分支时清除缓存
-    _fgCache = null;
-    console.log(`[M4] ${override ? '🎭 启用FG分支覆盖' : '✅ 清除FG分支覆盖'}`);
   }
 
   /** V3.2: 设置户籍门阀过滤器 */
@@ -76,11 +68,6 @@ export class M4Orchestrator {
   }
 
   getFamilyGraph(): any {
-    return this._familyGraphOverride || this.familyGraph;
-  }
-
-  /** 📜 信息权威铁律: 获取真实FG（绕过override，用于全局查询如getRelatedPersonsN） */
-  getRealFamilyGraph(): any {
     return this.familyGraph;
   }
 
@@ -210,6 +197,8 @@ export class M4Orchestrator {
         console.warn('[M4·海马体] 三突触回路异常，降级使用 Reranker 输出:', err);
       }
     }
+
+    try { const fg = this.familyGraph; if (fg && memories.length > 1) { for (const mem of memories) { const names = ((mem as any).fg_entity_names || "").split(",").map(function(s: string) { return s.trim(); }).filter(Boolean); let maxHeat = 0; for (var i = 0; i < names.length; i++) { try { var rows = (fg as any).query("SELECT properties FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE name = ?) OR target_id IN (SELECT id FROM nodes WHERE name = ?) LIMIT 1", [names[i], names[i]]); if (rows && rows[0]) { var ep = JSON.parse(rows[0].properties || "{}"); if ((ep._heat_score || 0) > maxHeat) maxHeat = ep._heat_score; } } catch(e) {} } if (maxHeat > 0) (mem as any)._heat_boost = Math.min(0.3, maxHeat * 0.3); } } } catch(e) {}
 
     const memorySummary = this.memoryRetriever.compressMemories(memories);
 

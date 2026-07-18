@@ -2,7 +2,9 @@
  * ChatEntry.ts — 入口守卫管线
  *
  * 从 chat.ts L435-574 拆出
- * 处理: 退出残留 | 显式/隐式扮演检测 | DNA编码 | 实体提取 | 图谱匹配
+ * 处理: DNA编码 | 实体提取 | 图谱匹配
+ *
+ * V4.0: 移除角色扮演检测（实体会晤替代）
  */
 import type { ChatContext } from '../chat.js';
 import { ENABLE_TEMPORAL_RULE_ENGINE, worldRuleMode } from '../../engine/temporal/TemporalConfig.js';
@@ -10,11 +12,7 @@ import { fetchWeatherNow, fetchForecast3d, cityLookup, isApiAvailable } from '..
 
 /** 入口管线可变状态 */
 export interface EntryState {
-  _currentRoleplay: string | null;
-  _currentRPBranch: any;
-  _currentCharacterClass: string | null;
   _currentRole: string;
-  _rpJustExited: number;
 }
 
 export interface EntryResult {
@@ -30,53 +28,6 @@ export async function runChatEntry(
   ctx: ChatContext,
   state: EntryState,
 ): Promise<EntryResult> {
-  // 📜 退出残留
-  if (state._rpJustExited > 0 && state._currentRoleplay) {
-    console.log('[📜角色退出残留] 检测到 _currentRoleplay=' + state._currentRoleplay + ' 但 _rpJustExited=true — 强制清除');
-    state._currentRoleplay = null;
-    state._currentRPBranch = null;
-    state._currentCharacterClass = null;
-    state._currentRole = 'secretary';
-  }
-  console.log('[CHAT_ENTRY] _currentRoleplay=' + (state._currentRoleplay || 'null') + ' _rpJustExited=' + state._rpJustExited + ' msg=' + message.substring(0,30));
-
-  // 显式扮演检测
-  const _rpEntry = message.match(/(?:扮演(?:一下)?|模仿|演一下|cos)[了]?([一-龥]{2,8})/);
-  if (_rpEntry && _rpEntry[1].trim().length >= 2) {
-    state._currentRoleplay = _rpEntry[1].replace(/[吧呗了试试看看一下玩玩]$/, '').trim();
-    console.log('[Roleplay] 🔒 入口锁定: ' + state._currentRoleplay);
-  }
-
-  // 隐式扮演检测
-  if (!_rpEntry && !state._currentRoleplay && ctx.m4) {
-    try {
-      const fg = ctx.m4.getFamilyGraph();
-      const allNames = fg ? fg.getAllPersonNames() : [];
-      for (const turn of ctx.conversationHistory.slice(-10)) {
-        const namesInHistory = turn.content.match(/[一-龥]{2,4}(?=[，,、。]|$)/g);
-        if (namesInHistory) {
-          for (const n of namesInHistory) {
-            if (n.length >= 2 && !allNames.includes(n)) allNames.push(n);
-          }
-        }
-      }
-      const COMMON_PHRASES = new Set(['不用了', '知道了', '好了', '对了', '行了', '没事', '好的',
-        '好吧', '是的', '嗯嗯', '谢谢', '不用谢', '不客气', '不会的', '可以的', '没关系']);
-      const allNamesFiltered = allNames.filter(function(n: string) { return !COMMON_PHRASES.has(n); });
-      for (const name of allNamesFiltered) {
-        if (name === '我' || name.length < 2) continue;
-        // FG真人禁止扮演（读 getPersonProfile.roleplay_forbidden）
-        try { const _p = fg.getPersonProfile(name); if ((_p as any)?.roleplay_forbidden) continue; } catch (e) { console.warn(`[ChatEntry] 操作失败`, (e as Error)?.message || e); }
-        if (message.startsWith(name + '，') || message.startsWith(name + ',') ||
-            message.startsWith(name + ' ') || message.startsWith(name + ':')) {
-          state._currentRoleplay = name;
-          console.log('[Roleplay] 🔒 隐式锁定: ' + name + ' (消息开头称呼)');
-          break;
-        }
-      }
-    } catch (_e: any) { console.error('[chat] error:', (_e as any)?.message); }
-  }
-
   const dna = ctx.encoder.encodeSingle(message);
 
   // 时空规则引擎

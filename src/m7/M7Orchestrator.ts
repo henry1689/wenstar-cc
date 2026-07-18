@@ -9,7 +9,7 @@ import type { PendingDream } from './types/index.js';
 import type { KnowledgeBase } from '../m2/KnowledgeBase.js';
 import type { M6Orchestrator } from '../m6/M6Orchestrator.js';
 import crypto from 'node:crypto';
-import type { FamilyGraph } from '../m4/FamilyGraph.js';
+import type { FamilyGraph } from '../m4/household/FamilyGraph.js';
 import type { TopicTracker } from '../app/knowledge/TopicTracker.js';
 import type { M8Engine } from '../m8/M8Engine.js';
 
@@ -372,9 +372,16 @@ export class M7Orchestrator {
       const sqlite = typeof storage.getSQLite === 'function' ? storage.getSQLite() : null;
       if (!sqlite) return;
 
-      // 从 FamilyGraph 读取所有人名
-      // 直接查家庭图谱数据库
-      const persons = sqlite.queryAll("SELECT name, properties FROM nodes WHERE type = 'person' AND name != '我'");
+      // 从 FamilyGraph（户籍体系）读取所有人名和档案
+      const personNames = fg.getAllPersonNames?.() || [];
+      const persons = personNames
+        .filter((n: string) => n !== '我')
+        .map((name: string) => {
+          try {
+            const profile = fg.getPersonProfile?.(name);
+            return { name, properties: JSON.stringify(profile || {}) };
+          } catch { return { name, properties: '{}' }; }
+        });
       if (!persons || persons.length === 0) return;
 
       for (const person of persons) {

@@ -21,7 +21,7 @@ import { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import { M3LogicOrchestrator } from '../m3/M3LogicOrchestrator.js';
 import { M4Orchestrator } from '../m4/M4Orchestrator.js';
 import { M5Orchestrator } from '../m5/M5Orchestrator.js';
-import { FamilyGraph } from '../m4/FamilyGraph.js';
+import { FamilyGraph } from '../m4/household/FamilyGraph.js';
 import type { SelfModelV1 } from '../m1/types/dna.js';
 
 const __filename = fileURLToPath(import.meta.url);

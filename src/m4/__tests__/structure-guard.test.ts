@@ -14,7 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import { M4Orchestrator } from '../M4Orchestrator.js';
 import { MemoryRetriever } from '../MemoryRetriever.js';
-import { FamilyGraph } from '../FamilyGraph.js';
+import { FamilyGraph } from '../household/FamilyGraph.js';
 import { rerank } from '../Reranker.js';
 import { decompose, mergeDecomposedResults } from '../QueryDecomposer.js';
 import type { M4Context, MemorySummary } from '../types/index.js';

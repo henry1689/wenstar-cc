@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { FamilyGraph } from '../FamilyGraph.js';
+import { FamilyGraph } from '../household/FamilyGraph.js';
 
 const TEST_DB = join(__dirname, '.test-family-graph.db');
 

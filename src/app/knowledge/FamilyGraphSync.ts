@@ -13,7 +13,7 @@
  *   - 每次同步只更新有变化的人物，不做全量覆盖
  */
 
-import type { FamilyGraph } from '../../m4/FamilyGraph.js';
+import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
 
 interface SyncResult {
   synced: number;

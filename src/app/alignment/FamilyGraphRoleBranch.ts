@@ -1,28 +1,9 @@
 /**
- * FamilyGraphRoleBranch — 家族图谱角色扮演分支系统
+ * @deprecated V4.0 — 角色扮演已废除，实体会晤替代。
+ * 本文件保留仅用于旧会话数据兼容，不参与任何运行时逻辑。
  *
- * 核心原理：角色扮演时，FG 的身份根从「我」(鸿艺) 切换到被扮演角色。
- * 整个分支就是一个固定不变的「角色家族树快照」，在扮演期间完全替代主 FG。
- *
- * ┌─────────────────────────────────────────────────────────────┐
- * │  主FG (正常)                   角色分支 (扮演熊梓铭时)       │
- * │  根 = 我(鸿艺)                  根 = 熊梓铭                  │
- * │  我--[spouse_of]-->玉瑶         熊梓铭--[child_of]-->熊勇   │
- * │  我--[parent_of]-->熊梓铭       熊梓铭--[child_of]-->王全芬 │
- * │  熊梓铭--[child_of]-->熊勇      ↳ 成为「我的爸爸 = 熊勇」  │
- * │  熊梓铭--[child_of]-->王全芬    ↳ 成为「我的妈妈 = 王全芬」│
- * └─────────────────────────────────────────────────────────────┘
- *
- * 使用方式：
- *   1. 扮演开始时：branch = new FamilyGraphRoleBranch(fg, '熊梓铭')
- *   2. 全量加载角色家族树到 branch 内部
- *   3. 所有 FG 查询通过 branch 进行，身份根永远是角色
- *   4. 扮演结束时：丢弃 branch，恢复主 FG
- *
- * 集成点：
- *   - chat.ts 中 _currentRoleplay 创建/销毁时同步创建/销毁 branch
- *   - M4/M5 通过 ctx.m4.getFamilyGraph() 获取的是 branch（而非主FG）
- *   - 主FG写入不受影响（integrateFromEntity 仍走主FG）
+ * 历史：角色扮演时切换 FG 身份根，M4Orchestrator.setFamilyGraphOverride 挂载。
+ * V4.0 清理：setFamilyGraphOverride / getRealFamilyGraph 已删除，本类已无调用方。
  */
 
 import type { FamilyGraph as FamilyGraphType } from '../../m4/types/graph.js';

@@ -9,7 +9,7 @@
  *   await bridge.bridgeFromPerson(personId, '张忠谋');
  *   await bridge.bridgeFromKnowledge('张忠谋', knId);
  */
-import type { FamilyGraph } from '../../m4/FamilyGraph.js';
+import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { CONFIDENCE } from './RelationshipTypes.js';
 

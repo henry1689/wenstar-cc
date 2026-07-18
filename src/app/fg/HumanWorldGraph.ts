@@ -9,7 +9,7 @@
  *   await hwg.enhanceFromConversation(personName, '我妈妈', rawInput);
  *   const network = hwg.getNetwork('张忠谋');
  */
-import type { FamilyGraph } from '../../m4/FamilyGraph.js';
+import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import {
   RELATION_TYPE_DEFS, RELATION_CATEGORY, getRelationCategory,

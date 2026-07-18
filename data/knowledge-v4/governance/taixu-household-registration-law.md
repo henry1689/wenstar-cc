@@ -1,13 +1,19 @@
-# 太虚境户籍管理法 V2.0
+# 太虚境户籍管理法 V2.1
 
 > 文曲星·太虚境 硅基生命体 — 最高效力法律文件
-> 版本：V2.0（档案体系定型版）
+> 版本：V2.1（V6 七子卷配套版）
 > 颁布日期：2026-07-18
 > 生效日期：系统下一次重启
 > 对标现实法律：《中华人民共和国居民身份证法》《中华人民共和国户口登记条例》《中华人民共和国个人信息保护法》
 > 关联制度：[fg-kinship-redlines.md](redlines/fg-kinship-redlines.md) · [household-registration-blueprint.md](household-registration-blueprint.md)
 
-**V2.0 核心修订：**
+**V2.1 核心修订：**
+- Dossier 七子卷体系定型：basicInfo / selfProfile / socialIdentity / lifeMilestones / boundDocuments / _changeHistory / misc
+- _changeHistory V6 格式确立：{time, operation, field, before, after, reason, source}，上限 10000 条
+- fgIntegrityGuard 由 5 项扩展为 10 项完整性守护
+- 旧 10 模块归档至 _deprecated，卷宗只增不删原则贯彻
+
+**V2.0 核心修订（历史）：**
 - UUID 去分类前缀 → 纯 9 位流水号（TXS-000000001）
 - entity_source 六类→五类（删除 roleplay）
 - name 列标准化：只存法定本名，关系称谓存入 edges
@@ -174,17 +180,23 @@ TXS-{9位自增流水号}
 
 人生卷宗为单一 TXS-ID 专属独立卷宗，永久叠加写入，永不清空、永不整体重置。
 
-### 第十九条　Dossier 五大板块
+### 第十九条　Dossier 七子卷结构（V2.1 修订）
 
-（一）**户籍登记表（结构化固定表格）**：法定姓名、别名、出生年份、性别、家庭户编码、entity_source、实体状态 status、安全密级。允许空白，未知不编造。
+人生卷宗由七子卷构成，旧 10 模块（contact / lifeResume / imageTraits / personalityPrefs / relationMap / familyNetwork / health / socialCapital / memoryAnchors）内容已迁移至七子卷，原始数据归档于 `_deprecated`，遵循卷宗只增不删原则。
 
-（二）**固有完整人设档案**：性格标签、外貌体态、生活习惯、饮食喜恶、心理特质、禁忌话题、说话语气、专属小动作。仅 LLM 综合多轮高置信结论可入库，碎片化单次闲聊描述仅存入 PendingItem 待确认。
+（一）**子卷① 基础信息（basicInfo）**：性别、出生年份、出生地、学历。登记表快照，允许空白。
 
-（三）**社会血缘与动态社团关系档案**：亲属链路、伴侣关系、基础社会角色、无限量 social_group_gene 社团编码、称谓方式、交互语气基调、话题边界标记、家族血脉码 family_gene。所有新增社团自动新增编码存入数组，无固定上限。
+（二）**子卷② 完整人设（selfProfile）**：性格标签、外貌体态、身体特征、穿着风格、声音特征、气味/香水、辨识特征、喜好/排斥、语言习惯、禁忌话题、健康状况、女性详细体征。仅 LLM 综合多轮高置信结论可入库，碎片化单次闲聊描述仅存入 PendingItem 待确认。
 
-（四）**全生命周期履历时间线**：首次出现时间、关系里程碑（结识/升级/降级/断裂）、社团加入/退出节点、人生重大事件（结婚/生子/毕业/换工作/搬迁/离世）、最后交互时间。
+（三）**子卷③ 社会身份（socialIdentity）**：职业时间线、婚恋时间线、当前职业/工作单位快照。每段时间线条目绑定 sourceRef 佐证索引。
 
-（五）**附属典籍卷宗**：绑定的 TXJ 典籍户籍清单（boundDocuments）、专属任务书、架构文档。典籍与生灵双向绑定——典籍户籍户卡同步写入挂靠生灵 TXS 数组。
+（四）**子卷④ 人生里程碑（lifeMilestones）**：首次出现时间、关系里程碑（结识/升级/降级/断裂）、社团加入/退出节点、人生重大事件（结婚/生子/毕业/换工作/搬迁/离世）。每条绑定 date / event / type / sourceRef。
+
+（五）**子卷⑤ 绑定典籍（boundDocuments）**：绑定的 TXJ 典籍户籍清单、专属任务书、架构文档。典籍与生灵双向绑定——典籍户籍户卡同步写入挂靠生灵 TXS 数组。
+
+（六）**子卷⑥ 变更流水（_changeHistory）**：V6 格式 `{time, operation, field, before, after, reason, source}`，上限 10000 条，超出自动归档至 `_deprecated._changeHistoryArchive`。全量数据永久可查询。
+
+（七）**子卷⑦ 兜底杂项（misc）**：自由格式 JSON，仅存放无固定归档字段的零散补充信息。
 
 ### 第二十条　兜底字段
 
@@ -311,9 +323,11 @@ TXS-{9位自增流水号}
 
 ### 第三十五条　完整性守护运行规则
 
-1. fgIntegrityGuard 系统开机全自动校验全部户籍、图谱、档案完整性。校验不通过系统降级运行。
-2. PAE 配套 acquisitionIntegrityGuard，校验 LLM 采集内容合规性。
-3. V2.0 新增校验项：禁止代码截取 TXS 字符串判断分类、name 列不得存储关系称谓、全部节点有合法 entity_source、social_group_genes 非空。
+1. fgIntegrityGuard 系统开机全自动校验 10 项户籍、图谱、档案完整性：①核心表非空 ②"我"节点存在 ③无自指边 ④家族反向边完整 ⑤entity_relations 无"姐妹"污染 ⑥所有人有姓名 ⑦全部节点有合法 UUID ⑧全部节点有 entity_source ⑨全部节点 status 合法 ⑩social_group_genes 非空。校验不通过系统降级运行。
+
+2. PAE 配套 acquisitionIntegrityGuard（6 项），校验 LLM 采集内容合规性：①无空值污染 ②pendingItems 质量 ③无重复 pendingItems ④changeHistory 合规 ⑤completeness 合法 ⑥无孤儿 dossier。
+
+3. V2.1 新增校验项（已纳入 fgIntegrityGuard ⑦-⑩）：全部节点有合法 UUID、全部节点有 entity_source、全部节点 status 合法、social_group_genes 非空、A 类全部有家族边到"我"。
 
 ### 第三十六条　分层数据恢复预案
 
@@ -367,7 +381,18 @@ TXS-{9位自增流水号}
 
 ---
 
-## 附：V2.0 修订核心变更摘要
+## 附：修订核心变更摘要
+
+### V2.1 修订（2026-07-18）
+
+1. **Dossier 七子卷定型**：basicInfo / selfProfile / socialIdentity / lifeMilestones / boundDocuments / _changeHistory / misc，替代旧 10 模块杂糅结构
+2. **_changeHistory V6 格式**：`{time, operation, field, before, after, reason, source}`，上限 10000 条
+3. **旧模块归档**：contact / lifeResume / imageTraits / personalityPrefs / relationMap / familyNetwork / health / socialCapital / memoryAnchors → `_deprecated`
+4. **fgIntegrityGuard 10 项**：扩展为完整 10 项检查（含 entity_source / status / social_group_genes / A 类家族边）
+5. **selfProfile 统一人设入口**：替代散落的 flat 字段 + imageTraits + personalityPrefs + health
+6. **socialIdentity 社会身份时间线**：替代散落的 occupation + relationMap 时序
+
+### V2.0 修订（2026-07-18）
 
 1. **UUID 去分类前缀**：TXS-{9位流水号}，分类信息移入 `nodes.category` 可变列
 2. **entity_source 六类→五类**：删除 roleplay，角色全部纳入 fictional/H/placeholder

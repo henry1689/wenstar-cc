@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
-import type { FamilyGraph } from '../m4/FamilyGraph.js';
+import type { FamilyGraph } from '../m4/household/FamilyGraph.js';
 import type { ChatResponse, ChatContext } from './chat.js';
 
 export interface ChatRouteDeps {

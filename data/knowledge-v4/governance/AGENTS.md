@@ -1,8 +1,8 @@
 # WenStar 知识库 Agent 操作规范
 
-> V4.0 双脑架构 — 第二大脑（知识库）治理层
-> 最后更新: 2026-07-18
-> 最高法律依据：[《太虚境户籍管理法 V2.0》](taixu-household-registration-law.md)
+> V4.3 双脑架构 — 第二大脑（知识库）治理层
+> 最后更新: 2026-07-19
+> 最高法律依据：[《太虚境户籍管理法 V2.1》](taixu-household-registration-law.md)
 
 ---
 
@@ -10,13 +10,14 @@
 
 在操作知识库之前，Agent 必须了解以下治理文件的层级：
 
-| 层级 | 文件 | 效力 |
-|:--|------|:--|
-| ① | [《太虚境户籍管理法》](taixu-household-registration-law.md) | 最高法律 |
-| ② | [fg-kinship-redlines.md](redlines/fg-kinship-redlines.md) | FG 操作铁律 |
-| ③ | [household-registration-blueprint.md](household-registration-blueprint.md) | 户籍制蓝皮书 |
-| ④ | [pae-profile-acquisition-engine.md](pae-profile-acquisition-engine.md) | PAE 技术文档 |
-| ⑤ | 本文档 | 知识库操作规范 |
+| 层级 | 文件 | 版本 | 效力 |
+|:--|------|:--|:--|
+| ① | [《太虚境户籍管理法》](taixu-household-registration-law.md) | V2.1 | 最高法律 |
+| ② | [fg-kinship-redlines.md](redlines/fg-kinship-redlines.md) | V3.5 | FG 操作铁律 |
+| ③ | [household-registration-blueprint.md](household-registration-blueprint.md) | V4.0 | 户籍制蓝皮书 |
+| ④ | [pae-profile-acquisition-engine.md](pae-profile-acquisition-engine.md) | V3.3 | PAE 技术文档 |
+| ⑤ | [entity-lifecycle-governance.md](entity-lifecycle-governance.md) | V1.0 | 实体生命周期治理 |
+| ⑥ | 本文档 | V4.3 | 知识库操作规范 |
 
 下位规范不得与上位规范相抵触。
 

@@ -86,6 +86,30 @@ export class DailyMaintenanceScheduler {
         const fgMaint = new FGMaintenance(sqlite);
         const fgReport = await fgMaint.runDaily();
         result.strength = fgReport.inferences;
+
+        // V4.0: 实体生命周期闭环 (每日批量状态流转)
+        try {
+          const { LifecycleManager } = await import('../../m4/household/LifecycleManager.js');
+          const lm = new LifecycleManager(fg);
+          const lifecycleReport = await lm.runDaily();
+          if (lifecycleReport.activeToDormant > 0 || lifecycleReport.dormantToArchived > 0 || lifecycleReport.dormantToActive > 0) {
+            console.log('[DailyMaintenance] 生命周期闭环: ' +
+              (lifecycleReport.activeToDormant > 0 ? `active→dormant ${lifecycleReport.activeToDormant}人 ` : '') +
+              (lifecycleReport.dormantToActive > 0 ? `dormant→active ${lifecycleReport.dormantToActive}人 ` : '') +
+              (lifecycleReport.dormantToArchived > 0 ? `dormant→archived ${lifecycleReport.dormantToArchived}人` : '')
+            );
+          }
+        } catch (e2) { console.warn('[DailyMaintenance] 生命周期闭环失败:', (e2 as Error)?.message || e2); }
+
+        // V4.0: 占位实体自动升级 (placeholder → real)
+        if (fg && typeof fg.runDailyHouseholdMaintenance === 'function') {
+          try {
+            var hmResult = fg.runDailyHouseholdMaintenance();
+            if (hmResult.dirtyNames > 0 || hmResult.placeholders > 0 || hmResult.lifecycle > 0) {
+              var parts = []; if (hmResult.dirtyNames > 0) parts.push('dirty:' + hmResult.dirtyNames); if (hmResult.placeholders > 0) parts.push('placeholder:' + hmResult.placeholders); if (hmResult.lifecycle > 0) parts.push('lifecycle:' + hmResult.lifecycle); console.log('[DailyMaintenance] household: ' + parts.join(' | '));
+            }
+          } catch (e3) { console.warn('[DailyMaintenance] household fail: ' + (e3 as Error).message); }
+        }
       }
     } catch (err) {
       console.warn('[DailyMaintenance] FG 维护失败:', err);

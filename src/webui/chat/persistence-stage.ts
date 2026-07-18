@@ -25,7 +25,6 @@ export interface PersistInput {
   dna: DNA;
   p: Perception24D;
   decision: M3Decision;
-  currentRoleplay: string | null;
 }
 
 const TOPIC_KW: Record<string, RegExp> = {
@@ -74,26 +73,22 @@ function buildPerceptionJson(p: Perception24D): string {
 export async function persistConversation(input: PersistInput): Promise<void> {
   const nowTs = new Date().toISOString();
   const topic = detectTopic(input.message);
-  const rp = input.currentRoleplay || null;
   let hadError = false;
 
   // ── Step 1: conversationHistory（内存）──
-  //    rpChar 标记角色扮演来源——非角色模式时 enrichedHistory 按此排除角色对话
-  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic, rpChar: rp } as any);
+  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic } as any);
   input.ctx.saveConversationHistory();
   if (input.ctx.conversationHistory.length > 500) {
     input.ctx.conversationHistory.splice(0, input.ctx.conversationHistory.length - 500);
   }
 
   // ── Step 2: conversations.db（对话历史库） ──
-  // V3.2: 解析当前对话归属的实体 UUID
+  // V4.0: 解析当前对话归属的实体 UUID（通过 M1 entity_genes）
   const resolveBelongUUID = (): string | null => {
     try {
-      const fg = input.ctx.m4?.getRealFamilyGraph?.();
+      const fg = input.ctx.m4?.getFamilyGraph?.();
       if (!fg) return null;
-      // 角色扮演: 归属角色 UUID
-      if (rp) return fg.getUUIDByName?.(rp) || null;
-      // 普通对话: 归属第一个提到的 person 实体
+      // 归属第一个提到的 person 实体
       const firstPerson = input.dna.entity_genes?.find((g: any) => g.type === 'person' && g.name && g.name !== '我');
       if (firstPerson) return fg.getUUIDByName?.(firstPerson.name) || null;
       return null;
@@ -111,7 +106,6 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       globalUid: input.dna.global_uid || (input.dna as any).dna_root_id,
       locationFingerprint: input.dna.location_fingerprint || '',
       isTest: input.ctx.testMode ? 1 : 0,
-      roleplayChar: rp || undefined,
       belongEntityUuid: belongUUID || undefined,
     });
     input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
@@ -120,7 +114,6 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       dnaRootId: (input.dna as any).dna_root_id,
       globalUid: input.dna.global_uid || (input.dna as any).dna_root_id,
       locationFingerprint: input.dna.location_fingerprint || '',
-      roleplayChar: rp || undefined,
       belongEntityUuid: belongUUID || undefined,
     });
   } catch (e: any) {
@@ -134,10 +127,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     const pJson = buildPerceptionJson(input.p);
     const calciumScore = input.decision.enhanced.calcium_score ?? 0.5;
     const calciumLevel = input.decision.enhanced.calcium_level ?? 1;
-    const locusPath = (input.dna as any).locus_path || (rp ? `roleplay.${rp}` : 'chat');
+    const locusPath = (input.dna as any).locus_path || 'chat';
     const now = new Date().toISOString();
-    const rpTag = rp ? `rp_${rp}` : null;
-    const primaryEmotion = rp ? `角色扮演·${rp}` : topic || 'chat';
+    const primaryEmotion = topic || 'chat';
 
     // 写用户消息 — 改造②：使用 SQLiteAdapter.writeMemory() 公共 API
     const idUser = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -146,14 +138,14 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       perceptionJson: pJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'user', rawInput: input.message,
       primaryEmotion, memoryType: 'dialog',
-      memoryKind: rp ? 'roleplay' : 'episodic',
+      memoryKind: 'episodic',
       lifecycleState: calciumLevel >= 2 ? 'active' : 'candidate',
       confidenceScore: 0.6,
       stabilityScore: calciumLevel >= 2 ? 0.45 : 0.2,
-      threadId: rpTag ?? (input.dna as any).dna_root_id ?? idUser,
+      threadId: (input.dna as any).dna_root_id ?? idUser,
       sourceConversationIds: [input.seqPos],
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: rpTag, topicLabel: null,
+      dialogGroupId: null, topicLabel: null,
     })) {
       hadError = true;
     }
@@ -169,14 +161,14 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       perceptionJson: pJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'assistant', rawInput: cleanReply,
       primaryEmotion, memoryType: 'dialog',
-      memoryKind: rp ? 'roleplay' : 'episodic',
+      memoryKind: 'episodic',
       lifecycleState: calciumLevel >= 2 ? 'active' : 'candidate',
       confidenceScore: 0.6,
       stabilityScore: calciumLevel >= 2 ? 0.45 : 0.2,
-      threadId: rpTag ?? (input.dna as any).dna_root_id ?? idAssist,
+      threadId: (input.dna as any).dna_root_id ?? idAssist,
       sourceConversationIds: [input.seqPos + 1],
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: rpTag, topicLabel: null,
+      dialogGroupId: null, topicLabel: null,
     })) {
       hadError = true;
     }
@@ -244,7 +236,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   // ── 更新内存 ──
-  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic, rpChar: rp } as any);
+  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic } as any);
   input.ctx.saveConversationHistory();
 
   if (hadError) {

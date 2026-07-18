@@ -24,8 +24,6 @@ export async function flushDialogGroup(
   decision: any,
   message: string,
   reply: string,
-  /** 外部依赖 — 当前是否在角色扮演中 */
-  currentRoleplay: string | null,
   /** 外部依赖 — 人名验证函数 */
   validatePersonName: (name: string) => boolean,
 ): Promise<void> {
@@ -94,15 +92,6 @@ export async function flushDialogGroup(
       );
     }
 
-    // 🎭 角色扮演标记：回填 memory_type 和 sub_type
-    if (dg.rpChar) {
-      try {
-        const rpName = dg.rpChar;
-        sql.writeRaw("UPDATE memories SET memory_type='rp_dialog', sub_type=? WHERE dialog_group_id=?", [rpName, dg.id]);
-        sql.writeRaw("UPDATE conversations SET roleplay_char=? WHERE dialog_group_id=?", [rpName, dg.id]);
-      } catch (_e: any) { console.error('[DialogGroup] error:', (_e as any)?.message); }
-    }
-
     // 情感轨迹标签
     const emotions = dg.perceptions.slice(0, 5).map((p: any) => {
       if (p.intimacy > 0.4) return '亲密';
@@ -111,31 +100,24 @@ export async function flushDialogGroup(
       return '中性';
     });
     const uniqueE = [...new Set(emotions)].slice(0, 3).join('→');
-    console.log('[DG] 闭组: ' + dg.id + ' (' + dg.rounds.length + '轮, 锚点轮#' + anchorIdx + ', 情感:' + uniqueE + (dg.rpChar ? ', 角色扮演:' + dg.rpChar : '') + ')');
+    console.log('[DG] 闭组: ' + dg.id + ' (' + dg.rounds.length + '轮, 锚点轮#' + anchorIdx + ', 情感:' + uniqueE + ')');
 
     // 黑钻晋升由 VaultManager 统一负责（金库→黑钻，以"被反复召回"为准）。
     // 闭组锚点已作为普通 memories 行写入，若日后被反复想起会自然经 VaultManager 晋升；
     // 此处不再另开一条闭组直出黑钻的路径，避免与 VaultManager 产生重复/语义分裂的黑钻。
 
-    // 图谱实体同步 + 档案提取（角色扮演时走真实FG，确保自学习不丢失）
+    // 图谱实体同步 + 档案提取
     if (ctx.m4 && dg.entities.length > 0) {
       try {
-        const fg = ctx.m4.getRealFamilyGraph?.() || ctx.m4.getFamilyGraph();
+        const fg = ctx.m4.getFamilyGraph();
         if (fg) {
-          // C2+C3: 分离说话人文本，供第一人称自述提取
-          //  - 用户(张三)的话 => 用户第一人称"我"
-          //  - 玉瑶/被扮演角色的话 => 助手第一人称"我"
-          // 仅当实体确实是发言者本人时才传入自述文本，避免把用户的"我"误归到第三方。
           const userLines = dg.rounds.map((r: any) => r.q || '').join('\n');
           const assistantLines = dg.rounds.map((r: any) => r.a || '').join('\n');
-          const rpChar = dg.rpChar || null;
           for (const name of dg.entities) {
             if (validatePersonName(name)) fg.integrateSocialRelation(name, 'acquaintance_of', '').catch(() => {});
-            // 判定该实体的第一人称自述来源
             let selfText: string | undefined;
-            if (rpChar && name === rpChar) selfText = assistantLines;   // 角色扮演：玉瑶所说即被扮演角色的自述
-            else if (name === '玉瑶') selfText = assistantLines;         // 玉瑶本人
-            else if (name === '我') selfText = userLines;                // 用户自身节点
+            if (name === '玉瑶') selfText = assistantLines;
+            else if (name === '我') selfText = userLines;
             fg.extractProfileFromText(name, combined, selfText).catch(() => {});
           }
         }

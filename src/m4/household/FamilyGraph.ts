@@ -1,20 +1,41 @@
-// FamilyGraph — SQLite 图结构家族知识库
-// Ref: M4-design-v1.md §3
-//
-// ╔═══════════════════════════════════════════════════════╗
-// ║  FamilyGraph.ts  v1.0                                 ║
-// ║  归属: M4 (知识融合层)                               ║
-// ║  职责: 家族关系图谱的存储与自动推断                    ║
-// ║  日期: 2026-06-02                                    ║
-// ╚═══════════════════════════════════════════════════════╝
+/**
+ * FamilyGraph — 太虚境户籍管理体系 · 数据持久层
+ *
+ * 法律依据：《太虚境户籍管理法 V2.1》
+ *
+ * 本模块是户籍管理体系的唯一数据源。不存在"家族图谱"和"户籍管理"两个独立系统
+ * —— FamilyGraph 就是户籍管理的数据库引擎，两者是同一事物的代码层和法律层。
+ *
+ * 承载内容：
+ *   - nodes 表：户籍登记表（TXS-ID、姓名、别名、分类、来源、状态、基因码、安全密级）
+ *   - edges 表：社会关系网络（双向家族边 + 社交边 + BFS 反向边推理 + 血缘传递）
+ *   - properties.dossier：人生卷宗七子卷（selfProfile / socialIdentity / lifeMilestones / boundDocuments / _changeHistory / misc / _deprecated）
+ *
+ * 功能模块（均在 household/ 目录下）通过本模块的公开 API 读写数据：
+ *   UUIDGatekeeper           → getUUIDByName / getEntityByUUID
+ *   ProfileAcquisitionEngine → getPersonProfile / setDossierField / addPendingItem / getRegistrationStatus
+ *   LifecycleManager         → setEntityStatus / _checkStatusDowngrade
+ *   EntityMeeting            → getPersonProfile / getRelatedPersons
+ *   RelationHeatTracker      → getEntityByUUID / setCategory
+ *   EntityContextBuilder     → getPersonProfile / getRelatedPersons
+ *
+ * 对外导出：类名 FamilyGraph 保持不变（历史兼容）。
+ * 概念定位：FamilyGraph === 太虚境户籍管理体系数据层。二者非并列关系。
+ *
+ * Ref: M4-design-v1.md §3
+ * 日期: 2026-06-02  |  V4.0 归入户籍管理体系: 2026-07-18
+ */
 
 // @ts-ignore - sql.js ships its own types via dist/sql-wasm.js
 import initSqlJs from 'sql.js';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, copyFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { EntityGene } from '../m1/types/dna.js';
-import { validatePersonName, validateRelationType } from './EntityValidator.js';
+import type { EntityGene } from '../../m1/types/dna.js';
+import { validatePersonName, validateRelationType } from '../EntityValidator.js';
+import { dossierRead, dossierWrite } from './shared/DossierPath.js';
+import { getRelationLabel } from './shared/RelationLabels.js';
+import { computeTargetStatus } from './shared/StatusRules.js';
 import type {
   FamilyGraph as FamilyGraphInterface,
   GraphNode,
@@ -27,8 +48,8 @@ import type {
   CircleLevel,
   RelationWeights,
   NodeType,
-} from './types/graph.js';
-import { DEFAULT_BASE_INTIMACY } from './types/graph.js';
+} from '../types/graph.js';
+import { DEFAULT_BASE_INTIMACY } from '../types/graph.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -382,6 +403,8 @@ const REVERSE_RELATION: Record<string, string> = {
 /** 🏛️ §十五: 统一反向映射表（家族+社交，同等对待） */const ALL_REVERSE: Record<string, string> = { ...REVERSE_RELATION, ...SOCIAL_REVERSE };
 const KINSHIP_TERMS = Object.keys(KINSHIP_MAP).sort((a, b) => b.length - a.length);
 const PENDING_PROMOTION_THRESHOLD = 3;
+/** V4.0: occurrences 权重标识 — ≥5 为高可信度待确认项 */
+const HIGH_OCCURRENCE_THRESHOLD = 5;
 const SPECIFIC_KINSHIP_LABEL: Record<string, string> = {
   '妈妈': '妈妈', '妈': '妈妈', '母亲': '妈妈',
   '爸爸': '爸爸', '爸': '爸爸', '父亲': '爸爸',
@@ -831,6 +854,198 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /**
+   * V6: 一次性全量将已有的 family_gene / social_group_genes 组成员名单同步到 dossier。
+   * 在 FG 初始化完成后由 server.ts 调用。幂等——重复调用不会产生重复数据。
+   */
+  async syncHouseholdsToDossier(): Promise<{ families: number; socialGroups: number }> {
+    const result = { families: 0, socialGroups: 0 };
+    try {
+      const familyGenes = this.query(
+        "SELECT DISTINCT family_gene FROM nodes WHERE type = 'person' AND family_gene IS NOT NULL"
+      ) as Array<{ family_gene: string }>;
+      for (const row of familyGenes) {
+        await this._rebuildHouseholdDossier(row.family_gene);
+        result.families++;
+      }
+
+      const socialGenes = this.query(
+        "SELECT DISTINCT social_group_genes FROM nodes WHERE type = 'person' AND social_group_genes IS NOT NULL AND social_group_genes != 'WW'"
+      ) as Array<{ social_group_genes: string }>;
+      const seen = new Set<string>();
+      for (const row of socialGenes) {
+        for (const g of (row.social_group_genes || '').split('|').filter(Boolean)) {
+          if (seen.has(g)) continue;
+          seen.add(g);
+          const prefix = g.substring(0, 2);
+          await this._rebuildSocialGroupDossier(g, prefix);
+          result.socialGroups++;
+        }
+      }
+
+      if (this._verbose) {
+        console.log(`[FamilyGraph] V6 家族户/社团同步到 dossier: ${result.families}族 + ${result.socialGroups}社`);
+      }
+    } catch (e) {
+      console.warn('[FamilyGraph] syncHouseholdsToDossier 失败:', e);
+    }
+    return result;
+  }
+
+  
+  /**
+   * V4.0: 扫描并清洗 name 列中含关系称谓/非人名的脏节点。
+   * 脏名称模式: 单字亲属词、关系称谓、地名、泛称等。
+   * 在 DailyMaintenance 定时执行。
+   */
+  cleanDirtyNames(): { scanned: number; cleaned: number; details: string[] } {
+    const result = { scanned: 0, cleaned: 0, details: [] as string[] };
+    const dirtyPatterns = [
+      /^[爸妈爷奶哥弟姐妹儿女夫妻叔伯姑舅姨婶]{1,2}$/,
+      /^(老公|老婆|男朋友|女朋友|爱人|伴侣)$/,
+      /^(老板|客户|同事|供应商|领导|下属|同学|老师|学生|朋友|邻居)$/,
+      /^(深圳|北京|上海|广州|杭州|武汉|成都)$/,
+      /^[省市县区州]$/,
+    ];
+
+    try {
+      const allPersons = this.query("SELECT id, name FROM nodes WHERE type = 'person' AND name != '我'");
+      result.scanned = allPersons.length;
+
+      for (const p of allPersons) {
+        const isDirty = dirtyPatterns.some(pat => pat.test(p.name));
+        if (isDirty) {
+          // Check if has edges — if so, try to merge rather than delete
+          const edgeCount = this.query("SELECT COUNT(*) as cnt FROM edges WHERE source_id = ? OR target_id = ?", [p.id, p.id]);
+          const edgeCnt = (edgeCount[0] as any)?.cnt || 0;
+
+          if (edgeCnt === 0) {
+            // Isolated dirty node — delete
+            this.run("DELETE FROM nodes WHERE id = ?", [p.id]);
+            result.cleaned++;
+            result.details.push(p.name + ': 删除(孤立脏节点)');
+          } else {
+            // Has edges — mark entity_source as placeholder for later merge
+            this.run("UPDATE nodes SET entity_source = 'placeholder' WHERE id = ?", [p.id]);
+            result.details.push(p.name + ': 标记placeholder(' + edgeCnt + '条边待合并)');
+          }
+        }
+      }
+
+      if (result.cleaned > 0 || result.details.length > 0) {
+        console.log('[FamilyGraph] 脏名称清洗: ' + result.cleaned + '人删除, ' + (result.details.length - result.cleaned) + '人标记');
+      }
+    } catch (e) {
+      console.warn('[FamilyGraph] cleanDirtyNames 异常:', (e as Error)?.message || e);
+    }
+    return result;
+  }
+
+  /** V4.0: 脏名称清洗 + 占位升级（每日维护挂钩） */
+  runDailyHouseholdMaintenance(): { dirtyNames: number; placeholders: number; lifecycle: number } {
+    const dirtyResult = this.cleanDirtyNames();
+    const placeholderResult = this.promotePlaceholders();
+    let lifecycleResult = 0;
+    try {
+      // status downgrade checks for all persons
+      const all = this.query("SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status != 'deceased'");
+      for (const p of all) {
+        const props = JSON.parse(p.properties || '{}');
+        const lastMentioned = props.last_mentioned;
+        if (!lastMentioned) continue;
+        const daysSince = (Date.now() - new Date(lastMentioned).getTime()) / 86400000;
+        const currentStatus = p.status || 'active';
+        if (currentStatus === 'active' && daysSince > 90) {
+          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['dormant', p.id]);
+          lifecycleResult++;
+        } else if (currentStatus === 'dormant' && daysSince > 365) {
+          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['archived', p.id]);
+          lifecycleResult++;
+        } else if (currentStatus === 'dormant' && daysSince < 90) {
+          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['active', p.id]);
+          lifecycleResult++;
+        }
+      }
+    } catch { /* ignore */ }
+    return { dirtyNames: dirtyResult.cleaned, placeholders: placeholderResult.upgraded, lifecycle: lifecycleResult };
+  }
+
+  /**
+   * V4.0: 占位实体自动升级。
+   * 扫描所有 entity_source = 'placeholder' 的节点，满足条件则自动升级为 'real'。
+   *
+   * 升级条件：
+   *   1. mention_count ≥ 3（被独立提及 ≥3 次）
+   *   2. 或者 last_mentioned 在 7 天内且有关系边（edges 中已建立社交连接）
+   *
+   * 法律依据：《户籍管理法》第三十三条
+   */
+  promotePlaceholders(): { scanned: number; upgraded: number; details: string[] } {
+    const result = { scanned: 0, upgraded: 0, details: [] as string[] };
+
+    try {
+      const placeholders = this.query(
+        "SELECT id, name, properties FROM nodes WHERE type = 'person' AND entity_source = 'placeholder'"
+      ) as Array<{ id: string; name: string; properties: string }>;
+
+      result.scanned = placeholders.length;
+
+      for (const row of placeholders) {
+        const props = JSON.parse(row.properties || '{}');
+        const mentionCount = props.mention_count || 0;
+        const lastMentioned = props.last_mentioned || '';
+        const daysSince = lastMentioned
+          ? (Date.now() - new Date(lastMentioned).getTime()) / 86400_000
+          : 999;
+
+        // 条件 1: 被提及 ≥ 3 次
+        const cond1 = mentionCount >= 3;
+
+        // 条件 2: 最近 7 天内有交互且有社交边
+        let hasEdges = false;
+        if (daysSince <= 7) {
+          const edgeCount = this.query(
+            "SELECT COUNT(*) as cnt FROM edges WHERE source_id = ? OR target_id = ?",
+            [row.id, row.id]
+          );
+          hasEdges = ((edgeCount[0] as any)?.cnt || 0) > 0;
+        }
+
+        if (cond1 || hasEdges) {
+          this.run('UPDATE nodes SET entity_source = ? WHERE id = ?', ['real', row.id]);
+          result.upgraded++;
+
+          // 记录变更历史
+          if (!props._changeHistory) props._changeHistory = [];
+          const reason = cond1 && hasEdges
+            ? `提及${mentionCount}次 + 近期有交互(${Math.round(daysSince)}天)`
+            : cond1 ? `累计提及${mentionCount}次` : `近${Math.round(daysSince)}天内有交互`;
+          props._changeHistory.push({
+            time: new Date().toISOString(),
+            operation: '实体来源升级',
+            field: 'entity_source',
+            before: 'placeholder',
+            after: 'real',
+            reason,
+            source: '占位升级引擎',
+          });
+          if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+          this.run('UPDATE nodes SET properties = ? WHERE id = ?', [JSON.stringify(props), row.id]);
+
+          result.details.push(`${row.name}: placeholder→real (${reason})`);
+        }
+      }
+
+      if (result.upgraded > 0) {
+        console.log(`[FamilyGraph] 占位升级: ${result.upgraded}/${result.scanned} 人 (${result.details.join('; ')})`);
+      }
+    } catch (e) {
+      console.warn('[FamilyGraph] promotePlaceholders 异常:', (e as Error)?.message || e);
+    }
+
+    return result;
+  }
+
+  /**
    * V2.0 UUID 纯流水号迁移
    */
   private _migrateToV5(): void {
@@ -1135,6 +1350,190 @@ export class FamilyGraph implements FamilyGraphInterface {
     return stats;
   }
 
+  /**
+   * V4.0: 手动设置实体生命周期状态。
+   * 支持 active / dormant / archived / deceased 四态流转。
+   * deceased 不可逆；archived 仅可恢复为 active。
+   */
+  setEntityStatus(entityName: string, newStatus: string, reason: string = '手动操作'): { success: boolean; error?: string } {
+    const node = this.findPersonNodeByNameOrAlias(entityName);
+    if (!node) return { success: false, error: `实体不存在: ${entityName}` };
+
+    const currentStatus = (node as any).status || 'active';
+    if (currentStatus === 'deceased') return { success: false, error: '已注销实体不可恢复' };
+    if (currentStatus === 'archived' && newStatus !== 'active') return { success: false, error: '封存实体仅可手动恢复为 active' };
+    if (!['active', 'dormant', 'archived', 'deceased'].includes(newStatus)) return { success: false, error: `非法状态: ${newStatus}` };
+
+    const props = JSON.parse(node.properties || '{}');
+    this.run('UPDATE nodes SET status = ? WHERE id = ?', [newStatus, node.id]);
+
+    if (!props._changeHistory) props._changeHistory = [];
+    props._changeHistory.push({
+      time: new Date().toISOString(),
+      operation: '状态变更',
+      field: 'status',
+      before: currentStatus,
+      after: newStatus,
+      reason,
+      source: '用户手动操作',
+    });
+    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
+      JSON.stringify(props), new Date().toISOString(), node.id,
+    ]);
+
+    if (this._verbose) console.log(`[FamilyGraph] 状态变更: ${entityName} ${currentStatus}→${newStatus} (${reason})`);
+    return { success: true };
+  }
+
+  /**
+   * V4.0: 统一分类管理入口。
+   * 所有 category 变更必须通过此方法——不再允许直接 UPDATE nodes SET category。
+   * 自动同步：nodes.category + _changeHistory + dossier (lifeMilestones/socialIdentity)。
+   *
+   * @param entityName - 实体名
+   * @param newCategory - 新分类 (A/B/C/D/E/F/G/H/X/S)
+   * @param reason - 变更原因
+   */
+  setCategory(entityName: string, newCategory: string, reason: string = '手动操作'): { success: boolean; error?: string } {
+    const validCategories = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X', 'S'];
+    if (!validCategories.includes(newCategory)) {
+      return { success: false, error: `非法分类: ${newCategory}。合法值: ${validCategories.join('/')}` };
+    }
+
+    const node = this.findPersonNodeByNameOrAlias(entityName);
+    if (!node) return { success: false, error: `实体不存在: ${entityName}` };
+
+    const currentCategory = (node as any).category || 'G';
+    if (currentCategory === newCategory) return { success: true }; // 未变化
+
+    // 1. 更新 nodes.category
+    this.run('UPDATE nodes SET category = ? WHERE id = ?', [newCategory, node.id]);
+
+    // 2. 追加 _changeHistory
+    const props = JSON.parse(node.properties || '{}');
+    if (!props._changeHistory) props._changeHistory = [];
+    props._changeHistory.push({
+      time: new Date().toISOString(),
+      operation: 'category修正',
+      field: 'category',
+      before: currentCategory,
+      after: newCategory,
+      reason,
+      source: '图谱同步',
+    });
+    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+
+    // 3. 同步到 dossier: 关系变迁叙事
+    if (!props.dossier) props.dossier = this.buildDossierFromFlat(props, props);
+    const dossier = props.dossier;
+
+    // 3a. lifeMilestones: 追加分类变更事件
+    if (!dossier.lifeMilestones) dossier.lifeMilestones = [];
+    const categoryLabels: Record<string, string> = {
+      A:'亲属', B:'职场', C:'朋友', D:'同学', E:'商业合作', F:'对立', G:'陌生人', H:'超自然', X:'情人', S:'系统',
+    };
+    dossier.lifeMilestones.push({
+      date: new Date().toISOString().substring(0, 10),
+      event: `关系分类变更: ${categoryLabels[currentCategory] || currentCategory} → ${categoryLabels[newCategory] || newCategory} (${reason})`,
+      type: 'relation',
+      sourceRef: 'category管理',
+    });
+
+    // 3b. socialIdentity: 若为 X 类升级，追加婚恋时间线
+    if (newCategory === 'X' && currentCategory !== 'X') {
+      if (!dossier.socialIdentity) dossier.socialIdentity = {};
+      if (!dossier.socialIdentity.maritalTimeline) dossier.socialIdentity.maritalTimeline = [];
+      dossier.socialIdentity.maritalTimeline.push({
+        date: new Date().toISOString().substring(0, 10),
+        event: `关系升温，由 ${categoryLabels[currentCategory] || currentCategory} 升级为亲密伴侣 (${reason})`,
+      });
+    }
+
+    this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
+      JSON.stringify(props), new Date().toISOString(), node.id,
+    ]);
+
+    if (this._verbose) {
+      console.log(`[FamilyGraph] 分类变更: ${entityName} ${currentCategory}→${newCategory} (${reason})`);
+    }
+    return { success: true };
+  }
+
+  /**
+   * V3.3 户籍登记卡状态查询
+   * 返回此人所有登记卡字段的采集状态 + 待采集字段清单。
+   * PAE 用此方法决定"待采集字段优先提取"策略。
+   */
+  getRegistrationStatus(personName: string): {
+    fields: Record<string, '已采集' | '待采集'>;
+    pendingFields: string[];
+    completenessScore: number;
+    p0Complete: number;
+    p0Total: number;
+    p1Complete: number;
+    p1Total: number;
+  } {
+    const result = {
+      fields: {} as Record<string, '已采集' | '待采集'>,
+      pendingFields: [] as string[],
+      completenessScore: 0,
+      p0Complete: 0,
+      p0Total: 0,
+      p1Complete: 0,
+      p1Total: 0,
+    };
+
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    if (!node) return result;
+
+    let props: any = {};
+    try { props = JSON.parse(node.properties || '{}'); } catch { /* ignore */ }
+    const dossier = props.dossier || {};
+
+    // P0/P1 权重：身份证级字段权重更高
+    const P0_KEYS = ['gender', 'birthYear', 'ethnicity', 'birthPlace'];
+    const P1_KEYS = ['education', 'maritalStatus', 'occupation', 'workplace', 'relationToUser'];
+
+    // P0 字段判断
+    result.p0Total = P0_KEYS.length;
+    for (const key of P0_KEYS) {
+      let hasValue = false;
+      switch (key) {
+        case 'gender': hasValue = !!(dossier.basicInfo?.gender || ''); break;
+        case 'birthYear': hasValue = !!(dossier.basicInfo?.birthYear || props.birthYear); break;
+        case 'ethnicity': hasValue = !!(dossier.basicInfo?.ethnicity || ''); break;
+        case 'birthPlace': hasValue = !!(dossier.basicInfo?.birthPlace || ''); break;
+      }
+      result.fields[key] = hasValue ? '已采集' : '待采集';
+      if (hasValue) result.p0Complete++;
+      else result.pendingFields.push(key);
+    }
+
+    // P1 字段判断
+    result.p1Total = P1_KEYS.length;
+    for (const key of P1_KEYS) {
+      let hasValue = false;
+      switch (key) {
+        case 'education': hasValue = !!(dossier.basicInfo?.education || ''); break;
+        case 'maritalStatus': hasValue = !!(dossier.basicInfo?.maritalStatus || ''); break;
+        case 'occupation': hasValue = !!(dossier.socialIdentity?.currentOccupation || props.occupation || ''); break;
+        case 'workplace': hasValue = !!(dossier.socialIdentity?.currentWorkplace || dossier.contact?.workplace || ''); break;
+        case 'relationToUser': hasValue = !!(props.relation_to_user || ''); break;
+      }
+      result.fields[key] = hasValue ? '已采集' : '待采集';
+      if (hasValue) result.p1Complete++;
+      else result.pendingFields.push(key);
+    }
+
+    // 综合完整度评分（P0 权重 60%，P1 权重 40%）
+    const p0Score = result.p0Complete / Math.max(1, result.p0Total);
+    const p1Score = result.p1Complete / Math.max(1, result.p1Total);
+    result.completenessScore = Math.round((p0Score * 0.6 + p1Score * 0.4) * 100) / 100;
+
+    return result;
+  }
+
   async addNode(node: GraphNode): Promise<void> {
     const aliases = [...new Set((node.aliases ?? []).map((alias) => alias.trim()).filter(Boolean))];
 
@@ -1222,6 +1621,8 @@ export class FamilyGraph implements FamilyGraphInterface {
     );
     // ── V3.3 基因码自动同步 ──
     this._syncGenesOnNewEdge(edge.source_id, edge.target_id, edge.relation);
+    // ── V6 家族户/社团成员名单同步到 dossier ──
+    await this._syncDossierHousehold(edge.source_id, edge.target_id, edge.relation);
     this.markDirty(true);
   }
 
@@ -1284,6 +1685,188 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
     return maxSeq;
+  }
+
+  /** V6: 建边后增量同步家族户/社团成员名单到各成员 dossier */
+  private async _syncDossierHousehold(sourceId: string, targetId: string, relation: string): Promise<void> {
+    const familyRelations = ['mother_of','father_of','child_of','sibling_of','spouse_of',
+      'parent_of','grandparent_of','grandchild_of','elder_sister_of','younger_sister_of',
+      'elder_brother_of','younger_brother_of','aunt_of','uncle_of','niece_of','nephew_of'];
+    const socialPrefixMap: Record<string, string> = {
+      'colleague_of':'CO', 'boss_of':'CO', 'subordinate_of':'CO', 'partner_of':'CO',
+      'classmate_of':'SC',
+      'client_of':'BU', 'operated_by':'BU',
+    };
+
+    try {
+      if (familyRelations.includes(relation)) {
+        // 读取两端最新的 family_gene（_syncGenesOnNewEdge 已更新）
+        const rows = this.query('SELECT family_gene FROM nodes WHERE id IN (?,?) AND family_gene IS NOT NULL',
+          [sourceId, targetId]);
+        const genes = [...new Set(rows.map((r: any) => r.family_gene))];
+        for (const gene of genes) {
+          await this._rebuildHouseholdDossier(gene);
+        }
+      }
+
+      const socialPrefix = socialPrefixMap[relation];
+      if (socialPrefix) {
+        const rows = this.query('SELECT social_group_genes FROM nodes WHERE id IN (?,?)',
+          [sourceId, targetId]);
+        const allGenes = new Set<string>();
+        for (const r of rows) {
+          (r.social_group_genes || '').split('|').filter(Boolean).forEach((g: string) => {
+            if (g.startsWith(socialPrefix)) allGenes.add(g);
+          });
+        }
+        for (const gene of allGenes) {
+          await this._rebuildSocialGroupDossier(gene, socialPrefix);
+        }
+      }
+    } catch (e) {
+      // 同步失败不影响边的创建
+      if (this._verbose) console.warn('[FamilyGraph] dossier household sync 失败:', e);
+    }
+  }
+
+  /** V6: 为指定 family_gene 组的所有成员重建 dossier.misc._household */
+  private async _rebuildHouseholdDossier(gene: string): Promise<void> {
+    const members = this.query(
+      "SELECT id, name, properties, created_at FROM nodes WHERE family_gene = ? AND type = 'person'",
+      [gene]
+    ) as Array<{ id: string; name: string; properties: string; created_at: string }>;
+    if (members.length < 2) return; // 单人不成户
+
+    // 户主 = "我"优先（如果在此户中），否则按 created_at 最早的成员
+    const sorted = [...members].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const selfNode = members.find(m => m.name === '我');
+    const householderName = selfNode ? '我' : sorted[0].name;
+
+    const memberIds = members.map(m => m.id);
+    const placeholders = memberIds.map(() => '?').join(',');
+
+    // 批量取该组内所有家族边
+    const edges = this.query(
+      `SELECT e.source_id, e.target_id, e.relation FROM edges e
+       WHERE e.source_id IN (${placeholders}) AND e.target_id IN (${placeholders})`,
+      [...memberIds, ...memberIds]
+    ) as Array<{ source_id: string; target_id: string; relation: string }>;
+
+    // 为每个成员构建 household 信息并写入
+    for (const member of members) {
+      const relList: Array<{ name: string; relation: string; birthYear?: number }> = [];
+
+      for (const other of members) {
+        if (other.id === member.id) continue;
+
+        // 查两者之间的家族边
+        const edge = edges.find(e =>
+          (e.source_id === member.id && e.target_id === other.id) ||
+          (e.source_id === other.id && e.target_id === member.id)
+        );
+        const relationLabel = edge
+          ? this._getEdgeDisplayLabel(edge.relation, edge.source_id === member.id)
+          : '亲属';
+
+        // 提取出生年份
+        let birthYear: number | undefined;
+        try {
+          const op = JSON.parse(other.properties || '{}');
+          birthYear = op.dossier?.basicInfo?.birthYear;
+        } catch { /* ignore */ }
+
+        relList.push({
+          name: other.name,
+          relation: relationLabel,
+          ...(birthYear ? { birthYear } : {}),
+        });
+      }
+
+      const householdInfo = {
+        gene,
+        householder: householderName,
+        members: relList,
+        lastSync: new Date().toISOString(),
+      };
+
+      await this._setDossierFieldSystem(member.name, 'misc._household', householdInfo);
+    }
+  }
+
+  /** V6: 为指定 social_group 码的所有成员重建 dossier.misc._socialGroups */
+  private async _rebuildSocialGroupDossier(gene: string, prefix: string): Promise<void> {
+    const members = this.query(
+      "SELECT id, name FROM nodes WHERE type = 'person' AND social_group_genes LIKE ?",
+      [`%${gene}%`]
+    ) as Array<{ id: string; name: string }>;
+    if (members.length < 2) return;
+
+    const typeMap: Record<string, string> = { CO: 'colleague', SC: 'school', BU: 'business' };
+    const memberNames = members.map(m => m.name);
+
+    const groupInfo = {
+      gene,
+      type: typeMap[prefix] || 'other',
+      members: memberNames,
+      lastSync: new Date().toISOString(),
+    };
+
+    // 更新该组每个成员的 _socialGroups（合并已有其他社团信息）
+    for (const member of members) {
+      const existing = await this._getDossierField(member.name, 'misc._socialGroups');
+      const groups: any[] = Array.isArray(existing) ? existing : [];
+      const idx = groups.findIndex((g: any) => g.gene === gene);
+      if (idx >= 0) {
+        groups[idx] = groupInfo;
+      } else {
+        groups.push(groupInfo);
+      }
+      await this._setDossierFieldSystem(member.name, 'misc._socialGroups', groups);
+    }
+  }
+
+  /** V6: 系统级 dossier 字段写入（不增加 mention_count，不触发 PAE） */
+  private async _setDossierFieldSystem(personName: string, fieldPath: string, value: any): Promise<void> {
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    if (!node) return;
+
+    const props = JSON.parse(node.properties || '{}');
+    if (!props.dossier) props.dossier = this.buildDossierFromFlat(props, props);
+
+    const { oldValue } = dossierWrite(props.dossier, fieldPath, value);
+    const oldStr = JSON.stringify(oldValue ?? null);
+    const newStr = JSON.stringify(value);
+    if (oldStr === newStr) return;
+
+    if (!props._changeHistory) props._changeHistory = [];
+    props._changeHistory.push({
+      time: new Date().toISOString(),
+      operation: '图谱同步',
+      field: `dossier.${fieldPath}`,
+      before: oldStr === 'null' ? null : JSON.parse(oldStr),
+      after: value,
+      reason: 'BFS 基因码组成员名单增量同步',
+      source: '图谱同步',
+    });
+    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+
+    this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
+      JSON.stringify(props), new Date().toISOString(), node.id,
+    ]);
+  }
+
+  /** V6: 读取 dossier 中指定字段的值 */
+  private async _getDossierField(personName: string, fieldPath: string): Promise<any> {
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    if (!node) return undefined;
+    const props = JSON.parse(node.properties || '{}');
+    if (!props.dossier) return undefined;
+    return dossierRead(props.dossier, fieldPath);
+  }
+
+  /** V6: 将 edge relation 转为中文展示标签（委托 shared/RelationLabels） */
+  private _getEdgeDisplayLabel(relation: string, isOutgoing: boolean): string {
+    return getRelationLabel(relation, isOutgoing);
   }
 
   async findRelated(entityName: string, relation?: string): Promise<GraphQueryResult[]> {
@@ -1387,9 +1970,9 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   private findPersonNodeByNameOrAlias(name: string): any | null {
-    const exact = this.query('SELECT id, name, aliases, properties FROM nodes WHERE name = ? AND type = ?', [name, 'person']);
+    const exact = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE name = ? AND type = ?', [name, 'person']);
     if (exact.length > 0) return exact[0];
-    const aliasHit = this.query('SELECT id, name, aliases, properties FROM nodes WHERE type = ? AND aliases LIKE ?', ['person', `%"${name}"%`]);
+    const aliasHit = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE type = ? AND aliases LIKE ?', ['person', `%"${name}"%`]);
     return aliasHit.length > 0 ? aliasHit[0] : null;
   }
 
@@ -2447,9 +3030,6 @@ export class FamilyGraph implements FamilyGraphInterface {
       mention_count: 0,
       ...props,
     } as PersonProfile;
-    // 🔴 FG真人标记: relation_to_user 非空则不可扮演
-    // V3.2.1 调试模式: DEBUG_UNLOCK_ALL=true 时全部放行（无需重启，修改此标志后重启即可）
-    (result as any).roleplay_forbidden = FamilyGraph.DEBUG_UNLOCK_ALL ? false : !!(result.relation_to_user && result.relation_to_user !== '' && result.relation_to_user !== '无' && !result.relation_to_user.includes('虚构') && !result.relation_to_user.includes('扮演'));
     // 📜 信息权威铁律 · 等级S: 记录age字段是否有效
     if (result.age !== undefined && result.age !== null) {
       if(this._verbose)console.log('[FG:S] getPersonProfile(' + personName + '→' + node.name + ') age=' + result.age + ' (SOURCE: nodes.properties)');
@@ -2461,35 +3041,20 @@ export class FamilyGraph implements FamilyGraphInterface {
     return result;
   }
 
-  /** V3.3: 根据 last_mentioned 时间自动降级实体状态 */
+  /** V3.3: 根据 last_mentioned 时间自动降级实体状态（委托 shared/StatusRules） */
   private _checkStatusDowngrade(node: any, profile: PersonProfile): void {
     try {
       const currentStatus = (node as any).status || 'active';
-      if (currentStatus === 'deceased') return; // 注销状态不可逆
-      if (currentStatus === 'archived') return; // 封存状态仅手动恢复
+      if (!profile.last_mentioned) return;
 
-      const lastMentioned = profile.last_mentioned;
-      if (!lastMentioned) return;
+      const daysSince = (Date.now() - new Date(profile.last_mentioned).getTime()) / 86400_000;
+      const result = computeTargetStatus(currentStatus, daysSince);
 
-      const daysSince = (Date.now() - new Date(lastMentioned).getTime()) / 86400_000;
-
-      if (currentStatus === 'active' && daysSince > 90) {
-        this.run('UPDATE nodes SET status = ? WHERE id = ?', ['dormant', node.id]);
-      } else if (currentStatus === 'dormant' && daysSince > 365) {
-        this.run('UPDATE nodes SET status = ? WHERE id = ?', ['archived', node.id]);
-      } else if (currentStatus === 'dormant' && daysSince < 90) {
-        // 最近被提及 → 恢复 active
-        this.run('UPDATE nodes SET status = ? WHERE id = ?', ['active', node.id]);
+      if (result.changed) {
+        this.run('UPDATE nodes SET status = ? WHERE id = ?', [result.to, node.id]);
       }
     } catch { /* 状态更新失败不影响读取 */ }
   }
-
-  /**
-   * V3.2.1 调试模式: 全部限制解锁
-   * true  = roleplay_forbidden 始终 false、circle_level/security_level 全部开放
-   * false = 正常运行（调试完成后恢复）
-   */
-  static DEBUG_UNLOCK_ALL = true;
 
   /**
    * SP2-3: 反义词冲突检测对
@@ -2637,7 +3202,7 @@ export class FamilyGraph implements FamilyGraphInterface {
    * @param fieldPath - 字段路径，如 "basicInfo.gender"、"health.condition"
    * @param value - 要写入的值
    */
-  async setDossierField(personName: string, fieldPath: string, value: any): Promise<void> {
+  async setDossierField(personName: string, fieldPath: string, value: any, confidence?: number): Promise<void> {
     const node = this.findPersonNodeByNameOrAlias(personName);
     if (!node) return;
 
@@ -2663,6 +3228,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     const oldValue = JSON.stringify(target[lastKey] ?? null);
     const newValueStr = JSON.stringify(value);
 
+    // V4.0: 系统只读保护 — systemReadOnly 标记的字段不可被 PAE 覆盖
+    if (target._systemReadOnly && target._systemReadOnly[lastKey]) {
+      return; // 只读字段，禁止覆盖
+    }
+
     // 值未变化则跳过
     if (oldValue === newValueStr) return;
 
@@ -2677,6 +3247,12 @@ export class FamilyGraph implements FamilyGraphInterface {
       timestamp: new Date().toISOString(),
     });
     if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+
+    // V4.0: 置信度标记（PAE 提取 vs 用户手动）
+    const lastEntry = props._changeHistory[props._changeHistory.length - 1];
+    if (lastEntry && confidence !== undefined) {
+      lastEntry.source = confidence >= 0.8 ? `PAE自动采集(置信度${confidence})` : `PAE自动采集(置信度${confidence})`;
+    }
 
     // 更新 mention 计数和最后提及时间
     props.mention_count = (props.mention_count || 0) + 1;

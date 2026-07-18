@@ -215,31 +215,30 @@ export class RelationHeatTracker {
    */
   async checkXUpgrade(uuid: string): Promise<UpgradeResult | null> {
     const state = await this.computeHeat(uuid);
-    if (state.heatScore < 0.8) return null;  // 热度不足
+    if (state.heatScore < 0.8) return null;
 
     const entity = this.familyGraph.getEntityByUUID(uuid);
     if (!entity) return null;
 
-    // 已是 A（亲属）或已是 X（情人）→ 不升级
     const currentCategory = entity.category || '';
     if (currentCategory === 'A' || currentCategory === 'X') return null;
 
-    // 升级分类为 X
+    // V4.0: 仅更新 category 列，TXS-ID 终身不变
     try {
-      const allX = (this.familyGraph as any).query(
-        "SELECT uuid FROM nodes WHERE category = 'X' AND type = 'person'"
-      );
-      let maxSeq = 0;
-      for (const r of (allX || [])) {
-        const num = parseInt((r.uuid || '').split('-')[1] || '0', 10);
-        if (!isNaN(num) && num > maxSeq) maxSeq = num;
-      }
-      const newUUID = `X-${String(maxSeq + 1).padStart(5, '0')}`;
       (this.familyGraph as any).run(
-        'UPDATE nodes SET uuid = ?, category = ? WHERE id = ?',
-        [newUUID, 'X', entity.id]
+        'UPDATE nodes SET category = ? WHERE id = ?',
+        ['X', entity.id]
       );
     } catch { return null; }
+
+    // V4.0: 记录分类变更到 dossier (通过 setCategory 统一入口)
+    try {
+      (this.familyGraph as any).setCategory?.(
+        entity.name || (entity as any).node_name || '',
+        'X',
+        `热力升级: heat=${state.heatScore}, warmth=${state.warmth}`
+      );
+    } catch { /* 非关键 */ }
 
     return {
       upgraded: true,
