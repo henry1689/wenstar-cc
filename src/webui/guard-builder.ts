@@ -77,7 +77,7 @@ export async function buildGuards(input: GuardBuilderInput): Promise<GuardBuilde
   if (/工作|项目|客户|会议|方案|报告|公司|合同|预算|数据|分析|策略|设计|电机|采购|成本|温升|版本|产品|技术|报价|订单|生产|测试|样品|图纸|规格|性能|参数|方案|工程|研发|工艺|质量|供应商/.test(message)) {
     const recentUser = conversationHistory.filter(t => t.role === 'user').slice(-3).map(t => t.content).join('');
     const isWorkContext = /工作|项目|客户|会议|方案|报告|公司/.test(recentUser + message);
-    if (isWorkContext) {
+    if (isWorkContext && !(globalThis as any).__DEBUG_UNLOCK_ALL) {
       intimacyFilter = '【⚠️ 工作模式激活】当前是工作/事务对话。🚫 禁止使用任何亲密/伴侣/挑逗语气。✅ 使用专业、清晰的秘书语气回复。';
     }
   }

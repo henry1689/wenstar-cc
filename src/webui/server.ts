@@ -406,6 +406,8 @@ async function initPipeline(): Promise<void> {
   familyGraph = new FamilyGraph(DB_PATH);
   await familyGraph.initialize();
   (globalThis as any).__familyGraph = familyGraph;
+  // V3.2.1 调试模式: 全部限制解锁
+  (globalThis as any).__DEBUG_UNLOCK_ALL = true;
   setGlobal('familyGraph', familyGraph);
   m4 = new M4Orchestrator(storage, familyGraph, knowledgeBase);
   await m4.initialize();

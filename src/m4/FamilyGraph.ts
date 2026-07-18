@@ -2141,7 +2141,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       ...props,
     } as PersonProfile;
     // 🔴 FG真人标记: relation_to_user 非空则不可扮演
-    (result as any).roleplay_forbidden = !!(result.relation_to_user && result.relation_to_user !== '' && result.relation_to_user !== '无' && !result.relation_to_user.includes('虚构') && !result.relation_to_user.includes('扮演'));
+    // V3.2.1 调试模式: DEBUG_UNLOCK_ALL=true 时全部放行（无需重启，修改此标志后重启即可）
+    (result as any).roleplay_forbidden = FamilyGraph.DEBUG_UNLOCK_ALL ? false : !!(result.relation_to_user && result.relation_to_user !== '' && result.relation_to_user !== '无' && !result.relation_to_user.includes('虚构') && !result.relation_to_user.includes('扮演'));
     // 📜 信息权威铁律 · 等级S: 记录age字段是否有效
     if (result.age !== undefined && result.age !== null) {
       if(this._verbose)console.log('[FG:S] getPersonProfile(' + personName + '→' + node.name + ') age=' + result.age + ' (SOURCE: nodes.properties)');
@@ -2150,6 +2151,13 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
     return result;
   }
+
+  /**
+   * V3.2.1 调试模式: 全部限制解锁
+   * true  = roleplay_forbidden 始终 false、circle_level/security_level 全部开放
+   * false = 正常运行（调试完成后恢复）
+   */
+  static DEBUG_UNLOCK_ALL = true;
 
   /**
    * SP2-3: 反义词冲突检测对
