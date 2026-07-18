@@ -273,6 +273,21 @@ export interface PersonDossier {
     type: 'knowledge' | 'task' | 'note' | 'setting';
     boundAt: string;
   }>;
+  /** V6: 固有完整人设档案（替代 imageTraits + personalityPrefs + health + 散落flat字段） */
+  selfProfile?: {
+    traits?: string[]; appearance?: string; bodyFeatures?: string;
+    style?: string; voice?: string; scent?: string; distinguishingMarks?: string;
+    likes?: string[]; dislikes?: string[]; languageHabits?: string; taboos?: string[];
+    healthCondition?: string; feminineDetails?: any; pendingItems?: any[];
+  };
+  /** V6: 社会身份时间线（替代 relationMap 时序 + occupation 散落） */
+  socialIdentity?: {
+    timeline?: Array<{ period: string; role: string; detail?: string; sourceRef?: string }>;
+    currentOccupation?: string; currentWorkplace?: string;
+    maritalTimeline?: Array<{ date: string; event: string }>;
+  };
+  /** V6: 归档旧模块（卷宗只增不删） */
+  _deprecated?: Record<string, any>;
 }
 
 /** 待确认条目（30 天 TTL） */
