@@ -9,7 +9,6 @@
 
 import type { RoleType } from '../../app/role/RoleClassifier.js';
 import type { TransitionState } from '../../app/role/TransitionManager.js';
-import type { FamilyGraphRoleBranch } from '../../app/alignment/FamilyGraphRoleBranch.js';
 import type { DNA } from '../../m1/types/dna.js';
 import type { M4Context } from '../../m4/types/index.js';
 
@@ -22,7 +21,7 @@ export interface ChatContext {
   // ── 全局唯一角色状态（只在此一处维护，全链路只读） ──
   currentRole: RoleType;
   rpState: TransitionState;
-  rpChar: FamilyGraphRoleBranch | null;
+  rpChar: null;  // V4.0: 角色扮演已废除
   rpTurn: number;
   rpJustExit: boolean;
 

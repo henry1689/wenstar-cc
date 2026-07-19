@@ -513,18 +513,24 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       decision.enhanced.calcium_score = Math.min(10, (decision.enhanced.calcium_score || 0.5) * _noveltyMultiplier);
     }
 
-    // P0-1: 角色路由（模块级状态持久化）
+    // P0-1: 角色路由（🛡️ V4.0: 会晤模式下固定为 neutral，不切换角色）
     const p = decision.enhanced.perception;
-    const roleDecision = classify({
-      message, perception: p,
-      entities: dna.entity_genes,
-      previousRole: _currentRole,
-      consecutiveIntimateCount: _transitionState.consecutiveIntimate,
-    });
-    const transition = evaluateTransition(_transitionState, roleDecision, message);
-    _transitionState = transition.state;
-    _currentRole = transition.newRole;
-    console.log('[RoleRouter] ' + _currentRole + ' (' + roleDecision.rule + ')');
+    const _inMeeting = ctx._entityMeeting?.isActive?.() ?? false;
+    if (!_inMeeting) {
+      const roleDecision = classify({
+        message, perception: p,
+        entities: dna.entity_genes,
+        previousRole: _currentRole,
+        consecutiveIntimateCount: _transitionState.consecutiveIntimate,
+      });
+      const transition = evaluateTransition(_transitionState, roleDecision, message);
+      _transitionState = transition.state;
+      _currentRole = transition.newRole;
+      console.log('[RoleRouter] ' + _currentRole + ' (' + roleDecision.rule + ')');
+    } else {
+      // 会晤中固定为 neutral，不触发 lover/secretary 等玉瑶角色
+      _currentRole = 'recaller';
+    }
     try { const { WorkingMemory: WM } = await import('../m9/WorkingMemory.js'); WM.currentTag = _currentRole; } catch (e) { console.warn('[WorkingMemory] currentTag 设置失败:', (e as any)?.message); }
     // 主人大脑镜像提取：每轮对话后自动提取+审查+存储
     if (ctx.masterProfile && message.length > 3) {
@@ -557,9 +563,8 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
     // 记忆以【相关记忆】标签注入到 knowledgeBaseText，不伪装成对话内容
     // 修复：干净的三层注入结构——对话原文/enrichedHistory、记忆/memoryFragments、知识/knowledgeBaseText
     let memoryFragments: string[] = [];
-    // 过滤历史：排除角色扮演期间的对话（按 persistence-stage 写入时的 rpChar 标记过滤）
-    let enrichedHistory: Array<ConversationTurn & { topic?: string; rpChar?: string }>;
-    enrichedHistory = ctx.conversationHistory.slice(-40).filter(function(t: any) { return !t.rpChar; });
+    let enrichedHistory: Array<ConversationTurn & { topic?: string }>;
+    enrichedHistory = ctx.conversationHistory.slice(-40);
         // ── 记忆检索：时间导航 + 情感检索 + 黑钻检索（已拆分至 retrieval-stage） ──
     let {
       isTopicShift, isFollowUp, hasContinuationMarkers, isCasualChat,
@@ -624,6 +629,17 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       ctx._entityMeeting.recordTurn('user', message, '我');
     }
 
+    // 🆕 V3.0: 会中换人检测（在退出检测之前）
+    if (ctx._entityMeeting?.isActive()) {
+      const fg = ctx.m4?.getFamilyGraph?.();
+      const allNames: string[] = fg?.getAllPersonNames?.() || [];
+      const switchTarget = EntityMeeting.detectSwitchIntent(message, allNames);
+      if (switchTarget) {
+        await ctx._entityMeeting.switchTo(switchTarget);
+        console.log('[EntityMeeting] 会中切换: → ' + switchTarget);
+      }
+    }
+
     // V4.0 会议退出检测
     if (ctx._entityMeeting?.isActive() && /^(?:散会|结束.*会议|会议.*结束|不开了|今天就到这儿|今天就到这里|先这样|下了|拜拜|再见).*$/.test(message.trim())) {
       const exitResult = await ctx._entityMeeting.exit();
@@ -632,22 +648,11 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       }
     }
 
-    // ── V4.0 实体会晤意图检测 + 激活 ──
+    // ── V3.0 实体会晤意图检测 + 激活（含间接呼唤/自然口语） ──
     if (ctx._entityMeeting && !ctx._entityMeeting.isActive()) {
       const fg = ctx.m4?.getFamilyGraph?.();
       const allNames: string[] = fg?.getAllPersonNames?.() || [];
-      // 先尝试标准检测
-      let intentNames = EntityMeeting.detectUserIntent(message, allNames);
-      // Fallback: 直接用简单匹配检测 "跟X聊聊"/"和X聊聊"/"找X" 模式
-      if (!intentNames) {
-        const simpleMatch = message.match(/[跟和找叫喊]\s*([一-龥]{2,4})\s*(聊聊|聊一下|说说话|来一下|过来|出来)/);
-        if (simpleMatch) {
-          const candidateName = simpleMatch[1];
-          if (allNames.includes(candidateName)) {
-            intentNames = [candidateName];
-          }
-        }
-      }
+      const intentNames = EntityMeeting.detectUserIntent(message, allNames);
       if (intentNames && intentNames.length > 0) {
         if (intentNames.length >= 3) {
           ctx._entityMeeting.enterMulti(intentNames);
@@ -659,17 +664,101 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
       }
     }
 
-    // ── V4.0 实体会晤：注入实体人物上下文 ──
+    // 🆕 V4.0: 会晤知识库缓存 — 首轮搜到的 KB 内容持续注入后续轮次
+    const _meetingKBCache: Map<string, string> = (ctx as any)._meetingKBCache || (() => { const m = new Map<string, string>(); (ctx as any)._meetingKBCache = m; return m; })();
+
+    // ── V4.0 实体会晤：注入实体人物上下文（含档案+对话历史+开场协议） ──
     let _entityContextText = '';
+    let _meetingEntityName: string | null = null;
     if (ctx._entityMeeting?.isActive()) {
       try {
-        const entityName = ctx._entityMeeting.getEntityName();
-        if (entityName) {
+        _meetingEntityName = ctx._entityMeeting.getEntityName();
+        if (_meetingEntityName) {
           const { buildEntityContext } = await import('../m4/household/EntityContextBuilder.js');
-          const ecResult = buildEntityContext(ctx.m4.getFamilyGraph?.(), { entityName });
+          const isFirstTurn = ctx._entityMeeting.isFirstTurn?.() ?? false;
+
+          // 🆕 V4.0: 查询与该实体的近期对话历史
+          let recentConversations: Array<{ role: string; content: string; timestamp: string }> = [];
+          try {
+            if (ctx.conversationDB && typeof ctx.conversationDB.searchConversations === 'function') {
+              const cRows = ctx.conversationDB.searchConversations(_meetingEntityName, 10, true);
+              if (cRows && cRows.length > 0) {
+                recentConversations = cRows.map((r: any) => ({
+                  role: r.role || 'user',
+                  content: (r.content || '').substring(0, 200),
+                  timestamp: r.timestamp || '',
+                }));
+              }
+            }
+            // fallback: 从 conversationHistory 中筛选
+            if (recentConversations.length === 0 && ctx.conversationHistory) {
+              const _hist = ctx.conversationHistory.filter((t: any) =>
+                (t.content || '').includes(_meetingEntityName!)
+              ).slice(-10);
+              if (_hist.length > 0) {
+                recentConversations = _hist.map((t: any) => ({
+                  role: t.role || 'user',
+                  content: (t.content || '').substring(0, 200),
+                  timestamp: t.timestamp || '',
+                }));
+              }
+            }
+          } catch (_convErr) { /* 对话历史查询失败不阻塞 */ }
+
+          const ecResult = buildEntityContext(ctx.m4.getFamilyGraph?.(), {
+            entityName: _meetingEntityName,
+            isFirstTurn,
+            userName: (ctx as any)._userName || '鸿艺',
+            recentConversations: recentConversations.length > 0 ? recentConversations : undefined,
+          });
           _entityContextText = ecResult.systemText;
+
+          // 🆕 V4.0: 知识库缓存 — 首轮缓存，后续轮次持续注入
+          const cachedKB = _meetingKBCache.get(_meetingEntityName);
+          if (isFirstTurn) {
+            // 首轮：缓存本轮搜到的知识库内容（含实体 KB + 主 KB 搜索）
+            const _kbForCache = knowledgeBaseText?.substring(0, 3000) || '';
+            if (_kbForCache.length > 20) {
+              _meetingKBCache.set(_meetingEntityName, _kbForCache);
+              _entityContextText += '\n\n【关于你的知识库档案】\n以下是你的知识库档案内容，你需要了解这些：\n' + _kbForCache;
+            }
+          } else if (cachedKB) {
+            // 后续轮次：重新注入缓存的 KB 内容（用户追问时不丢失档案）
+            _entityContextText += '\n\n【关于你的知识库档案】\n以下是之前查到的你的知识库档案，继续基于这些信息回复：\n' + cachedKB;
+          }
+
+          // 🆕 V4.0: 话题延续 — 把本轮用户消息 + 上一轮实体自己的回复注入
+          if (!isFirstTurn) {
+            const prevTurn = ctx.conversationHistory.slice(-2);
+            const continuityParts: string[] = [];
+            for (const t of prevTurn) {
+              const speaker = t.role === 'user' ? '鸿艺' : _meetingEntityName;
+              const snippet = (t.content || '').substring(0, 300);
+              continuityParts.push(`${speaker}：${snippet}`);
+            }
+            if (continuityParts.length > 0) {
+              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。）';
+            }
+          }
         }
       } catch (e) { /* 实体上下文构建失败不阻塞 */ }
+      // 🆕 V3.0: 首轮上下文已注入 → 清除首轮标记，下一轮不再注入开场协议
+      if (ctx._entityMeeting?.isFirstTurn?.()) {
+        ctx._entityMeeting.incrementTurn();
+      }
+
+      // 🛡️ V4.0: 会议结束时清除 KB 缓存
+      if (!ctx._entityMeeting?.isActive()) {
+        _meetingKBCache.clear();
+      }
+    }
+
+    // 🆕 V4.0: 会晤激活时，将实体名追加到 entity_genes 中以增强 M4 记忆检索
+    if (_meetingEntityName) {
+      const _alreadyInGenes = (dna.entity_genes || []).some((g: any) => g.name === _meetingEntityName);
+      if (!_alreadyInGenes) {
+        dna.entity_genes.push({ name: _meetingEntityName, type: 'person', allele: _meetingEntityName, phenotype: 'neutral', knowledge_type: 'private' });
+      }
     }
 
     // V4.0 Phase 7: 知识库检索管线 → KnowledgeContextBuilder
@@ -680,6 +769,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
         yuyaoMemory: ctx.yuyaoMemory, hybridSearch: ctx.hybridSearch,
         clueAssistant: ctx.clueAssistant, m8: ctx.m8, conversationDB: ctx.conversationDB,
         _gatekeeper: ctx._gatekeeper,  // V3.2: 门阀传入知识检索
+        _meetingEntityName,  // 🆕 V4.0: 实体名传给知识检索
       },
       knowledgeBaseText, memoryFragments, emotionalMemories,
       _bionicPromise,
@@ -1037,7 +1127,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
 
       if (!reply && isFactualRecallQuery) {
         const factTexts = new Set<string>();
-        for (const turn of ctx.conversationHistory.filter((t: any) => t.role === 'user' && !t.rpChar)) {
+        for (const turn of ctx.conversationHistory.filter((t: any) => t.role === 'user')) {
           if (turn.content) factTexts.add(turn.content);
         }
         for (const memory of emotionalMemories) {
@@ -1065,7 +1155,7 @@ export async function processChat(message: string, ctx: ChatContext): Promise<Ch
           try {
             for (const term of factTerms) {
               const rows = ctx.conversationDB?.queryAll?.(
-                "SELECT content FROM conversations WHERE role = 'user' AND content LIKE ? AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT 8",
+                "SELECT content FROM conversations WHERE role = 'user' AND content LIKE ? ORDER BY timestamp DESC LIMIT 8",
                 ['%' + term + '%']
               ) || [];
               for (const row of rows as Array<{ content?: string }>) {
@@ -1130,8 +1220,9 @@ let finalKnowledgeText = _entityContextText ? (_entityContextText + '\n\n' + kno
             snapshotId: 'pfc_' + Date.now().toString(36),
             contextSignature: (dna.locus_path || 'root') + '|' + (p.pleasure > 0.2 ? 'pos' : (p.pleasure < -0.2 ? 'neg' : 'neu')),
             temporal: { createdAt: new Date().toISOString(), sessionId: String(seqPos) || '', timeOfDay: 'morning', dayOfWeek: new Date().getDay() },
-            spatial: { sceneLabel: '对话中' },
+            spatial: { sceneLabel: _meetingEntityName ? `会晤:${_meetingEntityName}` : '对话中' },
             entities: { persons: _entities.map((e: any) => e.name), topics: [], objects: [] },
+            meetingEntity: _meetingEntityName || undefined,  // 🆕 V4.0: 告知 PFC 当前在会晤谁
             experienceSummary: (memoryFragments || []).join(' | ').substring(0, 200) || '(无)',
             emotion: { pleasure: p.pleasure || 0, arousal: p.arousal || 0, intimacy: p.intimacy || 0, trend: 'stable' },
             memoryPointers: emotionalMemories.map((m: any) => m?.record?.id || '').filter(Boolean),
@@ -1197,7 +1288,8 @@ if (isFactualRecallQuery) {
 	  strategist: '你现在是鸿艺的商业军师——冷静、理性、有策略思维。',
 	  recaller: '你现在是鸿艺的记忆助手——帮他回忆过往的点滴。',
 	};
-	const roleHint = _roleInstruction[_currentRole];
+	// 🛡️ V4.0: 会晤模式下跳过角色路由注入——实体有自己的身份
+	const roleHint = _meetingEntityName ? null : _roleInstruction[_currentRole];
 	if (roleHint ) {
 	  finalKnowledgeText = (finalKnowledgeText || '') + '\n\n【当前角色】' + roleHint;
 	}
@@ -1232,7 +1324,8 @@ if (isFactualRecallQuery) {
         // P2: 知识边界检测 — 玉瑶不知道的事诚实说不知道
         var _isSelfQ = /(你|玉瑶)[是有的在做能会]/.test(message);
         var _isWorkQ = /(你|玉瑶)[的]?(工作|忙|项目|客户|公司)/.test(message);
-        if (_isSelfQ && !_isWorkQ && !knowledgeBaseText) {
+        // 🛡️ V4.0: 会晤模式下跳过"不知道"守卫——实体有自己的知识范围
+        if (_isSelfQ && !_isWorkQ && !knowledgeBaseText && !_meetingEntityName) {
           // 关于玉瑶自己的事但知识库里没有 → 诚实说不知道（注入到 finalKnowledgeText 顶部）
           if (!finalKnowledgeText) finalKnowledgeText = '';
           if (finalKnowledgeText.indexOf('【不知道】') < 0) {
@@ -1337,7 +1430,9 @@ if (isFactualRecallQuery) {
               }
             }
 
-            if (_selfBlocks.length > 0) {
+            // 🛡️ V4.0: 会晤模式下不注入玉瑶的自我模型（性格/偏好/身份记忆），
+            // 避免与实体上下文"你是XX"冲突
+            if (!_meetingEntityName && _selfBlocks.length > 0) {
               finalKnowledgeText = _selfBlocks.join('\n') + '\n\n' + finalKnowledgeText;
             }
           }
@@ -1376,7 +1471,7 @@ if (isFactualRecallQuery) {
 if (_ruleEngineBlocked && _ruleEngineReply) {
   reply = _ruleEngineReply;
 } else {
-reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, knowledgeBaseText ? (knowledgeBaseText.split('\n').filter(l => l.trim()).join('\n') + '\n\n' + message) : message, _currentRole);
+reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, knowledgeBaseText ? (knowledgeBaseText.split('\n').filter(l => l.trim()).join('\n') + '\n\n' + message) : message, _currentRole, !!_meetingEntityName);
 }
 
     // P0-3: 规则幻觉校验 — 提取回复中的人名对照 FamilyGraph

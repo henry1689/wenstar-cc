@@ -76,6 +76,8 @@ export interface LLMProvider {
     userMessage?: string;
     /** P0: 角色路由结果（由 M5Orchestrator 预先计算，避免耦合在 LLM Provider 内部） */
     role?: import('../../app/role/RoleClassifier.js').RoleType;
+    /** 🆕 V4.0: 是否处于实体会晤模式 */
+    isEntityMeeting?: boolean;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }>;
 
   /** 切换角色 (可选实现) */

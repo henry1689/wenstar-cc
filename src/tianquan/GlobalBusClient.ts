@@ -83,6 +83,7 @@ export class GlobalBusClient extends EventEmitter {
       rl.on('line', (line: string) => {
         try { this._handleMessage(JSON.parse(line.trim())); } catch { /* ignore parse errors */ }
       });
+      rl.on('error', () => { /* readline error on closed socket — ignore */ });
       sock.on('close', () => { this._connected = false; this._socket = null; this._log('断开'); this.emit('disconnected'); this._tryReconnect(); });
       sock.on('error', (e) => { this._log(`错误: ${e.message}`); reject(e); });
     });

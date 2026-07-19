@@ -115,6 +115,44 @@ export class DailyMaintenanceScheduler {
       console.warn('[DailyMaintenance] FG 维护失败:', err);
     }
 
+    // 🆕 V4.0·Phase 4: 知识优化 — 优先级升级 + 关联标签
+    try {
+      const evoDb = this.storage.getSQLite();
+      if (evoDb) {
+        // 4.2 优先级升级: recall_count >= 3 的条目提高 impression_score
+        const promoted = evoDb.queryAll(
+          "SELECT id, title, recall_count, impression_score FROM knowledge_base WHERE recall_count >= 3 AND impression_score < 0.7 AND classification_pending = 0 LIMIT 20"
+        );
+        if (promoted && promoted.length > 0) {
+          for (const p of promoted) {
+            const row = p as any;
+            evoDb.writeRaw(
+              "UPDATE knowledge_base SET impression_score = MIN(1.0, COALESCE(impression_score, 0.5) + 0.1), updated_at = datetime('now') WHERE id = ?",
+              [row.id]
+            );
+          }
+          console.log('[DailyMaintenance] 知识升级: ' + promoted.length + '条高频知识升级');
+        }
+
+        // 4.3 关联: 标 same-entity 的知识条目互相打 tag
+        const grouped = evoDb.queryAll(
+          "SELECT belong_entity_uuid, COUNT(*) as cnt FROM knowledge_base WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' GROUP BY belong_entity_uuid HAVING cnt >= 2 LIMIT 20"
+        );
+        if (grouped && grouped.length > 0) {
+          let linked = 0;
+          for (const g of grouped) {
+            const grp = g as any;
+            evoDb.writeRaw(
+              "UPDATE knowledge_base SET tags = json_insert(COALESCE(tags, '[]'), '$[#]', 'linked_entity') WHERE belong_entity_uuid = ? AND tags NOT LIKE '%linked_entity%'",
+              [grp.belong_entity_uuid]
+            );
+            linked += (grp.cnt as number);
+          }
+          if (linked > 0) console.log('[DailyMaintenance] 知识关联: ' + linked + '条已打关联标签');
+        }
+      }
+    } catch (e5) { console.warn('[DailyMaintenance] 知识演化失败:', (e5 as Error).message); }
+
     try {
       // 🔥 睡眠期巩固 (SleepTime Consolidator)
       const _stSqlite = this.storage.getSQLite();
@@ -244,3 +282,4 @@ export class DailyMaintenanceScheduler {
   /** 手动触发（对外暴露） */
   get lastRunDate(): string { return this._lastRunDate; }
 }
+

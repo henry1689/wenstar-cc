@@ -25,7 +25,7 @@ try {
 } catch (_e) { /* .env not required */ }
 
 import http from 'node:http';
-import fs, { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import fs, { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setGlobal } from '../common/GlobalRegistry.js';
@@ -98,7 +98,6 @@ import { handleFGRoutes } from './server-fg-routes.js';
 import { handleHouseholdRoutes } from './server-household-routes.js';
 import { exportHookMonitor, importHookMonitor, startBackupDaemon } from '../hooks/backup-daemon.js';
 import { Orchestrator } from '../engine/orchestrator.js';
-import { setProbeWriter } from '../app/roleplay/RoleplayProbeReporter.js';
 import { SQLiteStorage } from '../engine/storage/SQLiteStorage.js';
 import type { ChatContext } from './chat.js';
 import { handleTianquanRoutes } from './server-tianquan-routes.js';
@@ -118,10 +117,108 @@ const DB_PATH = path.join(DATA_DIR, 'knowledge', 'family_graph.db');
 const HTML_PATH = path.join(__dirname, 'index.html');
 const PORT = ConfigService.getInt('PORT', 3000);
 const WS_DEBUG_MODE = ConfigService.getBool('WS_DEBUG_MODE');
-// 🔋 Token节省模式 — 所有后台定时器/心跳/节律默认关闭，仅在用户问及时间/天气/生理时按需一枪式启动
-const WS_LAZY_TIMERS = true; // 始终为 true：所有 setInterval/setTimeout 轮询永不启动
-if (WS_DEBUG_MODE) console.log('[启动] 🔧 调试模式 — 自动定时器/心跳/后台LLM已全部禁用');
-if (WS_LAZY_TIMERS) console.log('[启动] 🔋 Token节省模式 — 后台定时器全部暂停，时间/天气/生理按需触发');
+// 🔋 Token节省模式 — 默认 false（正常运行），仅调试时在 .env 设 WS_LAZY_TIMERS=true
+const WS_LAZY_TIMERS = ConfigService.getBool('WS_LAZY_TIMERS', false);
+
+// 🛡️ 调试模式自动过期检查
+let _debugExpired = false;
+if (WS_DEBUG_MODE) {
+  const expiresAt = ConfigService.get('WS_DEBUG_EXPIRES_AT', '');
+  if (expiresAt) {
+    const expiry = new Date(expiresAt).getTime();
+    if (Date.now() > expiry) {
+      _debugExpired = true;
+      console.error('');
+      console.error('╔══════════════════════════════════════════════════════╗');
+      console.error('║  🔴 WS_DEBUG_MODE 已过期！已强制切回 false           ║');
+      console.error('║  过期时间: ' + expiresAt + '                          ║');
+      console.error('║  如需延长请在 .env 更新 WS_DEBUG_EXPIRES_AT           ║');
+      console.error('╚══════════════════════════════════════════════════════╝');
+      console.error('');
+    }
+  }
+}
+
+// 🛡️ 启动横幅
+if (WS_DEBUG_MODE && !_debugExpired) {
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════╗');
+  console.log('║  ⚠️  调试模式已激活 (过期: ' + (ConfigService.get('WS_DEBUG_EXPIRES_AT', '未设置')).padEnd(25) + ') ║');
+  console.log('║  海马体节律 · 四域闭环 · M6演化 · 质检 · 备份      ║');
+  console.log('║  以上模块均已跳过                                   ║');
+  console.log('╚══════════════════════════════════════════════════════╝');
+  console.log('');
+}
+if (WS_LAZY_TIMERS) {
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════╗');
+  console.log('║  ⚠️  Token节省模式 — 后台定时器全部暂停             ║');
+  console.log('╚══════════════════════════════════════════════════════╝');
+  console.log('');
+}
+
+/** 🛡️ 有效的调试模式（考虑过期自动切回） */
+function isDebugMode(): boolean { return WS_DEBUG_MODE && !_debugExpired; }
+
+// 🛡️ 模块健康注册表 — 每个模块初始化完成后设为 alive
+const MODULE_HEALTH: Record<string, { required: boolean; alive: boolean; error?: string }> = {
+  'FG·户籍数据层':        { required: true,  alive: false },
+  'PAE·档案采集':          { required: true,  alive: false },
+  'Gatekeeper·门阀':       { required: true,  alive: false },
+  'HeatTracker·热力':      { required: false, alive: false },
+  'EntityMeeting·会晤':    { required: false, alive: false },
+  'Maintenance·维护引擎':   { required: true,  alive: false },
+  'Hippocampus·海马体':    { required: true,  alive: false },
+  'TianquanBus·事件总线':   { required: false, alive: false },
+  'Prefrontal·前额叶':      { required: false, alive: false },
+  'Cortex·新皮层':          { required: false, alive: false },
+  'SecondBrain·第二大脑':   { required: false, alive: false },
+  'M6·自我模型':            { required: true,  alive: false },
+  'Vault·记忆仓':           { required: true,  alive: false },
+  'Backup·备份引擎':        { required: false, alive: false },
+  'AQC·质检引擎':           { required: false, alive: false },
+  'AutoRec·自动采集':       { required: false, alive: false },
+  'Induction·归纳调度':     { required: false, alive: false },
+  'Consolidation·巩固队列':  { required: false, alive: false },
+  'DreamEngine·梦境引擎':   { required: false, alive: false },
+  'DailyMaint·每日维护':    { required: true,  alive: false },
+};
+
+/** 🛡️ 启动完整性校验 */
+function verifyStartupIntegrity(): { dead: string[]; degraded: string[]; score: number } {
+  const dead: string[] = [];
+  const degraded: string[] = [];
+  for (const [name, status] of Object.entries(MODULE_HEALTH)) {
+    if (status.required && !status.alive) dead.push(name);
+    else if (!status.required && !status.alive) degraded.push(name);
+  }
+  const totalModules = Object.keys(MODULE_HEALTH).length;
+  const aliveCount = Object.values(MODULE_HEALTH).filter(s => s.alive).length;
+  const score = Math.round((aliveCount / totalModules) * 100);
+
+  if (dead.length > 0) {
+    console.error(`🔴 关键模块未启动 (${dead.length}): ${dead.join(', ')}`);
+  }
+  if (degraded.length > 0) {
+    console.warn(`🟡 可选模块未启动 (${degraded.length}): ${degraded.join(', ')}`);
+  }
+  if (dead.length === 0 && degraded.length === 0) {
+    console.log(`✅ 全部 ${totalModules} 个模块通过启动校验 (健康分: ${score})`);
+  }
+  return { dead, degraded, score };
+}
+
+/** 🛡️ 标记模块存活 */
+function markModuleAlive(name: string): void {
+  if (MODULE_HEALTH[name]) {
+    MODULE_HEALTH[name].alive = true;
+  }
+}
+function markModuleError(name: string, err: string): void {
+  if (MODULE_HEALTH[name]) {
+    MODULE_HEALTH[name].error = err;
+  }
+}
 const TTS_URL = ConfigService.get('TTS_URL', 'http://localhost:8765');
 
 /** 统一错误输出 */
@@ -166,14 +263,35 @@ function getSelfModel(): SelfModelV1 {
 // ── 对话记忆（砂金库驱动 — SQLite 即时落盘） ──
 let conversationHistory: ConversationTurn[] = [];
 const MAX_SAVED_TURNS = 500;
+let _convWriteLock = false;
+let _convPendingWrites: Array<() => void> = [];
+
+/** 🛡️ V4.0: 对话历史安全写入（串行化所有写操作） */
+function safeConvWrite(op: () => void): void {
+  if (_convWriteLock) { _convPendingWrites.push(op); return; }
+  _convWriteLock = true;
+  try {
+    op();
+    // 强制执行上限
+    if (conversationHistory.length > MAX_SAVED_TURNS) {
+      conversationHistory.splice(0, conversationHistory.length - MAX_SAVED_TURNS);
+    }
+  } finally {
+    _convWriteLock = false;
+    // 处理队列中的待写入
+    const next = _convPendingWrites.shift();
+    if (next) safeConvWrite(next);
+  }
+}
+
 function loadConversationHistory(): void {
   try {
     if (conversationDB) {
       // 尝试从独立的 conversations.db 加载
       const recent = conversationDB.getRecentConversations(30);
       if (recent.length > 0) {
-        conversationHistory = recent.filter((r: any) => !r.roleplay_char).map(r => ({ role: r.role as 'user' | 'assistant', content: r.content, timestamp: r.timestamp }));
-        console.log('  从融合库加载了 ' + conversationHistory.length + ' 条对话记忆 ✓（已排除角色扮演）');
+        conversationHistory = recent.map(r => ({ role: r.role as 'user' | 'assistant', content: r.content, timestamp: r.timestamp }));
+        console.log('  从融合库加载了 ' + conversationHistory.length + ' 条对话记忆 ✓');
       }
     }
     // 后备: 从旧的 fusion_memory.db 加载（conversationDB修复前的存量数据）
@@ -280,16 +398,6 @@ const HOOK_DEFS = [
   {id:'H12',name:'M9·工作记忆·毕业',       th:15000},
   {id:'H13',name:'M6·自我演化·优先级',      th:300000},
   {id:'H14',name:'M4·记忆检索·多路融合',   th:15000},
-  // 🏗️ 角色扮演域全链路探针（9个，对应四层结构+验证器）
-  {id:'H15',name:'RP·装配总耗时',            th:600000},
-  {id:'H16',name:'RP·Layer1身份注入',         th:600000},
-  {id:'H17',name:'RP·Layer2关系注入',         th:600000},
-  {id:'H18',name:'RP·Layer3记忆召回',         th:600000},
-  {id:'H19',name:'RP·Layer4知识注入',         th:600000},
-  {id:'H20',name:'RP·身份层校验通过率',       th:600000},
-  {id:'H21',name:'RP·事实层校验',            th:600000},
-  {id:'H22',name:'RP·边界层校验',            th:600000},
-  {id:'H23',name:'RP·角色生长状态',          th:600000},
 ];
 for(const d of HOOK_DEFS) hookMonitor.set(d.id,{
   name:d.name,callCount:0,errorCount:0,totalDuration:0,
@@ -305,20 +413,6 @@ for (const _d of HOOK_DEFS) {
     _m.lastHeartbeat = _now0;
   }
 }
-// 🏗️ 角色扮演域全链路探针桥接：RoleplayProbeReporter → hookMonitor
-// RoleplayProbeReporter 发送 RP-H01..RP-H09，hookMonitor 存储为 H15..H23。
-// 映射：RP-H{N} → H{N+14}，使 RP 管线的 9 个探针获得真实遥测数据。
-setProbeWriter((id, durationMs, error) => {
-  const mappedId = id.startsWith('RP-H') ? 'H' + (parseInt(id.slice(3)) + 14) : id;
-  const _m = hookMonitor.get(mappedId);
-  if (_m) {
-    _m.callCount++;
-    _m.lastHeartbeat = Date.now();
-    _m.totalDuration += durationMs;
-    _m.lastStatus = error ? 'yellow' : 'green';
-    if (error) { _m.errorCount++; _m.lastError = error; }
-  }
-});
 let inductionScheduler: InductionScheduler;
 let consolidationQueue: ConsolidationQueue;
 let m7: M7Orchestrator;
@@ -407,6 +501,7 @@ async function initPipeline(): Promise<void> {
   await memoryVault.initialize();
   familyGraph = new FamilyGraph(DB_PATH);
   await familyGraph.initialize();
+  markModuleAlive('FG·户籍数据层');
   (globalThis as any).__familyGraph = familyGraph;
   // V3.2.1 调试模式: 全部限制解锁
   (globalThis as any).__DEBUG_UNLOCK_ALL = true;
@@ -557,6 +652,7 @@ async function initPipeline(): Promise<void> {
     const paeGuard = pae.acquisitionIntegrityGuard();
     if (paeGuard.healthy) {
       console.log('  档案采集引擎 (PAE) 就绪 ✓  (' + paeGuard.checks.length + ' 项检查通过)');
+      markModuleAlive('PAE·档案采集');
     } else {
       console.warn('  ⚠️ PAE 完整性检查未通过，降级运行:', paeGuard.errors.join('; '));
     }
@@ -577,6 +673,7 @@ async function initPipeline(): Promise<void> {
     gatekeeper.initBase(baseUUIDs);
     m4.setGatekeeper(gatekeeper);  // 注入 M4 检索层
     console.log(`  户籍门阀 (UUIDGatekeeper) 就绪 ✓ (基础层: ${baseUUIDs.length}人, 始终激活)`);
+    markModuleAlive('Gatekeeper·门阀');
   } catch (e) {
     console.warn('  门阀初始化失败:', (e as Error).message);
     gatekeeper = undefined;
@@ -586,6 +683,7 @@ async function initPipeline(): Promise<void> {
   try {
     heatTracker = new RelationHeatTracker(familyGraph);
     console.log('  关系热力追踪 (RelationHeatTracker) 就绪 ✓');
+    markModuleAlive('HeatTracker·热力');
   } catch (e) {
     console.warn('  热力追踪初始化失败:', (e as Error).message);
     heatTracker = undefined;
@@ -600,13 +698,14 @@ async function initPipeline(): Promise<void> {
     const minutesStore = new MeetingMinutesStore(familyGraph);
     entityMeeting.setMinutesStore(minutesStore);
     console.log('  实体会晤管理器 (EntityMeeting) 就绪 ✓ (含会议纪要)');
+    markModuleAlive('EntityMeeting·会晤');
   } catch (e) {
     console.warn('  实体会晤初始化失败:', (e as Error).message);
     entityMeeting = undefined;
   }
 
   loadConversationHistory();
-  if (!WS_DEBUG_MODE) { maintenance.start(); console.log('  维护引擎已启动 ✓'); }
+  if (!isDebugMode()) { maintenance.start(); console.log('  维护引擎已启动 ✓'); markModuleAlive('Maintenance·维护引擎'); }
   else { console.log('  [调试] 已跳过: 维护引擎'); }
 
   // 先创建 M8+M7（使 DreamQueue 可供 CQ/IS 联动注入）
@@ -622,12 +721,15 @@ async function initPipeline(): Promise<void> {
   inductionScheduler = new InductionScheduler(storage, m7.queue);
   // inductionScheduler.start() — 已由 coordinator 的 InductionScheduler 任务替代
   console.log('  归纳调度器已就绪 ✓');
+  markModuleAlive('Induction·归纳调度');
   consolidationQueue = new ConsolidationQueue(storage, m7.queue);
   // consolidationQueue.start() — 已由 coordinator 的 ConsolidationQueue 任务替代
   console.log('  巩固队列已就绪 ✓');
+  markModuleAlive('Consolidation·巩固队列');
 
   // m7Timer = startM7Interval(m7) — 已由 coordinator 的 M7-DreamEngine 任务替代
   console.log('  梦境引擎已就绪 ✓');
+  markModuleAlive('DreamEngine·梦境引擎');
 
   // 每日维护调度器 — 创建实例但不启动独立定时器，coordinator 通过 dm.runOnce() 触发
   try {
@@ -636,6 +738,7 @@ async function initPipeline(): Promise<void> {
     // dailyMaint.start() — 已由 coordinator 的 DailyMaintenance 任务替代
     (globalThis as any).__dailyMaintenanceScheduler = dailyMaint;
     console.log('  每日维护调度器已就绪 ✓');
+    markModuleAlive('DailyMaint·每日维护');
   } catch (err) {
     console.warn('  每日维护调度器就绪失败:', err);
   }
@@ -650,20 +753,21 @@ async function initPipeline(): Promise<void> {
   m6.setM8(m8);
 
   // 🔥 天权海马体节律调度器 — 统一调度所有海马体组件 (调试模式下跳过)
-  if (!WS_DEBUG_MODE) {
+  if (!isDebugMode()) {
   try {
     const { assembleAndStartHippocampus } = await import('../app/brain/assembleHippocampus.js');
     const hrc = assembleAndStartHippocampus({
       storage, m7, consolidationQueue, inductionScheduler,
     });
     console.log('  天权海马体节律调度器已启动 ✓');
+    markModuleAlive('Hippocampus·海马体');
   } catch (err) {
     console.warn('  天权海马体节律调度器启动失败:', err);
   }
   } else { console.log('  [调试] 已跳过: 天权海马体节律调度器 (含13个后台任务)'); }
 
   // ── 天权四域仿生闭环 — 事件总线 + 知识桥接 + 前额叶 ──
-  if (!WS_DEBUG_MODE) {
+  if (!isDebugMode()) {
   try {
     // ① 天权域事件总线（桥接 engine/bus/EventBus）
     const { EventBus } = await import('../engine/bus/EventBus.js');
@@ -673,6 +777,7 @@ async function initPipeline(): Promise<void> {
     (globalThis as any).__tianquanBus = tianquanBus;
     setGlobal("tianquanBus", tianquanBus);
     console.log('  天权事件总线已就绪 ✓');
+    markModuleAlive('TianquanBus·事件总线');
 
     // WebSocket 实时推送端点 (V4.0 Phase 5)
     try { setupWebSocket(); console.log('  WebSocket 推送端点已就绪 ✓'); } catch (e) { console.warn('  WebSocket 启动失败:', (e as Error)?.message); }
@@ -715,6 +820,7 @@ async function initPipeline(): Promise<void> {
       (globalThis as any).__prospectiveSimulator = sim;
     } catch { /* 可选 */ }
     console.log('  天权前额叶决策域已启动 ✓');
+    markModuleAlive('Prefrontal·前额叶');
 
     // ⑥ 新皮层生成调度器 (V4.0 Phase 5 — cortex激活)
     try {
@@ -724,6 +830,7 @@ async function initPipeline(): Promise<void> {
       (globalThis as any).__cortexOrchestrator = cortexOrchestrator;
       setGlobal('cortexOrchestrator' as any, cortexOrchestrator as any);
       console.log('  天权新皮层生成调度器已激活 ✓');
+      markModuleAlive('Cortex·新皮层');
     } catch (e) { console.warn('[启动] cortex 未激活:', (e as Error)?.message || e); }
 
     // ⑤ 第二大脑 Gateway 初始化 (V4.0 Phase 2)
@@ -752,6 +859,7 @@ async function initPipeline(): Promise<void> {
       (globalThis as any).__sourceTracker = sourceTracker;
     setGlobal("sourceTracker", sourceTracker);
       console.log('  第二大脑 Gateway 已启动 ✓ (' + secondBrainGateway.scanWikiMDFiles().length + ' 个 MD 文件)');
+      markModuleAlive('SecondBrain·第二大脑');
     } catch (err) {
       console.warn('  第二大脑 Gateway 初始化失败（降级运行）:', err);
     }
@@ -785,14 +893,16 @@ async function initPipeline(): Promise<void> {
     }
   });
   // M6 周期性维护（15分钟一次）— 调试模式下跳过
-  if (!WS_DEBUG_MODE) {
+  if (!isDebugMode()) {
   if (m6Timer) clearInterval(m6Timer);
   m6Timer = setInterval(() => { try { m6?.maintenance(); } catch (err) { console.error('[M6] 定时维护失败:', err); } }, 15 * 60 * 1000); addTimer(m6Timer);
   console.log('  自我模型已启动 ✓');
+  markModuleAlive('M6·自我模型');
 
   // 记忆仓每日备份（启动后5分钟首次执行）
   setTimeout(() => { try { memoryVault?.backup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 5 * 60 * 1000);
   console.log('  记忆仓已启动 ✓');
+  markModuleAlive('Vault·记忆仓');
   } else { console.log('  [调试] 已跳过: M6定时维护 + 记忆仓备份'); }
 
   // ── 统一备份引擎（三大永久存储：fusion_memory + family_graph + knowledge） ──
@@ -911,11 +1021,30 @@ async function initPipeline(): Promise<void> {
 
   // 🔋 LAZY: 备份在用户问及时通过 __temporalOnDemand 触发
   if (!WS_LAZY_TIMERS) {
-  setTimeout(async () => { try { await runUnifiedBackup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 15 * 60 * 1000);
+  // 🛡️ V4.0: 启动时如果已有最近备份(24h内)，跳过首次15min备份
+  try {
+    const bkFiles = readdirSync(BACKUP_DIR).filter((f: string) => f.endsWith('.db'));
+    const hasRecent = bkFiles.some((f: string) => {
+      const m = f.match(/(\d{4})-?(\d{2})-?(\d{2})/);
+      if (!m) return false;
+      const fd = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+      return (Date.now() - fd.getTime()) < 24 * 3600_000;
+    });
+    if (!hasRecent) {
+      setTimeout(async () => { try { await runUnifiedBackup(); } catch (e: any) { /* ignore */ } }, 15 * 60 * 1000);
+    } else {
+      console.log('  备份引擎: 已有24h内备份，跳过首次执行');
+    }
+  } catch (_bkCheck) { /* fall through */ }
   }
   addTimer(setInterval(async () => { try { await runUnifiedBackup(); } catch (e: any) { console.error('[server] error:', e?.message); } }, 30 * 60 * 1000));
   if (WS_LAZY_TIMERS) console.log('  统一备份引擎 — Token节省模式，未启动 ✓');
-  else console.log('  统一备份引擎已启动 ✓ (15min首执行, 30min周期)');
+  console.log('  统一备份引擎已启动 ✓ (15min首执行, 30min周期)');
+  markModuleAlive('Backup·备份引擎');
+
+  // 🛡️ V4.0: 音频文件清理（启动时 + 每 24h）
+  cleanupOldAudioFiles();
+  addTimer(setInterval(() => cleanupOldAudioFiles(), 24 * 3600_000));
 
   workingMemory = new MemoryWriteBuffer(storage, 50);
   workingMemory.startFlushTimer();
@@ -1027,7 +1156,7 @@ async function initPipeline(): Promise<void> {
   topicTracker = new TopicTracker(storage.getSQLite());
   somaticMemory = new SomaticMemory(storage.getSQLite());
   // 玉瑶的"做梦研究"定时器 — 调试模式下跳过 (会调LLM)
-  if (!WS_DEBUG_MODE) {
+  if (!isDebugMode()) {
   addTimer(setInterval(async () => {
     try {
       const needs = topicTracker.getTopicsNeedingResearch();
@@ -1099,6 +1228,7 @@ async function initPipeline(): Promise<void> {
   }
   if (WS_LAZY_TIMERS) console.log('  AQC 质检引擎 — Token节省模式 ✓');
   else console.log('  AQC 质检引擎已启动 ✓');
+  markModuleAlive('AQC·质检引擎');
 
   console.log(`  融合存储已初始化 (${storage.getSQLite().getStatus().totalRecords} 条记忆 ✓`);
   // 景幻仙姑自动巡检（每30分钟）
@@ -1206,6 +1336,38 @@ async function handleUserMessage(message: string, clientMsgId?: string | null, t
 }
 
 // ════════════════════════════════════════════════════════
+// 🛡️ V4.0 P0 修复: SSE 客户端限制 + 音频清理
+// ════════════════════════════════════════════════════════
+
+/** SSE 客户端上限 */
+const MAX_SSE_CLIENTS = 100;
+
+/** 🛡️ 音频文件自动清理: 保留最近 100 个，其余删除 */
+function cleanupOldAudioFiles(): void {
+  try {
+    const audioDir = path.join(DATA_DIR, 'audio');
+    if (!existsSync(audioDir)) return;
+    const files = readdirSync(audioDir)
+      .filter((f: string) => f.startsWith('tts_') && f.endsWith('.mp3'))
+      .sort()
+      .reverse(); // 最新在前
+    if (files.length <= 100) return;
+    const toDelete = files.slice(100);
+    for (const f of toDelete) {
+      try { unlinkSync(path.join(audioDir, f)); } catch (_) { /* ignore */ }
+    }
+    if (toDelete.length > 0) console.log('[AudioClean] 清理 ' + toDelete.length + ' 个旧音频文件, 保留 ' + Math.min(files.length, 100) + ' 个');
+  } catch (_) { /* 清理失败不影响主流程 */ }
+}
+
+/** 🛡️ 静默错误计数器（暴露到健康端点） */
+const _silentErrorCounts: Record<string, number> = {};
+function recordSilentError(module: string): void {
+  _silentErrorCounts[module] = (_silentErrorCounts[module] || 0) + 1;
+}
+(globalThis as any).__silentErrorCounts = _silentErrorCounts;
+
+// ════════════════════════════════════════════════════════
 // HTTP Server
 // ════════════════════════════════════════════════════════
 function readBody(req: http.IncomingMessage, maxBytes = 5 * 1024 * 1024): Promise<string> {
@@ -1279,8 +1441,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
-  // P2: SSE 实时推送端点
+  // P2: SSE 实时推送端点 (🛡️ V4.0: 增加客户端上限 + 心跳检测)
   if (req.method === 'GET' && url.pathname === '/events') {
+    if (sseClients.size >= MAX_SSE_CLIENTS) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'SSE 连接数已满' }));
+      return;
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -1289,7 +1456,69 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     });
     res.write('event: connected\ndata: {"status":"ok"}\n\n');
     sseClients.add(res);
-    req.on('close', function() { sseClients.delete(res); });
+    const heartbeatTimer = setInterval(() => {
+      try { res.write(': heartbeat\n\n'); } catch (_) {
+        clearInterval(heartbeatTimer);
+        sseClients.delete(res);
+      }
+    }, 30_000);
+    req.on('close', function() {
+      clearInterval(heartbeatTimer);
+      sseClients.delete(res);
+    });
+  }
+
+  // ── 🛡️ 健康检查（含模块存活率 + 开关状态，在可观测性路由之前拦截）──
+  if (req.method === 'GET' && url.pathname === '/api/health') {
+    const health = maintenance.getHealth();
+    const storageStatus = await storage.getStatus().catch(() => null);
+    if (storageStatus) health.storage.totalRecords = storageStatus.totalRecords;
+    const decayStats = storage.getDecayStats();
+    const m8st = storage.getSQLite().getStatus();
+    let alignmentSummary: { score: number; status: string } | null = null;
+    try {
+      const _ar = alignmentGuard.getCachedReport();
+      if (_ar) alignmentSummary = { score: _ar.score, status: _ar.status };
+    } catch (_e: any) { /* ignore */ }
+    let _pSimple: any = { userCount: 0, assistantCount: 0, ratio: '0' };
+    let _chatAlert: string | null = null;
+    try {
+      const _mdb = storage.getSQLite();
+      const _uc = _mdb.queryAll<any>('SELECT COUNT(*) as cnt FROM memories WHERE leaf_zone=?', ['user']);
+      const _ac = _mdb.queryAll<any>('SELECT COUNT(*) as cnt FROM memories WHERE leaf_zone=?', ['assistant']);
+      const uc = Number(_uc[0]?.cnt ?? 0), ac = Number(_ac[0]?.cnt ?? 0);
+      _pSimple = { userCount: uc, assistantCount: ac, ratio: ac > 0 ? (uc / ac).toFixed(2) : '0' };
+      const _chatPath = path.join(PROJECT_ROOT, 'src/webui/chat.ts');
+      if (existsSync(_chatPath) && fs.statSync(_chatPath).size > 100 * 1024) _chatAlert = 'chat.ts 超过100KB';
+    } catch (_pe) { /* stats not critical */ }
+    // 模块健康
+    const _moduleList = Object.entries(MODULE_HEALTH).map(([name, s]) => ({ name, required: s.required, alive: s.alive, error: s.error || null }));
+    const _aliveCount = _moduleList.filter(m => m.alive).length;
+    const _totalModules = _moduleList.length;
+    const _moduleScore = Math.round((_aliveCount / _totalModules) * 100);
+    const _integrity = (globalThis as any).__startupIntegrity || { dead: [], degraded: [], score: 100 };
+    const _overallScore = Math.round(((alignmentSummary?.score ?? 80) + _moduleScore) / 2);
+    let _healthStatus = 'ok';
+    if (_integrity.dead.length > 0) _healthStatus = 'unhealthy';
+    else if (_integrity.degraded.length > 0 || _overallScore < 80) _healthStatus = 'degraded';
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ...health,
+      status: _healthStatus,
+      score: _overallScore,
+      alignment: alignmentSummary,
+      modules: { total: _totalModules, alive: _aliveCount, score: _moduleScore, dead: _integrity.dead, degraded: _integrity.degraded, list: _moduleList },
+      memory: { ...health.memory, decay: decayStats, landmarks: m8st.landmarks, entities: m8st.totalEntities },
+      flags: { debug_mode: isDebugMode(), lazy_timers: WS_LAZY_TIMERS },
+      silent_errors: { ..._silentErrorCounts },  // 🛡️ V4.0: 静默错误计数
+      persistence: _pSimple,
+      chatFileAlert: _chatAlert,
+      roleplay: { active: false },
+      runtime: { enableNewArch: ENABLE_NEW_ARCH, orchestratorMode: orchestrator?.getMode?.() ?? null },
+      tianquan: masterHarris ? masterHarris.getStatus() : { started: false },
+    }));
+    return;
   }
 
   // 可观测性路由（已拆分至 server-observability-routes.ts）
@@ -1507,15 +1736,44 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         }
       } catch (_pe) { /* persistence/file stats not critical */ }
       // persistence handled in server-observability-routes.ts
+      // 🛡️ 模块健康：区分必选/可选
+      const _integrity = (globalThis as any).__startupIntegrity || { dead: [], degraded: [], score: 100 };
+      const _moduleList = Object.entries(MODULE_HEALTH).map(([name, s]) => ({
+        name, required: s.required, alive: s.alive, error: s.error || null,
+      }));
+      const _aliveCount = _moduleList.filter(m => m.alive).length;
+      const _totalModules = _moduleList.length;
+      const _moduleScore = Math.round((_aliveCount / _totalModules) * 100);
+      // 综合健康分 = (对齐度 + 模块分) / 2
+      const _overallScore = Math.round(((alignmentSummary?.score ?? 80) + _moduleScore) / 2);
+      // 状态判定
+      let _healthStatus = 'ok';
+      if (_integrity.dead.length > 0) _healthStatus = 'unhealthy';
+      else if (_integrity.degraded.length > 0 || _overallScore < 80) _healthStatus = 'degraded';
+
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         ...health,
+        status: _healthStatus,  // 🆕 说实话
+        score: _overallScore,   // 🆕 综合健康分
         alignment: alignmentSummary,
+        modules: {              // 🆕 模块健康明细
+          total: _totalModules,
+          alive: _aliveCount,
+          score: _moduleScore,
+          dead: _integrity.dead,
+          degraded: _integrity.degraded,
+          list: _moduleList,
+        },
         memory: {
           ...health.memory,
           decay: decayStats,
           landmarks: m8st.landmarks,
           entities: m8st.totalEntities,
+        },
+        flags: {                // 🆕 开关状态
+          debug_mode: isDebugMode(),
+          lazy_timers: WS_LAZY_TIMERS,
         },
         persistence: _pSimple,
         chatTsSizeKB: Math.round(_chatTsSize / 1024),
@@ -2235,6 +2493,7 @@ async function main(): Promise<void> {
     });
     autoRec.startTimer('ingestion');
     console.log('  [灰度] AutoRec 引擎已启动 ✓ (5min短周期, 仅采集不开规则引擎)');
+    markModuleAlive('AutoRec·自动采集');
   } catch (err) {
     console.warn('[AutoRec] 启动失败（不影响主流程）:', err);
   }
@@ -2260,6 +2519,10 @@ async function main(): Promise<void> {
   }, 30000);
 
   console.log('  玉瑶 · 太虚境 WebUI 初始化完成 ✓');
+
+  // 🛡️ 启动完整性校验 — 最后一道防线
+  const _integrityReport = verifyStartupIntegrity();
+  (globalThis as any).__startupIntegrity = _integrityReport;
 
   // ═══ S1 新架构：空初始化验证 (轻量模式下跳过) ═══
   if (!ConfigService.getBool("TIANQUAN_LITE")) {

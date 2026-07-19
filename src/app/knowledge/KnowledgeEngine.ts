@@ -269,6 +269,24 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       throw new Error('隐私内容不可存入知识库：用户个人信息应存于 MasterProfileService 或 FamilyGraph');
     }
 
+    // 🛡️ V4.0: 文件来源守卫 — 只有以文件形式上传的知识允许入库
+    // 合法的 source_type（对应真实文件格式），其他自动生成的内容一律拦截
+    const FILE_SOURCE_WHITELIST = new Set([
+      // 文档
+      'txt', 'md', 'pdf', 'docx', 'xlsx', 'csv', 'json',
+      // 图片
+      'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg',
+      // 视频
+      'mp4', 'avi', 'mov', 'mkv', 'webm',
+      // 设计/架构文档（以文件形式提交）
+      'architecture', 'protocol',
+    ]);
+    const srcType = (params.source_type || '').toLowerCase();
+    if (srcType && !FILE_SOURCE_WHITELIST.has(srcType)) {
+      console.warn(`[KE] 🛡️ 非文件来源拦截: source_type="${srcType}" title="${(params.title||'').substring(0,50)}" — 仅允许以文件形式上传的知识入库`);
+      throw new Error(`非文件来源的知识不可入库 (source_type=${srcType})`);
+    }
+
     // 修复双重UTF-8编码（浏览器上传时可能出现的文件名编码问题）
     const fixedTitle = fixDoubleEncoded(params.title);
     const fixedContent = params.content ? fixDoubleEncoded(params.content) : params.content;
@@ -440,6 +458,17 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   let _emotionSearchCount = 0;  // 🔥 情感检索计数，每20次持久化一次权重
   _ftsSearch.init().then(() => { _ftsInitialized = true; }).catch(() => {});
 
+  /** 🛡️ V4.0: 去除 markdown frontmatter（供评分阶段使用） */
+  function _stripFrontmatter(content: string): string {
+    if (!content) return '';
+    const trimmed = content.trimStart();
+    if (trimmed.startsWith('---')) {
+      const secondDash = trimmed.indexOf('---', 3);
+      if (secondDash !== -1) return trimmed.substring(secondDash + 3).trim();
+    }
+    return content;
+  }
+
   async function search(keyword: string, limit = 10, emotionalContext?: { pleasure: number; arousal: number; intimacy: number }, interactionType?: string): Promise<KnowledgeItem[]> {
     const ftsSearch = async (kw: string, lim: number) => {
       if (_ftsInitialized) {
@@ -459,8 +488,9 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
           } as KnowledgeItem));
         }
       }
-      // FTS5 降级 → LIKE
-      let sql = `SELECT * FROM knowledge_base WHERE (content LIKE ? OR title LIKE ?)`;
+      // FTS5 降级 → LIKE (🛡️ V4.0: 过滤非文件来源)
+      const srcWhitelist = [..._fileSourceWhitelist].map(s => `'${s}'`).join(',');
+      let sql = `SELECT * FROM knowledge_base WHERE (content LIKE ? OR title LIKE ?) AND (source_type IN (${srcWhitelist}) OR source_type IS NULL OR source_type = '')`;
       const params: any[] = [`%${kw}%`, `%${kw}%`];
       if (interactionType) { sql += ` AND interaction_type = ?`; params.push(interactionType); }
       sql += ` ORDER BY updated_at DESC LIMIT ?`; params.push(lim);
@@ -554,6 +584,16 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   function count(): number {
     const rows = sqlite.queryAll(`SELECT COUNT(*) as cnt FROM knowledge_base`);
     return rows.length > 0 ? (rows[0].cnt as number) : 0;
+  }
+
+  /** 🛡️ V4.0: 过滤非文件来源知识 */
+  const _fileSourceWhitelist = new Set([
+    'md','txt','pdf','docx','xlsx','csv','json','jpg','png','gif','webp',
+    'mp4','mov','webm','mkv','architecture','protocol','research','person',
+  ]);
+  function isFileSource(srcType: string | null | undefined): boolean {
+    if (!srcType) return true;  // null/empty → 放行旧数据
+    return _fileSourceWhitelist.has(srcType.toLowerCase());
   }
 
   /** 文件上传并入库 */
@@ -750,20 +790,28 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     if (enWords) { for (const w of enWords) ngramSet.add(w); }
 
     // ── 全表扫描 + ngram 文本评分 + 情感/场景/印象排序 ──
+    // 🛡️ V4.0: 过滤非文件来源的知识（landmark/milestone/spec/dream等自动生成内容）
+    const FILE_SOURCE_FILTER = ['md','txt','pdf','docx','xlsx','csv','json','jpg','png','gif','webp','mp4','mov','webm','mkv','architecture','protocol','research','person'];
+    const srcFilter = FILE_SOURCE_FILTER.map(s => `'${s}'`).join(',');
+    // 🆕 V4.0: 去掉了 LIMIT 50，改为全表扫描（459行全扫约50ms，SQLite 无压力）
     const allRows: any[] = sqlite.queryAll(
-      `SELECT * FROM knowledge_base ORDER BY COALESCE(impression_score,0.5) DESC, updated_at DESC LIMIT 50`
+      `SELECT * FROM knowledge_base WHERE (source_type IN (${srcFilter}) OR source_type IS NULL OR source_type = '') ORDER BY COALESCE(impression_score,0.5) DESC, updated_at DESC LIMIT 500`
     );
     if (!allRows.length) {
       console.log('[KBw] 空库');
       return [];
     }
 
-    // 逐条评分
+    // 逐条评分（🛡️ V4.0: frontmatter 在评分前剥离，标题命中加权）
     const maxHits = ngramSet.size || 1;
     const scored = allRows.map(row => {
       const item = rowToEntry(row);
       const isPending = !!(row as any).classification_pending;
-      const combined = (item.title + ' ' + (item.content || '')).toLowerCase();
+      const cleanContent = _stripFrontmatter(item.content || '');
+      const combined = (item.title + ' ' + cleanContent).toLowerCase();
+      // 标题命中 boost: 关键词出现在标题中权重大幅提高
+      const titleHits = ngramSet.size > 0 ? [...ngramSet].filter(ng => item.title.toLowerCase().includes(ng)).length : 0;
+      const titleBoost = ngramSet.size > 0 ? 1.0 + (titleHits / ngramSet.size) * 2.0 : 1.0;  // 最高 3x
 
       // 文本匹配: ngram 命中数
       let hits = 0;
@@ -785,9 +833,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
 
       const penalty = isPending ? 0.7 : 1.0;
       const impressionScore = item.impression_score || 0.5;
+      // 🆕 V4.0: 标题命中加权后的文本分
+      const boostedTextScore = Math.min(textScore * titleBoost, 1.0);
       let matchScore: number;
       if (textScore > 0) {
-        matchScore = Math.round((textScore * 0.50 + impressionScore * 0.20 + sceneScore * 0.15 + emotionScore * 0.15) * penalty * 1000) / 1000;
+        matchScore = Math.round((boostedTextScore * 0.50 + impressionScore * 0.20 + sceneScore * 0.15 + emotionScore * 0.15) * penalty * 1000) / 1000;
       } else {
         matchScore = Math.round((emotionScore * 0.35 + impressionScore * 0.25 + sceneScore * 0.25 + textScore * 0.15) * penalty * 1000) / 1000;
       }

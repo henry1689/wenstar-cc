@@ -40,13 +40,8 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
   if (req.method === 'POST' && url.pathname === '/api/chat') {
     const body = JSON.parse(await readBody(req));
     if (!body.message || typeof body.message !== 'string') { res.writeHead(400); res.end(JSON.stringify({ error: 'message required' })); return true; }
-    const _rpMsg = body.message.trim();
-    const _rpM = _rpMsg.match(/(?:扮演(?:一下)?|模仿|演一下|cos)[了]?([一-龥]{2,8})/);
-    let _rpPass = body.client_msg_id;
-    if (_rpM && _rpM[1].trim().length >= 2) {
-      _rpPass = '【角色扮演】' + _rpM[1].replace(/[吧呗了试试看看一下玩玩]$/, '').trim() + '||' + (_rpPass || '');
-    }
-    const result = await processChat(_rpMsg, _rpPass, body.test_mode === true);
+    // 🛡️ V4.0: 角色扮演已彻底废除，实体会晤替代。不再注入【角色扮演】标记。
+    const result = await processChat(body.message.trim(), body.client_msg_id, body.test_mode === true);
 
     // TTS 生成
     let audio_url: string | null = null;

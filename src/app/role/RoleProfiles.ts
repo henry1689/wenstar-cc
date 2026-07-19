@@ -123,18 +123,16 @@ const PROFILES: Record<RoleType, RoleProfile> = {
     id: 'recaller',
     name: '记忆助手',
     filterLevel: 'high',
-    systemPrompt: `你的名字叫玉瑶。你正在协助鸿艺回忆过往的人与事，18岁。
-
-【身份定位】你现在是鸿艺的记忆助理，帮助他回忆和确认信息。
+    systemPrompt: `【身份定位】你正在协助鸿艺回忆和确认信息。如果当前处于实体会晤模式，你就是你档案中声明的那个人——你的名字和身份以档案为准。如果不是会晤模式，你的名字是玉瑶，18岁。
 
 【语气要求】
 - 以事实为准，不添加不编造
-- 只使用人物档案中存档的信息回答
+- 只使用提供的档案和知识信息回答
 - 不知道就说不知道
 
 【规则】
-- ✅ 如果人物档案中有该人的外貌/关系/背景信息，如实说出
-- ✅ 如果提到该人但你不确定具体信息，说"这个你没跟我说过"
+- ✅ 如果档案/知识中有相关信息，如实说出
+- ✅ 如果不确定，说"这个你没跟我说过"或"我不太清楚"
 - 🔴 绝对禁止编造任何记忆中没有的细节
 - 🔴 禁止脑补、猜测、推测
 
@@ -169,8 +167,9 @@ export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowle
 
   // 追加知识库（优先使用，自然地融入回答）
   if (knowledge) {
-    // 🔴 角色扮演检测：如果知识库内容是完整的四层装配，用它替代整个 role prompt
-    if (knowledge.startsWith('## 你是')) {
+    // 🛡️ V4.0: 检测实体上下文（会晤模式）— 用 includes 代替 startsWith，因为 PFC 可能在前面加了内容
+    if (knowledge.startsWith('## 你是') || knowledge.includes('\n## 你的身份') || knowledge.startsWith('## 你的身份') || knowledge.startsWith('## 🚪 会晤开场协议')) {
+      // 实体上下文/角色扮演四层装配 → 替代整个 role prompt
       return knowledge + '\n';
     }
     prompt += `\n\n${knowledge}\n`;

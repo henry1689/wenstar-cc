@@ -12,6 +12,7 @@
 
 import type { FamilyGraph, PersonProfile, PersonDossier } from './FamilyGraph.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
+import { buildGreetingProtocol } from './EntityGreetingProtocol.js';
 
 /** 构建选项 */
 export interface EntityContextOptions {
@@ -23,6 +24,12 @@ export interface EntityContextOptions {
   feminineDetails?: boolean;
   /** 历史对话条数 */
   recentHistoryCount?: number;
+  /** 🆕 V3.0: 是否首轮对话（注入开场协议） */
+  isFirstTurn?: boolean;
+  /** 🆕 V3.0: 用户名（用于开场协议称呼） */
+  userName?: string;
+  /** 🆕 V4.0: 与该实体的近期对话记录 */
+  recentConversations?: Array<{ role: string; content: string; timestamp: string }>;
 }
 
 /** 构建结果 */
@@ -42,7 +49,7 @@ export function buildEntityContext(
   familyGraph: FamilyGraph,
   options: EntityContextOptions
 ): EntityContextResult {
-  const { entityName, appearance = true, feminineDetails = false, recentHistoryCount = 5 } = options;
+  const { entityName, appearance = true, feminineDetails = false, recentHistoryCount = 5, isFirstTurn = false, userName = '鸿艺', recentConversations } = options;
 
   const profile = familyGraph.getPersonProfile(entityName);
   if (!profile) {
@@ -74,6 +81,25 @@ export function buildEntityContext(
   if (basicInfo.birthYear) bioParts.push(`出生年: ${basicInfo.birthYear}`);
   if (basicInfo.birthPlace) bioParts.push(`出生地: ${basicInfo.birthPlace}`);
   if (basicInfo.education) bioParts.push(`学历: ${basicInfo.education}`);
+  if (basicInfo.maritalStatus) bioParts.push(`婚姻: ${basicInfo.maritalStatus}`);
+  if (basicInfo.ethnicity) bioParts.push(`民族: ${basicInfo.ethnicity}`);
+  // 🆕 V4.0: 从生命里程碑中提取年龄信息
+  if (!basicInfo.birthYear) {
+    const allMilestones = dossier.lifeMilestones || [];
+    for (const ms of allMilestones) {
+      const ageMatch = (ms.event || '').match(/年龄[：:]\s*(\d+)\s*岁/);
+      if (ageMatch) {
+        bioParts.push(`当前年龄: ${ageMatch[1]}岁 (${ms.date || '近期记录'})`);
+        break;
+      }
+      const birthMatch = (ms.event || '').match(/(\d{4})\s*年/);
+      if (birthMatch) {
+        bioParts.push(`出生年: ${birthMatch[1]}`);
+        break;
+      }
+    }
+  }
+
   if (bioParts.length > 0) {
     parts.push('### 基本信息');
     parts.push(bioParts.join('  |  '));
@@ -143,9 +169,35 @@ export function buildEntityContext(
 
   // ═══ 人际关系 ═══
   if (edges.length > 0) {
-    parts.push('### 你认识的人');
+    const relativeDetails: string[] = [];
     for (const edge of edges) {
-      parts.push(`- ${edge.entity}: ${edge.relationLabel}`);
+      const relProfile = familyGraph.getPersonProfile(edge.entity);
+      const relBasic = relProfile?.dossier?.basicInfo || {};
+      const relMilestones = relProfile?.dossier?.lifeMilestones || [];
+      // 构建亲属详情
+      let detail = `${edge.entity}（${edge.relationLabel}`;
+      if (relBasic.gender) detail += `，${relBasic.gender}`;
+      if (relBasic.birthYear) detail += `，${relBasic.birthYear}年生`;
+      if (relBasic.education) detail += `，${relBasic.education}`;
+      if (relProfile?.occupation || (relProfile?.dossier as any)?.socialIdentity?.currentOccupation) detail += `，${relProfile?.occupation || (relProfile?.dossier as any)?.socialIdentity?.currentOccupation || ''}`;
+      // 从里程碑提取年龄
+      if (!relBasic.birthYear) {
+        for (const ms of relMilestones) {
+          const ageMatch = (ms.event || '').match(/年龄[：:]\s*(\d+)\s*岁/);
+          if (ageMatch) { detail += `，现年${ageMatch[1]}岁`; break; }
+        }
+      }
+      detail += '）';
+      if (detail.length > edge.entity.length + 10) {
+        relativeDetails.push(detail);
+      } else {
+        relativeDetails.push(`- ${edge.entity}: ${edge.relationLabel}`);
+      }
+    }
+
+    parts.push('### 你认识的人（含详情）');
+    for (const d of relativeDetails) {
+      parts.push(`- ${d}`);
     }
     parts.push('');
   }
@@ -159,6 +211,19 @@ export function buildEntityContext(
     parts.push('');
   }
 
+  // 🆕 V4.0: 近期对话历史 — 让实体知道上次聊到哪了 ═══
+  if (recentConversations && recentConversations.length > 0) {
+    parts.push('### 你和鸿艺最近的对话');
+    parts.push('以下是你们近期的交流记录，你可以参考以保持对话的连贯性：');
+    for (const conv of recentConversations.slice(0, recentHistoryCount)) {
+      const role = conv.role === 'user' ? '鸿艺' : '你';
+      const date = conv.timestamp ? conv.timestamp.substring(0, 10) : '';
+      const snippet = (conv.content || '').substring(0, 150);
+      parts.push(`- (${date}) ${role}：${snippet}`);
+    }
+    parts.push('');
+  }
+
   // ═══ 行为约束 ═══
   parts.push('### 行为规范');
   parts.push(`- 你不扮演任何人——你就是 ${entityName} 本人`);
@@ -167,7 +232,16 @@ export function buildEntityContext(
   parts.push('- 档案中标注"待采集"的信息，说明你不知道——如实说不知道，不编造');
   parts.push('- 对话中用户告诉你新的个人信息，你会记住（系统自动归档）');
 
-  const systemText = parts.join('\n');
+  let systemText = parts.join('\n');
+
+  // 🆕 V3.0: 首轮注入开场协议
+  if (isFirstTurn) {
+    const greeting = buildGreetingProtocol(profile, userName);
+    if (greeting) {
+      systemText = greeting + '\n\n' + systemText;
+    }
+  }
+
   const summary = `${entityName}: ${profile.relation_to_user || ''} ${socialIdentity.currentOccupation || ''}`.trim();
 
   return {

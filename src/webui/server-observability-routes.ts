@@ -989,71 +989,7 @@ export async function handleObservabilityRoutes(
     return true;
   }
 
-  // ── 健康检查（含持久化健康度 + 文件健康度监控，改造③+⑥）──
-  if (req.method === 'GET' && url.pathname === '/api/health') {
-    const health = maintenance.getHealth();
-    const storageStatus = await storage.getStatus().catch(() => null);
-    if (storageStatus) health.storage.totalRecords = storageStatus.totalRecords;
-    const decayStats = storage.getDecayStats();
-    const m8st = storage.getSQLite().getStatus();
-    let alignmentSummary: { score: number; status: string } | null = null;
-    try {
-      const _ar = alignmentGuard.getCachedReport();
-      if (_ar) alignmentSummary = { score: _ar.score, status: _ar.status };
-    } catch (e: any) { console.error('[Observability] error:', e?.message); }
-    let _pSimple: any = { userCount: 0, assistantCount: 0, ratio: '0' };
-    let _chatAlert: string | null = null;
-    try {
-      const _mdb = storage.getSQLite();
-      const _uc = _mdb.queryAll('SELECT COUNT(*) as cnt FROM memories WHERE leaf_zone=?', ['user']);
-      const _ac = _mdb.queryAll('SELECT COUNT(*) as cnt FROM memories WHERE leaf_zone=?', ['assistant']);
-      const uc = Number((_uc[0] as any)?.cnt ?? 0);
-      const ac = Number((_ac[0] as any)?.cnt ?? 0);
-      _pSimple = { userCount: uc, assistantCount: ac, ratio: ac > 0 ? (uc / ac).toFixed(2) : '0' };
-      const _oFile = fileURLToPath(import.meta.url);
-      const _chatPath = join(dirname(dirname(_oFile)), 'webui', 'chat.ts');
-      if (existsSync(_chatPath) && statSync(_chatPath).size > 100 * 1024) {
-        _chatAlert = 'chat.ts 超过100KB';
-      }
-    } catch (_pe) { /* stats not critical */ }
-    // 🏗️ 防复发第二层: 角色扮演健康状态
-    let _rpStatus: any = { active: false };
-    try {
-      if (deps.getRoleplayStatus) {
-        const _rps = deps.getRoleplayStatus();
-        _rpStatus = { active: _rps.active, role: _rps.role, class: _rps.class, turns: _rps.turns };
-      }
-    } catch (_rpe) { /* roleplay status not critical */ }
-    const hybrid = hybridSearch?.getDiagnostics?.() ?? {
-      ready: hybridSearch?.isReady?.() ?? false,
-      embedderStatus: 'unknown',
-    };
-    let bionicStatus = bionic.getHealthSnapshot();
-    if (bionicStatus.reachable === null) {
-      const reachable = await bionic.health().catch(() => false);
-      bionicStatus = {
-        reachable,
-        cached: true,
-        lastCheckedAt: Date.now(),
-      };
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      ...health,
-      alignment: alignmentSummary,
-      memory: { ...health.memory, decay: decayStats, landmarks: m8st.landmarks, entities: m8st.totalEntities },
-      persistence: _pSimple,
-      chatFileAlert: _chatAlert,
-      roleplay: _rpStatus,
-      runtime: {
-        enableNewArch: !!enableNewArch,
-        orchestratorMode: orchestrator?.getMode?.() ?? null,
-        hybridSearch: hybrid,
-        bionic: bionicStatus,
-      },
-    }));
-    return true;
-  }
+  // ── 健康检查 → 已迁移至 server.ts（支持模块健康注册表 + 开关状态）──
 
   // ── 向量对齐巡检 ──
   if (req.method === 'GET' && url.pathname === '/api/alignment') {

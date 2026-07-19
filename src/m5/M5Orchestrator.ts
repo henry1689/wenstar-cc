@@ -38,7 +38,7 @@ export class M5Orchestrator {
    * @param knowledgeBase 知识库内容
    * @param userMessage 用户当前消息（用于场景记忆更新）
    */
-  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType): Promise<string> {
+  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, isEntityMeeting?: boolean): Promise<string> {
     // P0-1: 提取最近一条 timeline 的 dna_root_id 完成全链路闭环
     const dnaRootId = m4ctx.memory_summary.timeline
       .slice(-1)
@@ -58,12 +58,13 @@ export class M5Orchestrator {
     extractAnchor(conversationHistory, _realLastMsg);
     const anchorConstraint = buildAnchorConstraint();
 
-    // Step 2.6: 注入场景上下文记忆
+    // Step 2.6: 注入场景上下文记忆（🛡️ V4.0: 会晤模式下不注入玉瑶的锚点/场景约束）
     const sceneContext = buildContextPrompt();
-    // 角色扮演：完全隔离路径，不注入场景约束（防止身份混淆铁律覆盖角色设定）
-    const combinedKnowledge = (knowledgeBase && knowledgeBase.startsWith('【角色扮演】'))
-      ? knowledgeBase
-      : [anchorConstraint, sceneContext, knowledgeBase || ''].filter(Boolean).join('\n');
+    const combinedKnowledge = isEntityMeeting
+      ? (knowledgeBase || '')  // 会晤模式：纯实体上下文，不加玉瑶的场景约束
+      : (knowledgeBase && knowledgeBase.startsWith('【角色扮演】'))
+        ? knowledgeBase
+        : [anchorConstraint, sceneContext, knowledgeBase || ''].filter(Boolean).join('\n');
 
     // P1-3: 记录开始时间，用于判断是否需要过渡话术
     const _startTime = Date.now();
@@ -72,13 +73,14 @@ export class M5Orchestrator {
     // 📜 架构铁律：角色状态以 chat.ts 的 _currentRole 为唯一权威
     const _rpInput = userMessage || cognition.current.raw_input || '';
     this._currentRole = currentRole || this._currentRole;
-    // 强制 lover 覆盖（安全兜底，保留）
+    // 强制 lover 覆盖（🛡️ V4.0: 会晤模式下不强制覆盖）
     try {
-      if (this._currentRole !== 'lover' && isIntimate(_rpInput)) {
+      if (!isEntityMeeting && this._currentRole !== 'lover' && isIntimate(_rpInput)) {
         this._currentRole = 'lover';
         console.log('[M5Role] 消息含亲密词，强制→lover');
       }
     } catch (_re) { /* 亲密词检测非关键 */ }
+    if (isEntityMeeting) this._currentRole = 'recaller';
     console.log('[M5Role] ' + this._currentRole + ' (from chat.ts)');
 
     // Step 3: LLM 受控生成（唯一LLM调用点）
@@ -86,7 +88,7 @@ export class M5Orchestrator {
     let usedMockFallback = false;
     try {
       const currentTime = new Date().toISOString();
-      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole });
+      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting });
       draft = result.text;
     } catch (err) {
       console.error('[M5] LLM生成失败:', err);
