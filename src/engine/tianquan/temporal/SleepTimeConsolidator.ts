@@ -510,17 +510,17 @@ export class SleepTimeConsolidator {
   /** ⑤ 跨 session 实体关联 (V3.0 增强：更广搜索 + FG 关联) */
   private async _linkCrossSession(sqlite: any): Promise<number> {
     try {
-      // 扩大搜索范围到最近 500 条记忆
+      // 扩大搜索范围到最近 500 条对话（conversations 是实体标注真实来源；memories 无 entity_names 列）
       const rows = sqlite.queryAll(
-        `SELECT entity_names, created_at FROM memories WHERE entity_names IS NOT NULL
-         ORDER BY created_at DESC LIMIT 500`
+        `SELECT entity_names, timestamp FROM conversations WHERE entity_names IS NOT NULL AND entity_names != ''
+         ORDER BY timestamp DESC LIMIT 500`
       );
       const entitySessions = new Map<string, Set<string>>(); // name → set of dates
       for (const row of rows) {
         try {
           const names = parseEntityNames((row as any).entity_names);
           if (!Array.isArray(names)) continue;
-          const day = ((row as any).created_at || '').toString().substring(0, 10);
+          const day = ((row as any).timestamp || '').toString().substring(0, 10);
           for (const name of names) {
             if (typeof name !== 'string' || name.length < 2 || name === '我') continue;
             if (!entitySessions.has(name)) entitySessions.set(name, new Set());
