@@ -14,7 +14,28 @@
  *   - 私密表达（用户对某人的表白/亲密/好感/私事）过滤
  *   - 只针对"当前会晤实体之外"的其他实体做过滤；当前实体自己的发言保留
  */
-import type { FamilyGraph } from './FamilyGraph.js';
+export type ConversationSource =
+  | 'entity-context-store'
+  | 'conversation-search'
+  | 'conversation-history';
+
+export interface PrivateConversation {
+  role: string;
+  content: string;
+  timestamp: string;
+  /** 权威归属：必须与当前会晤实体 UUID 完全一致。 */
+  belong_entity_uuid?: string | null;
+  /** 数据来源：默认只信任按 UUID 查询的 EntityContextStore。 */
+  source?: ConversationSource;
+  /** 可选 ACL 标签，交由调用方授权函数解释。 */
+  acl?: string | null;
+}
+
+export interface ConversationAccessContext {
+  currentEntityUuid?: string | null;
+  allowedSources?: readonly string[];
+  authorize?: (conversation: PrivateConversation, currentEntityUuid: string) => boolean;
+}
 
 /** 私密表达关键词 — 用户对某人的亲密/情感/私事表达 */
 const INTIMATE_PATTERNS: RegExp[] = [
@@ -78,38 +99,34 @@ export function isIntimateAboutOthers(
 }
 
 /**
- * 过滤对话记忆列表：剔除涉及其他实体私密表达的内容。
- * @param conversations 对话列表（role/content/timestamp）
- * @param currentEntity 当前会晤实体名
- * @param familyGraph 家族图谱（用于获取所有人名）
+ * 按权威 UUID、可信来源和可选 ACL 过滤会晤对话。
+ * 任一关键属性缺失或授权检查异常时均 deny-by-default。
  */
 export function filterPrivateConversations(
-  conversations: Array<{ role: string; content: string; timestamp: string }>,
-  currentEntity: string,
-  familyGraph?: FamilyGraph,
-): Array<{ role: string; content: string; timestamp: string }> {
-  if (!conversations || conversations.length === 0) return conversations;
+  conversations: PrivateConversation[],
+  access: ConversationAccessContext,
+): PrivateConversation[] {
+  if (!Array.isArray(conversations) || conversations.length === 0) return [];
 
-  // 获取所有人名（当前实体之外的其他实体）
-  const allNames = familyGraph?.getAllPersonNames?.() || [];
-  const otherEntities = allNames.filter(n => n && n !== currentEntity);
+  const currentEntityUuid = access?.currentEntityUuid?.trim();
+  if (!currentEntityUuid) return [];
 
-  const filtered = conversations.filter(conv => {
-    const content = conv.content || '';
-    // 用户（role=user）对当前实体的话保留；对其他实体的私密表达过滤
-    // 当前实体（role=assistant）自己的发言保留
-    if (conv.role === 'assistant') return true; // 当前实体自己的发言不涉及他人隐私
+  const allowedSources = new Set(access.allowedSources ?? ['entity-context-store']);
 
-    // user 的发言：若是对其他实体的私密表达 → 过滤
-    if (isIntimateAboutOthers(content, currentEntity, otherEntities)) {
-      console.log(`[PrivacyFilter] 过滤：${currentEntity}的记忆含对其他实体私密表达: ${content.substring(0, 60)}`);
+  return conversations.filter(conversation => {
+    try {
+      // UUID 是权威归属。缺失、跨实体或来源不可信时一律拒绝。
+      if (!conversation?.belong_entity_uuid) return false;
+      if (conversation.belong_entity_uuid !== currentEntityUuid) return false;
+      if (!conversation.source || !allowedSources.has(conversation.source)) return false;
+
+      // 可选 ACL 必须显式通过；授权函数异常同样 deny-by-default。
+      if (access.authorize && !access.authorize(conversation, currentEntityUuid)) return false;
+      return true;
+    } catch {
       return false;
     }
-    return true;
   });
-
-  // 若过滤后为空，保留至少一条（避免实体无记忆）
-  return filtered.length > 0 ? filtered : conversations.slice(0, 1);
 }
 
 /** 过滤实体上下文中的"你认识的人"列表 — 只保留公开社交关系，剔除可能泄露他人私密关系的推测 */

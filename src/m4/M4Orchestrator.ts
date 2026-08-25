@@ -109,7 +109,18 @@ export class M4Orchestrator {
       entityUuids: personUuids.length > 0 ? personUuids : undefined,
     });
 
-    // Phase B: 缓存原始记忆（供 retrieveAsSnapshot 使用）
+    // ── V3.2 门阀过滤: 必须先过滤，再进入任何压缩、缓存、回调或快照链路 ──
+    if (this._gatekeeper?.isActive?.()) {
+      try {
+        memories = this._gatekeeper.filterMemories(memories);
+      } catch {
+        // 隐私门阀异常时 deny-by-default，绝不降级为未过滤记忆。
+        memories = [];
+        console.warn('[M4] UUID 门阀异常，已阻断本轮记忆注入');
+      }
+    }
+
+    // Phase B: 只缓存通过门阀的记忆（供 retrieveAsSnapshot 使用）
     this._lastRetrieveMemories = [...memories];
     this._lastRetrieveMaterials = { locusPath, entities: enhancedEntities, rawInput };
 
@@ -246,17 +257,6 @@ export class M4Orchestrator {
 
     const memorySummary = this.memoryRetriever.compressMemories(memories);
 
-    // ── V3.2 门阀过滤: 记忆检索结果按白名单 UUID 过滤 ──
-    if (this._gatekeeper?.isActive?.()) {
-      try {
-        const before = memories.length;
-        memories = this._gatekeeper.filterMemories(memories);
-        if (before !== memories.length) {
-          // 门阀过滤了部分记忆（静默，隐私保护不打印细节）
-        }
-      } catch { /* 门阀失败不影响检索 */ }
-    }
-
     // ── 2. 家族图谱 ──
     const activeFG = this.getFamilyGraph();
 
@@ -337,7 +337,12 @@ export class M4Orchestrator {
       try {
         familyContext = this._gatekeeper.filterFGMembers(familyContext);
         socialContext = this._gatekeeper.filterFGMembers(socialContext);
-      } catch { /* 门阀失败不阻断 */ }
+      } catch {
+        // FG 隐私过滤同样 fail-closed，避免异常时回填未过滤成员。
+        familyContext = [];
+        socialContext = [];
+        console.warn('[M4] FG 门阀异常，已阻断本轮人物上下文注入');
+      }
     }
 
     // ── 4. 情感检索结果注入 ──

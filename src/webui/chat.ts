@@ -85,7 +85,7 @@ import { alignmentGuard } from '../app/alignment/VectorAlignmentGuard.js';
 
 import { autoPromoteCandidatesV2 } from '../app/vault/VaultManager.js';
 import { EntityMeeting } from '../m4/household/EntityMeeting.js';
-import { filterPrivateConversations } from '../m4/household/EntityPrivacyFilter.js';
+import { filterPrivateConversations, type PrivateConversation } from '../m4/household/EntityPrivacyFilter.js';
 import { FGProfileWriteGateway } from '../m4/household/FGProfileWriteGateway.js';
 // 🔴 P0-2 会话模式分级: 读取 prompt_depth_enabled 总开关
 import { getRetrievalFusionConfig } from '../config/retrieval-fusion-config.js';
@@ -961,9 +961,10 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           // 🆕 V4.0: 查询与该实体的近期对话历史
           // 🆕 V10.13 修复: 优先按 belong_entity_uuid 查会晤对话（更精准），
           // searchConversations（content LIKE）作为兜底。
-          let recentConversations: Array<{ role: string; content: string; timestamp: string }> = [];
+          let recentConversations: PrivateConversation[] = [];
+          const _conversationEntityUuid = ctx._entityMeeting?.getEntityUUID?.() || null;
           try {
-            const _muuid = ctx._entityMeeting?.getEntityUUID?.();
+            const _muuid = _conversationEntityUuid;
             // ① 优先: EntityContextStore 按 UUID 查该实体的会晤对话（真实归属）
             if (_muuid && ctx.storage?.getSQLite) {
               const { EntityContextStore: _ECS } = await import('../app/entity/EntityContextStore.js');
@@ -980,6 +981,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
                   role: t.role || 'user',
                   content: (t.content || '').substring(0, 200),
                   timestamp: t.timestamp || '',
+                  belong_entity_uuid: _muuid,
+                  source: 'entity-context-store',
                 }));
               }
             }
@@ -991,6 +994,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
                   role: r.role || 'user',
                   content: (r.content || '').substring(0, 200),
                   timestamp: r.timestamp || '',
+                  belong_entity_uuid: r.belong_entity_uuid || null,
+                  source: 'conversation-search',
                 }));
               }
             }
@@ -1004,6 +1009,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
                   role: t.role || 'user',
                   content: (t.content || '').substring(0, 200),
                   timestamp: t.timestamp || '',
+                  belong_entity_uuid: t.belong_entity_uuid || null,
+                  source: 'conversation-history',
                 }));
               }
             }
@@ -1015,8 +1022,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           if (recentConversations.length > 0) {
             recentConversations = filterPrivateConversations(
               recentConversations,
-              _meetingEntityName,
-              ctx.m4.getFamilyGraph?.(),
+              { currentEntityUuid: _conversationEntityUuid },
             );
           }
 

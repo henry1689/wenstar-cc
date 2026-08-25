@@ -24,22 +24,35 @@ describe('EntityPrivacyFilter — 隐私隔离', () => {
     expect(isIntimateAboutOthers(content, '徐诗雨', OTHER_ENTITIES)).toBe(false);
   });
 
-  it('当前实体自己的发言 → 保留；用户对他人表白 → 过滤', () => {
+  it('只保留 UUID 归属与可信来源均匹配的记录', () => {
     const convos = [
-      { role: 'assistant' as const, content: '诗雨觉得今天工作有点累', timestamp: '' },
-      { role: 'user' as const, content: '徐诗雨，我好喜欢你', timestamp: '' },
-      { role: 'user' as const, content: '其实我好喜欢熊梓铭，她让我心动了', timestamp: '' },
+      { role: 'assistant' as const, content: '诗雨觉得今天工作有点累', timestamp: '', belong_entity_uuid: 'uuid-shiyu', source: 'entity-context-store' as const },
+      { role: 'user' as const, content: '属于其他实体的私密内容', timestamp: '', belong_entity_uuid: 'uuid-other', source: 'entity-context-store' as const },
+      { role: 'user' as const, content: '没有 UUID 的关键词兜底记录', timestamp: '', source: 'conversation-search' as const },
     ];
-    // 传 familyGraph mock（提供所有人名，含熊梓铭）
-    const fg = { getAllPersonNames: () => ['徐诗雨', '熊梓铭', '玉瑶'] } as any;
-    const filtered = filterPrivateConversations(convos, '徐诗雨', fg);
-    // 保留自己的发言 + 过滤用户对梓铭的私密表白
-    // "徐诗雨，我好喜欢你" 是对当前实体的表白（当前实体 = 徐诗雨），otherEntities 不含徐诗雨 → 保留
-    expect(filtered.length).toBe(2);
-    expect(filtered.some(t => t.content.includes('熊梓铭'))).toBe(false); // 梓铭私密被过滤
+    const filtered = filterPrivateConversations(convos, { currentEntityUuid: 'uuid-shiyu' });
+    expect(filtered).toEqual([convos[0]]);
+  });
+
+  it('UUID 缺失、来源不可信或 ACL 拒绝时 fail-closed', () => {
+    const trusted = {
+      role: 'user', content: '仅当前实体可见', timestamp: '',
+      belong_entity_uuid: 'uuid-shiyu', source: 'entity-context-store' as const,
+    };
+
+    expect(filterPrivateConversations([trusted], { currentEntityUuid: null })).toEqual([]);
+    expect(filterPrivateConversations([{ ...trusted, source: 'conversation-history' }], { currentEntityUuid: 'uuid-shiyu' })).toEqual([]);
+    expect(filterPrivateConversations([trusted], {
+      currentEntityUuid: 'uuid-shiyu',
+      authorize: () => false,
+    })).toEqual([]);
+    expect(filterPrivateConversations([trusted], {
+      currentEntityUuid: 'uuid-shiyu',
+      authorize: () => { throw new Error('ACL unavailable'); },
+    })).toEqual([]);
   });
 
   it('空列表 → 返回空', () => {
-    expect(filterPrivateConversations([], '徐诗雨')).toEqual([]);
+    expect(filterPrivateConversations([], { currentEntityUuid: 'uuid-shiyu' })).toEqual([]);
   });
 });
