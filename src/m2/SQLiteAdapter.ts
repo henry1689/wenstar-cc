@@ -2221,6 +2221,10 @@ export class SQLiteAdapter {
       validStartMs: obj.valid_start_ms ?? null,
       validUntilMs: obj.valid_until_ms ?? null,
       foresightStatus: obj.foresight_status ?? null,
+      dna_root_id: obj.dna_root_id ?? undefined,
+      // 🆕 编码健康修复: 映射 global_uid（此前遗漏 → 读-改-写路径如 promoteToLandmark/runDecayMaintenance
+      //   write() 回写时 global_uid=undefined → SQLiteAdapter.write() 走 || fallback 生成 MM+hash8 垃圾 UID）
+      global_uid: obj.global_uid ?? undefined,
       // V18: 补齐 belongEntityUuid — 此前 rowToRecord 遗漏该字段，
       //   导致 runDecayMaintenance 等"读-改-写"路径 write() 回写时 belongEntityUuid=undefined→NULL，
       //   全库 memories UUID 被清空（徐诗雨/熊梓铭记忆归零根因）。
