@@ -2195,17 +2195,36 @@ if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny) {
   } catch (e) { console.warn('[PhysicalLaws] 失败(静默):', (e as Error).message); }
 }
 
-// 🚄 2026-08-24 火车时刻查询(12306): "深圳到广州南的高铁几点" → wf_train_schedule → 真实车次注入。
-// 触发词: 高铁/火车/车次/余票/动车 + 站名对；静默失败不影响聊天。
+// 🚄 2026-08-24 火车时刻查询(12306): "深圳到广州南的高铁几点" / "G1102经过哪些站" → wf_train_schedule。
+// 触发词: 高铁/火车/车次/余票/动车/班次 + 站名对 或 车次号+经过；静默失败不影响聊天。
 if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny && !_meetingEntityName && message.length > 3) {
   try {
-    if (/高铁|火车|车次|余票|动车|班次/.test(message)) {
+    const _trainNoMT = message.match(/([GCDZKT]\d{1,5})/);
+    if (/高铁|火车|车次|余票|动车|班次/.test(message) || (_trainNoMT && /经过|经停|停靠|哪些站|沿途|路过/.test(message))) {
       const _stSrc = '深圳|广州南|广州|光明城|福田|香港|北京|上海|武汉|长沙|东莞|惠州|珠海|佛山|中山|厦门|南昌';
-      const _sm = message.match(new RegExp('(?:从|由)?\\s*(' + _stSrc + ')\\s*(?:到|去|至|前往|回)\\s*(' + _stSrc + ')'));
-      if (_sm) {
-        const mh = (globalThis as any).__masterHarris;
-        if (mh?.sendToYaoguangAndWait) {
-          const _trainResult = await mh.sendToYaoguangAndWait('wf_train_schedule', { from_station: _sm[1], to_station: _sm[2] });
+      const _mhT = (globalThis as any).__masterHarris;
+      const _trainNoM = message.match(/([GCDZKT]\d{1,5})/);
+      if (_trainNoM && /经过|经停|停靠|哪些站|路过|沿途/.test(message)) {
+        // 车次经停: "G1102经过哪些站"
+        const _no = _trainNoM[1];
+        const _stm = message.match(new RegExp('(?:从|由)?\\s*(' + _stSrc + ')\\s*(?:到|去|至|前往|回)\\s*(' + _stSrc + ')'));
+        if (_mhT?.sendToYaoguangAndWait) {
+          const _stopsResult = await _mhT.sendToYaoguangAndWait('wf_train_schedule', {
+            train_no: _no, from_station: _stm?.[1] || '', to_station: _stm?.[2] || '',
+          }, 18000);  // 🔴 经停=两次12306调用(映射+经停)，需更长超时
+          const _sr = _stopsResult?.result ?? null;
+          if (_sr?.status === 'ok' && _sr?.stops?.length) {
+            const _stopsText = _sr.stops.map((st: any) => (st.station || '') + (st.arrive && st.arrive !== '----' ? '到' + st.arrive : '') + (st.depart ? '开' + st.depart : '')).join('；');
+            // 🔴 前置注入+纠正标记：玉瑶有旧记忆（"经停虎门"）时以真实数据为准
+            finalKnowledgeText = '【🔴 火车经停·12306 最新真实数据】' + _no + '（' + _sr.date + '）共' + _sr.count + '站：' + _stopsText + '。⚠️ 若此前说过不同的经停信息，以这份数据为准（12306实时查询）。' + '\n\n' + (finalKnowledgeText || '');
+            console.log('[Train] 经停注入: ' + _no + ' ' + _sr.count + '站');
+          }
+        }
+      } else {
+        // 两站间车次: "深圳到广州南的高铁几点"
+        const _sm = message.match(new RegExp('(?:从|由)?\\s*(' + _stSrc + ')\\s*(?:到|去|至|前往|回)\\s*(' + _stSrc + ')'));
+        if (_sm && _mhT?.sendToYaoguangAndWait) {
+          const _trainResult = await _mhT.sendToYaoguangAndWait('wf_train_schedule', { from_station: _sm[1], to_station: _sm[2] });
           const _tr = _trainResult?.result ?? null;
           if (_tr?.status === 'ok' && _tr?.trains?.length) {
             const _sample = _tr.trains.slice(0, 5).map((t: any) => t.train_no + ' ' + t.depart + '→' + t.arrive + ' 历时' + t.duration).join('；');
