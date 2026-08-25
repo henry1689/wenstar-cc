@@ -2011,6 +2011,17 @@ export class SQLiteAdapter {
       const cl = ca >= 2 ? 3 : ca >= 1 ? 2 : ca >= 0.5 ? 1 : 0;
       const es = Math.min(1.0, ca * 0.8);
 
+      // 🆕 编码健康修复: 从 conversations 继承规范 global_uid/dna_root_id（否则重建的锚点无 UID/DNA）
+      let anchorGlobalUid = '', anchorDnaRootId = '';
+      try {
+        const guRes = this.db.exec(
+          "SELECT global_uid, dna_root_id FROM conversations WHERE dialog_group_id = ? AND belong_entity_uuid = ? AND global_uid IS NOT NULL AND global_uid != '' ORDER BY timestamp LIMIT 1"
+        );
+        if (guRes.length && guRes[0].values?.[0]) {
+          anchorGlobalUid = String(guRes[0].values[0][0] || '');
+          anchorDnaRootId = String(guRes[0].values[0][1] || '');
+        }
+      } catch { /* 继承失败不阻塞重建 */ }
       try {
         // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零（S4 P1-2 修复：
         //   与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
@@ -2020,13 +2031,15 @@ export class SQLiteAdapter {
           "locus_path,leaf_zone,raw_input,memory_kind,lifecycle_state,confidence_score,stability_score," +
           "thread_id,recall_count,promoted_to_diamond,effective_strength,strength_updated_at," +
           "is_landmark,primary_emotion,memory_type,dialog_group_id,belong_entity_uuid," +
+          "global_uid,dna_root_id," +
           "is_foresight,valid_until_ms,foresight_status,source_type) " +
-          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,0,NULL,'none','conversation')",
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,0,NULL,'none','conversation')",
           [id, seq++, String(firstTs || now),
            anchor40D,
            ca, cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
            cl >= 2 ? 'active' : 'candidate', 0.55, cl >= 2 ? 0.45 : 0.2,
-           dg, es, now, '平静', dg, eu]
+           dg, es, now, '平静', dg, eu,
+           anchorGlobalUid, anchorDnaRootId]
         );
         n++;
       } catch { /* 单条失败不阻塞 */ }

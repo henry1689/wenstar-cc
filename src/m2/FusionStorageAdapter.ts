@@ -111,6 +111,8 @@ export class FusionStorageAdapter {
       seq_pos: pos,
       created_at: now,
       dna_root_id: (dna as any).dna_root_id,
+      // 🆕 编码健康修复: 透传 global_uid（否则 SQLiteAdapter.write() 里 || fallback 生成 MM+hash8 垃圾 UID）
+      global_uid: (dna as any).global_uid,
       thread_id: (dna as any).dialog_group_id ?? (dna as any).dna_root_id ?? dna.branch_id,
       session_id: (dna as any).session_id ?? undefined,
       dialog_group_id: (dna as any).dialog_group_id,

@@ -220,6 +220,8 @@ export class MemoryAssessor {
           seq_pos: nextSeq,
           created_at: String(conv.timestamp || now),
           dna_root_id: dnaRootId,
+          // 🆕 编码健康修复: 从 conversations 继承规范 global_uid（conversations 有 DNAEncoder 生成的 23 字符 UID）
+          global_uid: String(conv.global_uid || conv.globalUid || ''),
           thread_id: String(conv.dialog_group_id || dnaRootId || memoryId),
           session_id: null as any,
           dialog_group_id: conv.dialog_group_id ? String(conv.dialog_group_id) : undefined,
