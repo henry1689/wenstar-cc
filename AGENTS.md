@@ -107,7 +107,7 @@ DeepSeek-V4-pro 上限 **104 万 tokens**。超过后 `/compact` 被 API 拒绝 
 
 ### 6. 🔴 改任何代码前 → 系统重建（3分钟强制流程）
 
-**背景**：每次会话 Claude 没有完整系统视野，只看到当前文件 → 必然打补丁。
+**背景**：每次会话 Codex 没有完整系统视野，只看到当前文件 → 必然打补丁。
 **解决方案**：每次修改代码前，强制执行以下三步，**重建系统认知**后再动手。
 
 ```
@@ -224,7 +224,7 @@ DeepSeek-V4-pro 上限 **104 万 tokens**。超过后 `/compact` 被 API 拒绝 
 
 ### 9. 🔴 危险信号 —— 立即停止
 
-当你看到 Claude 说出以下话，**立刻叫停，回到闸门 1**：
+当你看到 Codex 说出以下话，**立刻叫停，回到闸门 1**：
 
 | 危险信号 | 为什么是问题 |
 |----------|------------|
@@ -519,7 +519,7 @@ L5 · 事后编造检测
 - 服务用显式 `DB_PATH`（`DATA_DIR/knowledge/family_graph.db`）不受影响；**测试必须显式传路径**：`new FamilyGraph(path.join(process.cwd(), 'data', 'webui', 'knowledge', 'family_graph.db'))`。
 
 ### 4. Harness/Sentinel 协作（pi 环境）
-- pi 的 edit 不走 Claude hook → Sentinel 判定“无令牌写入” → `git checkout` 回滚（`git status` 观察不到修改）。
+- pi 的 edit 不走 Codex hook → Sentinel 判定“无令牌写入” → `git checkout` 回滚（`git status` 观察不到修改）。
 - 正确姿势（按序）：
   a. **先签豁免**：`node -e "require('/d/AI文件/harness/scripts/exemptions-core.cjs').addExemption('文件路径',{minutes:60,operations:['edit'],reason:'...'})"` → 豁免期内 Sentinel 放行（分支2）。
   b. edit 修改 → sleep 10s → `git status` 确认 M 持久。

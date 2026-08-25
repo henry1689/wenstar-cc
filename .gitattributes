@@ -1,0 +1,10 @@
+# 统一 LF 行尾，防止 CRLF/LF 混合污染 diff
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.db binary
+*.png binary
+*.jpg binary
+*.wav binary
+*.mp3 binary
+*.pyc binary

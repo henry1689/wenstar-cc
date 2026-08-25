@@ -1,18 +1,13 @@
 # ⚠️⚠️⚠️ SENTINEL 哨兵实时拦截通告 ⚠️⚠️⚠️
 
-> 最后更新: 2026-08-04T18:52:00.000Z
+> 最后更新: 2026-08-25T10:51:52.140Z
 > 此文件由 Sentinel 哨兵自动维护，每次拦截后更新。
 
 ---
 
-## 🔴 所有文件均受 Sentinel 实时监控
+## 🔴 以下文件已被 Sentinel 物理锁定（只读）
 
-| 防线 | 状态 | 详情 |
-|------|:--:|------|
-| **Sentinel v2.1** | 🟢 活跃 | 4 目录 / 1130+ 文件，800ms 轮询 |
-| **MCP Server** | 🟢 活跃 | localhost:8765，6 个工具 |
-| **Pre-ToolUse Hook** | 🟢 活跃 | Edit/Write 自动拦截 |
-| **Git Hook** | 🟢 活跃 | fail-close |
+- **src/app/knowledge/KnowledgeEngine.ts** — 5 次无令牌修改 — 🔒 已锁定，不可编辑
 
 ## 🟠 以下文件已被 Sentinel 多次拦截
 
@@ -22,14 +17,14 @@
 
 ## 📢 给 Claude 的通告
 
-**所有对 `src/` 下 .ts 文件的修改必须走 S1-S7 流水线。不走流水线的修改会被实时回滚。**
+**如果你发现以下文件无法编辑，说明 Sentinel 已将它设为只读。原因：你多次绕过 S1-S7 流水线直接修改。**
 
 **正确做法**：
-1. 先调用 MCP 工具 `harness_run_flow { files: ["..."], flow: "wenstaros_core_repair_flow" }`
-2. 等待 S1→S7 通过，获取写入令牌
-3. 令牌有效期内执行 Edit/Write
+1. 阅读 `CLAUDE.md` 中的 🛡️ Harness 强制约束
+2. 调用 MCP 工具 `harness_run_flow` 开始 S1-S7 流水线
+3. 流水线通过后获取写入令牌，Sentinel 自动放行
 
 **禁止**：
-- ❌ 跳过 `harness_run_flow` 直接 Edit/Write
 - ❌ `npx tsx scripts/xxx-patch.ts` — Bash 打补丁
 - ❌ `writeFileSync` 直接写文件
+- ❌ 用 Edit/Write 工具直接改源码

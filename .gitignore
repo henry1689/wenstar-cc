@@ -57,3 +57,4 @@ bionic-cognitive-engine/venv/
 scripts/patch-minor-check.mjs
 scripts/patch-safety.mjs
 *.sentinel-lock
+scripts/reindex-knowledge.py
