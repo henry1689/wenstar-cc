@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import type { FamilyGraph } from '../m4/household/FamilyGraph.js';
 import type { TopicTracker } from '../app/knowledge/TopicTracker.js';
 import type { M8Engine } from '../m8/M8Engine.js';
+import { M3_CONFIG } from '../config/M3Config.js';
 
 /**
  * M7 空闲批处理定时器
@@ -137,8 +138,8 @@ export class M7Orchestrator {
    */
   async triggerInduction(dna: any, decision: any): Promise<void> {
     const rawInput = dna.raw_input || '';
-    const calcium = decision.enhanced?.calcium_score || 0;
-    if (!rawInput || calcium < 2) return;
+    const calcium = decision.enhanced?.calcium_score ?? 0;
+    if (!rawInput || calcium < M3_CONFIG.calcium.level3Threshold) return;
 
     this.queue.add({
       source: 'dialog_trigger',

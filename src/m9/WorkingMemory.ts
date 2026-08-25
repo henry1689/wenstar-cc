@@ -5,7 +5,7 @@
  * - 修复 P0: calciumLevel ≥ 0.3 → calciumScore ≥ 0.3（毕业条件）
  * - 修复 P0: cycleCount 在 consolidation 中递增，支持 staged 毕业
  * - 修复 P1: primaryEmotion/secondaryEmotions 存入 WorkingEntry
- * - 修复 P1: 缓冲区丢弃时记录日志（数量+摘要）
+ * - 修复 P1: 周期巩固时保留未毕业条目，显式排空时记录丢弃
  */
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { Perception24D } from '../m3/types/perception.js';
@@ -125,7 +125,7 @@ export class MemoryWriteBuffer {
   /**
    * 毕业策略
    *  full: calciumScore ≥ 0.3 + 有实体 → 完整24D写入金库
-   *  false: 无实体或钙化过低 → 丢弃（原始对话已在砂金库）
+   *  false: 无实体或钙化过低 → 周期巩固继续保留；显式 flushAll 才丢弃
    */
   private shouldGraduate(entry: WorkingEntry): 'full' | false {
     if (!entry.hasMeaningfulEntity) return false;
@@ -141,9 +141,10 @@ export class MemoryWriteBuffer {
   async consolidate(): Promise<WriteResult[]> {
     const results: WriteResult[] = [];
     const snapshot: WorkingEntry[] = [...this.buffer];
+    const retainedEntries = new Set<WorkingEntry>();
     snapshot.sort((a, b) => a.createdAt - b.createdAt);
-    let discarded = 0;
-    let discardSample = '';
+    let retained = 0;
+    let retainedSample = '';
 
     for (const entry of snapshot) {
       // P0: 递增 cycleCount
@@ -158,22 +159,23 @@ export class MemoryWriteBuffer {
         const result = await this.writeEntry(entry);
         results.push(result);
       } else {
-        // P1: 记录丢弃的条目
-        discarded++;
-        if (!discardSample && entry.dna.raw_input) {
-          discardSample = entry.dna.raw_input.substring(0, 40);
+        // 尚未达到毕业条件或强制轮次，保留在 buffer 进入下一轮。
+        retainedEntries.add(entry);
+        retained++;
+        if (!retainedSample && entry.dna.raw_input) {
+          retainedSample = entry.dna.raw_input.substring(0, 40);
         }
       }
     }
 
-    // 🆕 V10.0 P0-4: 只移除已快照的条目，避免清空 snapshot 之后新 push 的条目
-    const _snapIds = new Set(snapshot.map(e => e.seqPos));
-    this.buffer = this.buffer.filter(e => !_snapIds.has(e.seqPos));
+    // 只移除本轮已毕业的快照条目；未毕业条目与巩固期间新 push 的条目继续保留。
+    const snapshotEntries = new Set(snapshot);
+    this.buffer = this.buffer.filter(entry => !snapshotEntries.has(entry) || retainedEntries.has(entry));
     if (results.length > 0) {
       console.log(`[WM] 巩固: ${results.length} 条进入金库`);
     }
-    if (discarded > 0) {
-      console.log(`[WM] 丢弃: ${discarded} 条 (低钙化无实体, 样本: "${discardSample}")`);
+    if (retained > 0) {
+      console.log(`[WM] 保留: ${retained} 条等待下一轮 (样本: "${retainedSample}")`);
     }
     return results;
   }
@@ -193,6 +195,10 @@ export class MemoryWriteBuffer {
     };
   }
 
+  /**
+   * 显式排空：立即写入当前已满足毕业条件的条目，并丢弃其余条目。
+   * 与周期性 consolidate 不同，本方法用于关闭/切换阶段，不保留到下一轮。
+   */
   async flushAll(): Promise<WriteResult[]> {
     const results: WriteResult[] = [];
     const dropped: number[] = [];
