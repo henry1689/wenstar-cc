@@ -75,7 +75,7 @@ const PERSON_SURNAMES = new Set(SURNAME_LIST);
 
 const NON_NAME_SUFFIX = new Set(['室','服','变','便','天','心','子','学','院','里','种','员','篇','摘','那','衣','呢','块','段','片','次','些','点','面','头','边','者','性','化','机','器','型','号','该','候','度','似','遇','职','责','储','述']);
 
-const COMMON_WORDS_PERSON = new Set(['应该','时候','强度','索引','关联','相遇','相似','职责','全长','公了','公桌','和种','史摘','和事','那那','白衬','鲁呢','段美','衣块','单员','公司','明天','谢谢','还是','或者','所以','因为','不过','而且','但是','如果','虽然','然后','家里','老说同','花卉','小镇','顺口','贝安','宝贝']);
+const COMMON_WORDS_PERSON = new Set(['应该','时候','强度','索引','关联','相遇','相似','职责','全长','公了','公桌','和种','史摘','和事','那那','白衬','鲁呢','段美','衣块','单员','公司','明天','谢谢','还是','或者','所以','因为','不过','而且','但是','如果','虽然','然后','家里','老说同','花卉','小镇','顺口','贝安','宝贝','姓名','身份','户口','归属','新人','登记','年龄','生日','性别','职业','住址']);
 
 const GRAMMAR_WORDS_PERSON = new Set('是说和的了在也都就来还要会能不很太把被让给对用从向跟与有没做走来看听等呢吗啊吧着过到比');
 
@@ -310,7 +310,19 @@ export class L3EntityAnnotator {
   ): L3AnnotationResult {
     if (!text) return { entity_genes: [] };
     const entities = this.extractor.extract(text);
-    // P2: [已移除] 人名二次检测 — 模糊人名由 LLM NER 处理（chat.ts），不再本地滑窗检测
+    // 🆕 编码健康修复: 恢复人名滑窗检测（P2 曾移除，注释称"由 LLM NER 处理"但 annotateWithLLM 全项目无调用方）
+    //   词典(entity_rules.json)无法覆盖新姓名（安琪/陈都灵等），导致 M1 识别不出 → PAE 档案采集收不到人
+    //   复用 isPersonName（姓氏表+停用词过滤，本文件早已实现），贪心长优先防重叠误报
+    const personNames = this.detectPersonNames(text);
+    if (personNames.length > 0) {
+      const existingNames = new Set(entities.map(e => e.name));
+      for (const nm of personNames) {
+        if (existingNames.has(nm)) continue;
+        existingNames.add(nm);
+        // slideDetected 标记: 供 ChatEntry 在 LLM 实体覆盖时保留滑窗识别的可靠人名（LLM 提取常遗漏新姓名）
+        entities.push({ name: nm, type: 'person', allele: nm, slideDetected: true } as any);
+      }
+    }
     const fullContext = `${text} ${context}`;
 
     const entityGenes: EntityGene[] = entities.map((entity) => ({
@@ -319,9 +331,41 @@ export class L3EntityAnnotator {
       allele: entity.allele,
       phenotype: this.determinePhenotype(entity.name, entity.type, fullContext, selfModel),
       knowledge_type: this.determineKnowledgeType(entity.type, entity.name),
+      // 🆕 编码健康修复: 透传 slideDetected 标记（否则 map 丢失 → ChatEntry 覆盖时删掉滑窗人名）
+      ...((entity as any).slideDetected ? { slideDetected: true } : {}),
     }));
 
     return { entity_genes: entityGenes };
+  }
+
+  /**
+   * 🆕 编码健康修复: 人名滑窗检测（恢复，原 P2 移除）
+   * 在连续中文片段上滑窗取 2-3 字，isPersonName 判断（姓氏表 + 常见词/后缀过滤）。
+   * 贪心：3 字命中则跳过 2 字（防 "安吉尔"→"安吉" 重叠误报）；命中后跳位减少重复扫描。
+   */
+  private detectPersonNames(text: string): string[] {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    const chineseRuns = text.match(/[\u4e00-\u9fff]+/g) || [];
+    for (const run of chineseRuns) {
+      let i = 0;
+      while (i < run.length) {
+        const c3 = run.substring(i, i + 3);
+        if (c3.length === 3 && isPersonName(c3)) {
+          if (!seen.has(c3)) { seen.add(c3); names.push(c3); }
+          i += 3;
+          continue;
+        }
+        const c2 = run.substring(i, i + 2);
+        if (c2.length === 2 && isPersonName(c2)) {
+          if (!seen.has(c2)) { seen.add(c2); names.push(c2); }
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+    }
+    return names;
   }
 
   /**

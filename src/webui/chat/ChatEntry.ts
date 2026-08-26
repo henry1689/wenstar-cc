@@ -140,8 +140,10 @@ export async function runChatEntry(
       : (() => { const fb = regexFallback(message); console.log('[LLMEntity] 条件化跳过LLM(无实体信号), 正则兜底: ' + (fb as any[]).map((e: any) => e.name).join(',') || '∅'); return fb; })();
     if (llmEntities.length > 0) {
       const llmNames = new Set(llmEntities.map((e: any) => e.name));
+      // 🆕 编码健康修复: 保留 L3 滑窗识别的可靠人名（slideDetected）——LLM 提取常遗漏新姓名
+      //   （如"登记安琪"仅返回关系词"女朋友"），若被覆盖则安琪永远进不了 PAE 档案采集
       const keptRules = dna.entity_genes.filter((g: any) =>
-        g.type !== 'person' || g.name === '我' || llmNames.has(g.name)
+        g.type !== 'person' || g.name === '我' || llmNames.has(g.name) || (g as any).slideDetected
       );
       const existingNames = new Set(keptRules.map((e: any) => e.name));
       for (const le of llmEntities) {

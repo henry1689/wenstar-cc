@@ -69,7 +69,7 @@ p1_speed:
     enabled: true          # 总开关: false 恢复旧 4 条 LLM 全开
     meeting_bypass: true   # 会晤激活时跳过所有缩减（保持 4 条 LLM 全开）
     entity_conditional: true       # 实体提取条件化（无白名单/人名形态信号不走 LLM）
-    pae_timeout_ms: 8000           # PAE LLM 超时（原 45s，最危险阻塞源）
+    pae_timeout_ms: 30000          # PAE LLM 超时（原 45s→8s 为防阻塞，PAE 已异步化不再阻塞主链，8s 导致 LLM 提取 100% 超时，回调到 30s）
     pae_signal_shortcircuit: true  # PAE 无新增档案信号短路
     kb_route_rule: true            # KB 路由纯规则（会晤保留 LLM）
     bionic_health_shortcircuit: true # Bionic 健康快照短路（7200 不可用不发网络）
