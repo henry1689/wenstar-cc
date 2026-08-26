@@ -89,6 +89,8 @@ import { filterPrivateConversations, type PrivateConversation } from '../m4/hous
 import { FGProfileWriteGateway } from '../m4/household/FGProfileWriteGateway.js';
 // 🔴 P0-2 会话模式分级: 读取 prompt_depth_enabled 总开关
 import { getRetrievalFusionConfig } from '../config/retrieval-fusion-config.js';
+// 🆕 编码健康修复: 实体域边界（警幻仙姑只读等）
+import { isReadOnlyEntity, isCelestialEntity } from '../config/entity-realms.js';
 // 🔴 P1-4 短路: PAE 档案信号检测（有人物提及但无档案事实陈述 → 跳过 LLM 采集）
 import { hasProfileSignal } from '../config/profile-acquisition-guard.js';
 
@@ -143,6 +145,8 @@ import { flushDialogGroup, persistConversation, runRetrieval } from './chat/inde
 
 // P0-1: 角色路由模块级状态（函数外，跨轮次持久化）
 let _currentRole: RoleType = 'secretary';  // 默认秘书——日常对话从专业模式开始，情感上升后自动切换
+// 🆕 编码健康修复: 天界会晤(警幻仙姑)进入时保存的人间现场角色（ctx 每轮新建，必须用模块级持久）
+let _savedHumanRole: RoleType | null = null;
 let _transitionState: TransitionState = createInitialState();
 
 // 对话组状态（跨轮次持久化）
@@ -853,6 +857,11 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             _em.enterMulti(_enterTargets);
             console.log('[EntityMeeting] 多人会晤启动: ' + _enterTargets.join(', '));
           } else {
+            // 🆕 编码健康修复: 天界域实体（警幻仙姑）会晤前保存人间会话现场（角色状态），退出后复原
+            if (isCelestialEntity(_enterTargets[0])) {
+              _savedHumanRole = _currentRole;
+              console.log('[EntityMeeting] 天界会晤进入: ' + _enterTargets[0] + '，人间现场已保存 (role=' + _currentRole + ')');
+            }
             _em.enter(_enterTargets[0]);
             console.log('[EntityMeeting] 单人会晤启动: ' + _enterTargets[0]);
           }
@@ -915,7 +924,14 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         (ctx as any)._exitEntityUuid = _exitUuid;
         // 🔴 玉瑶态角色重置(2026-08-23): 退出轮处于会晤中 → 角色路由强制 recaller，
         // 若不重置，转场后 _currentRole 延续"记忆助手"→ 玉瑶态答非所问（"你现在在哪"→"嗯～好呀。你说"）。
-        _currentRole = 'secretary';
+        // 🆕 编码健康修复: 天界会晤退出 → 复原人间现场角色（否则回不去原来的秘书/恋人模式）
+        if (_savedHumanRole) {
+          _currentRole = _savedHumanRole;
+          console.log('[MeetExit] 天界会晤退出，复原人间角色: ' + _currentRole);
+          _savedHumanRole = null;
+        } else {
+          _currentRole = 'secretary';
+        }
       } else if (_isMulti && intent.kind === 'addParticipant' && intent.targets.length === 1) {
         // ── 群聊加人（addParticipant ≠ 唤醒拒绝）──
         _em.addParticipant(intent.targets[0]);
@@ -1268,7 +1284,9 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     // 🔴 P1-4 短路 Layer1: 有人物提及但消息无档案信号(工作/年龄/亲属/健康/介绍等事实陈述) → 跳过 LLM 采集，省一次 8s 调用。
     //   会晤(_meetingEntityName 激活)旁路不短路——会晤消息常含持续档案信息。
     let _acquisitionReport: any = null;
-    if (ctx._profileAcquisitionEngine ) {
+    // 🆕 编码健康修复: 天界域实体（警幻仙姑）只读——不采集人间档案（写库转交引擎层）
+    const _realmReadOnly = _meetingEntityName ? isReadOnlyEntity(_meetingEntityName) : false;
+    if (ctx._profileAcquisitionEngine && !_realmReadOnly) {
       try {
         const _mentionedPersons: string[] = (dna.entity_genes || [])
           .filter((g: any) => g.type === 'person' && g.name && g.name !== '我')
@@ -2915,7 +2933,8 @@ if (_meetingExited) {
     }
 
     // ── V3.2 Hook C: 档案自动采集 — 从 AI 回复中提取人物信息（异步不阻塞）──
-    if (ctx._profileAcquisitionEngine && reply && reply.length > 10) {
+    // 🆕 编码健康修复: 天界域实体（警幻仙姑）只读——Hook C 同样跳过
+    if (ctx._profileAcquisitionEngine && reply && reply.length > 10 && !_realmReadOnly) {
       const _replyPersons: string[] = (dna.entity_genes || [])
         .filter((g: any) => g.type === 'person' && g.name && g.name !== '我')
         .map((g: any) => g.name as string);

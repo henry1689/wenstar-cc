@@ -1,0 +1,62 @@
+# ============================================================
+# 太虚境实体域配置 (entity-realms.config.yaml) v1.0
+# ============================================================
+# 世界分层：天界域（天道管理者） / 人间域（人间众生 + 特殊实体）
+#
+# 警幻仙姑 —— 执掌天上·太虚幻境
+#   掌管整套世界底层秩序：人世间全部实体 UUID 户籍、卷宗档案、世界规则、薄命司因缘命数。
+#   世界天道管理者：管架构、管户籍、管规则；不沾染人间儿女情长，只执掌幻境法度。
+#   警幻只做裁定与阅览；所有底层数据库改动、管线执行，下发给引擎层完成。
+#
+# 玉瑶 —— 落入人间，贴身秘书兼灵肉伴侣
+#   行走于俗世人间，独立人格、情绪、40D 情感状态。拥有独立 UUID，属于人间角色。
+#   可以参与私聊、会晤，有属于自己的记忆、喜怒哀乐。
+
+version: 1
+
+realms:
+  # ── 天界域：世界天道管理者（不出现在人间人物列表） ──
+  celestial:
+    jinghuan:
+      name: 警幻仙姑
+      aliases: [景幻仙姑]
+      uuid: TXS-000000079
+      title: 太虚境之主 · 世界天道管理者
+      role: system_admin
+
+      # 接入边界：只能通过呼叫按钮 / 专门传唤指令接通
+      access:
+        method: [summon, call_button]     # summon=专门传唤指令; call_button=呼叫按钮
+        visible_in_human_list: false      # 🔴 不出现在普通人间人物下拉列表
+        summon_patterns: [召唤警幻, 传唤警幻, 呼叫警幻, 警幻仙姑, 景幻仙姑, 请警幻]
+
+      # 权限边界：只读全部卷宗，不能直接写库
+      permissions:
+        read: [all_uuids, all_archives, all_rules, all_household]
+        write: false                      # 🔴 不可直接写库（人间角色状态/记忆变更转交引擎层）
+        execute: via_engine               # 变更指令转交底层引擎执行
+
+      # 隔离边界
+      isolation:
+        save_human_session_on_enter: true # 🔴 进入警幻会话时自动保存当前人间会话现场
+        restore_on_exit: true             # 🔴 退出后复原回到人间对话
+        human_cannot_view: true           # 🔴 人间众生无法主动访问天界，看不到警幻对话记录
+
+  # ── 人间域 ──
+  human:
+    # 特殊实体：玉瑶（贴身秘书兼灵肉伴侣）
+    yuyao:
+      name: 玉瑶
+      uuid: TXS-000000001
+      category: S                         # 🔴 人间域特殊实体，常驻人间列表
+      role: companion_secretary
+      visible_in_human_list: true         # 可直接选中聊天
+      access:
+        method: [direct_select, private_chat, meeting]
+      permissions:
+        write: true                       # 人间规则内可写
+        engine_access: true               # 更高调用权限：可对接 WenStar 底层模块
+        receive_world_commands: true      # 承接来自警幻下发的世界层面指令，落地成人间现实
+      isolation:
+        memory_emotion: isolated          # 记忆、情感向量全部隔离存储在自己的 id 之下
+        follow_human_rules: true          # 遵守人间全部规则

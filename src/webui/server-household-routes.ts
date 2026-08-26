@@ -9,6 +9,8 @@
  * GET  /api/household/recent        → 最近N天未提及的人物
  */
 import http from 'node:http';
+// 🆕 编码健康修复: 天界域实体（警幻仙姑）不进人间人物列表
+import { isVisibleInHumanList } from '../config/entity-realms.js';
 
 type HouseholdRouteDeps = {
   req: http.IncomingMessage;
@@ -130,7 +132,7 @@ export async function handleHouseholdRoutes(deps: HouseholdRouteDeps): Promise<b
     if (req.method === 'GET' && url.pathname === '/api/household/persons') {
       const allNames: string[] = fg.getAllPersonNames?.() || [];
       const list = allNames
-        .filter((n: string) => n !== '我')
+        .filter((n: string) => n !== '我' && isVisibleInHumanList(n))
         .map((name: string) => {
           try {
             const profile = fg.getPersonProfile?.(name);
