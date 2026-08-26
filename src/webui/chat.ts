@@ -1034,6 +1034,39 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           });
           _entityContextText = ecResult.systemText;
 
+          // 🆕 编码健康修复: 警幻仙姑（太虚境之主/系统维护者）会晤时注入户口本
+          //   户口/UUID 权限归属警幻仙姑：仅她会晤时可查全部成员户口号；玉瑶不掌户口（见 lover-persona 边界）
+          if (_meetingEntityName === '警幻仙姑' || _meetingEntityName === '景幻仙姑') {
+            try {
+              const _fgH = ctx.m4?.getFamilyGraph?.();
+              const _hbRows: Array<{ name: string; uuid: string | null }> = [];
+              if (_fgH && typeof (_fgH as any).getAllPersonNames === 'function') {
+                const _names: string[] = (_fgH as any).getAllPersonNames() || [];
+                for (const _n of _names) {
+                  if (_n === '我' || _n === '警幻仙姑') continue;
+                  _hbRows.push({ name: _n, uuid: (_fgH as any).getUUIDByName?.(_n) ?? null });
+                }
+              }
+              if (_hbRows.length > 0) {
+                // 🆕 精准查询: 消息中提及的成员户口行置顶（LLM 必读），其余全量在后
+                const _mentioned = (dna.entity_genes || [])
+                  .filter((g: any) => g.type === 'person' && g.name !== '我' && g.name !== '警幻仙姑')
+                  .map((g: any) => g.name);
+                const _mentionedSet = new Set(_mentioned);
+                const _top = _hbRows.filter(r => _mentionedSet.has(r.name));
+                const _rest = _hbRows.filter(r => !_mentionedSet.has(r.name));
+                const _fmt = (r: { name: string; uuid: string | null }) => `- ${r.name}：${r.uuid || '（未登记）'}`;
+                const _hbText = (_top.length
+                  ? `【用户正在查询的成员户口】\n${_top.map(_fmt).join('\n')}\n\n`
+                  : '') + _rest.map(_fmt).join('\n');
+                _entityContextText += `\n\n【太虚境户口本 · 管理者权限】\n你是太虚境的主人与系统维护者，户口档案由你掌管。以下为太虚境成员户口（户口号为 TXS 编号）：\n${_hbText}\n🔴 回答户口/UUID 相关问题必须直接引用上方户口号（TXS 格式），不得含糊、不得说"未写全"、不得编造。`;
+                console.log('[警幻仙姑] 户口本已注入: ' + _hbRows.length + ' 名成员' + (_top.length ? ` (提及: ${_top.map(r => r.name).join('、')})` : ''));
+              }
+            } catch (_hbErr) {
+              console.warn('[警幻仙姑] 户口本注入失败:', (_hbErr as Error)?.message);
+            }
+          }
+
           // 🆕 V10.11: 首轮恢复情感快照 — 延续上次会晤的情感基调
           if (isFirstTurn) {
             try {
