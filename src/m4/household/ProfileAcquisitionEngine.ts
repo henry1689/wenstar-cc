@@ -18,6 +18,8 @@
 
 import { PAE_CONFIG, PAE_INTEGRITY_CHECKS, REGISTRATION_FIELD_MAP, PRIORITY_THRESHOLDS, FORMAT_VALIDATORS, resolveRegistrationDef, getPAETimeoutMs, hasProfileSignal } from '../../config/profile-acquisition-guard.js';
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
+// 🆕 P1 降级链: LLM 提取失败/超时时用正则保底提取基础字段
+import { fallbackExtract } from './pae-fallback-extractor.js';
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserMessage,
@@ -280,6 +282,8 @@ export class ProfileAcquisitionEngine {
     // AI 回复提取（Hook C）的额外限流
     if (options.mode === 'post_generation') {
       if (!this.rateLimiter.allow(PAE_CONFIG.maxCallsPerHour, PAE_CONFIG.maxCallsPerDay)) {
+        // 🆕 P2 可观测: 限流拒绝不再静默
+        console.warn(`[PAE] Hook C 限流跳过: ${dedupedPersons.join('、')} (${this.rateLimiter.stats()})`);
         return report;
       }
     }
@@ -314,13 +318,26 @@ export class ProfileAcquisitionEngine {
             } catch { /* 非关键 */ }
           }
 
-          const rawResults = await this.extractWithLLM(
-            conversationText.substring(0, PAE_CONFIG.maxInputLength),
-            batch,
-            options,
-            fgKnownPersons,
-            pendingFieldsMap
-          );
+          let rawResults: ExtractionResult[];
+          try {
+            rawResults = await this.extractWithLLM(
+              conversationText.substring(0, PAE_CONFIG.maxInputLength),
+              batch,
+              options,
+              fgKnownPersons,
+              pendingFieldsMap
+            );
+          } catch (llmErr) {
+            // 🆕 P1 降级链: LLM 提取失败/超时 → 正则降级提取（保底登记姓名/性别/联系方式等格式明确字段）
+            const errMsg = llmErr instanceof Error ? llmErr.message : String(llmErr);
+            rawResults = fallbackExtract(conversationText.substring(0, PAE_CONFIG.maxInputLength), batch);
+            const fbFields = rawResults.reduce((s, r) => s + r.fields.length, 0);
+            if (fbFields > 0) {
+              console.warn(`[PAE] LLM提取失败(${errMsg.slice(0, 60)}), 降级正则提取: ${rawResults.map(r => r.personName + (r.fields.length ? `(${r.fields.length}字段)` : '')).join('、')}`);
+            } else {
+              throw llmErr; // 无降级产物 → 交给外层 catch 记录
+            }
+          }
           results = rawResults;
           this.extractionCache.set(cacheKey, { result: results, timestamp: Date.now() });
           // 🆕 V10.0 P0-2: 确认 PAE 提取到数据
@@ -372,6 +389,10 @@ export class ProfileAcquisitionEngine {
     }
 
     report.elapsedMs = Date.now() - startTime;
+    // 🆕 P2 可观测: 采集报告日志（有写入或处理了人时输出，供巡检统计）
+    if (report.personsProcessed > 0 || report.fieldsWritten > 0) {
+      console.log(`[PAE] 采集报告: ${report.personsProcessed}人 ${report.fieldsWritten}写/${report.fieldsSkipped}跳/${report.fieldsDiscarded}弃 ${report.elapsedMs}ms`);
+    }
     return report;
   }
 
