@@ -2,6 +2,7 @@
 景幻仙姑 · 生物智脑 — 文件系统管理器
 双写保护：SQLite + 文件系统同时写入
 """
+from typing import Optional, List, Dict, Any
 import hashlib
 import shutil
 from pathlib import Path

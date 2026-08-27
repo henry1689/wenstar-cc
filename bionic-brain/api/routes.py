@@ -3,7 +3,7 @@
 调用者视角：上传 → 搜索 → 获取结果。
 完全无感内部三库/IQC/星云等逻辑。
 """
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request
 from core.schemas import UploadRequest, UploadResponse, SearchRequest, DocumentResponse, HealthResponse
 from core.database import Database
 from vaults.alluvial import AlluvialVault
@@ -17,9 +17,13 @@ from engines.tagger import TaggerEngine
 router = APIRouter()
 
 
-def get_deps(request):
-    """依赖注入 — 由 main.py 在启动时设置"""
-    return request.app.state
+def get_deps(request: Request):
+    """依赖注入 — 由 main.py 在启动时设置
+    🆕 修复: fastapi 0.115 的 State 不支持下标访问(deps["retriever"] 报错),
+    返回内部 _state dict 保持现有路由兼容
+    """
+    state = request.app.state
+    return getattr(state, "_state", None) or vars(state)
 
 
 # ── 上传 ──
@@ -169,4 +173,27 @@ async def summarize(keyword: str = "", limit: int = 5, deps=Depends(get_deps)):
     """
     retriever: RetrieverEngine = deps["retriever"]
     result = await retriever.search(keyword, limit)
+    return result
+
+
+# ── 兼容路由 (wenstar bionic-adapter 期待 /api/v1) ──
+# 🆕 编码健康修复: wenstar src/adapter/bionic-adapter.ts 调 /api/v1/health + /api/v1/search，
+#   本服务挂在 /api 前缀，新增 /v1 兼容端点使其可直连。
+
+@router.get("/v1/health")
+async def v1_health(deps=Depends(get_deps)):
+    """wenstar 兼容: GET /api/v1/health → {status:'ok'}"""
+    return {"status": "ok", "service": "tai-xu-bionic"}
+
+
+@router.get("/v1/search")
+async def v1_search(
+    q: str,
+    user_id: str = "default_user",
+    limit: int = 5,
+    deps=Depends(get_deps),
+):
+    """wenstar 兼容: GET /api/v1/search?q=...&user_id=...&limit=..."""
+    retriever: RetrieverEngine = deps["retriever"]
+    result = await retriever.search(q, limit)
     return result
