@@ -111,14 +111,25 @@ export class MasterHarris extends EventEmitter {
   startYaoguangGuard(): void {
     if (this._yaoguangGuardStarted) return;
     this._yaoguangGuardStarted = true;
+    // 🆕 编码健康修复: 连续失败计数 — 防瞬时抖动触发重启（重启会 spawn 新进程→踢旧连接→堆积）
+    let _failStreak = 0;
     const loop = async () => {
       if (this._bus?.connected) {
         try {
           // 轻量探测: wf_location_fingerprint 空参数（瑶光域秒回）
-          const r = await this.sendToYaoguangAndWait('wf_location_fingerprint', { task: '' }, 4000);
+          // 🆕 编码健康修复: 超时 4s→8s（位置指纹计算可能慢，4s 误判率高）
+          const r = await this.sendToYaoguangAndWait('wf_location_fingerprint', { task: '' }, 8000);
           if (!r) {
-            console.warn('[YaoguangGuard] 瑶光域无响应，尝试重启...');
-            await this._restartYaoguang();
+            _failStreak++;
+            if (_failStreak >= 3) {
+              console.warn('[YaoguangGuard] 瑶光域连续 ' + _failStreak + ' 次无响应，重启...');
+              _failStreak = 0;
+              await this._restartYaoguang();
+            } else {
+              console.warn('[YaoguangGuard] 瑶光域无响应 (' + _failStreak + '/3)，暂不重启');
+            }
+          } else {
+            _failStreak = 0;
           }
         } catch (e) {
           console.warn('[YaoguangGuard] 探测异常:', (e as Error)?.message);
@@ -133,9 +144,21 @@ export class MasterHarris extends EventEmitter {
     if (this._yaoguangRestarting) return;
     this._yaoguangRestarting = true;
     try {
-      const { spawn } = await import('node:child_process');
+      const { spawn, execSync } = await import('node:child_process');
       const py = process.env.TIANQUAN_PYTHON || 'python';
       const script = 'D:/wenstar/wenstar_os/domain_yaoguang/bus_receiver.py';
+      // 🆕 编码健康修复: 重启前先杀旧 yaoguang 进程（否则堆积进程同域重连踢旧连接→恶性循环）
+      //   wmic 匹配同脚本进程（区分瑶光/瑶灵），先杀干净再起新实例
+      try {
+        const killed = execSync(
+          'wmic process where "name=\'python.exe\' and commandline like \'%domain_yaoguang/bus_receiver.py%\'" call terminate',
+          { encoding: 'utf-8', windowsHide: true, timeout: 15000 }
+        );
+        console.log('[YaoguangGuard] 已终止旧瑶光进程');
+      } catch (killErr) {
+        console.warn('[YaoguangGuard] 终止旧进程失败(可能无旧进程):', (killErr as Error)?.message?.slice(0, 60));
+      }
+      await new Promise(res => setTimeout(res, 1500)); // 等待端口/连接清理
       const child = spawn(py, ['-u', script], { detached: true, stdio: 'ignore' });
       child.unref();
       console.log('[YaoguangGuard] 已重启瑶光域: ' + py + ' ' + script);
