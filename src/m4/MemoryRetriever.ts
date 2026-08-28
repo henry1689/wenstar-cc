@@ -11,6 +11,7 @@ import type { MemorySummary } from './types/index.js';
 import { RETRIEVAL_THRESHOLDS, BATCH_SIZES, MIN_MATCHED_FOR_BREAK } from '../m2/retrieval-constants.js';
 import { LocalCache } from '../app/tools/LocalCache.js';
 import { HippocampalIndex } from '../engine/tianquan/temporal/HippocampalIndex.js';
+import { SURNAME_CHARS } from '../config/app-identity.js';
 import type { MultiRankResult, RankedList, RankedItem } from './types/retrieval.js';
 
 // 关键词检索缓存：相同关键词 30 秒内复用结果
@@ -118,6 +119,18 @@ export class MemoryRetriever {
       const segments = locusPath.split('.');
       const last = segments[segments.length - 1];
       if (last && last !== 'default' && last !== 'general') keywords.add(last);
+    }
+
+    // 🆕 P1-4 检索兜底: entity_genes 为空时，从 entities 提取人名作为关键词
+    // 根因：历史记忆在滑窗检测修复前创建，entity_genes=[] 导致关键词检索失效
+    if (keywords.size === 0) {
+      for (const e of entities) {
+        if (e.name) keywords.add(e.name);
+      }
+      // 如果 entities 也为空，跳过关键词检索（由 emotion/spine/locus 承担）
+      if (keywords.size === 0) {
+        console.log('[M4] 检索兜底: keywords 为空，跳过关键词检索');
+      }
     }
 
     if (keywords.size > 0) {
