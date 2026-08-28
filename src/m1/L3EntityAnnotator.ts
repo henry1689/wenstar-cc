@@ -71,6 +71,7 @@ function getEntityRules(): NormalizedEntityRule[] {
 
 // B1: 姓氏表统一 — 唯一数据源 app-identity.SURNAME_LIST
 import { SURNAME_LIST } from '../config/app-identity.js';
+import { FamilyGraph } from '../m4/household/FamilyGraph.js';
 const PERSON_SURNAMES = new Set(SURNAME_LIST);
 
 const NON_NAME_SUFFIX = new Set(['室','服','变','便','天','心','子','学','院','里','种','员','篇','摘','那','衣','呢','块','段','片','次','些','点','面','头','边','者','性','化','机','器','型','号','该','候','度','似','遇','职','责','储','述']);
@@ -226,10 +227,16 @@ class TokenBasedEntityExtractor {
  */
 export class L3EntityAnnotator {
   private extractor: TokenBasedEntityExtractor;
+  // P1: FG 人名库兜底 — 用于匹配已知人名（滑窗检测无法覆盖的场景）
+  private fg: FamilyGraph | null = null;
 
   constructor() {
     // P2: 从 JSON 加载实体规则（外部化配置），新增实体只需编辑 entity_rules.json
     this.extractor = new TokenBasedEntityExtractor(getEntityRules());
+    // P1: 初始化 FG 人名库（失败时降级，不影响主流程）
+    try {
+      this.fg = new FamilyGraph();
+    } catch (_) { /* FG 不可用时降级 */ }
   }
 
   /**
@@ -324,6 +331,20 @@ export class L3EntityAnnotator {
         // slideDetected 标记: 供 ChatEntry 在 LLM 实体覆盖时保留滑窗识别的可靠人名（LLM 提取常遗漏新姓名）
         entities.push({ name: nm, type: 'person', allele: nm, slideDetected: true } as any);
       }
+    }
+    // P1: FG 人名库兜底 — 匹配已知人名（滑窗检测无法覆盖新姓名时的补充）
+    if (this.fg) {
+      try {
+        const fgNames = this.fg.getAllPersonNames();
+        const existingNames = new Set(entities.map(e => e.name));
+        for (const fgName of fgNames) {
+          if (text.includes(fgName) && !existingNames.has(fgName)) {
+            existingNames.add(fgName);
+            entities.push({ name: fgName, type: 'person', allele: fgName } as any);
+            console.log(`[L3] FG 人名兜底: ${fgName}`);
+          }
+        }
+      } catch (_) { /* FG 查询失败不阻塞 */ }
     }
     const fullContext = `${text} ${context}`;
 
