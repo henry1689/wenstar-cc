@@ -140,7 +140,7 @@ describe('PerceptionAnalyzer (M3) — 边界情况', () => {
 // ─── M3LogicOrchestrator 单元测试 ───
 
 describe('M3LogicOrchestrator — 决策路由', () => {
-  it('中性短文本应返回 memorize（统一钙化后 L2 基准分~0.35 → level 1）', () => {
+  it('中性短文本应返回 memorize（统一钙化后 L2 基准分~0.35 → level 0（阈值从 0.3 调整为 0.25））', () => {
     const decision = new M3LogicOrchestrator().decide(makeDNA('嗯'));
     expect(decision.actions).toContain('memorize');
   });

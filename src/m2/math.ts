@@ -140,8 +140,8 @@ export function emotionalSimilarity(
       dynamicWeights[3] = Math.min(0.7, dynamicWeights[3] + 0.2);
       for (let q = 0; q < 3; q++) { dynamicWeights[q] = Math.max(0.05, dynamicWeights[q] - 0.07); }
     }
-    const total = dynamicWeights.reduce((s, w) => s + w, 0);
-    if (total > 0) for (let q = 0; q < 4; q++) dynamicWeights[q] /= total;
+    const weightSum = dynamicWeights.reduce((s, w) => s + w, 0);
+    if (weightSum > 0) for (let q = 0; q < 4; q++) dynamicWeights[q] /= weightSum;
   }
 
   // 逐维度权重
