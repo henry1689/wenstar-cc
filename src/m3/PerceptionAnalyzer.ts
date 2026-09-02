@@ -557,6 +557,10 @@ export class PerceptionAnalyzer {
       }
     }
 
+    // 40D: 将24维感知扩展为40字段（新D01-D40缺失字段默认中性0.5）
+    const p40 = this.buildPerceptionV40(perception);
+    Object.assign(perception, p40);
+
     return {
       branch_id: dna.branch_id,
       locus_path: dna.locus_path,
