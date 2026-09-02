@@ -616,7 +616,11 @@ export class PerceptionAnalyzer {
    * 此处置 0 占位。D36/D37 双极 [-1,1] 原样保留，其余钳 [0,1]。
    */
   buildPerceptionV40(p: Perception24D): PerceptionV40 {
-    const p40 = createEmptyPerceptionV40();
+    // 使用中性值 0.35 初始化（保持钙化分数不变）
+    const NEUTRAL = 0.35;
+    const p40 = {} as PerceptionV40;
+    for (const k of PERCEPTION_40D_KEYS) p40[k] = NEUTRAL;
+    // 然后覆盖 24D 映射的字段
     for (const { key24, dim40 } of MAP_24_TO_40) {
       const key40 = PERCEPTION_40D_KEYS[dim40 - 1];
       const v = p[key24] ?? 0;
