@@ -63,3 +63,29 @@ docs/adr/  （编号 001-009，已修复编号冲突）
 2. **单一 canonical**：规范只存一份于 `D:\tools\wenstar-cc`，外部目录（D:\wenstar）仅留指针。
 3. **版本唯一**：同一主题只保留最新版，旧版归档 `_archive/`，不并存。
 4. **动手前必读**：改动代码/数据前，先定位本表对应层级文件并读完。
+
+---
+
+## 📁 文档归档分类规则（后续新增文档必守·铁律）
+
+> 🔴 **后续新增任何文档，必须按以下分类存入 canonical 权威路径，禁止散落他处、禁止重复、禁止多版本并存。**
+
+| 文档类别 | 权威路径 | 命名规范 |
+|---------|---------|---------|
+| 法律（户籍/UUID/宪法） | `data/knowledge-v4/governance/` | 英文小写 kebab-case，如 `xxx-law-v1.0.md` |
+| 红线 | `data/knowledge-v4/governance/redlines/` | 英文小写 kebab-case |
+| 核心规约/蓝皮书 | `data/knowledge-v4/governance/` | 英文小写 kebab-case |
+| 设计蓝皮书/白皮书 | `docs/blueprint/` | `白皮书_主题-vN.md` / `蓝皮书_主题-vN.md` |
+| 编码/录入规约 | `docs/` | 中文主题名，如 `编码体系规约.md` |
+| 域规范（天权/瑶灵） | `data/knowledge-md/` | `[TIANQUAN]` / `[YAOLING]` 前缀 |
+| 决策记录 ADR | `docs/adr/` | `ADR-{3位序号}-{主题}.md`（序号连续不冲突） |
+| 变更台账 | `docs/blueprint/` | `变更台账_{日期}_{主题}.md` |
+| 历史版本归档 | `data/knowledge-v4/governance/_archive/` | 保留原文件名 |
+
+**五条铁律：**
+
+1. **先登记后落盘**：新增治理文档必须先登记到本文档「效力层级总表」，再写入文件。
+2. **单一 canonical**：只存一份于 `D:\tools\wenstar-cc`；禁止在 `D:\wenstar` 等外部目录新增治理文档。
+3. **版本唯一**：同主题只保留最新版，旧版移入 `_archive/`，不并存、不覆盖。
+4. **单一格式**：一律 `.md`，禁止 `.md`/`.txt` 双格式镜像。
+5. **ADR 序号唯一**：新 ADR 取当前最大序号 +1，禁止重号。
