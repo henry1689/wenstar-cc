@@ -53,7 +53,10 @@ import { DEFAULT_BASE_INTIMACY } from '../types/graph.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const DEFAULT_DB_PATH = join(__dirname, '..', '..', 'data', 'webui', 'knowledge', 'family_graph.db');
+// 🔴 路径修复: 用 process.cwd()（项目根）而非 __dirname 相对路径。
+//   __dirname 在开发(tsx 跑 src)时解析到 src/ 导致读空库(src/data)，
+//   生产(dist)时解析正确。process.cwd() 开发/生产一致指向项目根。
+const DEFAULT_DB_PATH = join(process.cwd(), 'data', 'webui', 'knowledge', 'family_graph.db');
 
 /**
  * P1: 人物画像 — 从"名字"到"完整的人"
@@ -5069,6 +5072,42 @@ export class FamilyGraph implements FamilyGraphInterface {
     return (rows as any[])
       .map(r => r.name as string)
       .filter(n => n && n.length >= 2 && !DIRTY_WORDS.has(n));
+  }
+
+  /**
+   * 🆕 P1: 获取所有人名 + 别名映射（用于 L3 实体兜底的简称/昵称匹配）
+   * 返回 Map<别名或全名, 主名>。
+   * 例: "诗韵"→"徐诗韵", "韵韵"→"徐诗韵", "徐诗韵"→"徐诗韵"
+   * 过滤：同 getAllPersonNames 的 DIRTY_WORDS
+   */
+  getAllPersonNamesWithAliases(): Map<string, string> {
+    const map = new Map<string, string>();
+    const DIRTY_WORDS = new Set(['老公','老婆','爸爸','妈妈','爷爷','奶奶','外公','外婆',
+      '哥哥','弟弟','姐姐','妹妹','儿子','女儿','同事','同学','朋友','室友',
+      '老板','上司','领导','客户','老师','医生','邻居','合伙人','我','公司',
+      '叔叔','时候你','学生','纪实小','小说','开心','计划吗','那你',
+      '姑姑','小龙','老邱','老大','焦虑','方案','无聊','徐茜','徐敏','上司',
+      '加班','什么名字','那你说','那继续','快乐','老家','那你再']);
+    try {
+      const rows = this.query('SELECT name, aliases FROM nodes WHERE type = ?', ['person']);
+      for (const r of (rows as any[])) {
+        const name = String(r.name || '');
+        if (!name || name.length < 2 || DIRTY_WORDS.has(name)) continue;
+        // 主名 → 主名
+        map.set(name, name);
+        // 别名 → 主名（仅干净别名）
+        try {
+          const aliases: string[] = Array.isArray(r.aliases) ? r.aliases : JSON.parse(String(r.aliases || '[]'));
+          for (const a of aliases) {
+            const alias = String(a || '').trim();
+            if (alias && alias.length >= 1 && !DIRTY_WORDS.has(alias) && !map.has(alias)) {
+              map.set(alias, name);
+            }
+          }
+        } catch { /* 别名解析失败跳过 */ }
+      }
+    } catch { /* 查询失败返回空 map */ }
+    return map;
   }
 
   /**

@@ -839,8 +839,10 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     if (_em) {
       const fg = ctx.m4?.getFamilyGraph?.();
       const allNames: string[] = fg?.getAllPersonNames?.() || [];
+      // 🆕 UUID 立法: 传入 FG 别名映射（诗韵/韵韵→徐诗韵），任意称呼都能唤醒会晤
+      const aliasMap: Map<string, string> = fg?.getAllPersonNamesWithAliases?.() ?? new Map<string, string>();
       // 🔴 P2-2: 会晤中传 inMeeting=true → detectUserIntent 严格模式（提名字不触发唤醒门卫）
-      const intent = EntityMeeting.detectIntent(message, allNames, _em.isActive());
+      const intent = EntityMeeting.detectIntent(message, allNames, _em.isActive(), aliasMap);
       const _isActive = _em.isActive();
       const _isMulti = _em.isMultiParty();
 

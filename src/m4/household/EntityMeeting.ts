@@ -434,9 +434,14 @@ export class EntityMeeting {
   /**
    * 🆕 V5.2: 模糊名称匹配 — 支持短名/昵称
    * "诗雨" → 匹配 "徐诗雨"
+   * 🆕 UUID 立法: 支持别名（"韵韵"→"徐诗韵"），任意称呼归一到 FG 主名
    */
-  private static _fuzzyFindName(input: string, knownNames: string[]): string | null {
+  private static _fuzzyFindName(input: string, knownNames: string[], aliasMap?: Map<string, string>): string | null {
     if (!input || input.length < 2) return null;
+    // 0. 🆕 别名精确匹配（UUID 立法核心）
+    if (aliasMap && aliasMap.has(input)) {
+      return aliasMap.get(input)!;
+    }
     // 1. 精确匹配
     const exact = knownNames.find(n => n === input);
     if (exact) return exact;
@@ -463,8 +468,24 @@ export class EntityMeeting {
    * - wake: detectUserIntent 命中（找XX聊聊/开个会/@XX）→ 仅私聊-玉瑶态允许 enter
    * - normal: 普通消息
    */
-  static detectIntent(message: string, knownPersonNames: string[], inMeeting: boolean = false): MessageIntent {
+  static detectIntent(
+    message: string,
+    knownPersonNames: string[],
+    inMeeting: boolean = false,
+    aliasMap?: Map<string, string>,
+  ): MessageIntent {
     const msg = message.trim();
+    // 🆕 UUID 立法: 别名归一化 — 别名映射到主名后加入匹配池，
+    //   使"诗韵/韵韵/全芬"等任意称呼都能触发会晤（getUUIDByName 只认主名）。
+    const _withAliases: string[] = aliasMap && aliasMap.size > 0
+      ? (() => {
+          const set = new Set(knownPersonNames);
+          for (const [alias, main] of aliasMap.entries()) {
+            if (main && main.length >= 2 && !set.has(main)) set.add(main);
+          }
+          return [...set];
+        })()
+      : knownPersonNames;
 
     // 1. 结束语（exit）— 不依赖人名。覆盖"结束吧/不聊了/先这样吧"等口语结束语。
     //    🔴 排除疑问句（"结束了吗/散会了没"不算退出，避免会晤中疑问误终止）。
@@ -481,30 +502,30 @@ export class EntityMeeting {
       return { kind: 'exit', targets: [] };
     }
 
-    if (!knownPersonNames || knownPersonNames.length === 0) return { kind: 'normal', targets: [] };
+    if (!_withAliases || _withAliases.length === 0) return { kind: 'normal', targets: [] };
 
-    const sorted = [...knownPersonNames]
+    const sorted = [..._withAliases]
       .filter(n => !EntityMeeting.GENERIC_NAMES.has(n) && n !== '玉瑶')  // 🔴 玉瑶=默认本体，不可作唤醒候选（"玉瑶，你现在在哪"→normal，防前缀"玉瑶，"误判 wake 答非所问）
       .sort((a, b) => b.length - a.length);
 
     // 2. 群聊加人（addParticipant）: "叫XX也来/参加/加入/进来"
     const addMatch = msg.match(/(?:叫|让|喊|把)\s*([一-龥]{2,4})\s*(?:也)?\s*(?:来|过来|参加|加入|进来)/);
     if (addMatch) {
-      const name = EntityMeeting._fuzzyFindName(addMatch[1], sorted);
+      const name = EntityMeeting._fuzzyFindName(addMatch[1], sorted, aliasMap);
       if (name) return { kind: 'addParticipant', targets: [name] };
     }
 
     // 3. 显式换主发言（switch）: "换XX来/吧"
     const swMatch = msg.match(/^换\s*([一-龥]{2,4})\s*(?:来|吧)?\s*$/);
     if (swMatch) {
-      const name = EntityMeeting._fuzzyFindName(swMatch[1], sorted);
+      const name = EntityMeeting._fuzzyFindName(swMatch[1], sorted, aliasMap);
       if (name) return { kind: 'switch', targets: [name] };
     }
 
     // 4. 唤醒/开会（wake）
     // 🔴 P2-2: 会晤中(inMeeting)用严格模式——只认明确切换句式，跳过确认/寒暄/兜底
     //   （"全芬你还是那么丰满"→normal，不再误判为唤醒王全芬触发门卫拒绝）
-    const wake = EntityMeeting.detectUserIntent(msg, sorted, inMeeting);
+    const wake = EntityMeeting.detectUserIntent(msg, sorted, inMeeting, aliasMap);
     if (wake && wake.length > 0) {
       return { kind: 'wake', targets: wake };
     }
@@ -512,7 +533,7 @@ export class EntityMeeting {
     return { kind: 'normal', targets: [] };
   }
 
-  static detectUserIntent(message: string, knownPersonNames: string[], inMeeting: boolean = false): string[] | null {
+  static detectUserIntent(message: string, knownPersonNames: string[], inMeeting: boolean = false, aliasMap?: Map<string, string>): string[] | null {
     if (!message || knownPersonNames.length === 0) return null;
     // P2-2: 会晤中严格模式——确认/寒暄类（你是X吗/XX在吗/消息含名字且短）不算切换意图
     const _strict = inMeeting === true;
@@ -522,11 +543,6 @@ export class EntityMeeting {
       .filter(n => !EntityMeeting.GENERIC_NAMES.has(n) && n !== '玉瑶')  // 🔴 玉瑶=默认本体，不可作唤醒候选（"玉瑶，你现在在哪"→normal，防前缀"玉瑶，"误判 wake 答非所问）
       .sort((a, b) => b.length - a.length);
     const msg = message.trim();
-
-    // 🔍 V10.0 诊断: 运行时确认函数被调用
-    if (msg.includes('诗雨') || msg.includes('徐诗雨')) {
-      console.log(`[EntityMeeting DEBUG] detectUserIntent called: msg="${msg}" sorted=${sorted.length}人 first="${sorted[0]}"`);
-    }
 
     // 🆕 V6.0: "A、B，都来" / "A B C 都过来一起"
     const duMatch = msg.match(/^(.+?)[，,、\s]*(?:都来|都过来|都过来一下|都来一下|都聊聊|都一起)\s*$/);
@@ -568,7 +584,7 @@ export class EntityMeeting {
       let m: RegExpExecArray | null;
       const msgStart = andMatch[0];
       while ((m = namePattern.exec(msgStart)) !== null) {
-        const name = EntityMeeting._fuzzyFindName(m![0], sorted);
+        const name = EntityMeeting._fuzzyFindName(m![0], sorted, aliasMap);
         if (name) allNames.add(name);
       }
       if (allNames.size >= 2 && /一起|都|开会|聊|讨论|聚/.test(msg)) {
@@ -582,7 +598,7 @@ export class EntityMeeting {
     // @name（最明确的意图）
     const atMatch = msg.match(/^@([一-龥\w]{1,8})(?:\s|$)/);
     if (atMatch) {
-      const name = EntityMeeting._fuzzyFindName(atMatch[1], sorted);
+      const name = EntityMeeting._fuzzyFindName(atMatch[1], sorted, aliasMap);
       if (name) return [name];
     }
 
@@ -590,7 +606,7 @@ export class EntityMeeting {
     // 🔴 P2-2: 会晤中跳过——"徐诗雨：" 可能是对当前对象的对话称呼，非切换意图
     const prefixMatch = msg.match(/^([一-龥]{2,8})[：:，,]/);
     if (!_strict && prefixMatch) {
-      const name = EntityMeeting._fuzzyFindName(prefixMatch[1], sorted);
+      const name = EntityMeeting._fuzzyFindName(prefixMatch[1], sorted, aliasMap);
       if (name) return [name];
     }
 
@@ -598,7 +614,7 @@ export class EntityMeeting {
     // 🔴 P2-2: 会晤中跳过——"熊勇不在家真好"是 2-8 字纯汉字，会被误当名字并模糊匹配
     const bareMatch = msg.match(/^([一-龥]{2,8})\s*$/);
     if (!_strict && bareMatch) {
-      const name = EntityMeeting._fuzzyFindName(bareMatch[1], sorted);
+      const name = EntityMeeting._fuzzyFindName(bareMatch[1], sorted, aliasMap);
       if (name) return [name];
     }
 
@@ -608,7 +624,7 @@ export class EntityMeeting {
     if (indirectMatch) {
       const target = indirectMatch[1].trim();
       // 尝试精确匹配
-      const exactName = EntityMeeting._fuzzyFindName(target, sorted);
+      const exactName = EntityMeeting._fuzzyFindName(target, sorted, aliasMap);
       if (exactName) return [exactName];
       // 模糊匹配（名字可能带后缀如"徐诗雨过来"）
       for (const name of sorted) {
@@ -631,59 +647,72 @@ export class EntityMeeting {
       full: name,
       short: name.length >= 3 ? name.slice(-2) : null,  // "徐诗雨" → short="诗雨"
     }));
+    // 🆕 UUID 立法: 追加别名（"韵韵"→"徐诗韵"），任意称呼都能匹配
+    if (aliasMap && aliasMap.size > 0) {
+      for (const [alias, main] of aliasMap.entries()) {
+        if (!alias || alias.length < 1 || alias === main) continue;
+        if (sorted.includes(main) && !_fuzzyNameList.some(nt => nt.full === alias)) {
+          _fuzzyNameList.push({ full: alias, short: null });
+        }
+      }
+    }
 
     // 🆕 自然口语: "我想找XX聊聊" / "我想和XX说说话" / "让XX来跟我说" / "我有事找XX"
     for (const nt of _fuzzyNameList) {
-      const name = nt.full;
-      const _nameRe = nt.short ? `(?:${name}|${nt.short})` : name;
+      const rawName = nt.full;
+      // 🆕 UUID 立法: 正则用原文（别名）匹配，返回归一到主名（"韵韵"→"徐诗韵"）
+      const returnName = (aliasMap && aliasMap.get(rawName) && aliasMap.get(rawName) !== rawName)
+        ? aliasMap.get(rawName)!
+        : rawName;
+      const _nameRe = nt.short ? `(?:${rawName}|${nt.short})` : rawName;
       // "我想找XX聊聊" / "我想和XX说说话" / "想跟XX聊" / "我要找XX"
       // 用 .*? 替代 \s* 解决"想找"/"想和"中间多一个动词的问题
-      if (new RegExp(`(?:想|想要|要)${name}\\s*(?:聊聊|谈谈|说说话|说几句|说点事|聊一下|说话|聊聊天)`).test(msg)) {
-        return [name];
+      if (new RegExp(`(?:想|想要|要)${_nameRe}\\s*(?:聊聊|谈谈|说说话|说几句|说点事|聊一下|说话|聊聊天)`).test(msg)) {
+        return [returnName];
       }
       // "想(找|跟|和|叫)XX" — 中间动词变体
-      if (new RegExp(`(?:想|想要|要)\\s*(?:找|跟|和|叫|喊|让)\\s*${name}`).test(msg)) {
-        return [name];
+      if (new RegExp(`(?:想|想要|要)\\s*(?:找|跟|和|叫|喊|让)\\s*${_nameRe}`).test(msg)) {
+        return [returnName];
       }
       // "那你以XX的身份和我聊" / "用XX的身份" / "扮演XX"
-      if (new RegExp(`(?:以|用|作为)\\s*${name}\\s*(?:的)?\\s*(?:身份|角色|语气|口吻)`).test(msg)) {
-        return [name];
+      if (new RegExp(`(?:以|用|作为)\\s*${_nameRe}\\s*(?:的)?\\s*(?:身份|角色|语气|口吻)`).test(msg)) {
+        return [returnName];
       }
       // "叫XX出来" / "让XX来" / "喊XX过来"
-      if (new RegExp(`[叫让喊]\\s*${name}\\s*(?:出来|来|过来)\\s*(?:[，,].*)?$`).test(msg)) {
-        return [name];
+      if (new RegExp(`[叫让喊]\\s*${_nameRe}\\s*(?:出来|来|过来)\\s*(?:[，,].*)?$`).test(msg)) {
+        return [returnName];
       }
       // "我有事找XX" / "有事找XX谈谈"
-      if (new RegExp(`有事(?:情|儿)?\\s*(?:找|和|跟)\\s*${name}`).test(msg)) {
-        return [name];
+      if (new RegExp(`有事(?:情|儿)?\\s*(?:找|和|跟)\\s*${_nameRe}`).test(msg)) {
+        return [returnName];
       }
       // "找XX聊聊" / "跟XX聊聊" / "和XX说说话"（句首或句中）
-      if (new RegExp(`(?:^|[ .,，。!！?？、])\\s*(?:跟|和|找|喊|叫)\\s*${name}\\s*(?:聊聊|聊一下|说说话|来一下|过来|出来|说几句)`).test(msg)) {
-        return [name];
+      if (new RegExp(`(?:^|[ .,，。!！?？、])\\s*(?:跟|和|找|喊|叫)\\s*${_nameRe}\\s*(?:聊聊|聊一下|说说话|来一下|过来|出来|说几句)`).test(msg)) {
+        return [returnName];
       }
       // 🆕 V10.0: 身份确认 — "你是XX吗"/"你叫XX"等（直接用 includes 避免正则编码问题）
       // 🔴 P2-2: 会晤中严格模式跳过——"全芬你还是那么丰满"是对话不是切换意图
       const _short = nt.short || '';
       const _isIdCheck = /(?:你是|你叫|你就是|你是叫)/.test(msg);
-      if (!_strict && _isIdCheck && (msg.includes(name) || (_short && msg.includes(_short)))) {
-        if (msg.length <= name.length + 8) {
-          console.log(`[EntityMeeting ID] 身份确认匹配: "${msg}" → name="${name}" short="${_short}"`);
-          return [name];
+      if (!_strict && _isIdCheck && (msg.includes(rawName) || (_short && msg.includes(_short)))) {
+        if (msg.length <= rawName.length + 8) {
+          console.log(`[EntityMeeting ID] 身份确认匹配: "${msg}" → name="${_nameRe}" short="${_short}"`);
+          return [returnName];
         }
       }
       // 🆕 V10.0: "XX在吗"
       const _isHereCheck = /(?:在吗|在不|在不在)/.test(msg);
-      if (!_strict && _isHereCheck && (msg.includes(name) || (_short && msg.includes(_short)))) {
-        if (msg.length <= name.length + 6) return [name];
+      if (!_strict && _isHereCheck && (msg.includes(rawName) || (_short && msg.includes(_short)))) {
+        if (msg.length <= rawName.length + 6) return [returnName];
       }
       // 最宽泛兜底：消息中包含XX且结尾有"聊聊/谈谈/说说话/聊一下"
       // 🔴 P2-2: 会晤中跳过（"我们聊聊"可能是对当前对象的对话，非切换）
-      if (!_strict && new RegExp(`${name}.*(?:聊聊|谈谈|说说话|聊一下|说几句)\\s*$`).test(msg)) {
-        return [name];
+      if (!_strict && new RegExp(`${_nameRe}.*(?:聊聊|谈谈|说说话|聊一下|说几句)\\s*$`).test(msg)) {
+        return [returnName];
       }
       // 简短直接: "找XX" / "叫XX" / "让XX来" 句尾
-      if (new RegExp(`(?:^|[ .,，。!！?？、])\\s*(?:找|叫|喊|让)\\s*${name}\\s*$`).test(msg)) {
-        return [name];
+      if (new RegExp(`(?:^|[ .,，。!！?？、])\\s*(?:找|叫|喊|让)\\s*${_nameRe}\\s*$`).test(msg)) {
+        return [returnName];
       }
     }
 

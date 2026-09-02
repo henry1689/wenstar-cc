@@ -76,17 +76,26 @@ const PERSON_SURNAMES = new Set(SURNAME_LIST);
 
 const NON_NAME_SUFFIX = new Set(['室','服','变','便','天','心','子','学','院','里','种','员','篇','摘','那','衣','呢','块','段','片','次','些','点','面','头','边','者','性','化','机','器','型','号','该','候','度','似','遇','职','责','储','述']);
 
-const COMMON_WORDS_PERSON = new Set(['应该','时候','强度','索引','关联','相遇','相似','职责','全长','公了','公桌','和种','史摘','和事','那那','白衬','鲁呢','段美','衣块','单员','公司','明天','谢谢','还是','或者','所以','因为','不过','而且','但是','如果','虽然','然后','家里','老说同','花卉','小镇','顺口','贝安','宝贝','姓名','身份','户口','归属','新人','登记','年龄','生日','性别','职业','住址','别女','别男','别问','别走','别的']);
+const COMMON_WORDS_PERSON = new Set(['应该','时候','强度','索引','关联','相遇','相似','职责','全长','公了','公桌','和种','史摘','和事','那那','白衬','鲁呢','段美','衣块','单员','公司','明天','谢谢','还是','或者','所以','因为','不过','而且','但是','如果','虽然','然后','家里','老说同','花卉','小镇','顺口','贝安','宝贝','姓名','身份','户口','归属','新人','登记','年龄','生日','性别','职业','住址','别女','别男','别问','别走','别的','关系','在里','了吗','吗的','怎么','什么','这样','那样','哪里','现在','刚刚','刚才','今天','明天','昨天','时候','如何','为啥','为何','多久','几次']);
 
-const GRAMMAR_WORDS_PERSON = new Set('是说和的了在也都就来还要会能不很太把被让给对用从向跟与有没做走来看听等呢吗啊吧着过到比');
+const GRAMMAR_WORDS_PERSON = new Set('是说和的了在也都就来还要会能不很太把被让给对用从向跟与有没做走来看听等呢吗啊吧着过到比现起去回最');
 
 function isPersonName(token: string): boolean {
   if (token.length < 2 || token.length > 3) return false;
   if (token === '有人' || token === '某人' || token === '大家') return false;
-  if (token[0] === '阿' && /[一-龥]/.test(token[1]) && !NON_NAME_SUFFIX.has(token[1])) return true;
+  if (token[0] === '阿' && /[一-龥]/.test(token[1]) && !NON_NAME_SUFFIX.has(token[1])) {
+    // 🆕 阿X昵称同样需虚词尾字过滤（防"阿芬在/阿芬最/阿芬了"误报）
+    if (GRAMMAR_WORDS_PERSON.has(token[token.length - 1])) return false;
+    return true;
+  }
   // 老X/小X 要求第二字也必须是姓氏（防'老说同一件事'→'老说'误报）
   if ((token[0] === '老' || token[0] === '小') && token.length === 2 && PERSON_SURNAMES.has(token[1]) && !NON_NAME_SUFFIX.has(token[1])) return true;
   if (!PERSON_SURNAMES.has(token[0])) return false;
+  // 🆕 首字虚词过滤：滑窗在任意位置取2-3字，开头易粘上"和/的/是/在"等语法词（如"和全芬"）
+  if (GRAMMAR_WORDS_PERSON.has(token[0])) return false;
+  // 🆕 虚词尾字过滤：3字人名尾字不能是虚词（防"全芬在/全芬了/关系"误报）
+  //   滑窗在任意位置取2-3字，尾字易粘上"在/了/和/关系/吗/呢"等语法词
+  if (GRAMMAR_WORDS_PERSON.has(token[token.length - 1])) return false;
   // 2字：检查常见非人名词 + 后缀过滤
   if (token.length === 2) {
     if (COMMON_WORDS_PERSON.has(token)) return false;
@@ -233,11 +242,29 @@ export class L3EntityAnnotator {
   constructor() {
     // P2: 从 JSON 加载实体规则（外部化配置），新增实体只需编辑 entity_rules.json
     this.extractor = new TokenBasedEntityExtractor(getEntityRules());
-    // P1: 初始化 FG 人名库（失败时降级，不影响主流程）
-    try {
-      this.fg = new FamilyGraph();
-    } catch (_) { /* FG 不可用时降级 */ }
+    // P1: FG 初始化改为惰性（构造同步无法 await sql.js wasm），initFg() 异步补加载
   }
+
+  /**
+   * 🆕 P1: 异步初始化 FG 人名库（含别名映射）。
+   * 构造同步无法 await sql.js wasm 加载，需调用方（async 环境）调用一次。
+   * 幂等：已初始化则跳过。
+   */
+  async initFg(): Promise<void> {
+    if (this.fg || this._fgInitFailed) return;
+    try {
+      const fg = new FamilyGraph();
+      await fg.initialize();
+      this.fg = fg;
+      console.log('[L3] FG 人名库初始化完成（含别名）');
+    } catch (e) {
+      this._fgInitFailed = true;
+      console.warn('[L3] FG 初始化失败，别名兜底降级:', (e as Error)?.message);
+    }
+  }
+
+  /** FG 初始化失败标志（避免每轮重试） */
+  private _fgInitFailed = false;
 
   /**
    * 判断实体的 phenotype（对自我模型的影响方向）
@@ -322,10 +349,33 @@ export class L3EntityAnnotator {
     //   复用 isPersonName（姓氏表+停用词过滤，本文件早已实现），贪心长优先防重叠误报
     const personNames = this.detectPersonNames(text);
     if (personNames.length > 0) {
+      // 🆕 FG 交叉验证: 滑窗识别的2-3字人名若与 FG 全名存在子串关系，规范化为 FG 全名
+      //   例: 滑窗"全芬在/全芬" → FG 有"王全芬" → 规范化为"王全芬"（简称提升为全名，检索才命中）
+      let fgNameMap: Map<string, string> | null = null;
+      if (this.fg) {
+        try {
+          fgNameMap = new Map();
+          for (const fgName of this.fg.getAllPersonNames()) {
+            // 建立 FG 全名 → 自身；以及滑窗可能识别出的子串 → 全名的映射
+            fgNameMap.set(fgName, fgName);
+          }
+        } catch (_) { /* FG 查询失败不阻塞 */ }
+      }
+      const normalizedNames = personNames.map((nm) => {
+        // 先查精确命中 FG 全名
+        if (fgNameMap?.has(nm)) return nm;
+        // 否则找 FG 中包含该滑窗人名的全名（简称 → 全名）
+        if (fgNameMap) {
+          for (const fgFull of fgNameMap.keys()) {
+            if (fgFull.includes(nm) && fgFull !== nm) return fgFull;
+          }
+        }
+        return nm; // 非 FG 成员的新姓名保留（仍需识别）
+      });
       // 🆕 P2 可观测: 滑窗识别到的新人名打日志（供巡检误报监控，仅含新姓名时触发）
-      console.log(`[L3] 滑窗人名: ${personNames.join('、')}`);
+      console.log(`[L3] 滑窗人名: ${personNames.join('、')}${normalizedNames.some((n, i) => n !== personNames[i]) ? ' → 规范化: ' + [...new Set(normalizedNames)].join('、') : ''}`);
       const existingNames = new Set(entities.map(e => e.name));
-      for (const nm of personNames) {
+      for (const nm of normalizedNames) {
         if (existingNames.has(nm)) continue;
         existingNames.add(nm);
         // slideDetected 标记: 供 ChatEntry 在 LLM 实体覆盖时保留滑窗识别的可靠人名（LLM 提取常遗漏新姓名）
@@ -333,15 +383,23 @@ export class L3EntityAnnotator {
       }
     }
     // P1: FG 人名库兜底 — 匹配已知人名（滑窗检测无法覆盖新姓名时的补充）
+    // 🆕 扩展: 用 getAllPersonNamesWithAliases 支持简称/昵称匹配（"诗韵"→"徐诗韵"）
     if (this.fg) {
       try {
-        const fgNames = this.fg.getAllPersonNames();
+        const fgNameMap = (this.fg as any).getAllPersonNamesWithAliases?.()
+          ?? new Map(this.fg.getAllPersonNames().map((n: string) => [n, n]));
         const existingNames = new Set(entities.map(e => e.name));
-        for (const fgName of fgNames) {
-          if (text.includes(fgName) && !existingNames.has(fgName)) {
-            existingNames.add(fgName);
-            entities.push({ name: fgName, type: 'person', allele: fgName } as any);
-            console.log(`[L3] FG 人名兜底: ${fgName}`);
+        // 遍历所有主名+别名，若文本包含则添加对应主名（别名归一化）
+        for (const [aliasOrName, mainName] of fgNameMap.entries()) {
+          if (aliasOrName.length < 1) continue;
+          if (text.includes(aliasOrName) && !existingNames.has(mainName)) {
+            existingNames.add(mainName);
+            entities.push({ name: mainName, type: 'person', allele: aliasOrName, aliasOf: mainName } as any);
+            if (aliasOrName !== mainName) {
+              console.log(`[L3] FG 别名兜底: ${aliasOrName} → ${mainName}`);
+            } else {
+              console.log(`[L3] FG 人名兜底: ${mainName}`);
+            }
           }
         }
       } catch (_) { /* FG 查询失败不阻塞 */ }

@@ -114,4 +114,43 @@ describe('L3EntityAnnotator — 边界测试', () => {
       expect(e.type).toBe('self');
     }
   });
+
+  it('滑窗检测: 简称"全芬"应识别为人名且不含虚词杂质', () => {
+    const annotator = new L3EntityAnnotator();
+    const r1 = annotator.annotate('全芬在哪里', '', DEFAULT_SELF);
+    const names1 = r1.entity_genes.filter(e => e.type === 'person').map(e => e.name);
+    // "在"是虚词尾字，不应粘进人名
+    expect(names1.some(n => n === '全芬')).toBe(true);
+    expect(names1.some(n => n === '全芬在')).toBe(false);
+
+    const r2 = annotator.annotate('好久没见全芬了', '', DEFAULT_SELF);
+    const names2 = r2.entity_genes.filter(e => e.type === 'person').map(e => e.name);
+    expect(names2.some(n => n === '全芬')).toBe(true);
+    expect(names2.some(n => n === '全芬了')).toBe(false);
+  });
+
+  it('滑窗检测: 虚词开头/常见词不应误报为人名', () => {
+    const annotator = new L3EntityAnnotator();
+    // "关系"首字"关"是姓氏但整体是常见词，不应识别为人名
+    const r1 = annotator.annotate('鸿艺和全芬是什么关系', '', DEFAULT_SELF);
+    const names1 = r1.entity_genes.filter(e => e.type === 'person').map(e => e.name);
+    expect(names1.some(n => n === '关系')).toBe(false);
+    // "和全芬"首字"和"是虚词，不应作为人名开头
+    expect(names1.some(n => n === '和全芬')).toBe(false);
+    // 但"全芬"本身应被识别
+    expect(names1.some(n => n === '全芬')).toBe(true);
+
+    const r2 = annotator.annotate('全芬现在做什么', '', DEFAULT_SELF);
+    const names2 = r2.entity_genes.filter(e => e.type === 'person').map(e => e.name);
+    expect(names2.some(n => n === '全芬现')).toBe(false);
+  });
+
+  it('FG 交叉验证: 滑窗识别的简称应规范化为 FG 全名', () => {
+    const annotator = new L3EntityAnnotator();
+    // 若 FG 中存在"王全芬"，滑窗识别的"全芬"应被规范化为"王全芬"
+    const r = annotator.annotate('全芬最近怎么样', '', DEFAULT_SELF);
+    const names = r.entity_genes.filter(e => e.type === 'person').map(e => e.name);
+    // 至少包含一个可命中"全芬"记忆的人名（全芬或王全芬）
+    expect(names.some(n => n.includes('全芬'))).toBe(true);
+  });
 });

@@ -283,4 +283,23 @@ describe('[本体-标签分离] emotion_color 不影响 DNA 核心标识', () =>
     // M1 不负责情感分析，emotion_color 应为 undefined
     expect(dna.emotion_color).toBeUndefined();
   });
+
+  it('P1: 场景词应派生 location_fingerprint 并同步影响 global_uid 区位标识', () => {
+    const encoder = new DNAEncoder(TEST_SELF);
+    // 场景词“办公室”应命中 deriveLocationFingerprint 规则
+    const dna = encoder.encodeSingle('我在办公室写代码');
+    expect(dna.location_fingerprint).toBeTruthy();
+    expect(dna.location_fingerprint).not.toBe('0'.repeat(32));
+    // global_uid 23 位且区位标识部分（第10-17位）不再是空fp哈希 84E0C0EA
+    expect(dna.global_uid).toHaveLength(23);
+    expect(dna.global_uid!.substring(9, 17)).not.toBe('84E0C0EA');
+  });
+
+  it('P1: 无场景词时沿用会话缓存，降级保持兼容', () => {
+    const encoder = new DNAEncoder(TEST_SELF);
+    const dna = encoder.encodeSingle('今天心情不错');
+    // 无场景词 → 沿用缓存（初始全0），不报错不崩溃
+    expect(dna.location_fingerprint).toBeDefined();
+    expect(dna.global_uid).toHaveLength(23);
+  });
 });

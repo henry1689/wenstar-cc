@@ -15,6 +15,8 @@ export const M3_CONFIG = {
     level2Threshold: 0.65,
     /** 晶体级起始（≥此值触发 act 行动） */
     level3Threshold: 0.65,
+    /** P3: 40D归一化补偿偏移（dimCount从24→40导致分数系统性下降约0.03） */
+    dimCountOffset: 0.03,
   },
 
   // ── 场景调整系数 ──

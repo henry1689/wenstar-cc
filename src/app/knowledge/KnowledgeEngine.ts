@@ -268,7 +268,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     scene_tags?: string | string[];
     /** P0: 交互型分类 */
     interaction_type?: string;
-    /** P0: 情感曲谱（24D 感知向量 JSON） */
+    /** P0: 情感曲谱（40D 感知向量 JSON，存于 perception_40d 列） */
     emotion_vector?: string;
     /** V3.2: 户籍卷宗归档 — 此知识归属的实体 UUID */
     belongEntityUuid?: string;

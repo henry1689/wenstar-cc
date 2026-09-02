@@ -31,10 +31,22 @@ import type {
 describe('[M3守卫] perception.ts 类型接口', () => {
   it('Perception24D 有 24 个 number 字段、4 象限各 6 维', () => {
     const p: Perception24D = {
+      // 原24字段
       pleasure: 0.5, arousal: 0.5, dominance: 0.5, aggression: 0.5, sincerity: 0.5, humor: 0.5,
       factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5, temporal_focus: 0.5, self_ref: 0.5,
       intimacy: 0.5, power_diff: 0.5, dependency: 0.5, moral_judgment: 0.5, etiquette: 0.5, belonging: 0.5,
       sexual_attraction: 0.5, sensory_craving: 0.5, energy_merge: 0.5, possessiveness: 0.5, ecstasy: 0.5, safety: 0.5,
+      // 新增40D字段(D01-D40)
+      d01_muscle_load: 0.5, d02_pain_level: 0.5, d03_nerve_arousal: 0.5, d04_endocrine_hormones: 0.5,
+      d05_pheromone: 0.5, d06_metabolic_cycle: 0.5, d07_self_heal: 0.5, d08_sensory_env: 0.5,
+      d09_self_identity: 0.5, d10_desire_drive: 0.5, d11_fear_fatigue: 0.5, d12_enjoyment: 0.5,
+      d13_empathy: 0.5, d14_self_protection: 0.5, d15_partner_attachment: 0.5, d16_partner_protection: 0.5,
+      d17_family_belonging: 0.5, d18_family_protection: 0.5, d19_social_fit: 0.5, d20_team_protection: 0.5,
+      d21_private_space: 0.5, d22_home_environment: 0.5, d23_workplace: 0.5, d24_public_space: 0.5,
+      d25_spatiotemporal: 0.5, d26_seasonal_climate: 0.5, d27_micro_physiology: 0.5, d28_nature_expansion: 0.5,
+      d29_social_refinement: 0.5, d30_spiritual_growth: 0.5, d31_quantum_coupling: 0.5, d32_global_overview: 0.5,
+      d33_sexual_attraction: 0.5, d34_energy_merge: 0.5, d35_sincerity: 0.5, d36_dominance: 0.5,
+      d37_moral_judgment: 0.5, d38_humor: 0.5, d39_dependency: 0.5, d40_possessiveness: 0.5,
     };
     expect(Object.keys(p).length).toBe(64);
     // 所有字段均为 number
@@ -229,10 +241,22 @@ describe('[M3守卫] 运行时不变性', () => {
 describe('[M3守卫] 外部消费者契约', () => {
   it('Perception24D 被 m2/math/types/SQLite/m5/m8/m9/adapter 使用 — 24 字段不变', () => {
     const keys: (keyof Perception24D)[] = [
+      // 原24字段
       'pleasure', 'arousal', 'dominance', 'aggression', 'sincerity', 'humor',
       'factual', 'logical', 'certainty', 'abstract', 'temporal_focus', 'self_ref',
       'intimacy', 'power_diff', 'dependency', 'moral_judgment', 'etiquette', 'belonging',
       'sexual_attraction', 'sensory_craving', 'energy_merge', 'possessiveness', 'ecstasy', 'safety',
+      // 新增40D字段(D01-D40)
+      'd01_muscle_load', 'd02_pain_level', 'd03_nerve_arousal', 'd04_endocrine_hormones',
+      'd05_pheromone', 'd06_metabolic_cycle', 'd07_self_heal', 'd08_sensory_env',
+      'd09_self_identity', 'd10_desire_drive', 'd11_fear_fatigue', 'd12_enjoyment',
+      'd13_empathy', 'd14_self_protection', 'd15_partner_attachment', 'd16_partner_protection',
+      'd17_family_belonging', 'd18_family_protection', 'd19_social_fit', 'd20_team_protection',
+      'd21_private_space', 'd22_home_environment', 'd23_workplace', 'd24_public_space',
+      'd25_spatiotemporal', 'd26_seasonal_climate', 'd27_micro_physiology', 'd28_nature_expansion',
+      'd29_social_refinement', 'd30_spiritual_growth', 'd31_quantum_coupling', 'd32_global_overview',
+      'd33_sexual_attraction', 'd34_energy_merge', 'd35_sincerity', 'd36_dominance',
+      'd37_moral_judgment', 'd38_humor', 'd39_dependency', 'd40_possessiveness',
     ];
     expect(keys.length).toBe(64);
   });

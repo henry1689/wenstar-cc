@@ -1,6 +1,6 @@
 {
-  "name": "hermes-emotion-system",
-  "version": "0.1.0",
+  "name": "wenstar",
+  "version": "1.0.0",
   "description": "情感伴侣类脑认知系统 - M1 DNA编码器模块",
   "type": "module",
   "scripts": {

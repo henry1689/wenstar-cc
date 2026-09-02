@@ -86,15 +86,16 @@ describe('FamilyGraph — 自动推断', () => {
   });
 
   it('重复 pending 条目应自动晋升为正式档案字段', async () => {
+    // 使用含姓氏的正式姓名（"小雨"会被 GarbageEntityGuard 拦截为 L2 昵称）
     await graph.integrateFromEntity(
       [{ name: '姐姐', type: 'person', allele: '姐姐', phenotype: 'neutral', knowledge_type: 'family' }],
-      '我姐姐叫小雨'
+      '我姐姐叫张雨'
     );
-    await graph.addPendingItem('小雨', 'contact.workplace', '深圳上班', '来源1');
-    await graph.addPendingItem('小雨', 'contact.workplace', '深圳上班', '来源2');
-    await graph.addPendingItem('小雨', 'contact.workplace', '深圳上班', '来源3');
+    await graph.addPendingItem('张雨', 'contact.workplace', '深圳上班', '来源1');
+    await graph.addPendingItem('张雨', 'contact.workplace', '深圳上班', '来源2');
+    await graph.addPendingItem('张雨', 'contact.workplace', '深圳上班', '来源3');
 
-    const profile = graph.getPersonProfile('小雨');
+    const profile = graph.getPersonProfile('张雨');
     expect(profile?.dossier?.contact?.workplace).toBe('深圳上班');
     expect(profile?.pendingItems ?? []).toHaveLength(0);
   });

@@ -10,6 +10,33 @@ function makeItem(id: string, text: string, source: RankedItem['source'] = 'keyw
   return { id, text, score: 1.0, source, entityUuid: null, calciumScore: 1, createdAt: '2026-01-01' };
 }
 
+function legacyMmr(
+  candidates: RankedItem[],
+  relevanceScores: Map<string, number>,
+  config: { lambda: number; topK: number },
+): MMRSelectedItem[] {
+  const selected: MMRSelectedItem[] = [];
+  const remaining = [...candidates];
+  while (selected.length < config.topK && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestMMR = -Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const relevance = relevanceScores.get(remaining[i].id) ?? 0;
+      const maxSim = selected.length === 0
+        ? 0
+        : Math.max(...selected.map(item => jaccardSimilarity(item.text, remaining[i].text)));
+      const mmr = config.lambda * relevance - (1 - config.lambda) * maxSim;
+      if (mmr > bestMMR) {
+        bestMMR = mmr;
+        bestIdx = i;
+      }
+    }
+    const [chosen] = remaining.splice(bestIdx, 1);
+    selected.push({ ...chosen, mmrScore: bestMMR });
+  }
+  return selected;
+}
+
 describe('jaccardSimilarity', () => {
   it('完全相同的文本返回近 1', () => {
     const sim = jaccardSimilarity('今天天气很好', '今天天气很好');
@@ -89,6 +116,21 @@ describe('mmrDiversify', () => {
     const result = mmrDiversify(items, new Map([['A', 1.0], ['B', 0.5]]));
     for (const r of result) {
       expect(typeof r.mmrScore).toBe('number');
+    }
+  });
+
+  it('50 条混合候选与优化前算法逐项等价', () => {
+    const items = Array.from({ length: 50 }, (_, i) => makeItem(
+      `M${i}`,
+      `${i % 4 === 0 ? '家庭往事' : i % 4 === 1 ? '工作计划' : i % 4 === 2 ? '旅行见闻' : '情绪记录'}-${i % 11}-${i}`,
+    ));
+    const scores = new Map(items.map((item, i) => [item.id, ((i * 37) % 101) / 100]));
+    for (const config of [
+      { lambda: 0.8, topK: 5 },
+      { lambda: 0.7, topK: 10 },
+      { lambda: 0.5, topK: 15 },
+    ]) {
+      expect(mmrDiversify(items, scores, config)).toEqual(legacyMmr(items, scores, config));
     }
   });
 });

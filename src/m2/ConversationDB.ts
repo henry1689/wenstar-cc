@@ -154,6 +154,8 @@ export class ConversationDB {
     belongEntityUuid?: string;
     /** P0-2: 消息内提到的人/实体 UUID 集合（FG 图谱旁路，不参与记忆归属与检索） */
     mentionedEntityUuids?: string[];
+    /** G1-A3c1: 逻辑消息的 canonical atom record ID；与 GlobalUID/DNA root 独立。原值写入，不 trim/coerce/生成/复用 */
+    messageId?: string;
   }): number {
     this.ensureReady();
     const seqPos = options?.seqPos ?? 0;
@@ -163,13 +165,14 @@ export class ConversationDB {
     // is_summary 与 is_compacted 同步写入（过渡兼容，后续统一为 is_summary）
     const compactVal = options?.isCompacted ?? 0;
     this.db.run(
-      `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, global_uid, location_fingerprint, dialog_group_id, dialog_round, is_test, is_compacted, is_summary, roleplay_char, is_promoted, namespace, belong_entity_uuid, mentioned_entity_uuids)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, global_uid, location_fingerprint, dialog_group_id, dialog_round, is_test, is_compacted, is_summary, roleplay_char, is_promoted, namespace, belong_entity_uuid, mentioned_entity_uuids, message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       [role, content, timestamp, seqPos, options?.topic || '', entityNames, perceptionSummary,
        options?.calciumScore || 0, options?.dnaRootId || null, options?.globalUid || null, options?.locationFingerprint || null,
        options?.dialogGroupId || null, options?.dialogRound ?? null, options?.isTest ?? 0, compactVal, compactVal,
        options?.roleplayChar || null, options?.namespace || 'default', options?.belongEntityUuid || null,
-       options?.mentionedEntityUuids ? JSON.stringify(options.mentionedEntityUuids) : null],
+       options?.mentionedEntityUuids ? JSON.stringify(options.mentionedEntityUuids) : null,
+       options?.messageId ?? null],
     );
     // C4: 触发防抖落盘（共享模式委托 owner；独立模式 150ms 合并落盘），防止用户/助手消息因崩溃丢失
     this.scheduleFlush();

@@ -29,10 +29,10 @@ import {
   reinforcementBoost,
 } from './math.js';
 import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
-import { computeL2Norm } from './EmotionVectorCodec.js';
+import { computeL2Norm40D } from './PerceptionVector40DCodec.js';
 import { decodePerceptionV40, encodePerceptionV40, map24DTo40D, cosineSimilarity40D, PERCEPTION_40D_ENCODING_VERSION, encodeEmptyPerceptionV40 } from './PerceptionVector40DCodec.js';
-import type { PerceptionV40 } from '../m3/types/perception-40d.js';
-import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from '../m3/types/perception-40d.js';
+import type { PerceptionV40 } from './types/perception-40d.js';
+import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from './types/perception-40d.js';
 import { migrateSchema } from './MigrationManager.js';
 import { createHash } from 'node:crypto';
 
@@ -657,8 +657,8 @@ export class SQLiteAdapter {
     // P0-4: 钙化分边界强制校验
     const cs = Math.max(MEMORY_CONFIG.recall.calciumMin, Math.min(MEMORY_CONFIG.recall.calciumMax, record.calcium_score));
     const cl = record.calcium_level;
-    // P1: l2_norm 预计算
-    const l2 = computeL2Norm(record.perception);
+    // P1: l2_norm 预计算（40维感知向量）
+    const l2 = computeL2Norm40D(p40);
 
     this.runSql(
       `INSERT OR REPLACE INTO memories
@@ -1664,36 +1664,37 @@ export class SQLiteAdapter {
     this._dirtyCount++;
   }
 
-  /** V16: 修复 knowledge_base（sql.js session 内执行）。替代 fix-xsy-kb.cjs / fix-all-entities-final.cjs。 */
+  /**
+   * V16: 修复 knowledge_base（sql.js session 内执行）。替代 fix-xsy-kb.cjs / fix-all-entities-final.cjs。
+   * 🔴 通则化改造(2026-09-02): 去除特定 UUID/人名硬编码（徐诗雨/熊梓铭/徐诗韵个案补丁），
+   *    改为通用规则——人物档案重复去重对所有实体生效（UUID 管理通则应适用于所有人群）。
+   *    个案数据修复（去归属/补建档案）由数据维护流程处理，不再每次启动执行。
+   */
   private _fixKnowledgeBase(): void {
     if (!this.db) return;
-    const now = new Date().toISOString();
-    // 1) 徐诗雨去重
+    // 通则: 人物档案按 belong_entity_uuid 去重（保留最早一条，适用于所有实体）
     try {
-      const d = this.db.exec("SELECT id FROM knowledge_base WHERE belong_entity_uuid='TXS-000000007' AND classification='人物档案' ORDER BY created_at ASC");
-      if (d.length&&d[0].values&&d[0].values.length>1) {
-        for (let i=1;i<d[0].values.length;i++) this.db.run('DELETE FROM knowledge_base WHERE id=?',[String(d[0].values[i][0])]);
-        console.log(`[SQLiteAdapter] KB去重徐诗雨:${d[0].values.length}→1`);
-        this._dirtyCount++;
-      }
-    } catch {}
-    // 2) 熊梓铭去归属
-    try {
-      const x = this.db.exec("SELECT id,title FROM knowledge_base WHERE belong_entity_uuid='TXS-000000003' AND classification!='人物参考'");
-      if (x.length&&x[0].values) {
-        let f=0;
-        for (const [id] of x[0].values as any[][]) { this.db.run('UPDATE knowledge_base SET belong_entity_uuid=NULL,updated_at=? WHERE id=?',[now,String(id)]); f++; }
-        if (f>0){console.log(`[SQLiteAdapter] KB去归属熊梓铭:${f}篇`);this._dirtyCount++;}
-      }
-    } catch {}
-    // 3) 徐诗韵补建
-    try {
-      const c = this.db.exec("SELECT COUNT(*) FROM knowledge_base WHERE belong_entity_uuid='TXS-000000011'");
-      if ((c.length&&c[0]?.values?.[0]?.[0]?Number(c[0].values[0][0]):0)===0) {
-        this.db.run("INSERT OR IGNORE INTO knowledge_base (id,title,content,source_type,classification,type,tags,locked,belong_entity_uuid,created_at,updated_at,impression_score,recall_count) VALUES (?,?,?,?,?,?,?,0,?,?,?,0.9,0)",
-          ['kn_xsyun_v16','徐诗韵·人物档案','## 徐诗韵\n### 基本信息\n女|2010年生|初中在读|未婚\n### 性格\n活泼、开朗、爱笑、粘人、话多、没心没肺、小机灵鬼\n### 外貌\n瓜子脸，大眼睛圆亮，笑起来弯成月牙露小虎牙。高马尾，约155cm。\n### 家族\n父徐东伟|母阿苏|姐徐诗雨、徐诗涵\n### 关系\n密友——通过姐姐诗雨认识\n','md','人物档案','note','["徐诗韵","人物档案"]','TXS-000000011',now,now]);
-        console.log('[SQLiteAdapter] KB创建徐诗韵:1篇');
-        this._dirtyCount++;
+      const d = this.db.exec(
+        "SELECT belong_entity_uuid, id FROM knowledge_base " +
+        "WHERE classification='人物档案' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' " +
+        "ORDER BY created_at ASC"
+      );
+      if (d.length && d[0].values) {
+        const seen = new Map<string, boolean>();
+        let dupCount = 0;
+        for (const row of d[0].values as any[][]) {
+          const [uuid, id] = row;
+          if (seen.has(String(uuid))) {
+            this.db.run('DELETE FROM knowledge_base WHERE id=?', [String(id)]);
+            dupCount++;
+          } else {
+            seen.set(String(uuid), true);
+          }
+        }
+        if (dupCount > 0) {
+          console.log(`[SQLiteAdapter] KB人物档案去重（通则）: 删除 ${dupCount} 条重复档案`);
+          this._dirtyCount++;
+        }
       }
     } catch {}
   }
@@ -2011,17 +2012,21 @@ export class SQLiteAdapter {
       const cl = ca >= 2 ? 3 : ca >= 1 ? 2 : ca >= 0.5 ? 1 : 0;
       const es = Math.min(1.0, ca * 0.8);
 
-      // 🆕 编码健康修复: 从 conversations 继承规范 global_uid/dna_root_id（否则重建的锚点无 UID/DNA）
-      let anchorGlobalUid = '', anchorDnaRootId = '';
+      // 🆕 编码健康修复: 从 conversations 继承规范 global_uid/dna_root_id/location_fingerprint（否则重建的锚点无 UID/DNA/fp）
+      let anchorGlobalUid = '', anchorDnaRootId = '', anchorLocationFp = '';
       try {
-        const guRes = this.db.exec(
-          "SELECT global_uid, dna_root_id FROM conversations WHERE dialog_group_id = ? AND belong_entity_uuid = ? AND global_uid IS NOT NULL AND global_uid != '' ORDER BY timestamp LIMIT 1"
+        const guRes = this.execSql(
+          "SELECT global_uid, dna_root_id, location_fingerprint FROM conversations WHERE dialog_group_id = ? AND belong_entity_uuid = ? AND length(trim(COALESCE(global_uid,''))) = 23 AND trim(COALESCE(dna_root_id,'')) != '' ORDER BY timestamp LIMIT 1",
+          [dg, eu],
         );
         if (guRes.length && guRes[0].values?.[0]) {
           anchorGlobalUid = String(guRes[0].values[0][0] || '');
           anchorDnaRootId = String(guRes[0].values[0][1] || '');
+          anchorLocationFp = String(guRes[0].values[0][2] || '');
         }
-      } catch { /* 继承失败不阻塞重建 */ }
+      } catch (err) {
+        console.warn('[SQLiteAdapter] 锚点身份继承查询失败:', (err as Error)?.message);
+      }
       try {
         // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零（S4 P1-2 修复：
         //   与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
@@ -2031,15 +2036,15 @@ export class SQLiteAdapter {
           "locus_path,leaf_zone,raw_input,memory_kind,lifecycle_state,confidence_score,stability_score," +
           "thread_id,recall_count,promoted_to_diamond,effective_strength,strength_updated_at," +
           "is_landmark,primary_emotion,memory_type,dialog_group_id,belong_entity_uuid," +
-          "global_uid,dna_root_id," +
+          "global_uid,dna_root_id,location_fingerprint," +
           "is_foresight,valid_until_ms,foresight_status,source_type) " +
-          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,0,NULL,'none','conversation')",
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,0,NULL,'none','conversation')",
           [id, seq++, String(firstTs || now),
            anchor40D,
            ca, cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
            cl >= 2 ? 'active' : 'candidate', 0.55, cl >= 2 ? 0.45 : 0.2,
            dg, es, now, '平静', dg, eu,
-           anchorGlobalUid, anchorDnaRootId]
+           anchorGlobalUid, anchorDnaRootId, anchorLocationFp || '0'.repeat(32)]
         );
         n++;
       } catch { /* 单条失败不阻塞 */ }

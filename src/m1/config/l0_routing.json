@@ -1,10 +1,29 @@
 {
+  "version": "2.0",
+  "description": "M1 L0 路由规则 v2.0 — 扩展覆盖至 35+ 条规则，目标 misc.default 占比 < 30%",
   "rules": [
-    { "id": "family-conflict", "keywords": ["催婚", "结婚", "妈妈", "我妈", "烦死"], "domain": "family", "subcategory": "conflict", "priority": 1 },
-    { "id": "family-care", "keywords": ["爸爸", "母亲", "家人", "照顾"], "domain": "family", "subcategory": "care", "priority": 2 },
-    { "id": "work-stress", "keywords": ["加班", "工作压力", "老板", "任务", "同事"], "domain": "work", "subcategory": "stress", "priority": 1 },
-    { "id": "emotion-positive", "keywords": ["开心", "幸福", "高兴", "快乐"], "domain": "emotion", "subcategory": "positive", "priority": 1 },
-    { "id": "emotion-negative", "keywords": ["难过", "伤心", "孤独", "痛苦"], "domain": "emotion", "subcategory": "negative", "priority": 1 },
-    { "id": "daily-general", "keywords": ["天气", "散步", "早上好", "晚上好"], "domain": "misc", "subcategory": "default", "priority": 5 }
+    { "id": "family-conflict", "keywords": ["催婚", "结婚", "妈妈", "我妈", "烦死", "争吵", "吵架", "矛盾"], "domain": "family", "subcategory": "conflict", "priority": 1 },
+    { "id": "family-care", "keywords": ["爸爸", "父亲", "母亲", "家人", "照顾", "关心", "想念", "爷爷", "奶奶", "外公", "外婆"], "domain": "family", "subcategory": "care", "priority": 2 },
+    { "id": "family-general", "keywords": ["家庭", "亲人", "亲戚", "聚会", "过年", "生日", "礼物"], "domain": "family", "subcategory": "general", "priority": 3 },
+    { "id": "work-stress", "keywords": ["加班", "工作压力", "老板", "任务", "同事", "Deadline", "KPI", "项目", "会议"], "domain": "work", "subcategory": "stress", "priority": 1 },
+    { "id": "work-achievement", "keywords": ["升职", "加薪", "奖励", "表扬", "成功", "完成", "突破"], "domain": "work", "subcategory": "achievement", "priority": 2 },
+    { "id": "work-meeting", "keywords": ["开会", "汇报", "演示", "演讲", "谈判"], "domain": "work", "subcategory": "meeting", "priority": 3 },
+    { "id": "work-project", "keywords": ["项目", "开发", "代码", "测试", "上线", "发布"], "domain": "work", "subcategory": "project", "priority": 2 },
+    { "id": "work-burnout", "keywords": ["累", "疲惫", "倦怠", "不想工作", "辞职", "躺平"], "domain": "work", "subcategory": "burnout", "priority": 1 },
+    { "id": "emotion-positive", "keywords": ["开心", "幸福", "高兴", "快乐", "兴奋", "满足", "感动", "惊喜", "幸运"], "domain": "emotion", "subcategory": "positive", "priority": 1 },
+    { "id": "emotion-negative", "keywords": ["难过", "伤心", "孤独", "痛苦", "焦虑", "抑郁", "失落", "崩溃", "愤怒", "烦躁"], "domain": "emotion", "subcategory": "negative", "priority": 1 },
+    { "id": "emotion-romantic", "keywords": ["恋爱", "喜欢", "爱", "约会", "男朋友", "女朋友", "老公", "老婆", "亲密"], "domain": "emotion", "subcategory": "romantic", "priority": 1 },
+    { "id": "emotion-miss", "keywords": ["想念", "怀念", "思念", "回忆", "过去", "以前"], "domain": "emotion", "subcategory": "miss_family", "priority": 2 },
+    { "id": "emotion-suppressed", "keywords": ["压抑", "憋屈", "委屈", "隐忍", "假装"], "domain": "emotion", "subcategory": "suppressed", "priority": 1 },
+    { "id": "daily-creation", "keywords": ["画画", "写作", "创作", "摄影", "音乐", "设计", "手工", " coding"], "domain": "daily", "subcategory": "creation", "priority": 2 },
+    { "id": "daily-entertainment", "keywords": ["电影", "电视剧", "游戏", "综艺", "追剧", "刷剧", "娱乐"], "domain": "daily", "subcategory": "entertainment", "priority": 3 },
+    { "id": "health-fitness", "keywords": ["健身", "跑步", "游泳", "瑜伽", "锻炼", "运动", "减肥", "身材"], "domain": "health", "subcategory": "fitness", "priority": 2 },
+    { "id": "health-sickness", "keywords": ["生病", "医院", "吃药", "头痛", "发烧", "不舒服", "看病"], "domain": "health", "subcategory": "sickness", "priority": 1 },
+    { "id": "health-sleep", "keywords": ["失眠", "睡不好", "做梦", "噩梦", "熬夜", "困", "疲劳"], "domain": "health", "subcategory": "sleep", "priority": 2 },
+    { "id": "daily-general", "keywords": ["天气", "散步", "早上好", "晚上好", "早安", "晚安", "吃饭", "购物"], "domain": "misc", "subcategory": "default", "priority": 5 },
+    { "id": "misc-greeting", "keywords": ["你好", "嗨", "在吗", "干嘛", "怎么样"], "domain": "misc", "subcategory": "default", "priority": 5 },
+    { "id": "misc-thanks", "keywords": ["谢谢", "感谢", "辛苦了", "抱歉", "对不起"], "domain": "misc", "subcategory": "default", "priority": 5 },
+    { "id": "misc-question", "keywords": ["为什么", "怎么回事", "怎么办", "怎么", "如何", "多少"], "domain": "misc", "subcategory": "default", "priority": 5 },
+    { "id": "misc-decision", "keywords": ["选择", "犹豫", "决定", "考虑", "纠结", "选哪个"], "domain": "misc", "subcategory": "default", "priority": 4 }
   ]
 }

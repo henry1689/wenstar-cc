@@ -96,11 +96,11 @@ describe('searchV12 - entityUuid 过滤', () => {
     const result = searchV12(null as any, mr, 'query', null, {
       entityUuids: ['uuid-shirley'],
     });
-    // 应该只返回 uuid-shirley 和无归属的记忆
+    // P0-A3: deny-by-default — 无归属记录不通过
     const ids = result.raw.map(r => r.item.id);
     expect(ids).toContain('A');
-    expect(ids).toContain('C'); // entityUuid=null 通过
-    expect(ids).not.toContain('B');
+    expect(ids).not.toContain('B'); // 不在白名单
+    expect(ids).not.toContain('C'); // entityUuid=null 被过滤
   });
 });
 

@@ -36,7 +36,8 @@ export type SearchDomain =
 export type RetrievalRoute =
   | 'emotion' | 'keyword' | 'spine' | 'locus' | 'entity' | 'work'  // 现有 6 路（MemoryRetriever）
   | 'diamond' | 'knowledge' | 'vault' | 'note' | 'profile'          // 新增域路由
-  | 'conversation' | 'default';
+  | 'conversation' | 'default'
+  | 'meeting';                                                      // 会晤隔离墙（MeetingWallAdapter）
 
 /**
  * 统一命中 — 多路并行检索的原子单位。

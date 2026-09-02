@@ -45,7 +45,7 @@ describe('hasProfileSignal — P1-4 PAE 档案信号', () => {
 });
 
 describe('getPAETimeoutMs — P1-4 超时配置', () => {
-  it('读 yaml p1_speed.llm_reduction.pae_timeout_ms（8000，原 45s 收紧）', () => {
-    expect(getPAETimeoutMs()).toBe(8000);
+  it('读 yaml p1_speed.llm_reduction.pae_timeout_ms（30s，原 8s 放宽）', () => {
+    expect(getPAETimeoutMs()).toBe(30000);
   });
 });

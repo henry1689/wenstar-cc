@@ -14,6 +14,16 @@ import { resolveReferent } from '../../app/works/ReferentResolver.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
 
+export interface RetrievalIntent {
+  isTopicShift: boolean;
+  isFollowUp: boolean;
+  hasContinuationMarkers: boolean;
+  isCasualChat: boolean;
+  isLimitedRetrieval: boolean;
+  hasNewEntity: boolean;
+  hasPersonEntity: boolean;
+}
+
 export interface RetrievalInput {
   ctx: any;
   message: string;
@@ -25,19 +35,36 @@ export interface RetrievalInput {
   p40?: import('../../m3/types/perception-40d.js').PerceptionV40;
   enrichedHistory: Array<{ content: string }>;
   memoryFragments: string[];
+  /** 独立网络检索可在意图确定后立即启动，但不得在回调中修改共享上下文。 */
+  onIntentReady?: (intent: RetrievalIntent) => void;
 }
 
-export interface RetrievalOutput {
-  isTopicShift: boolean;
-  isFollowUp: boolean;
-  hasContinuationMarkers: boolean;
-  isCasualChat: boolean;
-  isLimitedRetrieval: boolean;
-  hasNewEntity: boolean;
-  hasPersonEntity: boolean;
+export interface RetrievalOutput extends RetrievalIntent {
   emotionalMemories: ScoredMemory[];
   memoryGate: import('../../app/conversation/MemoryGate.js').MemoryGateOutput;
   memoryGateFillerUsed: boolean;
+}
+
+type FoundationRouteOptions = import('../../m4/retrieval/orchestrate.js').FoundationRouteOptions;
+type FoundationRouteResult = import('../../m4/retrieval/orchestrate.js').FoundationRouteResult;
+
+/**
+ * 提前启动与主记忆链互不依赖的 Foundation 多源路由。
+ * 只返回独立结果，不在异步任务内修改 memoryFragments；调用方在原注入点合并，
+ * 因此并发完成顺序不会改变最终上下文顺序。
+ */
+export function startFoundationRouteTask(
+  ctx: any,
+  message: string,
+  options: FoundationRouteOptions,
+): Promise<FoundationRouteResult | null> {
+  if (!ctx.storage?.getSQLite?.() || !ctx.knowledgeBase) return Promise.resolve(null);
+  return import('../../m4/retrieval/orchestrate.js')
+    .then(({ runFoundationRoutes }) => runFoundationRoutes(ctx, message, options))
+    .catch(error => {
+      console.warn('[FoundationRoutes] 并发路由失败，降级为空结果:', (error as Error)?.message);
+      return null;
+    });
 }
 
 export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutput> {
@@ -182,6 +209,38 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         }
         // 🔴 S2-O2: 记忆条数 5→8，颗粒度更精细（用户问过去时覆盖更多关键记忆，回复更完整真实）
         // 🔴 记忆召回彻底解决: 8→15（配合三槽位时间覆盖，早期记忆也可注入）
+        // 🆕 统一检索中枢接入：会晤场景也走 SearchOrchestrator 多路并行 + RRF 融合
+        //   现有三槽位（MeetingWallAdapter）+ Foundation 额外域（黑钻/金库/记事）并行检索，
+        //   融合结果优先注入（更相关的在前），三槽位原有逻辑保留为兜底去重。
+        try {
+          const { MeetingWallAdapter } = await import('../../m4/retrieval/adapters/MeetingWallAdapter.js');
+          const { createDefaultRegistry } = await import('../../m4/retrieval/index.js');
+          const { SearchOrchestrator } = await import('../../m4/retrieval/SearchOrchestrator.js');
+          const _orchestrator = new SearchOrchestrator();
+          const _reg = createDefaultRegistry({ sqlite: _sqlite as any });
+          _reg.register(new MeetingWallAdapter(_sqlite as any));
+          const _orRes = await _orchestrator.runSearch(_reg, {
+            query: message,
+            entityUuids: [_entityUuid],
+            policy: { enforce: false } as any,
+            mode: 'balanced',
+            nowMs: Date.now(),
+          });
+          if (_orRes.hits.length > 0) {
+            const _orSeen = new Set(memoryFragments.map((f: string) => f.substring(0, 20)));
+            let _orInjected = 0;
+            for (const _oh of _orRes.hits) {
+              const _t = String(_oh.text || '').substring(0, 250);
+              if (_t.length > 4 && !_orSeen.has(_t.substring(0, 20))) {
+                _orSeen.add(_t.substring(0, 20));
+                memoryFragments.push('【' + _meetingEntityName + '的记忆】' + _t);
+                _orInjected++;
+              }
+              if (_orInjected >= 10) break;
+            }
+            console.log(`[MeetingOrchestrator] 统一中枢注入: ${_orInjected} 条 (routes=${JSON.stringify(_orRes.routeStats)})`);
+          }
+        } catch (_orErr) { /* 统一中枢失败不阻塞，降级现有三槽位 */ }
         for (const _em of _rankedMems.slice(0, 15)) {
           // 🔴 P0-3 修复: 会晤记忆截断 100 → 250（避免关键记忆细节丢失导致 LLM 编造）
           const _t = (_em.raw_input || '').substring(0, 250);
@@ -418,6 +477,31 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   // V10.4: 话题切换深度检索(10-15条)，日常闲聊常用检索(5-8条)
   const _memLimit = isTopicShift ? 15 : 8;
   const _memFinalLimit = isTopicShift ? 8 : 5;
+
+  try {
+    input.onIntentReady?.({
+      isTopicShift,
+      isFollowUp,
+      hasContinuationMarkers,
+      isCasualChat,
+      isLimitedRetrieval,
+      hasNewEntity,
+      hasPersonEntity,
+    });
+  } catch (error) {
+    console.warn('[RetrievalStage] 独立检索启动失败，继续主链:', (error as Error)?.message);
+  }
+
+  // Foundation 与情感记忆/V13 主链无数据依赖，提前启动；仍在原位置等待并注入。
+  const _foundationPromise = startFoundationRouteTask(ctx, message, {
+    meetingMode: !!_meetingEntityName,
+    activeEntityUuids: _activeEntityUuids,
+    isTopicShift,
+    perception: p,
+    perception40d: input.p40,
+    locusPath: (dna as any).locus_path || 'default',
+    entities: dna.entity_genes.map(g => ({ name: g.name, type: g.type })),
+  });
 
   try {
     // V7.0: 始终检索记忆，不再用 isTopicShift 做总开关
@@ -782,13 +866,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
 
   // ── Foundation 统一路由块（S4 影子比对 / S5 注入） ──
   try {
-    if (ctx.storage?.getSQLite?.() && ctx.knowledgeBase) {
-      const { runFoundationRoutes } = await import('../../m4/retrieval/orchestrate.js');
-      const _fResult = await runFoundationRoutes(ctx, message, {
-        meetingMode: !!_meetingEntityName,
-        activeEntityUuids: _activeEntityUuids,
-        isTopicShift,
-      });
+    const _fResult = await _foundationPromise;
+    if (_fResult) {
       if (WS_FOUNDATION_ROUTES) {
         for (const _f of _fResult.fragments) {
           if (!memoryFragments.some(f => f.includes(_f.substring(0, 20)))) memoryFragments.push(_f);

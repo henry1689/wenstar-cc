@@ -59,9 +59,9 @@ export function decodeEmotionVector(json: string): Perception24D | null {
 }
 
 /**
- * 计算 24D 向量的 L2 范数（用于向量检索粗筛）
+ * 计算 Perception24D 向量的 L2 范数（历史遗留，40D 迁移后仅用于兼容）
  * l2_norm = sqrt(Σx²)，值域 [0, sqrt(24)] ≈ [0, 4.9]
- * 范数接近 0 表示无情感倾向（纯事实文本），范数大表示情感强烈
+ * @deprecated 使用 computeL2Norm40D 替代
  */
 /**
  * V13: 带文本指纹的感知向量编码

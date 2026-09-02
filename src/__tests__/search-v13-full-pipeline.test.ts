@@ -144,7 +144,7 @@ describe('V13 L4 DAG 闭包', () => {
         makeItem('B', '关联记忆', 'keyword', 0.5),
       ]},
     ]);
-    const r = await searchV13(null as any, mr, 'test', null, {},
+    const r = await searchV13(null as any, mr, 'test', null, { entityUuids: ['u1'] },
       { enableDAGClosure: true }, repo);
     // DAG 开启时至少有 layer latency 记录
     expect(r.layerLatency!['L4_DAG']).toBeDefined();
@@ -297,6 +297,7 @@ describe('V13 全开模式 (全七层)', () => {
     const r = await searchV13(null as any, mr, '记忆', null, {
       mode: 'balanced', limit: 10,
       timeRange: { start: '2026-07-01' },
+      entityUuids: ['u1'],
     }, fullCfg, repo);
 
     // 至少不崩溃

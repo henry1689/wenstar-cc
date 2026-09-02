@@ -1,7 +1,7 @@
 /**
  * Fusion Memory Types — 融合记忆系统的核心类型定义
  *
- * 24 维情感向量作为记忆的主索引，文本/实体/话题作为次级索引。
+ * 40 维情感向量作为记忆的主索引，文本/实体/话题作为次级索引。
  */
 import type { Perception24D } from '../../m3/types/perception.js';
 import type { EntityGene } from '../../m1/types/dna.js';
@@ -65,7 +65,7 @@ export interface EmotionalMemoryRecord {
   /** 来源对话ID列表（JSON） */
   source_conversation_ids?: number[];
 
-  /** ── 主索引：完整 24 维情感向量 ── */
+  /** ── 主索引：完整 40 维情感向量（perception_40d 列） ── */
   perception: Perception24D;
   /** V20: 40D 感知向量（双轨，来自 perception_v2 列） */
   perceptionV40?: import('../../m3/types/perception-40d.js').PerceptionV40;
