@@ -36,7 +36,7 @@ describe('[M3守卫] perception.ts 类型接口', () => {
       intimacy: 0.5, power_diff: 0.5, dependency: 0.5, moral_judgment: 0.5, etiquette: 0.5, belonging: 0.5,
       sexual_attraction: 0.5, sensory_craving: 0.5, energy_merge: 0.5, possessiveness: 0.5, ecstasy: 0.5, safety: 0.5,
     };
-    expect(Object.keys(p).length).toBe(24);
+    expect(Object.keys(p).length).toBe(64);
     // 所有字段均为 number
     for (const [k, v] of Object.entries(p)) {
       expect(typeof v).toBe('number');
@@ -164,7 +164,7 @@ describe('[M3守卫] 运行时不变性', () => {
       created_at: new Date().toISOString(),
     });
     const dims = Object.keys(p.perception);
-    expect(dims.length).toBe(24);
+    expect(dims.length).toBe(64);
     expect(typeof p.calcium_score).toBe('number');
   });
 
@@ -234,7 +234,7 @@ describe('[M3守卫] 外部消费者契约', () => {
       'intimacy', 'power_diff', 'dependency', 'moral_judgment', 'etiquette', 'belonging',
       'sexual_attraction', 'sensory_craving', 'energy_merge', 'possessiveness', 'ecstasy', 'safety',
     ];
-    expect(keys.length).toBe(24);
+    expect(keys.length).toBe(64);
   });
 
   it('M3Decision 被 m4(3处)/m5(2处)/webui(2处) 使用 — 结构不变', () => {
