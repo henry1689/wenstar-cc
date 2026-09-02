@@ -14,8 +14,14 @@ coverage/
 *.p12
 *.pfx
 
-# Private/local data
-data/
+# Private/local data — 顶层 data 忽略内容，但恢复治理文件
+data/*
+!data/knowledge-v4/
+data/knowledge-v4/*
+!data/knowledge-v4/governance/
+# 子项目 data 目录（test/ui）
+test/data/
+ui/data/
 .var/
 *.jsonl
 .tmp/

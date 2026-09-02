@@ -1,5 +1,7 @@
 # 文曲星 · 玉瑶 · 太虚境
 
+> 🔴 **动手前 30 秒必读：[GOVERNANCE.md](GOVERNANCE.md)（治理文件效力层级总表）** — 改动任何代码/数据前，先读对应层级的法律/规约。
+
 ## 🌐 语言（最高优先级）
 
 🔴 **所有交流、回复、文档、代码注释默认使用中文。**
@@ -54,7 +56,7 @@ S1 全局审视 → S2 方案定稿 → S3 实施 → S4 架构评审 → S4.5 �
 
 ### 🔴 铁律 0.4：UUID 户籍管理法 — 全链路 UUID 强关联
 
-**依据**：《UUID户籍管理法 WS-HUKOU-LAW-V1.0》（`D:\wenstar\docs\UUID户籍管理法-WS-HUKOU-LAW-V1.0.md`）+ 太虚境户籍管理法 V2.1
+**依据**：《UUID户籍管理法 WS-HUKOU-LAW-V1.0》（`data/knowledge-v4/governance/uuid-household-registration-law-v1.0.md`）+ 太虚境户籍管理法 V2.1（`data/knowledge-v4/governance/taixu-household-registration-law.md`）
 
 任何数据操作（写入/读取/检索/注入 LLM/输出）必须：
 1. **先确定当前户口**（belong_entity_uuid）：会晤模式强制 = 会晤实体 UUID，禁止 entity_genes 推断覆盖
