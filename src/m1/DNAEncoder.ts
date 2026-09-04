@@ -193,6 +193,17 @@ export class DNAEncoder {
     return this._encodeCombined(utterance, contextStr);
   }
 
+  /**
+   * P1: 初始化内部 L3 annotator 的 FG 人名库（简称→家谱全名规范化 / FG 别名兜底）。
+   * 幂等：annotator 内部以 this.fg / _fgInitFailed 保证只初始化一次。
+   * 调用方：ChatEntry.runChatEntry 在 encodeSingle 前 await 一次（初始化失败降级，不阻塞对话）。
+   * 修复契约漂移：此前 ChatEntry 直接调 ctx.encoder.initFg?.() 但 DNAEncoder 未暴露该方法，
+   * 导致 FG 人名库在聊天链路从未初始化（TS2339）。此为门面委托，FG 初始化逻辑单一源仍在 L3。
+   */
+  async initFg(): Promise<void> {
+    return this.annotator.initFg();
+  }
+
   encodeBatch(inputs: Array<{ utterance: string; context?: string[] }>): DNA[] {
     return inputs.map((input) => this.encodeSingle(input.utterance, input.context));
   }

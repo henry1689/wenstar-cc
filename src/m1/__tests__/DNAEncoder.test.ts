@@ -303,3 +303,26 @@ describe('[本体-标签分离] emotion_color 不影响 DNA 核心标识', () =>
     expect(dna.global_uid).toHaveLength(23);
   });
 });
+
+// ─── initFg 委托（L3 FG 人名库预初始化）───
+// Ref: L3EntityAnnotator.initFg — 聊天入口 ChatEntry.runChatEntry 在 encodeSingle 前 await
+// 修复契约漂移：DNAEncoder 曾未暴露 initFg → ChatEntry 调用 TS2339 + FG 人名库在聊天链路从未初始化。
+// 验证：委托方法存在；调用不抛错（FG 初始化失败降级不阻塞对话）；幂等二次调用直接返回。
+describe('DNAEncoder — initFg 委托', () => {
+  it('暴露 initFg 委托方法（async）', () => {
+    const encoder = new DNAEncoder(TEST_SELF);
+    expect(typeof (encoder as any).initFg).toBe('function');
+  });
+
+  it('initFg 调用 resolve 不抛错（FG 初始化失败降级）', async () => {
+    const encoder = new DNAEncoder(TEST_SELF);
+    // 测试环境 FG 默认 DB 路径不可达 → annotator 走降级（_fgInitFailed），仍须 resolve 不 reject
+    await expect(encoder.initFg()).resolves.toBeUndefined();
+  }, 30000);
+
+  it('initFg 幂等：二次调用直接返回', async () => {
+    const encoder = new DNAEncoder(TEST_SELF);
+    await encoder.initFg();
+    await expect(encoder.initFg()).resolves.toBeUndefined();
+  }, 30000);
+});
