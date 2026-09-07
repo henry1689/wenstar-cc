@@ -40,6 +40,15 @@ const SENTENCE_TAIL_BLOCK = ['的','也','后','小','说','你','她','他','�
 const SENTENCE_HEAD_BLOCK = ['那','这','和','与','跟','把','被','在','对','有','就','向','从','让','使'];
 const COMMON_NOUN_BLOCK = new Set(['关系','幸福','舒服','项目','身体','感觉','情况','问题','时候','东西','朋友','同事','理由','意思','未来','现在','今天','明天']);
 
+// M2-1 2026-09-07: 弱证据姓(兼用字)——字义高频、姓氏低频的单字。
+// 它们虽在百家姓表, 但现代汉语中多作虚词/形容词/名词(温=温柔, 时=时候, 应=应该,
+// 花=花朵, 别=别人, 那=那个, 幸=幸福, 解=解决, 项=项目, 舒=舒服, 阴=阴天)。
+// 语义: 首字落此集合 ≠ 人名证据。hasSurname 单看首字 + L3 判定 "hasSurname||length>=3"
+// 双双放行"温柔/应一下/时半/花骨朵/时间的话"等中文短语 → 入 FG 成垃圾 person(实测每日新增)。
+const WEAK_EVIDENCE_SURNAMES = new Set([
+  '温','时','应','花','别','那','幸','解','项','舒','阴',
+]);
+
 /** 判断是否为句子片段/普通名词（非人名）。供 gradeEntity 与 LLMEntityExtractor 复用。 */
 export function looksLikeSentenceFragment(name: string): boolean {
   if (COMMON_NOUN_BLOCK.has(name)) return true;
@@ -99,6 +108,13 @@ export function gradeEntity(
   // V12.0 P1-9: 句子片段/普通名词拦截（短语污染根因）— 必须在 hasSurname/长度判定之前
   if (looksLikeSentenceFragment(name)) {
     return { name, grade: 0, reason: '句子片段/普通名词 — 非人名' };
+  }
+
+  // M2-1 2026-09-07: 弱证据姓拦截 — "温柔/应一下/时半/花骨朵/时间的话" 以兼用字开头
+  // 被 hasSurname 单看首字误判 L3 → 入 FG 成垃圾 person。弱证据姓 ≠ 人名证据(需组合证据),
+  // 降 L2 待绑定上下文; 真实弱姓人已登记走 knownNames(L4) / 用户确认(L5) 路径, 不回退。
+  if (name.length >= 2 && WEAK_EVIDENCE_SURNAMES.has(name[0])) {
+    return { name, grade: 2, reason: '弱证据姓(兼用字) — 疑似短语, 需绑定上下文' };
   }
 
   // L2: 昵称/简称 — 少于3字的非姓氏名（"艺哥""小明""阿芬"）
