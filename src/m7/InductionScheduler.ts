@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { DreamQueue } from './DreamQueue.js';
 import { ConfigService } from '../config/ConfigService.js';
+// 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门(共现归纳建 object 前过滤垃圾)
+import { checkEntityWrite } from '../m4/household/EntityWriteGate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -64,24 +66,49 @@ export class InductionScheduler {
     if (this.timer) clearInterval(this.timer);
   }
 
+  /** 持久化归纳游标到 engine_store（跨重启防重扫，空窗也推进） */
+  private _saveLastRun(sqlite: any, ts: number): void {
+    try {
+      if (sqlite && typeof sqlite.writeRaw === 'function') {
+        sqlite.writeRaw(
+          "INSERT OR REPLACE INTO engine_store (key, value, updated_at) VALUES ('induction_last_run', ?, ?)",
+          [String(ts), new Date().toISOString()],
+        );
+      }
+    } catch { /* 游标写失败不阻塞 */ }
+  }
+
   async runInduction(): Promise<void> {
     // 确保目录存在（不再依赖 start() 创建）
     if (!existsSync(this.inductionPath)) mkdirSync(this.inductionPath, { recursive: true });
 
     const now = new Date();
-    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const nowMs = now.getTime();
+    // 🔴 2026-09-07 修复(M1-3): 归纳时间窗 = 自上次运行以来(engine_store 游标)，而非固定"过去1小时"。
+    // 原死锁: 任务绑 DELTA 节律(需连续 idle 2h 才进入) + 固定查过去1h → 进 DELTA 时过去1h 必无新记忆
+    // → 恒 recent.length=0 直接 return，自 6-04 coordinator 化后 3 个月零产出。
+    let _sinceMs = nowMs - 24 * 3600_000;  // 游标缺失(首跑)回看 24h
+    try {
+      const _sqlite0 = this.storage.getSQLite();
+      const _rows = _sqlite0?.queryAll?.("SELECT value FROM engine_store WHERE key = 'induction_last_run' LIMIT 1") || [];
+      if (_rows.length > 0 && _rows[0]?.value) {
+        const _t = Number(_rows[0].value);
+        if (Number.isFinite(_t) && _t > 0) _sinceMs = _t;
+      }
+    } catch { /* 游标读失败回退 24h */ }
 
     try {
       const sqlite = this.storage.getSQLite();
-      const latestRecords = sqlite.findBySeqPosRange(0, 999_999_999, 50);
+      const latestRecords = sqlite.findBySeqPosRange(0, 999_999_999, 300);
 
-      // 过去 1 小时钙化 ≥ 0.3 的记录
+      // 自上次归纳以来 钙化 ≥ 0.3 的记录
       const recent = latestRecords.filter(r => {
         const created = new Date(r.created_at).getTime();
-        return created >= oneHourAgo.getTime() && r.calcium_score >= 0.3;
+        return created >= _sinceMs && r.calcium_score >= 0.3;
       });
 
-      if (recent.length === 0) return;
+      // 无新内容也推进游标（防每次 24h 重扫空转），下次从本次起算
+      if (recent.length === 0) { this._saveLastRun(sqlite, nowMs); return; }
 
       // 结构归纳：更新实体关系图
       this.buildEntityRelations();
@@ -121,7 +148,7 @@ export class InductionScheduler {
 
       const record: InductionRecord = {
         period_type: 'daily',
-        period_start: oneHourAgo.toISOString(),
+        period_start: new Date(_sinceMs).toISOString(),
         period_end: now.toISOString(),
         summary,
         reflection,
@@ -142,6 +169,7 @@ export class InductionScheduler {
       else if (hoursSinceLast >= 24) periodType = 'daily';
       else periodType = 'hourly';
       this.lastInductionTime = now.getTime();
+      this._saveLastRun(sqlite, nowMs);
 
       const filePath = join(this.inductionPath, `induction_${now.toISOString().slice(0, 13).replace('T', '_')}.json`);
       writeFileSync(filePath, JSON.stringify(record, null, 2), 'utf-8');
@@ -154,7 +182,7 @@ export class InductionScheduler {
             `INSERT INTO inductions (period_type, period_start, period_end, summary_text,
              source_record_count, dominant_mood, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            periodType, oneHourAgo.toISOString(), now.toISOString(),
+            periodType, new Date(_sinceMs).toISOString(), now.toISOString(),
             summary, recent.length, mood, now.toISOString(),
           );
         }
@@ -295,6 +323,14 @@ export class InductionScheduler {
       for (const [key, data] of cooccurrence) {
         if (data.count < 2) continue;
         const [entityA, entityB] = key.split('::');
+        // 🔴 FG-P0(2026-09-09): 写前统一闸门 — 句子片段/泛词/对话残留/超长的共现对不再建 object 实体
+        //   (垃圾根治: 此前任意词对 count>=2 即 INSERT object, 是次垃圾源)
+        const _gateA = checkEntityWrite(entityA);
+        const _gateB = checkEntityWrite(entityB);
+        if (!_gateA.allowed || !_gateB.allowed) {
+          console.log(`[InductionGate] 拦截共现对建实体: "${entityA}"(${_gateA.reason}) × "${entityB}"(${_gateB.reason})`);
+          continue;
+        }
         const avgCalcium = data.totalCalcium / data.count;
         const relation = avgCalcium > 0.4 ? 'strongly_related_to' : 'related_to';
         const strength = Math.min(1, data.count / 10 + avgCalcium);

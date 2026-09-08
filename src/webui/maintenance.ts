@@ -15,6 +15,8 @@ type AnyStorage = { getStatus(): Promise<{ totalRecords: number }> | { totalReco
 
 // B1: 姓氏表统一 — 唯一数据源 app-identity（SURNAME_LIST 供 SURNAMES_SET / SURNAME_CHARS 供 448 正则）
 import { SURNAME_LIST, SURNAME_CHARS } from '../config/app-identity.js';
+// 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — 人名抢救也过闸门(句子残留以姓开头假名不入户籍)
+import { checkPersonEntity } from '../m4/household/EntityWriteGate.js';
 
 // ──────────────────────────────────────────────
 // 类型定义
@@ -466,6 +468,12 @@ export class MaintenanceService {
       try {
         const existing = sqlite.queryAll('SELECT id FROM entities WHERE name = ? AND type = ?', [rawName, 'person']);
         if (existing.length > 0) continue; // 已有记录，跳过
+        // 🔴 FG-P0: 写前统一闸门 — 裁剪后的候选仍需为合规人名(姓氏+名结构); 句子残留/弱证据拒绝
+        const _gv = checkPersonEntity(rawName);
+        if (!_gv.allowed) {
+          console.warn(`[EntityGate] rescueNames 拦截: "${rawName}" — ${_gv.reason}`);
+          continue;
+        }
 
         // 写入 entities
         sqlite.writeRaw('INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)', rawName, 'person');

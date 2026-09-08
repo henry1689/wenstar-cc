@@ -12,6 +12,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
+// 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — ensureEntity object 通道过滤垃圾(句子片段/外貌特征词不建独立实体)
+import { checkEntityWrite } from '../m4/household/EntityWriteGate.js';
 import type { Perception24D } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
 import type {
@@ -825,6 +827,15 @@ export class SQLiteAdapter {
   }
 
   private ensureEntity(name: string, type: string, uuid?: string): void {
+    // 🔴 FG-P0: 写前统一闸门(object 通道) — 句子片段/外貌特征词/对话残留不再建独立 object 实体
+    //   (person 由 M1 isPersonName/gradeEntity 识别后进入, 高可信, 不gate防误伤)
+    if (type === 'object') {
+      const _gv = checkEntityWrite(name);
+      if (!_gv.allowed) {
+        console.warn(`[EntityGate] ensureEntity 拦截 object 写入: "${name}" — ${_gv.reason}`);
+        return;
+      }
+    }
     this.runSql(
       `INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)`,
       [name, type],
