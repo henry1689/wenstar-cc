@@ -18,8 +18,6 @@ import { createHash } from 'node:crypto';
 // 文件切片器实例（段落策略，每块 500 字符，50 重叠）
 const fileChunker = new FileChunker({ strategy: 'paragraph', chunkSize: 500, overlap: 50, minChunkLen: 20 });
 import { createLocalEmbedding } from './EmbeddingProvider.js';
-import { VectorStore } from './VectorStore.js';
-import { hybridSearch } from './RAGPipeline.js';
 import { writeFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { LocalCache } from '../tools/LocalCache.js';
@@ -108,7 +106,6 @@ ${entry.source_name ? `source_name: "${entry.source_name}"\n` : ''}${entry.file_
 // P2 ✅ 已切换: @zvec/zvec 0.5.0 C++ N-API — HNSW + COSINE + WAL
 import { getZvecAdapter, type IZvecAdapter } from '../../m2/ZvecAdapter.js';
 import { FtsSearch } from './FtsSearch.js';
-import { Reranker } from './Reranker.js';
 import { AutoClassifier } from '../learning/AutoClassifier.js';
 import { EmotionMatcher } from './EmotionMatcher.js';
 import { KnowledgeRelationGraph } from '../learning/KnowledgeRelationGraph.js';
@@ -126,6 +123,12 @@ async function ensureZvecReady(): Promise<IZvecAdapter> {
   }
   return _zvecAdapter;
 }
+
+/** ADR 2026-09-09 架构归位:向量检索功能开关(默认关)。关闭 Zvec 主链路,保留实验 P2 备用。 */
+function vectorSearchEnabled(): boolean {
+  return ConfigService.getBool('KB_VECTOR_SEARCH', false);
+}
+
 /** P2: 检索缓存（30秒TTL） */
 const searchCache = new LocalCache<string, KnowledgeItem[]>({ ttlMs: 30_000, namespace: 'kb_search' });
 const embedProvider = createLocalEmbedding();
@@ -164,6 +167,8 @@ function rowToEntry(r: Record<string, any>): KnowledgeItem {
 async function ensureIndex(sqlite: SQLiteAdapter): Promise<void> {
   if (_indexReady) return;
   if (ConfigService.getBool("TIANQUAN_LITE")) { _indexReady = true; return; }
+  // ADR 2026-09-09:向量分支随功能开关(默认关=不回填 zvec,消除 0 docs 空转)
+  if (!vectorSearchEnabled()) { _indexReady = true; return; }
   try {
     const rows = sqlite.queryAll(
       `SELECT id, kn_id, chunk_text, embedding FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 5000`,
@@ -191,6 +196,8 @@ async function indexContent(
 ): Promise<void> {
   await ensureIndex(sqlite);
   if (ConfigService.getBool("TIANQUAN_LITE")) return; // 轻量模式跳过向量索引
+  // ADR 2026-09-09:向量分支关闭——knowledge_chunks 分块+嵌入仅为向量服务,主链路(FTS/n-gram)不消费
+  if (!vectorSearchEnabled()) return;
   const chunkResult = fileChunker.chunkWithSummary({ text: content, source: knId });
   if (chunkResult.chunks.length === 0) return;
 
@@ -468,8 +475,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     } catch (_de) { /* 清理索引失败不阻塞 */ }
     // 🔴 S4-Y3: 同步移除 FtsSearch 内存索引
     try { _ftsSearch.remove(id); } catch (_rfe) { /* 不阻塞 */ }
-    const zvs = await ensureZvecReady();
-    zvs.removeByPrefix(id).catch(() => {});
+    // ADR 2026-09-09:向量清理随功能开关(默认关=跳过)
+    if (vectorSearchEnabled()) {
+      const zvs = await ensureZvecReady();
+      zvs.removeByPrefix(id).catch(() => {});
+    }
     return true;
   }
 
@@ -478,7 +488,6 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   const _bm25k1 = parseFloat(process.env['KB_BM25_K1'] || '') || 1.5;
   const _bm25b = parseFloat(process.env['KB_BM25_B'] || '') || 0.75;
   const _ftsSearch = new FtsSearch(sqlite, { k1: _bm25k1, b: _bm25b });
-  const _reranker = new Reranker();
   const _autoClassifier = new AutoClassifier(sqlite);
   const _emotionMatcher = new EmotionMatcher();
   // 🔥 加载持久化情感权重（engine_store），首次启动用默认值
@@ -574,21 +583,9 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       }
     }
 
-    // 3. RRF 融合: FTS + Zvec 向量（FTS 无结果时尝试向量兜底）
-    const zvs = await ensureZvecReady();
-    if (embedProvider.isAvailable() && zvs.size > 0) {
-      try {
-        await ensureIndex(sqlite);
-        const vecResults = await hybridSearch(trimmed, embedProvider, zvs as any, (kw: string, lim: number) => { const like = '%' + kw + '%'; return sqlite.queryAll('SELECT * FROM knowledge_base WHERE content LIKE ? OR title LIKE ? ORDER BY updated_at DESC LIMIT ?', [like, like, lim]).map(rowToEntry); }, limit, emotionalContext);
-        if (vecResults.length > 0) {
-          const fused = _reranker.rrfFuse([
-            { items: results.map(r => ({ ...r, matchScore: 0.5, source: 'fts' as const })), source: 'fts' },
-            { items: vecResults.map(r => ({ ...(r as any), matchScore: (r as any).matchScore || 0.5, source: 'vector' as const })), source: 'vector' },
-          ], limit);
-          results = fused;
-        }
-      } catch { /* 降级到纯FTS */ }
-    }
+    // ADR 2026-09-09 架构归位:删除 Zvec RRF 融合块(四重断裂,从未工作,曾靠 as any 硬注入 + 空 catch 静默)。
+    // 向量分支随功能开关 KB_VECTOR_SEARCH(默认关);未来启用需按 IZvecAdapter.search 契约正确适配,严禁 as any。
+    // 主链路 = FTS BM25 + n-gram + EmotionMatcher 情绪重排(现网已在工作的路径)。
 
     // 🔥 EmotionMatcher: 情感感知重排序
     if (results.length > 0 && emotionalContext) {
@@ -675,15 +672,35 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
 
   /** 强制重新索引所有已有知识条目（维护用） */
   async function reindexAll(): Promise<number> {
-    await ensureIndex(sqlite);
-    const all = list(500);
-    let indexed = 0;
-    for (const item of all) {
-      await indexContent(sqlite, item.id, item.content);
-      indexed++;
+    // ADR 2026-09-09 架构归位:reindexAll = 重建主链路索引(FTS + n-gram);向量分块分支随功能开关(默认关=跳过)
+    const started = Date.now();
+    // 1) FTS BM25 内存倒排全量重建
+    try { await _ftsSearch.rebuild(); } catch (e) { console.warn('[KnowledgeEngine] FTS 重建失败:', (e as Error)?.message ?? e); }
+    // 2) n-gram search_index 全量重建(m4 既有通道,与 add 增量索引 L363 同源,不新增写入通道)
+    let kbTotal = 0;
+    try {
+      const { rebuildAllIndexes } = await import('../../m4/SearchIndexBuilder.js');
+      const _idxDb = (sqlite as any).rawDb;
+      if (_idxDb && typeof _idxDb.run === 'function') {
+        const res = rebuildAllIndexes(_idxDb);
+        kbTotal = res.total;
+        console.log(`[KnowledgeEngine] n-gram 索引重建: ${kbTotal} 条`);
+      }
+    } catch (e) { console.warn('[KnowledgeEngine] n-gram 重建失败:', (e as Error)?.message ?? e); }
+    // 3) 向量分块分支(功能开关开才执行)
+    if (vectorSearchEnabled()) {
+      await ensureIndex(sqlite);
+      const all = list(500);
+      let indexed = 0;
+      for (const item of all) {
+        await indexContent(sqlite, item.id, item.content);
+        indexed++;
+      }
+      console.log(`[KnowledgeEngine] 重新索引完成(FTS+n-gram+向量分块): ${indexed} 条, ${Date.now() - started}ms`);
+      return indexed || kbTotal;
     }
-    console.log(`[KnowledgeEngine] 重新索引完成: ${indexed} 条`);
-    return indexed;
+    console.log(`[KnowledgeEngine] 重新索引完成(FTS+n-gram, 向量分支关闭): ${Date.now() - started}ms`);
+    return kbTotal;
   }
 
   /** 向量搜索调试（返回原始分块匹配） */
