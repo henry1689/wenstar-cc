@@ -178,9 +178,10 @@ class NLPEventExtractorImpl {
         break;
       }
     }
+    // 生理周期事件：baseDays 语义 = 周期间隔(下次到临)。单一源 EVENT_COMMON_SENSE.menstruationCycleDays。
     if (/例假|生理期|月经/.test(text)) {
       eventType = 'phys_cycle';
-      baseDays = 30;
+      baseDays = EVENT_COMMON_SENSE.menstruationCycleDays;
     }
 
     const durationMs = durationMatch ? this.parseDuration(durationMatch[1], durationMatch[2]) : null;
@@ -195,7 +196,8 @@ class NLPEventExtractorImpl {
           eventType,
           startTs: now,
           endTs: now + totalMs,
-          cycleMs: eventType === 'phys_cycle' ? 30 * 86400000 * 1000 : 0,
+          // cycleMs = 周期间隔(与 durationMs/endTs 语义一致 = 下次到临);从 baseDays 单一源派生,避免字面量重复与单位漂移。
+          cycleMs: eventType === 'phys_cycle' ? baseDays * 86400000 : 0,
           durationMs: totalMs,
           durationText: durationMatch ? durationMatch[0] : `${baseDays}天`,
           destination: destMatch?.[1] || null,

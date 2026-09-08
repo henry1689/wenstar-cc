@@ -64,26 +64,52 @@ export function encodePerceptionV40(p: PerceptionV40): string {
  *   v0: `{"d12_enjoyment":0.5,...}`（早期命名对象，无 __v）
  * 长度不对或解析失败返回 null（不抛出）。
  */
+/**
+ * 格式闸:v2 形状判定(供 decode 分支选择与 detect 同源)。
+ * v2 格式 = 对象携带 dims 数组。detect 只判格式、不做完整性校验,故此处不查长度/数值。
+ */
+function hasV2Shape(rec: Record<string, unknown>): boolean {
+  return Array.isArray(rec.dims);
+}
+
+/**
+ * 完整性闸:从对象解析 v2 dims(长 40 + 全有限数)。
+ * 非法 → null。仅在格式闸通过后调用;decode 内部校验,保证"非法 v2 → null(需修复)"语义。
+ */
+function parseV2Dims(rec: Record<string, unknown>): number[] | null {
+  const dims = rec.dims as unknown[];
+  if (dims.length !== PERCEPTION_40D_DIM) return null;
+  const out = new Array<number>(PERCEPTION_40D_DIM);
+  for (let i = 0; i < PERCEPTION_40D_DIM; i++) {
+    const v = Number(dims[i]);
+    if (!isFinite(v)) return null;
+    out[i] = v;
+  }
+  return out;
+}
+
 export function decodePerceptionV40(json: string | null | undefined): PerceptionV40 | null {
   if (!json) return null;
   try {
     const arr = JSON.parse(json);
-    // v2: `{__v:2, dims:[...]}` — 校验 __v===2 且 dims 为数组（S4 P2 修复）
     if (typeof arr === 'object' && arr !== null && !Array.isArray(arr)) {
       const rec = arr as Record<string, unknown>;
-      if (rec.__v === PERCEPTION_40D_ENCODING_VERSION) {
-        if (!Array.isArray(rec.dims)) return null;
-        const dims = rec.dims as unknown[];
-        if (dims.length !== PERCEPTION_40D_DIM) return null;
+      // 声明为 v2(__v===2)却无 dims → 畸形 v2,返回 null(不落 v0 命名分支)
+      if (rec.__v === PERCEPTION_40D_ENCODING_VERSION && !hasV2Shape(rec)) {
+        return null;
+      }
+      // 带 dims 数组 → 按 v2 解析(与 detect 判定同源):
+      // 旧 decode 仅 __v===2 才解析,使 {__v:3,dims:[40]}/{dims:[40]} 落 v0 分支静默产出全零,
+      // 而 detect 判 2 —— 版本判定分裂导致脏数据"审计通过但内容清零"。
+      // 未知 __v + 合法 dims:数据保全优先,按 v2 解析(不返 null,以免迁移侧破坏性覆写)。
+      if (hasV2Shape(rec)) {
+        const dims = parseV2Dims(rec);
+        if (dims === null) return null;
         const p = createEmptyPerceptionV40();
-        for (let i = 0; i < PERCEPTION_40D_DIM; i++) {
-          const v = Number(dims[i]);
-          if (!isFinite(v)) return null;
-          p[PERCEPTION_40D_KEYS[i]] = v;
-        }
+        for (let i = 0; i < PERCEPTION_40D_DIM; i++) p[PERCEPTION_40D_KEYS[i]] = dims[i];
         return p;
       }
-      // v0: 命名对象（无 dims 字段 / 无 __v）→ 直接读命名键
+      // v0: 命名对象(无 dims 字段 / 无 __v)→ 直接读命名键
       const p = createEmptyPerceptionV40();
       for (const k of PERCEPTION_40D_KEYS) {
         const v = Number((arr as Record<string, unknown>)[k]);
@@ -91,7 +117,7 @@ export function decodePerceptionV40(json: string | null | undefined): Perception
       }
       return p;
     }
-    // v1: 纯数组（40 元素）
+    // v1: 纯数组(40 元素)
     if (Array.isArray(arr)) {
       if (arr.length !== PERCEPTION_40D_DIM) return null;
       const p = createEmptyPerceptionV40();
@@ -118,7 +144,8 @@ export function detectPerceptionV40Version(json: string | null | undefined): num
   try {
     const v = JSON.parse(json);
     if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      if (Array.isArray((v as Record<string, unknown>).dims)) return 2;
+      // 与 decode 同源:格式闸 = 带 dims 数组即 v2(完整性由 decode 内部校验)
+      if (hasV2Shape(v as Record<string, unknown>)) return 2;
       return 0;
     }
     if (Array.isArray(v)) return 1;
