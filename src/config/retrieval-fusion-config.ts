@@ -46,6 +46,8 @@ export interface SpeedFilterConfig {
   second_filter_threshold: number;
   /** P0-3 普通碎片(sand/timeline)入池上限，超出按 priority 取前 N 条 */
   max_normal_memory_count: number;
+  /** 2026-09-09: 会晤场景普通碎片入池上限（实体会晤承载"昨天一天记忆"，放宽 10→20） */
+  meeting_max_normal_memory_count: number;
   /** P0-2 会话模式分级加载总开关: false 时强制 standard，一键回退 */
   prompt_depth_enabled: boolean;
 }
@@ -91,7 +93,7 @@ const DEFAULTS: RetrievalFusionConfig = {
   v13_rrf_weights: { spine: 0.35, keyword: 0.3, work: 0.25, entity: 0.2, emotion: 0.1, locus: 0.05, multi_hit_bonus: 1.2 },
   budget: { mem_ratio_normal: 0.6, kb_ratio_normal: 0.4, mem_ratio_longtext: 0.3, kb_ratio_longtext: 0.15, longtext_max_ratio: 0.8, work_max_chars: 4000, hard_max_chars: 8000 },
   filter: { min_similarity: 0.6, max_fusion_items: 16 },
-  speed_filter: { second_filter_threshold: 0.15, max_normal_memory_count: 10, prompt_depth_enabled: true },
+  speed_filter: { second_filter_threshold: 0.15, max_normal_memory_count: 10, meeting_max_normal_memory_count: 20, prompt_depth_enabled: true },
   p1_speed: {
     streaming: { enabled: true, job_ttl_ms: 180000, poll_hint_ms: 150 },
     llm_reduction: {

@@ -55,6 +55,7 @@ filter:
 speed_filter:
   second_filter_threshold: 0.15   # P0-1 二次精筛阈值: 记忆 vs 用户 query 相关性低于此值丢弃。S4-B2 实测: 相关记忆 0.17-0.51、无关 0.00 → 取 0.15 保相关除无关
   max_normal_memory_count: 10     # P0-3 普通碎片(sand/timeline)入池上限
+  meeting_max_normal_memory_count: 20  # 2026-09-09 会晤场景放宽: 实体会晤需承载"昨天一天记忆"，10 条行碎片远不够(徐诗雨失忆链②修复)
   prompt_depth_enabled: true      # P0-2 会话模式分级加载总开关（false 强制 standard）
 
 # ── 第二阶段 P1 响应提速 ──

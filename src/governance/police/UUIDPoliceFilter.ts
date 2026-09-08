@@ -110,7 +110,7 @@ export function screenContext(
   let filteredCount = 0;
   for (const line of lines) {
     // 只处理带实体名的标签片段（【XX的记忆】/【对话·XX】/【XX的档案】等）
-    const tagMatch = line.match(/^【([^】]*)的?(?:记忆|对话·|档案|金库|珍藏|重要记忆|知识|简介|资料)】/);
+    const tagMatch = line.match(/^【([^】]*?)的?(?:记忆|对话·|档案|金库|珍藏|重要记忆|知识|简介|资料)】/);
     if (tagMatch && entityNameToUuid) {
       // 解析标签中的实体名：如 "徐诗雨的记忆" → 徐诗雨；"对话·徐诗雨" → 徐诗雨
       const rawName = tagMatch[1] || '';
@@ -214,4 +214,39 @@ export function canWriteEntity(
     allowed: false,
     reason: `会晤"${policy.meetingEntityName}"中尝试写入主FG已有实体"${name}" — 已拦截`,
   };
+}
+
+/**
+ * 2026-09-09 记忆碎片化修复(共性): 会晤注入边界逐段判定（整段保留，不拆行）。
+ * 原 chat.ts 闸门把多段记忆 join('\n')→screenContext→split('\n')，将每段多行记忆拆成
+ * ~40 字行碎片 → MemoryInjector 按 priority 只留 10 行 → LLM 只见 ~900 字无上下文碎片。
+ * 本函数对每段整体判定：段首标签标识归属实体 → 非白名单实体整段剔除；白名单/无标签整段保留。
+ */
+export function screenMeetingSegments(
+  segments: string[],
+  p: PolicePolicy,
+  entityNameToUuid?: (name: string) => string | null,
+): string[] {
+  if (!segments || segments.length === 0) return segments;
+  const kept: string[] = [];
+  for (const seg of segments) {
+    if (!seg || !seg.trim()) continue;
+    // 段首标签即段归属：首行【XX的记忆/对话·XX/…】→ 解析实体名对会晤白名单 deny-by-default，
+    // 非白名单实体 → **整段剔除**（不再依赖 screenContext 行过滤——那只剔标签行、正文行全留，
+    // 会让他人段以"无标签正文"残留，整段判定失效）。无标签段保守保留。
+    const firstLine = (seg.split('\n', 1)[0] || '').trim();
+    const tagMatch = firstLine.match(/^【([^】]*?)的?(?:记忆|对话·|档案|金库|珍藏|重要记忆|知识|简介|资料)】/);
+    if (tagMatch && entityNameToUuid) {
+      const rawName = (tagMatch[1] || '').replace(/^对话·/, '').trim();
+      if (rawName && rawName !== '对话') {
+        const uuid = entityNameToUuid(rawName);
+        if (uuid) {
+          if (!passes(uuid, p)) continue;  // 他人实体段整段剔除
+        }
+        // UUID 解析失败 → 保守保留
+      }
+    }
+    kept.push(seg);
+  }
+  return kept;
 }

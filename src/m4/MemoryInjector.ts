@@ -208,18 +208,24 @@ export function injectMemories(opts: InjectOptions): string {
     }
   }
 
-  // ── 🔴 P0-3 普通碎片上限: sand/timeline 最多 max_normal_memory_count 条，其余按 priority 丢弃 ──
+  // ── 🔴 P0-3 普通碎片上限: sand/timeline 最多 N 条，其余按 priority 丢弃 ──
+  // 🔴 2026-09-09 记忆碎片化修复(共性): 会晤场景(preserveLabels=true)条数上限放宽
+  //   max_normal_memory_count:10 → meeting_max_normal_memory_count:20 —— 实体会晤需承载
+  //   "昨天一天记忆"，10 条(配合曾拆行成 ~40 字碎片)根本不够；玉瑶态保持 10 不撑爆普通预算。
   // 豁免: diamond/vault/knowledge/context（金库对条数豁免，但对 query 相关性仍受精筛）
+  const _normalCap = opts.preserveLabels === true
+    ? (SPF.meeting_max_normal_memory_count ?? SPF.max_normal_memory_count)
+    : SPF.max_normal_memory_count;
   const _capped: MemoryItem[] = [];
   const _normal: MemoryItem[] = [];
   for (const it of _filtered) {
     if (it.kind === 'sand' || it.kind === 'timeline') _normal.push(it);
     else _capped.push(it);
   }
-  if (_normal.length > SPF.max_normal_memory_count) {
+  if (_normal.length > _normalCap) {
     _normal.sort((a, b) => b.priority - a.priority);
-    _normal.length = SPF.max_normal_memory_count;
-    console.log(`[MemoryInjector] 普通碎片上限: 超${SPF.max_normal_memory_count}条，按 priority 保留前${SPF.max_normal_memory_count}条`);
+    _normal.length = _normalCap;
+    console.log(`[MemoryInjector] 普通碎片上限: 超${_normalCap}条，按 priority 保留前${_normalCap}条${opts.preserveLabels === true ? ' (会晤放宽)' : ''}`);
   }
   _filtered = [..._capped, ..._normal];
 

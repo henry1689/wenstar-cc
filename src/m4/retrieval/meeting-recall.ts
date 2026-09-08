@@ -154,7 +154,7 @@ export function keywordRecallMemories(
         `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
          WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1 AND raw_input LIKE ?
          ORDER BY created_at DESC, calcium_score DESC LIMIT 1`,
-        [entityUuid, `%${kw}%`, 1],
+        [entityUuid, `%${kw}%`],
       ) || []
     ) as RecallMemoryRow[];
     for (const r of rows) {
@@ -184,7 +184,7 @@ export function recallOriginalConversations(
         `SELECT role, content, timestamp FROM conversations
          WHERE belong_entity_uuid = ? AND content LIKE ? AND LENGTH(content) > 150
          ORDER BY timestamp DESC LIMIT 3`,
-        [entityUuid, `%${kw}%`, 3],
+        [entityUuid, `%${kw}%`],
       ) || []
     ) as RecallConversationRow[];
     for (const r of rows) {
