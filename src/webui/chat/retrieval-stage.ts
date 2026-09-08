@@ -13,6 +13,14 @@ import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
 import { resolveReferent } from '../../app/works/ReferentResolver.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
+// 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
+//   与 MeetingWallAdapter 共用本模块，杜绝同构漂移（模块零 import，无 M 层反向依赖）。
+import {
+  RECALL_TRIGGER_RE,
+  extractTopicKeywords,
+  keywordRecallMemories,
+  recallOriginalConversations,
+} from '../../m4/retrieval/meeting-recall.js';
 
 export interface RetrievalIntent {
   isTopicShift: boolean;
@@ -155,7 +163,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
            ORDER BY calcium_score DESC LIMIT 6`,
           [_entityUuid]
         ) || [];
-        const _isRecallQuestion = /(?:记得|聊过|说过|之前|以前|上次|那件事|那次|回忆|是不是|上次说|聊起|什么内容|最早|第一次|当初|刚认识)/.test(message);
+        // 🔴 2026-09-09 会晤失忆修复: 触发词升级为共享 RECALL_TRIGGER_RE（含"还是X的事/继续说"等续聊引导），
+        //   用户不写"记得/上次"也能触发原文兑底。共享常量唯一源 = m4/retrieval/meeting-recall.ts。
+        const _isRecallQuestion = RECALL_TRIGGER_RE.test(message);
         let _entityMems = [..._recentRows, ..._histRows];
         if (_isRecallQuestion) {
           // 回忆问句: 追加最早 6 条（时间轴兜底，早期低钙化记忆此时才可被召回）
@@ -241,6 +251,30 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             console.log(`[MeetingOrchestrator] 统一中枢注入: ${_orInjected} 条 (routes=${JSON.stringify(_orRes.routeStats)})`);
           }
         } catch (_orErr) { /* 统一中枢失败不阻塞，降级现有三槽位 */ }
+        // 🔴 2026-09-09 会晤失忆修复(A): 内容相关召回并入 — 关键词命中的当日记忆排到钙化序之前。
+        //   续聊"还是徐诗韵的事"→ 抽词"诗韵" → 当天 LIKE 命中 6:05《蒹葭》记忆(钙化仅0.70排当天55名)，
+        //   防 4:45-5:14 高钙 ANCHOR(1.6-2.05) 占满近期槽 TOP8 把关键细节永久挤出。
+        const _exclKwNames = new Set<string>([_meetingEntityName, '玉瑶', ...((_fg?.getAllPersonNames?.()) || [])]);
+        // 话题锚 = 消息中直接提到的"他人 FG 全名"（非当前会晤实体/玉瑶），如"徐诗韵" → 尾字"诗韵"置前优先召回。
+        const _topicPrefer: string[] = [];
+        for (const _pn of (_fg?.getAllPersonNames?.()) || []) {
+          if (_pn !== _meetingEntityName && _pn !== '玉瑶' && message.includes(_pn)) _topicPrefer.push(_pn);
+        }
+        const _topicKw = extractTopicKeywords(message, _exclKwNames, 4, _topicPrefer);
+        if (_topicKw.length > 0) {
+          try {
+            const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4);
+            // 内容相关命中无条件前置注入（每条 250 字，不占钙化槽 15 条名额）：
+            // 低钙关键记忆(如引诗)即使钙化排 50+ 也能进上下文。
+            for (const _kr of _kwRows) {
+              const _krt = (_kr.raw_input || '').substring(0, 250);
+              if (_krt.length > 4 && !memoryFragments.some((f: string) => f.includes(_krt.substring(0, 20)))) {
+                memoryFragments.push('【' + _meetingEntityName + '的记忆·相关】' + _krt);
+              }
+            }
+            if (_kwRows.length > 0) console.log(`[EntityMem·内容相关] 关键词 ${_topicKw.join('/')} 召回 ${_kwRows.length} 条 → 前置注入`);
+          } catch (_kwcErr) { /* 内容相关召回失败不阻塞，保持纯钙化序 */ }
+        }
         for (const _em of _rankedMems.slice(0, 15)) {
           // 🔴 P0-3 修复: 会晤记忆截断 100 → 250（避免关键记忆细节丢失导致 LLM 编造）
           const _t = (_em.raw_input || '').substring(0, 250);
@@ -292,7 +326,19 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
                 if (/^[一-龥]{3}$/.test(_s3) && !_STOP_KW.has(_s3) && !_exclNames.has(_s3)) _kwCandidates.push(_s3);
               }
             }
+            // 🔴 2026-09-09 会晤失忆修复(B): 压缩原文取回 — EntityContextStore.searchEntityContext 带
+            //   is_compacted=0 过滤（压缩归档后对其不可见）。此处用 meeting-recall 共享取回（不过滤压缩，
+            //   遵循"原始对话只增不删永久留存")直接命中被压缩归档的《蒹葭》引诗/寒假约定原文注入。
             const _kwList = [...new Set(_kwCandidates)].slice(0, 4);
+            if (_topicKw.length > 0) {
+              const _origHits = recallOriginalConversations(_sqlite, _entityUuid, _topicKw, 4, 400);
+              for (const _oh2 of _origHits) {
+                const _cb2 = (_oh2.content || '').substring(0, 400);
+                if (_cb2.length > 4 && !memoryFragments.some((f: string) => f.includes(_cb2.substring(0, 20)))) {
+                  memoryFragments.push('【对话·' + _meetingEntityName + '·原文】' + _cb2);
+                }
+              }
+            }
             for (const _kw of _kwList) {
               const _hits = _store2.searchEntityContext(_entityUuid, _kw, 2);
               for (const _ht of _hits) {

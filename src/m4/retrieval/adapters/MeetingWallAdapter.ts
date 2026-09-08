@@ -18,6 +18,17 @@
 
 import type { RetrievalContext, SearchHit } from '../types.js';
 import type { RetrievalAdapter } from '../adapter.js';
+// 🔴 2026-09-09 会晤失忆修复: 与 retrieval-stage 隔离墙共用共享召回模块（消灭同构漂移）。
+//   统一触发正则/关键词内容相关召回/钙化槽/去重均取自 m4/retrieval/meeting-recall.ts（零 import 模块）。
+import {
+  RECALL_TRIGGER_RE,
+  extractTopicKeywords,
+  keywordRecallMemories,
+  recentCalciumRows,
+  historyCalciumRows,
+  dedupeRowsById,
+} from '../meeting-recall.js';
+import type { RecallMemoryRow } from '../meeting-recall.js';
 
 /** 隔离墙数据源（SQLiteAdapter.queryAll 兼容最小形状） */
 export interface MeetingWallSource {
@@ -26,9 +37,6 @@ export interface MeetingWallSource {
 
 /** 编造特征过滤 — 命中特征词的记忆不注入（对齐原隔离墙 S2-J1b） */
 const FABRICATION_PATTERNS = /海边|比基尼|营销总监|全职太太|来月经|身体开始变|刻骨铭心|从零到一|泳衣|穿拖鞋/;
-
-/** 回忆问句检测（对齐原隔离墙 _isRecallQuestion） */
-const RECALL_QUESTION_RE = /(?:记得|聊过|说过|之前|以前|上次|那件事|那次|回忆|是不是|上次说|聊起|什么内容|最早|第一次|当初|刚认识)/;
 
 /** 输出条数上限 */
 const MAX_MEMORIES = 15;
@@ -47,26 +55,22 @@ export class MeetingWallAdapter implements RetrievalAdapter {
     const hits: SearchHit[] = [];
     const now = new Date().toISOString();
 
-    // ── 近期槽（当日 <1天） ──
-    const recentRows = this.source.queryAll<any>(
-      `SELECT id, raw_input, calcium_score, effective_strength, created_at FROM memories
-       WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1
-       ORDER BY calcium_score DESC LIMIT 8`,
-      [entityUuids[0]],
-    ) || [];
+    // ── 近期槽（当日 <1天）+ 历史槽（>=1天）—— 共享工具（meeting-recall.ts），与隔离墙同源 ──
+    let entityMems: RecallMemoryRow[] = [
+      ...recentCalciumRows(this.source, entityUuids[0], 8),
+      ...historyCalciumRows(this.source, entityUuids[0], 6),
+    ];
 
-    // ── 历史槽（>=1天） ──
-    const histRows = this.source.queryAll<any>(
-      `SELECT id, raw_input, calcium_score, effective_strength, created_at FROM memories
-       WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) >= 1
-       ORDER BY calcium_score DESC LIMIT 6`,
-      [entityUuids[0]],
-    ) || [];
+    // 🔴 2026-09-09 会晤失忆修复(A): 内容相关召回优先 — 关键词命中的当日记忆排到钙化序之前。
+    //   续聊"还是X的事"抽词命中 6:05《蒹葭》等低钙化关键记忆，防高钙 ANCHOR 占满近期槽 TOP8。
+    const kwHits: RecallMemoryRow[] = keywordRecallMemories(this.source, entityUuids[0], extractTopicKeywords(ctx.query), 4);
+    if (kwHits.length > 0) {
+      entityMems = dedupeRowsById([...kwHits, ...entityMems]);
+      console.log(`[MeetingWallAdapter] 内容相关召回: ${kwHits.length} 条前置 (query=${ctx.query.substring(0, 20)})`);
+    }
 
-    let entityMems = [...recentRows, ...histRows];
-
-    // ── 回忆问句 → 最早槽 ──
-    if (RECALL_QUESTION_RE.test(ctx.query)) {
+    // ── 回忆/续聊触发 → 最早槽（共享统一触发正则，含续聊引导） ──
+    if (RECALL_TRIGGER_RE.test(ctx.query)) {
       const earlyRows = this.source.queryAll<any>(
         `SELECT id, raw_input, calcium_score, effective_strength, created_at FROM memories
          WHERE belong_entity_uuid = ? ORDER BY seq_pos ASC LIMIT 6`,

@@ -50,7 +50,27 @@ export async function flushDialogGroup(
       }
     }
     // 锚点必须是完整Q+A
-    const anchorText = '【核心】\n用户: ' + dg.rounds[anchorIdx].q + '\n玉瑶: ' + dg.rounds[anchorIdx].a;
+    // 🔴 2026-09-09 会晤失忆修复(C): ANCHOR 特征轮补充 — 承诺/约定/引文/重要时间节点轮若非情感峰值轮，
+    //   钙化分仅来自情感强度(低) → 易被召回挤出（实证: 6:05 引诗《蒹葭》钙化 0.70 排 55/257 取不到）。
+    //   闭组时把这些特征轮并入 ANCHOR 摘要文本（最多补 2 轮），保证"重要的非情感轮"留下可召回内容。
+    //   特征判定用通用承诺/约定/书面引用词集，零硬编码人名/诗名。
+    const FEATURE_ROUND_RE = /答应|承诺|约定|约好|保证|一定|下次|寒假|暑假|开学|回来|盼着|记得|记住|重要|关键|写过|念过|背过|那首诗|那句话|答应过|白露|时节|一首诗/;
+    const _featRounds: string[] = [];
+    if (dg.rounds.length > 1) {
+      for (let _fi = 0; _fi < dg.rounds.length; _fi++) {
+        if (_fi === anchorIdx) continue;
+        const _ftext = dg.rounds[_fi].q + dg.rounds[_fi].a;
+        if (FEATURE_ROUND_RE.test(_ftext)) {
+          _featRounds.push('【第' + (_fi + 1) + '轮】\n用户: ' + dg.rounds[_fi].q + '\n玉瑶: ' + dg.rounds[_fi].a);
+          if (_featRounds.length >= 2) break;
+        }
+      }
+    }
+    let anchorText = '【核心】\n用户: ' + dg.rounds[anchorIdx].q + '\n玉瑶: ' + dg.rounds[anchorIdx].a;
+    if (_featRounds.length > 0) {
+      anchorText += '\n\n【重要补充】\n' + _featRounds.join('\n\n');
+      console.log(`[DG·特征轮] 组 ${dg.id} 锚点补充 ${_featRounds.length} 个特征轮(承诺/约定/引文)`);
+    }
     // H3: 锚点即本组情感峰值轮，钙化分直接采用 dg.maxCalcium（引擎级 [0,1] 分值），
     //     不再 *1.2 抬升到不可达的 [0,4.5] 旧标度。锚点的"重要性"由独立的 anchor_score 列 + dialog_group_id 标记，不靠虚高钙化分。
     const anchorCalcium = Math.round(dg.maxCalcium * 1000) / 1000;
