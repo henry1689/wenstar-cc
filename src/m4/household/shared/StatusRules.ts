@@ -34,9 +34,10 @@ export function computeTargetStatus(
   currentStatus: string,
   daysSinceLastMention: number
 ): StatusTransition {
-  // deceased/archived 不可自动变更
+  // deceased/archived/void 不可自动变更
   if (currentStatus === 'deceased') return { changed: false };
   if (currentStatus === 'archived') return { changed: false };
+  if (currentStatus === 'void') return { changed: false };
 
   // active → dormant (>90天)
   if (currentStatus === 'active' && daysSinceLastMention > STATUS_THRESHOLDS.DORMANT_AFTER_DAYS) {

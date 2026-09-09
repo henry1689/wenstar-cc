@@ -1025,7 +1025,8 @@ export class FamilyGraph implements FamilyGraphInterface {
           const edgeCnt = (edgeCount[0] as any)?.cnt || 0;
 
           if (edgeCnt === 0) {
-            // Isolated dirty node — delete
+            // Isolated dirty node — delete (with edge cleanup to prevent orphans)
+            this.run("DELETE FROM edges WHERE source_id = ? OR target_id = ?", [p.id, p.id]);
             this.run("DELETE FROM nodes WHERE id = ?", [p.id]);
             result.cleaned++;
             result.details.push(p.name + ': 删除(孤立脏节点)');
@@ -1053,7 +1054,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     let lifecycleResult = 0;
     try {
       // status downgrade checks for all persons
-      const all = this.query("SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status != 'deceased'");
+      const all = this.query("SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status NOT IN ('deceased','void')");
       for (const p of all) {
         const props = JSON.parse(p.properties || '{}');
         const lastMentioned = props.last_mentioned;
@@ -1400,7 +1401,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (this._allPersonNamesCache && Date.now() - this._allPersonNamesCache.ts < 30000) {
       return this._allPersonNamesCache.names;
     }
-    const rows = this.query("SELECT name FROM nodes WHERE type = 'person'") as Array<{ name: string }>;
+    const rows = this.query("SELECT name FROM nodes WHERE type = 'person' AND status != 'void'") as Array<{ name: string }>;
     const names = rows.map(r => r.name);
     this._allPersonNamesCache = { names, ts: Date.now() };
     return names;
@@ -1463,13 +1464,19 @@ export class FamilyGraph implements FamilyGraphInterface {
    * deceased 不可逆；archived 仅可恢复为 active。
    */
   setEntityStatus(entityName: string, newStatus: string, reason: string = '手动操作'): { success: boolean; error?: string } {
-    const node = this.findPersonNodeByNameOrAlias(entityName);
+    let node = this.findPersonNodeByNameOrAlias(entityName);
+    // void(回收)实体不在常规查找(结构性隔离)中, 但需支持手动恢复 → 按名直查 void
+    if (!node) {
+      const v = this.query("SELECT id, name, aliases, properties, uuid, status FROM nodes WHERE name = ? AND type = 'person' AND status = 'void'", [entityName]);
+      if (v.length > 0) node = v[0];
+    }
     if (!node) return { success: false, error: `实体不存在: ${entityName}` };
 
     const currentStatus = (node as any).status || 'active';
     if (currentStatus === 'deceased') return { success: false, error: '已注销实体不可恢复' };
+    if (currentStatus === 'void' && newStatus !== 'active') return { success: false, error: '回收(void)实体仅可手动恢复为 active' };
     if (currentStatus === 'archived' && newStatus !== 'active') return { success: false, error: '封存实体仅可手动恢复为 active' };
-    if (!['active', 'dormant', 'archived', 'deceased'].includes(newStatus)) return { success: false, error: `非法状态: ${newStatus}` };
+    if (!['active', 'dormant', 'archived', 'deceased', 'void'].includes(newStatus)) return { success: false, error: `非法状态: ${newStatus}` };
 
     const props = JSON.parse(node.properties || '{}');
     this.run('UPDATE nodes SET status = ? WHERE id = ?', [newStatus, node.id]);
@@ -2093,9 +2100,9 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   private findPersonNodeByNameOrAlias(name: string): any | null {
-    const exact = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE name = ? AND type = ?', [name, 'person']);
+    const exact = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE name = ? AND type = ? AND status != ?', [name, 'person', 'void']);
     if (exact.length > 0) return exact[0];
-    const aliasHit = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE type = ? AND aliases LIKE ?', ['person', `%"${name}"%`]);
+    const aliasHit = this.query('SELECT id, name, aliases, properties, uuid FROM nodes WHERE type = ? AND status != ? AND aliases LIKE ?', ['person', 'void', `%"${name}"%`]);
     return aliasHit.length > 0 ? aliasHit[0] : null;
   }
 
@@ -3807,7 +3814,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
   /** 🏛️ 为所有人批量建立档案 */
   ensureAllPersonProfiles(): { total: number; enriched: number; details: string[] } {
-    const all = this.query("SELECT name FROM nodes WHERE type = 'person'");
+    const all = this.query("SELECT name FROM nodes WHERE type = 'person' AND status != 'void'");
     let enriched = 0;
     const details: string[] = [];
     for (const row of all) {
@@ -5060,7 +5067,7 @@ export class FamilyGraph implements FamilyGraphInterface {
    * P0-3: 获取所有已知人员姓名（用于幻觉校验）
    */
   getAllPersonNames(): string[] {
-    const rows = this.query('SELECT name FROM nodes WHERE type = ?', ['person']);
+    const rows = this.query('SELECT name FROM nodes WHERE type = ? AND status != ?', ['person', 'void']);
     // 🛡️ V10.0: 系统级过滤 — 排除泛称词和垃圾节点名
     // 🆕 V10.11: 与 EntityContextBuilder.GARBAGE_NAMES 保持同步
     const DIRTY_WORDS = new Set(['老公','老婆','爸爸','妈妈','爷爷','奶奶','外公','外婆',
@@ -5089,7 +5096,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       '姑姑','小龙','老邱','老大','焦虑','方案','无聊','徐茜','徐敏','上司',
       '加班','什么名字','那你说','那继续','快乐','老家','那你再']);
     try {
-      const rows = this.query('SELECT name, aliases FROM nodes WHERE type = ?', ['person']);
+      const rows = this.query('SELECT name, aliases FROM nodes WHERE type = ? AND status != ?', ['person', 'void']);
       for (const r of (rows as any[])) {
         const name = String(r.name || '');
         if (!name || name.length < 2 || DIRTY_WORDS.has(name)) continue;
@@ -5502,7 +5509,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     // ⑧ V3.3: 全部 person 节点有合法 status
     const badStatus = this.query(
-      "SELECT COUNT(*) as cnt FROM nodes WHERE type = 'person' AND (status IS NULL OR status NOT IN ('active','dormant','archived','deceased'))"
+      "SELECT COUNT(*) as cnt FROM nodes WHERE type = 'person' AND (status IS NULL OR status NOT IN ('active','dormant','archived','deceased','void'))"
     )[0]?.cnt || 0;
     checks.push({
       name: '全部节点status合法', passed: badStatus === 0,
@@ -5644,6 +5651,18 @@ export class FamilyGraph implements FamilyGraphInterface {
       console.warn('[FamilyGraph] ⚠️ 以下人员缺少家族关系边（待人为补充）: ' + orphanNames.join(', '));
     }
     checks.push({ name: '全员有家族边', passed: orphanNames.length === 0, detail: orphanNames.length > 0 ? `缺${orphanNames.length}人: ${orphanNames.slice(0,5).join(',')}…` : '通过' });
+
+    // ⑱ 🆕 V13: 孤儿边检测与清理（source 或 target 指向不存在的节点）
+    const orphanEdgeCount = this.query(
+      "SELECT COUNT(*) as cnt FROM edges WHERE source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)"
+    )[0]?.cnt || 0;
+    if (orphanEdgeCount > 0) {
+      // 清理孤儿边
+      this.run("DELETE FROM edges WHERE source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)");
+      this.markDirty(true);
+    }
+    checks.push({ name: '无孤儿边', passed: orphanEdgeCount === 0, detail: orphanEdgeCount > 0 ? `已清理${orphanEdgeCount}条` : '通过' });
+    if (orphanEdgeCount > 0) errors.push(`${orphanEdgeCount} 条孤儿边已自动清理`);
 
     const healthy = errors.length === 0;
     if (healthy) {

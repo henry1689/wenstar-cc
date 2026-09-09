@@ -59,7 +59,7 @@ export class LifecycleManager {
       }
 
       const persons = fg.query(
-        "SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status != 'deceased'"
+        "SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status NOT IN ('deceased','void')"
       ) as Array<{ id: string; name: string; status: string; properties: string }>;
 
       for (const p of persons) {
@@ -107,13 +107,18 @@ export class LifecycleManager {
    */
   async setEntityStatus(
     entityName: string,
-    newStatus: 'active' | 'dormant' | 'archived' | 'deceased',
+    newStatus: 'active' | 'dormant' | 'archived' | 'deceased' | 'void',
     reason: string = '手动操作'
   ): Promise<{ success: boolean; error?: string }> {
     const fg = this.familyGraph as any;
 
     try {
-      const node = fg.findPersonNodeByNameOrAlias?.(entityName);
+      let node = fg.findPersonNodeByNameOrAlias?.(entityName);
+      // void(回收)实体需支持手动恢复 → 按名直查 void
+      if (!node) {
+        const v = fg.query?.("SELECT id, name, status, properties FROM nodes WHERE name = ? AND type = 'person' AND status = 'void'", [entityName]);
+        if (v && v.length > 0) node = v[0];
+      }
       if (!node) return { success: false, error: `实体不存在: ${entityName}` };
 
       const currentStatus = node.status || 'active';
@@ -121,6 +126,9 @@ export class LifecycleManager {
       // 规则校验
       if (currentStatus === 'deceased') {
         return { success: false, error: '已注销实体不可恢复' };
+      }
+      if (currentStatus === 'void' && newStatus !== 'active') {
+        return { success: false, error: '回收(void)实体仅可手动恢复为 active' };
       }
       if (currentStatus === 'archived' && newStatus !== 'active') {
         return { success: false, error: '封存实体仅可手动恢复为 active' };
