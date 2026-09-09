@@ -34,7 +34,10 @@ if (fs.existsSync(envPath)) {
 //   KB 会晤闸门修复改走 harness_run_flow 落 src 并 commit——已提交 src 是唯一权威。
 //   仅允许 DB/数据修复脚本（写库不写 src/dist），禁止 src/dist 改写。
 const prestartScripts = [
-  { label: 'Edge清理', cmd: `node "${path.join(__dirname, 'scripts', 'clean-all-person-edges.cjs')}"` },
+  // 🔴 2026-09-09 Phase C: 停用 clean-all-person-edges.cjs（硬编码覆写档案：对熊梓铭/徐诗雨/徐诗韵
+  //   整覆写 dossier.basicInfo/selfProfile 等，覆盖 Owner 拍板真值如诗韵 2012、诗雨大学已毕业）。
+  //   档案唯一源 = PAE + 用户确认真值（S4 治理）。边管理归 FamilyGraph 自身（脚本 V17 注释自述）。
+  //   原脚本保留在 scripts/ 供参考，不再执行。
   { label: '时空回填', cmd: `node "${path.join(__dirname, 'scripts', 'backfill-temporals.cjs')}"` },
 ];
 
