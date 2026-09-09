@@ -322,6 +322,44 @@ async function run() {
   }
 
   // ═══════════════════════════════════════
+  // 6. 记忆保留治理 (S4 Phase E: belong/about 覆盖 + 连续性 + void 隔离)
+  // ═══════════════════════════════════════
+  console.log('📡 [维度6] 记忆保留治理 (S4)');
+  if (db) {
+    try {
+      const memTotal = (query(db, 'SELECT COUNT(*) as cnt FROM memories')[0] as any)?.cnt || 0;
+      const memBelong = (query(db, "SELECT COUNT(*) as cnt FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND belong_entity_uuid != 'null'")[0] as any)?.cnt || 0;
+      const belongRate = memTotal ? Math.round(memBelong / memTotal * 100) : 0;
+      if (belongRate >= 90) pass('记忆保留治理', 'belong 归属覆盖率', `${belongRate}% (${memBelong}/${memTotal})`);
+      else if (belongRate >= 70) warn('记忆保留治理', 'belong 归属覆盖率', `${belongRate}%`, '启动回填或治理脚本补标');
+      else fatal('记忆保留治理', 'belong 归属覆盖率', `${belongRate}%`, 'belong 标注严重缺失，检索隔离失效');
+
+      const meCount = (query(db, 'SELECT COUNT(DISTINCT memory_id) as cnt FROM memory_entities')[0] as any)?.cnt || 0;
+      const aboutRate = memTotal ? Math.round(meCount / memTotal * 100) : 0;
+      if (aboutRate >= 30) pass('记忆保留治理', 'about(memory_entities) 覆盖', `${aboutRate}% (${meCount}/${memTotal})`);
+      else warn('记忆保留治理', 'about(memory_entities) 覆盖', `${aboutRate}%`, '按人聚合检出受限(回迁记忆待补关联)');
+
+      const months = query(db, 'SELECT substr(created_at,1,7) m, COUNT(*) c FROM memories GROUP BY m ORDER BY m') as any[];
+      if (months.length >= 2) pass('记忆保留治理', '记忆按月连续性', months.map((x) => `${x.m.slice(2)}:${x.c}`).join(' '));
+      else warn('记忆保留治理', '记忆按月连续性', `仅 ${months.length} 个月数据`);
+    } catch (e: any) { warn('记忆保留治理', '执行异常', e?.message || 'unknown'); }
+
+    try {
+      const fgActivePath = join(PROJECT_ROOT, 'data', 'webui', 'knowledge', 'family_graph.db');
+      if (existsSync(fgActivePath)) {
+        const fdb2 = await loadSQLite(fgActivePath);
+        if (fdb2) {
+          const act = (query(fdb2, "SELECT COUNT(*) c FROM nodes WHERE type='person' AND status='active'")[0] as any)?.c || 0;
+          const vd = (query(fdb2, "SELECT COUNT(*) c FROM nodes WHERE status='void'")[0] as any)?.c || 0;
+          const voidEdges = (query(fdb2, "SELECT COUNT(*) c FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE s.status='void' OR t.status='void'")[0] as any)?.c || 0;
+          if (voidEdges === 0) pass('记忆保留治理', 'FG 户籍/回收隔离', `active ${act} 真户籍 / void ${vd} 回收 / void 关联边 0 ✓`);
+          else { fatal('记忆保留治理', 'void 关联边', `${voidEdges} 条(隔离失效)`, '清理 void 参与边'); pass('记忆保留治理', 'FG 户籍', `active ${act} / void ${vd}`); }
+        }
+      }
+    } catch (e: any) { warn('记忆保留治理', 'FG 检查异常', e?.message || 'unknown'); }
+  }
+
+  // ═══════════════════════════════════════
   // 输出报告
   // ═══════════════════════════════════════
   const fatals = report.filter(r => r.status === '🔴');
