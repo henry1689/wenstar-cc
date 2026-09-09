@@ -357,6 +357,17 @@ async function run() {
         }
       }
     } catch (e: any) { warn('记忆保留治理', 'FG 检查异常', e?.message || 'unknown'); }
+
+    // UUIDSupervisor 户籍监督 (§十七-十九): 悬空/登记率等巡检并入每日报告
+    try {
+      const { runUUIDSupervision } = await import('../governance/police/UUIDSupervisor.js');
+      const sup = await runUUIDSupervision(DB_PATH, join(PROJECT_ROOT, 'data', 'webui', 'knowledge', 'family_graph.db'));
+      for (const it of sup.items) {
+        if (it.status === 'fail') fatal('UUID户籍监督', it.name, it.detail, '需治理干预');
+        else if (it.status === 'warn') warn('UUID户籍监督', it.name, it.detail, '建议补标/清理');
+        else pass('UUID户籍监督', it.name, it.detail);
+      }
+    } catch (e: any) { warn('UUID户籍监督', '执行异常', e?.message || 'unknown'); }
   }
 
   // ═══════════════════════════════════════
