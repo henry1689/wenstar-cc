@@ -26,8 +26,8 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..
 const FG_DB = join(REPO, 'data', 'webui', 'knowledge', 'family_graph.db');
 const FUSION_DB = join(REPO, 'data', 'webui', 'fusion_memory.db');
 
-/** 已知污染源（本次事故入库的垃圾），用于构建「干净」的真实人名参考集 */
-const POLLUTED_UUIDS = new Set(['TXS-000000151']);
+/** 注：已确认垃圾（习累 TXS-151 / 秋节快 152 / 马上 153）均已 void，
+ *  故下方 status='active' 查询会自动排除，无需在此硬编码名单。 */
 
 describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名零误伤', () => {
   it('事故用例：习累 不再是 L3 候选（判为句子片段/弱证据）', () => {
@@ -43,6 +43,14 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     expect(stillAccepted, `以下片段仍被判 L3 候选：${stillAccepted.join('、')}`).toEqual([]);
   });
 
+  it('二轮实测漏网案例：秋节快（中秋节快乐）/ 马上 必须被拦', () => {
+    // 真实对话实测再次漏网的两个（同类滑窗片段），已纳入判据
+    for (const s of ['秋节快', '马上']) {
+      expect(looksLikeSentenceFragment(s), `${s} 应被判为句子片段`).toBe(true);
+      expect(gradeEntity(s, new Set()).grade, `${s} 不应达 L3`).toBeLessThan(3);
+    }
+  });
+
   it('误伤防线：FG 全部 active 真人名（含别名）不得被判为句子片段', () => {
     if (!existsSync(FG_DB)) return; // 无库则跳过（守卫价值由 CI/本地存在时体现）
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -53,7 +61,6 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
 
     const hurt: string[] = [];
     for (const r of rows) {
-      if (POLLUTED_UUIDS.has(r.uuid)) continue; // 排除污染源
       let aliases: string[] = [];
       try { aliases = JSON.parse(r.aliases || '[]'); } catch { /* ignore */ }
       for (const n of [r.name, ...aliases]) {
@@ -68,6 +75,13 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     const realNames = ['徐诗韵', '熊梓铭', '刘运新', '王全芬', '徐诗雨', '林土锋', '陈雪花', '警幻仙姑'];
     const wrong = realNames.filter((n) => gradeEntity(n, new Set()).grade < 2);
     expect(wrong, `以下真实人名被判为过低级：${wrong.join('、')}`).toEqual([]);
+  });
+
+  it('误伤防线：含常见人名用字的姓名不得被尾字判据误伤（李峰/张爱玲/王一/李梦/白露 等）', () => {
+    // 尾字集刻意排除了这些歧义字 —— 若后人扩充时误加，本用例会失败
+    const wouldBeHurts = ['李峰', '张爱玲', '王一', '李梦', '白露', '万方', '陈英', '徐东伟', '熊梓玥'];
+    const wrong = wouldBeHurts.filter((n) => looksLikeSentenceFragment(n));
+    expect(wrong, `以下真实姓名被尾字判据误伤：${wrong.join('、')}`).toEqual([]);
   });
 
   it('反例防线：非人名高频用字不得因本判据被“反向放行”（黑名单/称谓仍拦）', () => {
