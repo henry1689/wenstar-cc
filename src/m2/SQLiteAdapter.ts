@@ -126,6 +126,52 @@ function perceptionV40To24D(p40: PerceptionV40 | null): Perception24D {
   return neutral;
 }
 
+/**
+ * D8 根治（2026-09-11）: memories 覆盖写「身份/归属关键列」单一事实源。
+ *
+ * 背景：memories 表存在多处 `INSERT OR REPLACE`，而 REPLACE = DELETE + INSERT ——
+ * 未列入 column list 的列会被静默重置为 NULL（不报错、不告警）。
+ * 历史实证：`writeMemory()` 的列清单漏了 `fg_entity_names`，导致全库 2012 条该列恒为 NULL；
+ * 而同路径 `entity_genes` 却保留了 362 条 —— 正是「列缺失」而非「未赋值」的铁证。
+ *
+ * 本清单是这类字段的唯一权威定义：任何 memories 覆盖写路径都必须携带。
+ *
+ * ❗ 刻意的范围边界（S4 评审 P2-7）: 本清单只保护「身份/归属类」6 列。
+ *   未纳入的列（如 recall_count / promoted_to_diamond / effective_strength，
+ *   在 writeMemory 的 VALUES 里仍是硬编码字面量 0/0/1.0）今日不可达——
+ *   因为 writeMemory 的 id 是每轮随机的 mem_*，不会 REPLACE 到同一行；
+ *   但这意味着守卫抓不到「REPLACE 抹掉召回/晋升计数」類型的未来回归。
+ *   若写入语义变为「可重复写同一 id」，必须把这几列一并纳入。
+ */
+export const MEMORY_IDENTITY_CRITICAL_COLUMNS = [
+  'dna_root_id',
+  'entity_genes',
+  'fg_entity_names',
+  'global_uid',
+  'belong_entity_uuid',
+  'location_fingerprint',
+] as const;
+
+/** 返回 columnList 中缺失的关键列（纯函数，供守卫与单测复用） */
+export function missingMemoryCriticalColumns(columnList: readonly string[]): string[] {
+  const present = new Set(columnList.map((c) => c.trim()));
+  return MEMORY_IDENTITY_CRITICAL_COLUMNS.filter((c) => !present.has(c));
+}
+
+/**
+ * 从 INSERT 语句文本中提取 column list（纯函数）。
+ * 仅识别首对圆括号，兼容 `INSERT [OR REPLACE] INTO <table> (c1, c2, ...)`。
+ */
+export function extractInsertColumns(sql: string): string[] {
+  const m = /INSERT\s+(?:OR\s+REPLACE\s+)?INTO\s+[`"\w]+\s*\(([^)]*)\)/i.exec(sql);
+  if (!m) return [];
+  return m[1]
+    .split(',')
+    // 拼接式 SQL 字符串会产生 `" +\n "locus_path` 这类 token → 剥引号与加号（S4 评审 P2-2 噪音项）
+    .map((s) => s.replace(/["'`+]/g, '').trim())
+    .filter(Boolean);
+}
+
 export class SQLiteAdapter {
   private db: SqlJsDatabase | null = null;
   private dbPath: string;
@@ -595,9 +641,21 @@ export class SQLiteAdapter {
        options?.calciumScore ?? null, options?.dnaRootId ?? null,
        compacted, compacted, options?.namespace ?? 'default']
     );
+    // ⚠️ P1(S4 独立评审): rowid 必须在 save() **之前**读取——与 ConversationDB.insertConversation 同一陷阱。
+    // save() 达到 _FLUSH_BATCH 时会同步 flushNow() → db.export()，而 sql.js 的 export()
+    // 会关闭并重开连接，last_insert_rowid() 作为连接级状态将归 0（已实测证实）→ 原实现会返回 0。
+    const _rowIdRes = this.queryAll('SELECT last_insert_rowid() as id');
     // C4: 关键写入触发防抖落盘（合并在 150ms 窗口，避免 per-write 96MB export）
     this.save();
-    return this.queryAll('SELECT last_insert_rowid() as id')[0]?.id as number || 0;
+    // 降级可见性（S4 复审 P2-D 对称要求）：与 ConversationDB.insertConversation 保持一致
+    const _finalRid = Number(_rowIdRes?.[0]?.id) || 0;
+    if (_finalRid <= 0) {
+      console.warn(
+        '[SQLiteAdapter] insertConversation 未能取得 last_insert_rowid（返回 0）— ' +
+          '调用方若将其当作主键使用会出错，请检查 flush 顺序',
+      );
+    }
+    return _finalRid;
   }
 
   /** 搜索砂金库对话（降级检索用） */
@@ -773,6 +831,7 @@ export class SQLiteAdapter {
     dialogGroupId?: string | null; topicLabel?: string | null;
     dnaRootId?: string | null;        // P0-1: DNA 根码透传落库（编码规约 B1）
     entityGenes?: any[] | null;       // P0-2: L3 实体基因落库（编码规约 B2）
+    fgEntityNames?: string | null;    // D3 修复: FG 实体名(逗号分隔)；缺省时由 entityGenes 同源派生，调用方一般无需传
     belongEntityUuid?: string | null;  // V10.4: 实体归属标注
     isForesight?: boolean;            // V13: 前瞻时态标记
     validUntilMs?: number | null;     // V13: 有效截止时间(ms)
@@ -786,9 +845,20 @@ export class SQLiteAdapter {
       const p40Json = opts.perceptionV40
         ? opts.perceptionV40
         : (opts.perceptionJson ? encodePerceptionV40(map24DTo40D(parsePerception24DJson(opts.perceptionJson))) : null);
+
+      // 🔴 D3 修复(2026-09-11): fg_entity_names 落库。
+      // 原实现列清单缺席该列 → INSERT OR REPLACE 每轮把已写入的值抹成 NULL（全库 2012 条恒空）。
+      // 由 entityGenes 同源派生（过滤 self），使调用方无需各自记得传参 —— 结构上不可遗漏。
+      const fgEntityNames = opts.fgEntityNames
+        ?? (Array.isArray(opts.entityGenes)
+          ? (opts.entityGenes
+              .filter((g: any) => g && g.type !== 'self' && g.name)
+              .map((g: any) => String(g.name))
+              .join(',') || null)
+          : null);
       this.runSql(
         `INSERT OR REPLACE INTO memories
-        (id, seq_pos, created_at, perception_40d, calcium_score, calcium_level,
+        (id, fg_entity_names, seq_pos, created_at, perception_40d, calcium_score, calcium_level,
          locus_path, leaf_zone, raw_input, memory_kind, lifecycle_state,
          confidence_score, stability_score, thread_id, session_id, source_conversation_ids,
          recall_count, promoted_to_diamond, strength_updated_at, effective_strength,
@@ -796,9 +866,9 @@ export class SQLiteAdapter {
 	         dna_root_id, entity_genes,
 	         global_uid, location_fingerprint, belong_entity_uuid,
 		         is_foresight, valid_until_ms, foresight_status, namespace)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          opts.id, opts.seqPos, opts.createdAt, p40Json,
+          opts.id, fgEntityNames, opts.seqPos, opts.createdAt, p40Json,
           opts.calciumScore, opts.calciumLevel,
           opts.locusPath, opts.leafZone, (opts.rawInput.length > 4000 ? console.warn(`[SQLiteAdapter] raw_input 超长: ${opts.rawInput.length} seq=${opts.seqPos}`) : null, opts.rawInput),
           opts.memoryKind ?? 'episodic',

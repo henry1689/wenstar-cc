@@ -184,11 +184,34 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     if (_convUserId) _convUserRowId = _convUserId;
     const _convAsstId = input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
       seqPos: input.seqPos + 1, topic,
+      // 🔴 D1 修复(2026-09-11): assistant 轮补 entityNames。
+      // 实测：该字段原缺失 → 全库 assistant 轮 entity_names 100% 为空（833/833）。
+      // ❗ 真实消费方（经两轮 S4 独立评审校正，勿再写错）：
+      //   - SleepTimeConsolidator.ts:229 —— 弹性晋升的实体多样性加成（读 conversations.entity_names）
+      //   - SleepTimeConsolidator.ts:513 —— 跨 session 关联
+      //     （WHERE entity_names IS NOT NULL AND entity_names != ''）→ 此前 assistant 行被整体排除
+      //   - MemoryAssessor.ts:183/216 —— **是**该字段消费方（parseConversationEntities(conv.entity_names)），
+      //     但被 :203 的 `if (conv.role !== 'user') continue;` 限定为**只吃 user 行**，
+      //     故 assistant 轮补齐不影响它。
+      //   - 【另案登记】SleepTimeConsolidator.ts:345 亦写 entity_names，但打的是 memories 表
+      //     （该表无 entity_names 列，只有 fg_entity_names）→ 语句 prepare 即报错被 :476 catch 吞掉，
+      //     该情景→语义归纳路径恒为 0。属本次范围外的独立缺陷，待另立任务。
+      // 与 user 轮同源（同一 DNA 的 entity_genes），保证同一轮两行的实体视图一致。
+      entityNames: input.dna.entity_genes.filter((g: any) => g.type !== 'self').map((g: any) => g.name),
+      // 🔴 D2 修复(2026-09-11): assistant 轮补 perception。
+      // 实测：该字段原缺失 → 全库 assistant 轮 perception_summary 100% 为空（833/833）。
+      // ❗ 性质说明（S4 评审校正）：这是一项**对称性/前瞻性**补齐，而非修复当前可见缺失——
+      //   conversations.perception_summary 的主消费方 MemoryAssessor 同样只处理 user 行；
+      //   两行取同一次感知（input.p），保持 conversations 表两行字段完整同构。
+      perception: { pleasure: input.p.pleasure, arousal: input.p.arousal, intimacy: input.p.intimacy },
       calciumScore: input.decision.enhanced.calcium_score,
       dnaRootId: (input.dna as any).dna_root_id,
       globalUid: input.dna.global_uid || (input.dna as any).dna_root_id,
       locationFingerprint: input.dna.location_fingerprint || '',
       belongEntityUuid: asstUUID || undefined,
+      // S3 补充(同一缺陷类，S2 范围外，待 S4 评审确认): user 轮传 isTest，assistant 轮未传
+      // → 测试模式下 assistant 行 is_test=0，会把测试数据混入生产记忆。补齐使两行对称。
+      isTest: input.ctx.testMode ? 1 : 0,
       mentionedEntityUuids: mentionedEntityUuids,
     });
     if (_convAsstId) _convAsstRowId = _convAsstId;

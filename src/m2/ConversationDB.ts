@@ -174,8 +174,31 @@ export class ConversationDB {
        options?.mentionedEntityUuids ? JSON.stringify(options.mentionedEntityUuids) : null,
        options?.messageId ?? null],
     );
+    // 🔴 D5 修复(2026-09-11): 返回真实 conversations.id（原实现返回 seqPos）。
+    // 调用方 persistence-stage 把返回值当作主键用于增量索引 source_id
+    // （注释原文即「P1-C 修复: source_id 用真实 conversations.id（与 rebuildAllIndexes 一致）」），
+    // 而 rebuildAllIndexes 用的是 `SELECT id ... String(id)` —— 口径不一致导致
+    // search_index.source_id 越过 conversations.id 上限（实测 18121 条）。
+    //
+    // ⚠️ P1(S4 独立评审发现并实证): rowid 必须在 scheduleFlush() **之前**读取。
+    // 共享模式下 scheduleFlush() 会同步委托 SQLiteAdapter.save()，累计到 _FLUSH_BATCH 时
+    // 同步 flushNow() → db.export()；而 sql.js 的 export() 会关闭并重开连接，
+    // last_insert_rowid() 是**连接级**状态 → 重开后恒为 0（已实测: export 前=1、后=0）。
+    // 若先 flush 再取，约每 _FLUSH_BATCH 次写入就静默降级为 seqPos，D5 缺陷当场复活。
+    let _rid = 0;
+    try {
+      _rid = Number(this.queryAll('SELECT last_insert_rowid() AS id')?.[0]?.id);
+    } catch { /* 降级为 seqPos */ }
+
     // C4: 触发防抖落盘（共享模式委托 owner；独立模式 150ms 合并落盘），防止用户/助手消息因崩溃丢失
     this.scheduleFlush();
+
+    if (Number.isFinite(_rid) && _rid > 0) return _rid;
+    // 降级必须可见：否则 search_index.source_id 会静默回到与主键口径不一致的状态
+    console.warn(
+      `[ConversationDB] last_insert_rowid 不可用(id=${_rid})，降级返回 seqPos=${seqPos} — ` +
+        'search_index.source_id 将与本表主键口径不一致（D5 复现）',
+    );
     return seqPos;
   }
 
