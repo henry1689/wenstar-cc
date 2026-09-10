@@ -695,7 +695,13 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           try {
             const { EntityContextStore } = await import('../app/entity/EntityContextStore.js');
             const _store = new EntityContextStore(ctx.storage.getSQLite());
-            const _dbTurns = _store.queryEntityContext(_meetingUuid, 40);
+            // P0: 先查未压缩的，不够再从已压缩兜底补充（解决老实体 100% 压缩导致上下文为零的问题）
+            let _dbTurns = _store.queryEntityContext(_meetingUuid, 40, false);
+            if (_dbTurns.length < 20) {
+              const _compactTurns = _store.queryEntityContext(_meetingUuid, 40, true);
+              const _seen = new Set(_dbTurns.map((t: any) => t.content?.substring(0, 30)));
+              _compactTurns.forEach((t: any) => { if (!_seen.has(t.content?.substring(0, 30))) _dbTurns.push(t); });
+            }
             if (_dbTurns.length > enrichedHistory.length) {
               enrichedHistory = _dbTurns;
             }
@@ -707,7 +713,16 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           const { EntityContextStore: _ECS2 } = await import('../app/entity/EntityContextStore.js');
           const _store2 = new _ECS2(ctx.storage.getSQLite());
           const _yuyaoU = ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.('玉瑶') ?? null;
-          const _yuyaoTurns = _yuyaoU ? _store2.queryEntityContext(_yuyaoU, 40) : [];
+          // P0: 玉瑶态也启用已压缩兜底
+          const _yuyaoTurns = _yuyaoU ? (() => {
+            let turns = _store2.queryEntityContext(_yuyaoU, 40, false);
+            if (turns.length < 20) {
+              const compact = _store2.queryEntityContext(_yuyaoU, 40, true);
+              const seen = new Set(turns.map((t: any) => t.content?.substring(0, 30)));
+              compact.forEach((t: any) => { if (!seen.has(t.content?.substring(0, 30))) turns.push(t); });
+            }
+            return turns;
+          })() : [];
           enrichedHistory = _yuyaoTurns.length > 0 ? _yuyaoTurns : ctx.conversationHistory.slice(-20);
         } catch {
           enrichedHistory = ctx.conversationHistory.slice(-20);
@@ -991,9 +1006,16 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
               // 改分段采样（近期30全量 + 最早10 + 中部5），保证时间轴覆盖。
               // 🔴 记忆召回策略: 常规近期 30 轮全量（聚焦当前话题）；回忆问句时才分段采样（+早期/中部）
               const _recallQ = /(?:记得|聊过|说过|之前|以前|上次|那件事|那次|回忆|是不是|上次说|聊起|什么内容|最早|第一次|当初|刚认识)/.test(message);
+              // P0: 会晤召回也启用已压缩兜底，确保老实体不被压缩隔离
               const _turns = _recallQ
-                ? _store.queryEntityContextSegmented(_muuid, { recent: 30, early: 10, mid: 5 })
-                : _store.queryEntityContext(_muuid, 30);
+                ? _store.queryEntityContextSegmented(_muuid, { recent: 30, early: 10, mid: 5, includeCompacted: true })
+                : _store.queryEntityContext(_muuid, 30, false);
+              // 常规查询也兜底：未压缩不够时补已压缩
+              if (!_recallQ && (_turns as any[]).length < 10) {
+                const _compactFallback = _store.queryEntityContext(_muuid, 30, true);
+                const _seen2 = new Set((_turns as any[]).map((t: any) => t.content?.substring(0, 30)));
+                _compactFallback.forEach((t: any) => { if (!_seen2.has(t.content?.substring(0, 30))) (_turns as any[]).push(t); });
+              }
               if (_turns && _turns.length > 0) {
                 recentConversations = _turns.map((t: any) => ({
                   role: t.role || 'user',
