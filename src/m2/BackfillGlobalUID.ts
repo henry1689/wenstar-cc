@@ -34,7 +34,12 @@ const db = new SQL.Database(buffer);
 
 // 1. 统计存量
 const total = db.exec('SELECT COUNT(*) FROM memories')[0].values[0][0] as number;
-const missing = db.exec('SELECT COUNT(*) FROM memories WHERE global_uid IS NULL OR global_uid = ""')[0].values[0][0] as number;
+// 🔴 修复(2026-09-11): 原写法 `global_uid = ""` 依赖 SQLite 的「双引号退化当字符串」**非标准行为**：
+//   - DQS 宽松模式（本文件用 sql.js）实测不报错，把 `""` 当空串 → 碰巧得到预期结果；
+//   - 但严格模式（SQLITE_DQS=0，如 better-sqlite3）下必抛错：
+//     no such column: "" - should this be a string literal in single-quotes?
+// 即语义依赖编译选项 —— 换运行库/升级即静默改变行为，属隐患。统一改用标准单引号字面量。
+const missing = db.exec("SELECT COUNT(*) FROM memories WHERE global_uid IS NULL OR global_uid = ''")[0].values[0][0] as number;
 console.log(`\n记忆总数: ${total}  缺GlobalUID: ${missing}`);
 
 if (missing === 0) {
@@ -45,7 +50,7 @@ if (missing === 0) {
 
 // 2. 回填 memories
 console.log('\n回填 memories...');
-const rows = db.exec('SELECT id, seq_pos, created_at, dna_root_id, locus_path FROM memories WHERE global_uid IS NULL OR global_uid = ""');
+const rows = db.exec("SELECT id, seq_pos, created_at, dna_root_id, locus_path FROM memories WHERE global_uid IS NULL OR global_uid = ''");
 let backfilled = 0;
 
 for (const row of rows[0]?.values || []) {
@@ -95,7 +100,7 @@ const data = db.export();
 writeFileSync(DB_PATH, Buffer.from(data));
 db.close();
 
-console.log(`\n═'.repeat(60)`);
+console.log('\n' + '═'.repeat(60));
 console.log('  回填完成!');
 console.log(`  memories:    ${backfilled} 条 (GlobalUID + location_fingerprint)`);
 console.log(`  conversations: ${convMissing > 0 ? convMissing + ' 条' : '无需回填'}`);
