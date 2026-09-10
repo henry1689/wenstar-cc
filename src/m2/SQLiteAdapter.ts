@@ -12,6 +12,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
+// 2026-09-11: 启动期 fg_entity_names 派生回填需与写入侧共用同一序列化格式
+import { formatNames } from './EntityNameCodec.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — ensureEntity object 通道过滤垃圾(句子片段/外貌特征词不建独立实体)
 import { checkEntityWrite } from '../m4/household/EntityWriteGate.js';
 import type { Perception24D } from '../m3/types/perception.js';
@@ -548,6 +550,31 @@ export class SQLiteAdapter {
 
         // black_diamond 从 source_id → memories 传导
         this.runSql("UPDATE black_diamond SET belong_entity_uuid = (SELECT m.belong_entity_uuid FROM memories m WHERE m.id = black_diamond.source_id AND m.belong_entity_uuid IS NOT NULL) WHERE belong_entity_uuid IS NULL AND source_id IS NOT NULL");
+
+        // 🔴 2026-09-11: fg_entity_names **幂等派生回填**（从 entity_genes）——
+        //   为何放在启动末步：该列在 D3 修复前几乎全空；且实测**存在启动期写入路径把它抹回 NULL**
+        //   （实测：磁盘上已回填 298 条 → 启动后变 0）。
+        //   本步放在此处 → 无论此前哪个写入点抹过，启动后该列都与 entity_genes 一致（幂等可重复跑）。
+        //   数据源确定性（无需 LLM），格式与写入侧共用 EntityNameCodec.formatNames。
+        try {
+          const _fgRows = this.db.exec(
+            "SELECT id, entity_genes FROM memories WHERE entity_genes IS NOT NULL AND entity_genes != '' AND entity_genes != '[]' AND (fg_entity_names IS NULL OR fg_entity_names = '')",
+          );
+          let _fgFilled = 0;
+          if (_fgRows.length && _fgRows[0].values) {
+            for (const [id, genesRaw] of _fgRows[0].values) {
+              let genes: any[] = [];
+              try { genes = JSON.parse(String(genesRaw)); } catch { continue; }
+              if (!Array.isArray(genes)) continue;
+              const names = genes.filter((g) => g && g.type !== 'self' && g.name).map((g) => String(g.name).trim()).filter(Boolean);
+              const formatted = formatNames(names);
+              if (!formatted) continue;
+              this.db.run("UPDATE memories SET fg_entity_names = ? WHERE id = ? AND (fg_entity_names IS NULL OR fg_entity_names = '')", [formatted, String(id)]);
+              _fgFilled++;
+            }
+          }
+          if (_fgFilled > 0) console.log('[Backfill] fg_entity_names 派生回填: ' + _fgFilled + ' 条');
+        } catch (e) { console.warn('[Backfill] fg_entity_names 派生失败(不阻塞):', (e as Error)?.message); }
 
         const _memAfter = (this.queryAll('SELECT COUNT(*) as cnt FROM memories WHERE belong_entity_uuid IS NOT NULL')[0] as any)?.cnt || 0;
         console.log('[Backfill] memories标注: ' + _memBefore + '→' + _memAfter);
