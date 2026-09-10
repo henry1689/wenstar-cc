@@ -5337,7 +5337,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     let profiles = 0, relations = 0, skipped = 0;
 
     // ── ① 人物档案 → 黑钻 ──
-    const allPersons = this.query("SELECT id, name, properties FROM nodes WHERE type = 'person'");
+    const allPersons = this.query("SELECT id, name, properties, uuid FROM nodes WHERE type = 'person'");
     for (const node of allPersons) {
       try {
         const props = JSON.parse(node.properties || '{}');
@@ -5355,8 +5355,8 @@ export class FamilyGraph implements FamilyGraphInterface {
         const calcium = Math.min(3, Math.floor(completeness * 5)); // completeness 0-1 → calcium 0-3
 
         sqlite.writeRaw(
-          `INSERT OR REPLACE INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, namespace, entry_channel, status)
-           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'default', 'fg_sync', 'active')`,
+          `INSERT OR REPLACE INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, namespace, entry_channel, status, belong_entity_uuid)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'default', 'fg_sync', 'active', ?)`,
           [
             `fg_${node.name}_${Date.now().toString(36)}`,
             summary,
@@ -5367,6 +5367,7 @@ export class FamilyGraph implements FamilyGraphInterface {
             `[FG人物档案] ${node.name} · 完整度${Math.round(completeness * 100)}%`,
             new Date().toISOString(), new Date().toISOString(),
             null,
+            (node as any).uuid ?? null, // 🔴 2026-09-11: 人物档案黑钻同样必须带归属
           ],
         );
         profiles++;
@@ -5386,10 +5387,15 @@ export class FamilyGraph implements FamilyGraphInterface {
 
       const summary = `[FG家族关系] ${src.name} 是 ${tgt.name} 的${RELATION_LABEL_CN[edge.relation] || edge.relation}`;
       const relId = `fg_rel_${src.name}_${tgt.name}_${edge.relation}`.replace(/[^a-zA-Z0-9一-鿿_]/g, '_');
+      // 🔴 修复(2026-09-11，D8 同类病根治): relId 是**确定性 id** → 本 INSERT OR REPLACE
+      //   每次启动都会重写同一行；而原列清单**缺 belong_entity_uuid** → 每次都把归属抹成 NULL。
+      //   实测：webui 每次启动使 32 条关系镜像丢失归属（黑钻标注率 91.2% → 76.5%）。
+      //   归属约定与批次1一致：取 **A 侧（主语 = src）** 的 UUID。
+      const srcUuid = (this.query('SELECT uuid FROM nodes WHERE id = ?', [edge.source_id])[0] as any)?.uuid ?? null;
 
       sqlite.writeRaw(
-        `INSERT OR REPLACE INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, namespace, entry_channel, status)
-         VALUES (?, ?, '亲密', ?, 3, 0, ?, ?, ?, ?, NULL, 'default', 'fg_sync', 'active')`,
+        `INSERT OR REPLACE INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, namespace, entry_channel, status, belong_entity_uuid)
+         VALUES (?, ?, '亲密', ?, 3, 0, ?, ?, ?, ?, NULL, 'default', 'fg_sync', 'active', ?)`,
         [
           relId,
           summary,
@@ -5397,6 +5403,7 @@ export class FamilyGraph implements FamilyGraphInterface {
           JSON.stringify(['fg_relation', `family`, edge.relation, `from:${src.name}`, `to:${tgt.name}`]),
           `[FG关系] ${src.name}→${tgt.name} (${edge.relation})`,
           new Date().toISOString(), new Date().toISOString(),
+          srcUuid,
         ],
       );
       relations++;

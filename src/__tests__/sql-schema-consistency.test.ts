@@ -312,6 +312,71 @@ const ENTITY_NAME_COLUMN_REGISTRY = new Map<string, 'conversations' | 'memories'
   ['src/m2/EntityNameCodec.ts|fg_entity_names', 'memories'],
 ]);
 
+/**
+ * [D8-全表] INSERT OR REPLACE 列清单守卫（2026-09-11 推广）
+ * ==========================================================
+ * 原 D8 守卫只扫 `memories`（见 memory-write-columns.test.ts）。
+ * 但同一张病在别的表上重演了：`FamilyGraph` 的 FG→黑钻同步用
+ *   INSERT OR REPLACE INTO black_diamond (id, summary, ..., status)
+ * —— **列清单缺 belong_entity_uuid**，而 id 是确定性值 → 每次 webui 启动
+ * 都重写同一行、把回填好的归属抹成 NULL（实测 32 条关系镜像丢失，黑钻标注率 91.2%→76.5%）。
+ *
+ * 本守卫把「关键列」概念推广到**所有表**：每张有归属/身份语义的表登记自己不可缺失的列；
+ * 扫描 src/** 全部 `INSERT OR REPLACE INTO <表>`，列清单缺登记列 → 失败（fail-closed）。
+ */
+const REPLACE_CRITICAL_COLUMNS: Record<string, readonly string[]> = {
+  // 表名 → 该表被 INSERT OR REPLACE 时**必须携带**的列（未列出 = 会被静默抹成 NULL）
+  memories: ['dna_root_id', 'entity_genes', 'fg_entity_names', 'global_uid', 'belong_entity_uuid', 'location_fingerprint'],
+  black_diamond: ['belong_entity_uuid'],
+  conversations: ['belong_entity_uuid', 'entity_names'],
+};
+
+/**
+ * 已文档化的例外（均为人工核实过的合法情形，不是“放行”）：
+ *  ① MemoryVault 的 `memories` 属**独立库** data/memory-vault/vault.db（另一套 schema）
+ *  ② 对话组锚点重建：id = `<dialogGroupId>_ANCHOR` 独立命名空间，REPLACE 只重写自身行，
+ *     不抹其他记忆 —— 与 memory-write-columns.test.ts 的锚点例外同源，用指纹（非文件粒度）
+ *     以免把同文件的 writeMemory 一并豁免（那是必须被守的点）。
+ */
+const REPLACE_GUARD_EXEMPT_FILE = 'src/app/memory-vault/MemoryVault.ts';
+/** 锚点重建的列指纹：`source_type` 是锚点写入独有的列（write()/writeMemory() 均无）
+ *  注：不能用参数值 'user.misc.default' 作指纹 —— 它是**参数**，不在 SQL 字面量里。 */
+const REPLACE_GUARD_ANCHOR_MARKER = 'source_type';
+
+describe('[D8-全表] INSERT OR REPLACE 列清单不得缺失已登记的关键列', () => {
+  it('扫描 src/** 全部 REPLACE 写入点，列清单必须包含该表登记的关键列', () => {
+    const offenders: string[] = [];
+    let scanned = 0;
+    let exempted = 0;
+    for (const file of walkTs(SRC)) {
+      const rel = relative(REPO, file).replace(/\\/g, '/');
+      const src = readFileSync(file, 'utf-8');
+      for (const lit of extractLogicalStrings(src)) {
+        const m = /INSERT\s+OR\s+REPLACE\s+INTO\s+([A-Za-z_][\w$]*)\s*\(([^)]*)\)/i.exec(lit.text);
+        if (!m) continue;
+        const table = m[1];
+        const critical = REPLACE_CRITICAL_COLUMNS[table];
+        if (!critical) continue; // 未登记的表不做要求（但可在此登记以纳入守卫）
+        const cols = m[2].split(',').map((c) => c.trim());
+        if (rel === REPLACE_GUARD_EXEMPT_FILE || cols.includes(REPLACE_GUARD_ANCHOR_MARKER)) { exempted++; continue; }
+        scanned++;
+        const missing = critical.filter((c) => !cols.includes(c));
+        if (missing.length) {
+          offenders.push(
+            `${rel}:${lit.line}  INSERT OR REPLACE INTO ${table} 缺 [${missing.join(', ')}]\n` +
+              `      → REPLACE = DELETE+INSERT，未列出的列会被静默置 NULL（该表有确定性 id 时每次重写都抹一次）`,
+          );
+        }
+      }
+    }
+    console.log(
+      `[D8-全表] 受检 REPLACE 写入点 = ${scanned} 个（另豁免 ${exempted} 个），覆盖表: ${Object.keys(REPLACE_CRITICAL_COLUMNS).join(', ')}`,
+    );
+    expect(scanned, '未扫描到任何受登记的 REPLACE 写入点，守卫可能失效').toBeGreaterThan(0);
+    expect(offenders, `以下 REPLACE 写入点列清单不完整（会静默抹字段）：\n  ${offenders.join('\n  ')}`).toEqual([]);
+  });
+});
+
 describe('[C4] 跨表同概念列名（entity_names / fg_entity_names）使用点必须登记', () => {
   const COLS = ['entity_names', 'fg_entity_names'];
   const discovered = new Map<string, number[]>();
