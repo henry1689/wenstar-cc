@@ -27,6 +27,7 @@ import {
 } from './prompts/profile-extraction.js';
 import type { PersonProfile, PersonDossier, PendingItem } from './FamilyGraph.js';
 import type { FamilyGraph } from './FamilyGraph.js';
+import type { FGProfileWriteGateway } from './FGProfileWriteGateway.js';
 import { dossierRead } from './shared/DossierPath.js';
 
 // ── 类型定义 ──
@@ -224,13 +225,15 @@ class RateLimiter {
 export class ProfileAcquisitionEngine {
   private familyGraph: FamilyGraph;
   private rawLLMCall: RawLLMCaller;
+  private gateway: FGProfileWriteGateway | null;
   private rateLimiter = new RateLimiter();
   private extractionCache = new Map<string, { result: ExtractionResult[]; timestamp: number }>();
   private writeLock = new Map<string, Promise<void>>();
 
-  constructor(familyGraph: FamilyGraph, rawLLMCall: RawLLMCaller) {
+  constructor(familyGraph: FamilyGraph, rawLLMCall: RawLLMCaller, gateway?: FGProfileWriteGateway) {
     this.familyGraph = familyGraph;
     this.rawLLMCall = rawLLMCall;
+    this.gateway = gateway ?? null;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -705,16 +708,23 @@ export class ProfileAcquisitionEngine {
         if (node) snapshot = node.properties;
       } catch { /* 降级：快照失败也继续写 */ }
 
-      // Step 7: 写入
+      // Step 7: 写入（经 gateway 授权，会晤隔离）
+      let committed = false;
       try {
         if (confidence >= effectiveDirectThreshold && canDirectWrite) {
-          // 直接写入 dossier
-          await this.familyGraph.setDossierField(personName, writePath, field.value);
+          // 直接写入 dossier：经 gateway 授权
+          if (this.gateway) {
+            committed = this.gateway.tryUpdateProfile(personName, { [writePath]: field.value });
+          } else {
+            await this.familyGraph.setDossierField(personName, writePath, field.value);
+            committed = true;
+          }
         } else {
-          // 写入 pendingItems
+          // 写入 pendingItems（不經 gateway，因为 pendingItems 是用户主动录入）
           const source = `${options.source || 'conversation'} | ${field.evidence.substring(0, 80)}`;
           const valueStr = typeof field.value === 'string' ? field.value : JSON.stringify(field.value);
           await this.familyGraph.addPendingItem(personName, writePath, valueStr, source);
+          committed = true;
         }
 
         // Step 8: 写后验证
@@ -741,8 +751,8 @@ export class ProfileAcquisitionEngine {
           }
         }
 
-        const writeType = confidence >= effectiveDirectThreshold && canDirectWrite ? 'direct' : 'pending';
-        return { committed: true, fieldPath: field.fieldPath, reason: `${writeType}:${confidence}` };
+        const writeType = committed ? (confidence >= effectiveDirectThreshold && canDirectWrite ? 'direct' : 'pending') : 'gateway_denied';
+        return { committed, fieldPath: field.fieldPath, reason: committed ? `${writeType}:${confidence}` : writeType };
       } catch (err) {
         // 写入异常 → 尝试回滚
         if (snapshot) {

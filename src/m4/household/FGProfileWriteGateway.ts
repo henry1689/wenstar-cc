@@ -53,6 +53,25 @@ export class FGProfileWriteGateway {
     this.fg?.updatePersonProfile?.(entityName, updates as any, opts);
   }
 
+  /**
+   * 更新人物档案，并返回「是否真正写入（授权结果）」。
+   *
+   * 为何需要（M2-2 写侧收口）：ProfileAcquisitionEngine 需要知道写入是否被授权，
+   * 以便正确统计 fieldsWritten / 决定是否写 pendingItems。既有 updatePersonProfile
+   * 返回 void，把授权结果丢弃了。
+   *
+   * 🔴 授权语义与 updatePersonProfile **完全相同**（同一 private allowed() → canWriteEntity）：
+   * 非会晤一律允许；会晤中只允许写会晤实体本人或主 FG 尚不存在的新实体；
+   * 其余拒绝（软拦截，记日志不 throw）。本方法**只多返回结果，不放宽任何写入路径**。
+   *
+   * @returns true = 已授权且已发起写入；false = 被授权闸门拒绝，未写入
+   */
+  tryUpdateProfile(entityName: string, updates: Record<string, any>, opts?: any): boolean {
+    if (!this.allowed(entityName)) return false;
+    this.fg?.updatePersonProfile?.(entityName, updates as any, opts);
+    return true;
+  }
+
   /** 添加外貌/特征边 */
   addFeatureEdge(personName: string, featureName: string, featureType: 'appearance' | 'body' | 'style' | 'trait' = 'appearance'): void {
     if (!this.allowed(personName)) return;
