@@ -28,13 +28,17 @@ export class EntityContextStore {
     this._sqlite = sqlite;
   }
 
-  /** 从 conversations 表按 UUID 精准查询实体对话历史 */
-  queryEntityContext(uuid: string, limit: number = 200): ConversationTurn[] {
+  /** 从 conversations 表按 UUID 精准查询实体对话历史。
+   *  includeCompacted=true 时包含已压缩对话（用于兜底补充，避免老实体上下文为零）。
+   *  调用方负责去重合并，未压缩优先。
+   */
+  queryEntityContext(uuid: string, limit: number = 200, includeCompacted: boolean = false): ConversationTurn[] {
     try {
+      const compactedFilter = includeCompacted ? '' : 'AND is_compacted = 0';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp, belong_entity_uuid
          FROM conversations
-         WHERE belong_entity_uuid = ? AND is_compacted = 0
+         WHERE belong_entity_uuid = ? ${compactedFilter}
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, limit],
       );
@@ -57,26 +61,28 @@ export class EntityContextStore {
    *  改为近期 recent 条全量 + 最早 early 条 + 中部 mid 条采样，保证时间轴覆盖。 */
   queryEntityContextSegmented(
     uuid: string,
-    opts: { recent: number; early: number; mid: number } = { recent: 30, early: 10, mid: 5 },
+    opts: { recent: number; early: number; mid: number; includeCompacted?: boolean } = { recent: 30, early: 10, mid: 5 },
   ): ConversationTurn[] {
     try {
-      const { recent, early, mid } = opts;
+      const { recent, early, mid, includeCompacted } = opts;
+      const compactedFlag = includeCompacted ? 1 : 0;
+      const compactedFilter = compactedFlag ? '' : 'AND is_compacted = 0';
       const totalRow = this._sqlite.queryAll(
-        `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? AND is_compacted = 0`,
+        `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? ${compactedFilter}`,
         [uuid],
       ) as any;
       const total = Number(totalRow?.[0]?.c ?? 0);
-      if (total <= recent) return this.queryEntityContext(uuid, Math.max(total, recent));
+      if (total <= recent) return this.queryEntityContext(uuid, Math.max(total, recent), includeCompacted ?? false);
 
       const recentRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND is_compacted = 0
+         WHERE belong_entity_uuid = ? ${compactedFilter}
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, recent],
       ) || [];
       const earlyRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND is_compacted = 0
+         WHERE belong_entity_uuid = ? ${compactedFilter}
          ORDER BY timestamp ASC LIMIT ?`,
         [uuid, early],
       ) || [];
@@ -85,7 +91,7 @@ export class EntityContextStore {
       const _midOffset = early + Math.floor((_midSpan - _midTake) / 2);
       const midRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND is_compacted = 0
+         WHERE belong_entity_uuid = ? ${compactedFilter}
          ORDER BY timestamp ASC LIMIT ? OFFSET ?`,
         [uuid, _midTake, _midOffset],
       ) || [];
@@ -110,11 +116,12 @@ export class EntityContextStore {
   }
 
   /** 🔴 记忆召回彻底解决: 按内容关键词检索实体历史对话（用户问具体事时 LIKE 精准召回） */
-  searchEntityContext(uuid: string, keyword: string, limit = 3): ConversationTurn[] {
+  searchEntityContext(uuid: string, keyword: string, limit = 3, includeCompacted: boolean = false): ConversationTurn[] {
     try {
+      const compactedFilter = includeCompacted ? '' : 'AND is_compacted = 0';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND is_compacted = 0 AND content LIKE ?
+         WHERE belong_entity_uuid = ? ${compactedFilter} AND content LIKE ?
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, `%${keyword}%`, limit],
       );
