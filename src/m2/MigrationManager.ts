@@ -10,6 +10,8 @@
  * - 最小侵入：迁移在 SQLiteAdapter.initialize() 中触发，不阻塞启动
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+// C3(2026-09-11): 实体名解析收口到 EntityNameCodec（唯一事实源）
+import { parseNames } from './EntityNameCodec.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -710,7 +712,7 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
           const nameToUuidMap = new Map(deduped);
           let fgFilled = 0;
           for (const [memId, fgNames] of fgRows[0].values) {
-            const names = String(fgNames).split(',').map(n => n.trim()).filter(Boolean);
+            const names = parseNames(fgNames);
             for (const name of names) {
               const fgUuid = nameToUuidMap.get(name);
               if (fgUuid && fgUuid.startsWith('TXS-')) {

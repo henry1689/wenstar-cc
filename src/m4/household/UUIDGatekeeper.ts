@@ -17,6 +17,8 @@
  */
 
 import type { FamilyGraph } from './FamilyGraph.js';
+// C3(2026-09-11): 实体名解析收口到 m2/EntityNameCodec（唯一事实源；兼容 JSON 历史格式）
+import { parseNames } from '../../m2/EntityNameCodec.js';
 
 /** 会话统计 */
 interface SessionStats {
@@ -272,7 +274,8 @@ export class UUIDGatekeeper {
   filterByEntityNames(entityNamesStr: string | null | undefined): boolean {
     if (!entityNamesStr) return true; // 无实体标记的记忆始终放行
 
-    const names = entityNamesStr.split(',').map(s => s.trim()).filter(Boolean);
+    // C3(2026-09-11): 原裸 split(',') 无法处理 JSON 历史格式 → 收口到 EntityNameCodec
+    const names = parseNames(entityNamesStr);
     if (names.length === 0) return true;
 
     for (const name of names) {

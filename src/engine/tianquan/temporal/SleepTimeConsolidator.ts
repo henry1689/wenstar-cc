@@ -20,24 +20,9 @@ import type { FusionStorageAdapter } from '../../../m2/FusionStorageAdapter.js';
 import { MEMORY_CONFIG } from '../../../config/MemoryConfig.js';
 // V12.4 阶段B 根除24D: perception_json 列已删，读 perception_40d 列反解（pleasure=D12 / intimacy=D15，arousal 无槽位=0.5）
 import { decodePerceptionV40, encodeEmptyPerceptionV40 } from '../../../m2/PerceptionVector40DCodec.js';
-
-/**
- * 解析 entity_names 字段 — 兼容两种格式：
- *   A. 逗号分隔字符串（conversations 表实际格式: "徐诗韵,熊梓铭"）
- *   B. JSON 数组（旧格式: ["徐诗韵"]）
- */
-function parseEntityNames(raw: unknown): string[] {
-  if (!raw) return [];
-  const s = String(raw).trim();
-  if (!s) return [];
-  if (s.startsWith('[')) {
-    try {
-      const arr = JSON.parse(s);
-      return Array.isArray(arr) ? arr.map((x: unknown) => String(x).trim()).filter(Boolean) : [];
-    } catch { /* 非 JSON 则按逗号切 */ }
-  }
-  return s.split(',').map((x: string) => x.trim()).filter(Boolean);
-}
+// C3(2026-09-11): 实体名解析已收口到 m2/EntityNameCodec（唯一事实源）——
+//   删除本文件原先的本地 parseEntityNames 副本，与其余 4+ 处实现合并。
+import { parseNames } from '../../../m2/EntityNameCodec.js';
 
 /** 各阶段执行窗口（小时） */
 const STAGE_WINDOWS = {
@@ -243,7 +228,7 @@ export class SleepTimeConsolidator {
         // 实体多样性加成
         let uniquePersons = 0;
         try {
-          const entityNames = parseEntityNames((row as any).entity_names);
+          const entityNames = parseNames((row as any).entity_names);
           if (Array.isArray(entityNames)) {
             uniquePersons = new Set(
               entityNames.filter((n: string) => typeof n === 'string' && n.length > 1 && n !== '我')
@@ -352,7 +337,7 @@ export class SleepTimeConsolidator {
       const entityMentions = new Map<string, { count: number; snippets: string[]; days: Set<string>; calciumTotal: number }>();
       for (const row of rows) {
         try {
-          const names = parseEntityNames((row as any).fg_entity_names);
+          const names = parseNames((row as any).fg_entity_names);
           if (!Array.isArray(names)) continue;
           const text = (row as any).raw_input || '';
           const cal = (row as any).calcium_score || 0.5;
@@ -518,7 +503,7 @@ export class SleepTimeConsolidator {
       const entitySessions = new Map<string, Set<string>>(); // name → set of dates
       for (const row of rows) {
         try {
-          const names = parseEntityNames((row as any).entity_names);
+          const names = parseNames((row as any).entity_names);
           if (!Array.isArray(names)) continue;
           const day = ((row as any).timestamp || '').toString().substring(0, 10);
           for (const name of names) {
@@ -743,7 +728,7 @@ export class SleepTimeConsolidator {
       let reinforced = 0;
       for (const mem of topMemories) {
         try {
-          const entities = parseEntityNames((mem as any).fg_entity_names);
+          const entities = parseNames((mem as any).fg_entity_names);
           const personNames = Array.isArray(entities)
             ? entities.filter((e: any) => typeof e === 'string').map((n: string) => ({ name: n, type: 'person' as const }))
             : [];

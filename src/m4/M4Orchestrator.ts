@@ -10,6 +10,8 @@
  * - 检索质量指标增强
  */
 import type { M3Decision } from '../m3/types/perception.js';
+// C3(2026-09-11): 实体名解析收口到 m2/EntityNameCodec（唯一事实源；兼容 JSON 历史格式）
+import { parseNames } from '../m2/EntityNameCodec.js';
 import type { M4Context, MemorySummary } from './types/index.js';
 import type { DNA } from "../m1/types/dna.js";
 import type { ScoredMemory } from '../m2/types/index.js';
@@ -226,10 +228,7 @@ export class M4Orchestrator {
       const fg = this.familyGraph;
       if (fg && memories.length > 1) {
         for (const mem of memories) {
-          const names = ((mem as any).fg_entity_names || '')
-            .split(',')
-            .map((s: string) => s.trim())
-            .filter(Boolean);
+          const names = parseNames((mem as any).fg_entity_names);
           let maxHeat = 0;
           for (let i = 0; i < names.length; i++) {
             try {

@@ -6,6 +6,8 @@
  */
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
 import type { EntityGene } from '../../m1/types/dna.js';
+// C3(2026-09-11): 实体名解析收口到 m2/EntityNameCodec（唯一事实源）
+import { parseEntries, formatNames } from '../../m2/EntityNameCodec.js';
 import type { Perception24D } from '../../m3/types/perception.js';
 import type { EmotionalMemoryRecord } from '../../m2/types/index.js';
 import { initialStrength } from '../../m2/math.js';
@@ -49,6 +51,13 @@ function normalizeTopicTag(topic: unknown): string | undefined {
   return normalized ? normalized.slice(0, 48) : undefined;
 }
 
+/**
+ * 把原始值（conversations.entity_names）解析为结构化 EntityGene[]。
+ *
+ * C3(2026-09-11): 原实现自带一套「JSON 数组 / 逗号分隔」解析逻辑，与仓内其余 4+ 处副本漂移。
+ * 现改用 m2/EntityNameCodec 的 parseEntries（忠实超集：字符串或对象条目均支持），
+ * 本函数只保留「条目 → EntityGene 材质化」领域语义。
+ */
 function parseConversationEntities(raw: unknown): EntityGene[] {
   const materialize = (name: string, type: EntityGene['type'] = 'person'): EntityGene => ({
     name,
@@ -58,39 +67,23 @@ function parseConversationEntities(raw: unknown): EntityGene[] {
     knowledge_type: 'private',
   });
 
-  if (typeof raw !== 'string' || raw.trim().length === 0) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed
-        .map((item) => {
-          if (typeof item === 'string') {
-            const name = item.trim();
-            return name ? materialize(name) : null;
-          }
-          if (item && typeof item === 'object' && typeof item.name === 'string') {
-            const name = item.name.trim();
-            if (!name) return null;
-            return {
-              name,
-              type: item.type ?? 'person',
-              allele: item.allele ?? name,
-              phenotype: item.phenotype ?? 'neutral',
-              knowledge_type: item.knowledge_type ?? 'private',
-            } as EntityGene;
-          }
-          return null;
-        })
-        .filter((item): item is EntityGene => Boolean(item));
-    }
-  } catch { /* fallback to csv */ }
-
-  return raw
-    .split(',')
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .map((name) => materialize(name));
+  return parseEntries(raw)
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const name = entry.trim();
+        return name ? materialize(name) : null;
+      }
+      const name = typeof (entry as any).name === 'string' ? String((entry as any).name).trim() : '';
+      if (!name) return null;
+      return {
+        name,
+        type: (entry as any).type ?? 'person',
+        allele: (entry as any).allele ?? name,
+        phenotype: (entry as any).phenotype ?? 'neutral',
+        knowledge_type: (entry as any).knowledge_type ?? 'private',
+      } as EntityGene;
+    })
+    .filter((item): item is EntityGene => Boolean(item));
 }
 
 function parseSandPerception(raw: unknown): Perception24D {
@@ -242,7 +235,7 @@ export class MemoryAssessor {
           suppression_reason: undefined,
           archived_at: null,
           healed_at: null,
-          fg_entity_names: entityGenes.length > 0 ? entityGenes.map((gene) => gene.name).join(',') : undefined,
+          fg_entity_names: entityGenes.length > 0 ? formatNames(entityGenes.map((gene) => gene.name)) || undefined : undefined,
           // V13: 从 source conversation 继承 entity 归属
           belongEntityUuid: String(conv.belong_entity_uuid || conv.entity_uuid || null),
           primary_emotion: derivePrimaryEmotion(perception),

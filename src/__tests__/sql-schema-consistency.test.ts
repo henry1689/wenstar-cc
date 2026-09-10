@@ -306,6 +306,10 @@ const ENTITY_NAME_COLUMN_REGISTRY = new Map<string, 'conversations' | 'memories'
   ['src/m2/MigrationManager.ts|fg_entity_names', 'memories'],
   ['src/m2/SQLiteAdapter.ts|entity_names', 'conversations'],
   ['src/m2/SQLiteAdapter.ts|fg_entity_names', 'memories'],
+  // C2/C3 新增: EntityNameCodec 就是「两列名」的单一事实源（ENTITY_NAME_COLUMNS），
+  // 它同时包含两个列名字面量，属登记制内的合法核心条目。
+  ['src/m2/EntityNameCodec.ts|entity_names', 'conversations'],
+  ['src/m2/EntityNameCodec.ts|fg_entity_names', 'memories'],
 ]);
 
 describe('[C4] 跨表同概念列名（entity_names / fg_entity_names）使用点必须登记', () => {

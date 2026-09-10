@@ -7,6 +7,8 @@
  * 取代旧的 JsonStorageAdapter。
  */
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+// C3(2026-09-11): 实体名序列化收口到 EntityNameCodec（唯一事实源）
+import { formatNames } from './EntityNameCodec.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
@@ -94,7 +96,8 @@ export class FusionStorageAdapter {
           .filter((g: any) => g.type === 'person' && g.name !== '我' && g.name.length > 1)
           .map((g: any) => g.name);
         if (personNames.length > 0) {
-          fgNames = personNames.join(',');
+          // C3(2026-09-11): 序列化格式收口到 EntityNameCodec.formatNames
+          fgNames = formatNames(personNames);
           // V13: 取第一个有UUID的实体作为归属
           for (const name of personNames) {
             try {

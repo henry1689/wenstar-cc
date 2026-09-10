@@ -6,6 +6,8 @@
  *（由 SQLiteAdapter 统一落盘管理）。
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+// C3(2026-09-11): 实体名序列化收口到 EntityNameCodec（唯一事实源）
+import { formatNames } from './EntityNameCodec.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -160,7 +162,8 @@ export class ConversationDB {
     this.ensureReady();
     const seqPos = options?.seqPos ?? 0;
     const timestamp = new Date().toISOString();
-    const entityNames = options?.entityNames?.join(',') || '';
+    // C3(2026-09-11): 逗号分隔的写入格式定义收口到 EntityNameCodec.formatNames（唯一事实源）
+    const entityNames = formatNames(options?.entityNames);
     const perceptionSummary = options?.perception ? JSON.stringify(options.perception) : '';
     // is_summary 与 is_compacted 同步写入（过渡兼容，后续统一为 is_summary）
     const compactVal = options?.isCompacted ?? 0;
