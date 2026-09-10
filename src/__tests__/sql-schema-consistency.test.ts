@@ -279,8 +279,83 @@ describe('[SQL-schema 守卫] 全仓 SQL 必须能对至少一个真实库 prepa
 });
 
 /**
+ * 跨表同概念列名登记守卫（C4）
+ * ===================================
+ * 事故（2026-09-11）: `entity_names`(conversations) 与 `fg_entity_names`(memories) 是**同一概念的两个列名**。
+ * 共 4 处在 memories 上写了 entity_names → 运行时必抛 `no such column`，均被 try/catch 吞掉
+ * → **静默降级**: SleepTimeConsolidator 归纳恒 0 / ProspectiveSimulator 前瞻匹配恒 0 /
+ *   NoveltyDetector 恒走 fallback / KnowledgeAccessFacade 检索恒空。
+ *
+ * 为何静态 prepare 检查（上一个 describe）抓不到:
+ *   坏列名在被插值的**独立字符串**里（如 `const likeClause = '... entity_names LIKE ?'`），
+ *   该片段自身**没有表引用**（无 FROM/JOIN/INTO）→ 被 TABLE_REF 过滤掉。
+ *
+ * 本守卫用「file|列名 → 声明目标表」登记制，三重校验（fail-closed）:
+ *   ① 发现但未登记 → 失败（新增使用点必须解释目标表）
+ *   ② 登记但已消失 → 失败（防登记表腐化/文件改名后漏改）
+ *   ③ 声明的目标表在该列上确实存在该列（拿 schema 预言机反向验证登记真实性）
+ */
+const ENTITY_NAME_COLUMN_REGISTRY = new Map<string, 'conversations' | 'memories'>([
+  ['src/app/vault/MemoryAssessor.ts|entity_names', 'conversations'],
+  ['src/engine/tianquan/temporal/KnowledgeAccessFacade.ts|fg_entity_names', 'memories'],
+  ['src/engine/tianquan/temporal/NoveltyDetector.ts|fg_entity_names', 'memories'],
+  ['src/engine/tianquan/temporal/ProspectiveSimulator.ts|fg_entity_names', 'memories'],
+  ['src/engine/tianquan/temporal/SleepTimeConsolidator.ts|entity_names', 'conversations'],
+  ['src/engine/tianquan/temporal/SleepTimeConsolidator.ts|fg_entity_names', 'memories'],
+  ['src/m2/ConversationDB.ts|entity_names', 'conversations'],
+  ['src/m2/MigrationManager.ts|fg_entity_names', 'memories'],
+  ['src/m2/SQLiteAdapter.ts|entity_names', 'conversations'],
+  ['src/m2/SQLiteAdapter.ts|fg_entity_names', 'memories'],
+]);
+
+describe('[C4] 跨表同概念列名（entity_names / fg_entity_names）使用点必须登记', () => {
+  const COLS = ['entity_names', 'fg_entity_names'];
+  const discovered = new Map<string, number[]>();
+  for (const file of walkTs(SRC)) {
+    const rel = relative(REPO, file).replace(/\\/g, '/');
+    for (const lit of extractLogicalStrings(readFileSync(file, 'utf-8'))) {
+      for (const col of COLS) {
+        if (new RegExp(`\\b${col}\\b`).test(lit.text)) {
+          const key = `${rel}|${col}`;
+          if (!discovered.has(key)) discovered.set(key, []);
+          discovered.get(key)!.push(lit.line);
+        }
+      }
+    }
+  }
+
+  it('无「未登记」的列名使用点', () => {
+    const fresh = [...discovered.keys()].filter((k) => !ENTITY_NAME_COLUMN_REGISTRY.has(k));
+    expect(
+      fresh,
+      `以下文件出现了 entity_names / fg_entity_names 但未登记目标表。\n` +
+        `请确认其 SQL 实际打向哪张表（memories 只有 fg_entity_names！）并加入 ENTITY_NAME_COLUMN_REGISTRY:\n  ${fresh.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('无「已登记但已消失」的条目（防登记表腐化）', () => {
+    const stale = [...ENTITY_NAME_COLUMN_REGISTRY.keys()].filter((k) => !discovered.has(k));
+    expect(stale, `登记表腐化：以下条目在源码中已不再出现，请移除或修正:\n  ${stale.join('\n  ')}`).toEqual([]);
+  });
+
+  it('登记声明的目标表确实含该列（反向验证登记真实性）', () => {
+    const dbs = DB_PATHS.filter(([, p]) => existsSync(p)).map(([n, p]) => [n, new Database(p, { readonly: true })] as const);
+    const bad: string[] = [];
+    for (const [key, table] of ENTITY_NAME_COLUMN_REGISTRY) {
+      const col = key.split('|')[1];
+      const has = dbs.some(([, db]) => {
+        const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+        return cols.includes(col);
+      });
+      if (!has) bad.push(`${key} → 声明的表 ${table} 并没有 ${col} 列`);
+    }
+    for (const [, db] of dbs) db.close();
+    expect(bad, `登记表声明与实际 schema 不符:\n  ${bad.join('\n  ')}`).toEqual([]);
+  });
+});
+/**
  * 词法扫描器夹具单测（S4 评审 P2-3）：假阴性比假阳性更危险 —— 漏检就失去防护。
- * 这四条钉住已知会让引号配对失同步的构造。
+ * 这六条钉住已知会让引号配对失同步的构造。
  */
 describe('[SQL-schema 守卫] 词法扫描器夹具（防引号失同步 → 静默丢覆盖）', () => {
   const pick = (src: string) => extractLogicalStrings(src).map((s) => s.text);

@@ -57,7 +57,9 @@ export class ProspectiveSimulator {
 
     try {
       // 1. 从 memories 查相似话题 + 相似情绪的场景
-      const likeClause = context.entities.map(() => 'entity_names LIKE ?').join(' OR ');
+      // 🔴 修复(2026-09-11): memories 表**只有 fg_entity_names 列**，无 entity_names ——
+      //   原 SQL 必然抛 "no such column: entity_names"，被 try/catch 吞掉 → 前瞻场景匹配恒 0。
+      const likeClause = context.entities.map(() => 'fg_entity_names LIKE ?').join(' OR ');
       const params: string[] = [];
       for (const e of context.entities.slice(0, 3)) {
         params.push(`%${e}%`);
@@ -66,7 +68,7 @@ export class ProspectiveSimulator {
       const topicClause = context.topic ? 'raw_input LIKE ?' : '1=1';
       if (context.topic) params.push(`%${context.topic}%`);
 
-      const sql = `SELECT id, raw_input, calcium_score, entity_names, created_at, perception_40d
+      const sql = `SELECT id, raw_input, calcium_score, fg_entity_names, created_at, perception_40d
         FROM memories WHERE (${likeClause} OR ${topicClause})
         AND lifecycle_state != 'suppressed'
         ORDER BY created_at DESC LIMIT 20`;

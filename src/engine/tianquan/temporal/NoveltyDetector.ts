@@ -142,9 +142,16 @@ export class NoveltyDetector {
       if (names.length === 0) return { novelty: 1, nearestMatchId: null, similarity: 0, calciumMultiplier: 1.5, method: 'fallback' };
 
       // 查最近 10 条记忆中有多少包含同名实体
-      const like = names.map(n => `entity_names LIKE '%${n}%'`).join(' OR ');
+      // 🔴 修复(2026-09-11) 两处:
+      //   ① 列名漂移: memories **只有 fg_entity_names**，无 entity_names → 原 SQL 必抛
+      //      "no such column: entity_names"，被 catch 吞掉 → 新颖度检测恒走 fallback。
+      //   ② 注入/转义: 原实现用 `'%${n}%'` 字符串插值，实体名含单引号时会直接破坏 SQL
+      //      （同一失败模式: 抛错 → 被吞 → 静默降级）。改为绑定参数。
+      const like = names.map(() => 'fg_entity_names LIKE ?').join(' OR ');
+      const likeParams = names.map(n => `%${n}%`);
       const rows = this.sqlite.queryAll(
-        `SELECT id FROM memories WHERE (${like}) ORDER BY created_at DESC LIMIT 5`
+        `SELECT id FROM memories WHERE (${like}) ORDER BY created_at DESC LIMIT 5`,
+        likeParams,
       );
       if (rows && rows.length >= 3) {
         // 很多记忆包含相同实体 → 熟悉话题

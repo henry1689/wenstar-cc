@@ -143,7 +143,9 @@ export class KnowledgeAccessFacade {
       );
       if (entityNames.length === 0) return [];
 
-      const likeClauses = entityNames.map(() => "entity_names LIKE '%' || ? || '%'").join(' OR ');
+      // 🔴 修复(2026-09-11): memories 表**只有 fg_entity_names 列**，无 entity_names ——
+      //   原 SQL 必然抛 "no such column: entity_names"，被 catch 吞掉 → 知识访问的记忆检索恒空。
+      const likeClauses = entityNames.map(() => "fg_entity_names LIKE '%' || ? || '%'").join(' OR ');
       const rows = this.sqlite.queryAll(
         `SELECT id, raw_input, calcium_score FROM memories
          WHERE (${likeClauses}) AND lifecycle_state != 'suppressed'
