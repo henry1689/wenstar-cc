@@ -275,6 +275,10 @@ export class DNAEncoder {
     const sceneTags = this.deriveSceneTags(l0Result!.locus_path, l3Result!.entity_genes);
 
     // ── 组装 DNA ──
+    // 🔴 P1-1 修复(2026-09-05): 场景指纹派生一次，供 location_fingerprint 与 global_uid 区位标识共用。
+    // 原实现 generateGlobalUID 第 4 参传空 '' → 区位恒为全零指纹哈希 84E0C0EA，指纹派生白做
+    // （pre-existing 测试"场景词应派生 location_fingerprint 并影响 global_uid"断言暴露此缺陷）。
+    const _locationFingerprint = this.deriveLocationFingerprint(utterance);
     const dna: DNA = {
       locus_path: l0Result.locus_path,
       taxonomy_version: l0Result.taxonomy_version,
@@ -289,9 +293,9 @@ export class DNAEncoder {
       ambiguity_score: l0Result!.ambiguity_score,
       warnings: warnings.length > 0 ? warnings : undefined,
       dna_root_id,
-      global_uid: DNAEncoder.generateGlobalUID('MM', l1Result.seq_pos, 0, ''),
+      global_uid: DNAEncoder.generateGlobalUID('MM', l1Result.seq_pos, 0, _locationFingerprint),
       // P1-1: 场景指纹派生（替代恒全0）——无场景词时沿用会话缓存，降级保持 G2 全PASS
-      location_fingerprint: this.deriveLocationFingerprint(utterance),
+      location_fingerprint: _locationFingerprint,
     };
 
     return dna;

@@ -33,6 +33,10 @@ export interface FoundationRouteOptions {
   timeRange?: RetrievalContext['timeRange'];
   /** 注入 now（融合近因因子） */
   nowMs?: number;
+  /** 当前话题路径（显式传入优先；缺省回退 ctx._dna.locus_path）。修复 TS2353：接口曾不收该字段导致调用方传参被忽略 */
+  locusPath?: string;
+  /** DNA 实体（显式传入优先；缺省回退 ctx._dna.entity_genes）。形状与 RetrievalContext.entities 一致 */
+  entities?: Array<{ name: string; type: string }>;
 }
 
 /** 结果 */
@@ -86,9 +90,11 @@ export async function runFoundationRoutes(
     perception40d: opts.perception40d,
     entityUuids: opts.activeEntityUuids,
     mode: opts.isTopicShift ? 'full' : 'balanced',
-    locusPath: (ctx?._dna as any)?.locus_path || 'default',
+    // opts 显式传入优先（retrieval-stage 提供当前轮 DNA），缺省回退 ctx._dna（旧隐式路径）。
+    // 修复契约漂移：此前忽略 opts 传入值从 ctx._dna 隐式取，ctx._dna 若滞后于当前轮 DNA 则检索域选错。
+    locusPath: opts.locusPath ?? ((ctx?._dna as any)?.locus_path || 'default'),
     // S6: 供 MemoryAdapter 的 retrieveMultiRank 使用（M1 entity_genes 形状）
-    entities: ((ctx?._dna as any)?.entity_genes ?? []).map((g: any) => ({ name: g.name, type: g.type })),
+    entities: opts.entities ?? ((ctx?._dna as any)?.entity_genes ?? []).map((g: any) => ({ name: g.name, type: g.type })),
     limit: opts.isTopicShift ? 5 : 3,
     sessionId: ctx?.sessionId,
     timeRange: opts.timeRange,

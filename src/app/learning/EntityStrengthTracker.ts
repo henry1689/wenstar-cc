@@ -37,34 +37,31 @@ export class EntityStrengthTracker {
       for (const name of [entityA, entityB]) {
         const existing = sqlite.queryAll('SELECT id FROM entities WHERE name = ? LIMIT 1', [name]);
         if (existing.length === 0) {
-          sqlite.writeRaw('INSERT INTO entities (id, name, type, created_at) VALUES (?, ?, ?, ?)', [
-            `auto_${name}_${Date.now()}`,
-            name,
-            'person',
-            new Date().toISOString(),
-          ]);
+          sqlite.writeRaw('INSERT OR IGNORE INTO entities (name, type) VALUES (?, ?)', [name, 'person']);
         }
       }
 
       // 更新或插入关联
       sqlite.writeRaw(
-        `INSERT INTO entity_relations (entity_a_id, entity_b_id, relation, strength, created_at, updated_at)
+        `INSERT INTO entity_relations (entity_a_id, entity_b_id, relation, strength, updated_at)
          VALUES (
            (SELECT id FROM entities WHERE name = ? LIMIT 1),
            (SELECT id FROM entities WHERE name = ? LIMIT 1),
-           'co_occurrence', ?, ?, ?
+           'co_occurrence', ?, ?
          )
          ON CONFLICT(entity_a_id, entity_b_id, relation) DO UPDATE SET
            strength = MIN(1.0, strength + ?),
            updated_at = ?`,
         [
           entityA, entityB,
-          effectiveStrength, new Date().toISOString(), new Date().toISOString(),
+          effectiveStrength, new Date().toISOString(),
           effectiveStrength,
           new Date().toISOString(),
         ],
       );
-    } catch { /* 并发写入冲突忽略 */ }
+    } catch (e) {
+      console.error('[EntityStrengthTracker] boost 失败:', (e as Error)?.message || e);
+    }
   }
 
   /**

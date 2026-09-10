@@ -342,7 +342,7 @@ export class SleepTimeConsolidator {
     try {
       // 扫描最近 200 条记忆，扩展时间窗口覆盖更多跨会话数据
       const rows = sqlite.queryAll(
-        `SELECT id, raw_input, calcium_score, entity_names, created_at
+        `SELECT id, raw_input, calcium_score, fg_entity_names, created_at
          FROM memories WHERE memory_kind = 'episodic'
          ORDER BY created_at DESC LIMIT 200`
       );
@@ -352,7 +352,7 @@ export class SleepTimeConsolidator {
       const entityMentions = new Map<string, { count: number; snippets: string[]; days: Set<string>; calciumTotal: number }>();
       for (const row of rows) {
         try {
-          const names = parseEntityNames((row as any).entity_names);
+          const names = parseEntityNames((row as any).fg_entity_names);
           if (!Array.isArray(names)) continue;
           const text = (row as any).raw_input || '';
           const cal = (row as any).calcium_score || 0.5;
@@ -734,7 +734,7 @@ export class SleepTimeConsolidator {
     try {
       // 1. 回放 top-20 高钙化记忆，强化 hippocampal_index 映射
       const topMemories = sqlite.queryAll(
-        `SELECT id, raw_input, calcium_score, locus_path, entity_names, perception_40d
+        `SELECT id, raw_input, calcium_score, locus_path, fg_entity_names, perception_40d
          FROM memories WHERE calcium_score >= ${MEMORY_CONFIG.sleepConsolidation.systemsConsolidationCalcium} AND lifecycle_state != 'suppressed'
          ORDER BY calcium_score DESC LIMIT ${MEMORY_CONFIG.sleepConsolidation.systemsConsolidationBatchSize}`
       );
@@ -743,7 +743,7 @@ export class SleepTimeConsolidator {
       let reinforced = 0;
       for (const mem of topMemories) {
         try {
-          const entities = parseEntityNames((mem as any).entity_names);
+          const entities = parseEntityNames((mem as any).fg_entity_names);
           const personNames = Array.isArray(entities)
             ? entities.filter((e: any) => typeof e === 'string').map((n: string) => ({ name: n, type: 'person' as const }))
             : [];
