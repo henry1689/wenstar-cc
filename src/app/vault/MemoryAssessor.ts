@@ -208,13 +208,14 @@ export class MemoryAssessor {
         const narrativeTag = deriveNarrativeTag(text, conv.topic);
         const entityGenes = parseConversationEntities(conv.entity_names);
         // 🔴 2026-09-11: 兜底 — 若 conv.entity_names 为空（历史数据/旧路径写入），
-        //   从已存在记忆的 entity_genes 派生，避免 fg_entity_names 被清成 NULL。
-        if (entityGenes.length === 0) {
+        //   从同 conversation 的已有记忆的 entity_genes 派生，避免 fg_entity_names 被清成 NULL。
+        if (entityGenes.length === 0 && conversationId > 0) {
           try {
             const sqlite = this.storage.getSQLite();
+            // 按 seq_pos 找已晋升的记忆（已晋升的记忆 entity_genes 已填充）
             const existing = sqlite.queryAll(
-              "SELECT entity_genes FROM memories WHERE dialog_group_id = ? AND entity_genes IS NOT NULL AND entity_genes != '[]' AND entity_genes != '' LIMIT 1",
-              [conv.dialog_group_id]
+              "SELECT entity_genes FROM memories WHERE seq_pos = ? AND entity_genes IS NOT NULL AND entity_genes != '[]' AND entity_genes != '' LIMIT 1",
+              [conv.seq_pos]
             ) as any[];
             if (existing.length > 0) {
               try { const g = JSON.parse(String(existing[0]?.entity_genes || '[]')); if (Array.isArray(g) && g.length > 0) entityGenes.push(...g.filter((x: any) => x?.name)); } catch {}
