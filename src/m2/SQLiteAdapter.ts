@@ -808,7 +808,10 @@ export class SQLiteAdapter {
         record.secondary_emotions ? JSON.stringify(record.secondary_emotions) : null,
         record.dna_root_id ?? null,
         record.entity_genes ? JSON.stringify(record.entity_genes) : null,
-        record.fg_entity_names ?? null,
+        // 🔴 2026-09-11: fg_entity_names 兜底派生 —— 若调用方未传但 entity_genes 非空，自动派生
+        //   必要性：MemoryAssessor 等旧路径可能从空 conv.entity_names 解析出空 entityGenes，
+        //   导致 fg_entity_names 被写 NULL；此处兜底确保只要 entity_genes 有数据就不会丢失。
+        (record.fg_entity_names ?? (record.entity_genes && record.entity_genes.length > 0 ? formatNames(record.entity_genes.map((g: any) => g.name).filter(Boolean)) : null)) ?? null,
         record.time_period ?? null,
         record.season ?? null,
         record.lunar_term ?? null,
