@@ -70,6 +70,42 @@ if (failed.length > 0) {
   for (const f of failed) console.warn('  - ' + f.label + ': ' + (f.reason || 'unknown'));
 }
 
+// ── V21: ServerLock — 生产数据库写保护 ──
+const LOCK_PATH = path.join(__dirname, 'data', 'webui', 'server.lock');
+let _lockInfo = null;
+try {
+  if (fs.existsSync(LOCK_PATH)) {
+    _lockInfo = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+    // 检查进程是否还存活
+    try {
+      process.kill(_lockInfo.pid, 0);
+      console.warn(`[Start] ⚠️ 检测到服务已在运行 (PID ${_lockInfo.pid}, host ${_lockInfo.host})`);
+      console.warn(`[Start]    锁文件: ${_lockInfo.path}`);
+      console.warn(`[Start]    启动时间: ${_lockInfo.startedAt}`);
+      console.warn(`[Start]    如需重启，请先停止现有实例。`);
+    } catch (e) {
+      // 进程不存在，清理残留锁
+      console.warn(`[Start] 清理残留锁文件 (PID ${_lockInfo.pid} 已终止)`);
+      fs.unlinkSync(LOCK_PATH);
+      _lockInfo = null;
+    }
+  }
+} catch (e) {
+  console.warn('[Start] 锁文件解析失败，清理后继续:', e.message);
+  try { fs.unlinkSync(LOCK_PATH); } catch {}
+  _lockInfo = null;
+}
+
+// 创建新锁（子进程启动前）
+const newLock = { pid: process.pid, host: os.hostname(), startedAt: new Date().toISOString(), path: LOCK_PATH };
+fs.writeFileSync(LOCK_PATH, JSON.stringify(newLock, null, 2), 'utf8');
+console.log('[Start] 已创建服务器锁:', LOCK_PATH);
+// 子进程退出时释放锁
+child.on('exit', () => {
+  try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch {}
+  console.log('[Start] 已释放服务器锁');
+});
+
 // 启动 server.ts
 console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')...');
 const memLimit = process.env.TIANQUAN_LITE === 'true'
