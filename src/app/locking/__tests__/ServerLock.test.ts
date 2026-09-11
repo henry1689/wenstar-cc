@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { ServerLock, requireUnlock } from '../ServerLock.js';
+import { ServerLock, requireUnlock, readLockInfo, isServiceRunning } from '../ServerLock.js';
 
 describe('ServerLock', () => {
   let lockDir: string;
@@ -26,7 +26,7 @@ describe('ServerLock', () => {
     expect(existsSync(lockPath)).toBe(true);
     const info = JSON.parse(readFileSync(lockPath, 'utf8'));
     expect(info.pid).toBe(process.pid);
-    expect(info.host).toBe(require('os').hostname());
+    expect(info.host).toBe(hostname());
     expect(info.startedAt).toBeDefined();
     expect(info.path).toBe(lockPath);
   });
@@ -54,7 +54,6 @@ describe('ServerLock', () => {
     mkdirSync(lockDir, { recursive: true });
     const lock = new ServerLock(lockPath);
     lock.acquire();
-    // 同一进程的 ServerLock 实例应被允许
     expect(() => requireUnlock(lock, '测试操作')).not.toThrow();
   });
 
@@ -66,12 +65,56 @@ describe('ServerLock', () => {
     mkdirSync(lockDir, { recursive: true });
     const lock = new ServerLock(lockPath);
     lock.acquire();
-    // 修改锁文件为不同 PID
+    // 篡改锁文件为「其他存活进程」的 PID
     const info = JSON.parse(readFileSync(lockPath, 'utf8'));
     info.pid = 99999;
     writeFileSync(lockPath, JSON.stringify(info));
-    // 其他进程的 ServerLock 实例应被拒绝
     const otherLock = new ServerLock(lockPath);
     expect(() => requireUnlock(otherLock, '测试操作')).toThrow(/服务正在运行/);
+  });
+
+  it('readLockInfo 应读取锁内容（无锁返回 null）', () => {
+    mkdirSync(lockDir, { recursive: true });
+    expect(readLockInfo(lockPath)).toBeNull();
+    const lock = new ServerLock(lockPath);
+    lock.acquire();
+    const info = readLockInfo(lockPath);
+    expect(info).not.toBeNull();
+    expect(info?.pid).toBe(process.pid);
+  });
+
+  it('readLockInfo 对损坏 JSON 应返回 null（fail-safe）', () => {
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(lockPath, '{ 这不是合法 JSON');
+    expect(readLockInfo(lockPath)).toBeNull();
+  });
+
+  it('isServiceRunning 应识别本进程持有的锁', () => {
+    mkdirSync(lockDir, { recursive: true });
+    const lock = new ServerLock(lockPath);
+    lock.acquire();
+    expect(isServiceRunning(lockPath)).toBe(true);
+  });
+
+  it('isServiceRunning 对残留锁（持有进程已死）返回 false', () => {
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: 99999, host: 'test', startedAt: '2024-01-01', path: lockPath }));
+    expect(isServiceRunning(lockPath)).toBe(false);
+  });
+
+  it('isServiceRunning 无锁文件时返回 false', () => {
+    expect(isServiceRunning(lockPath)).toBe(false);
+  });
+
+  it('isOwnedBySelf 应正确判定锁归属', () => {
+    mkdirSync(lockDir, { recursive: true });
+    const lock = new ServerLock(lockPath);
+    lock.acquire();
+    expect(lock.isOwnedBySelf()).toBe(true);
+    // 篡改为其他 PID 后不再归属自己
+    const info = JSON.parse(readFileSync(lockPath, 'utf8'));
+    info.pid = 99999;
+    writeFileSync(lockPath, JSON.stringify(info));
+    expect(lock.isOwnedBySelf()).toBe(false);
   });
 });

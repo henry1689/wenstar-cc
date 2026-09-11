@@ -5,6 +5,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawn, execSync } = require('child_process');
 
 const TSC_CLI = path.join(__dirname, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -71,40 +72,31 @@ if (failed.length > 0) {
 }
 
 // ── V21: ServerLock — 生产数据库写保护 ──
+// 锁语义：锁归属「真正写库的 server 进程」(child.pid)，而非 start.cjs 监督进程。
+//   服务内 SQLiteAdapter: lock.pid === process.pid → 自身写入放行；
+//   外部脚本 (better-sqlite3): 锁存在且 PID 不同 → 拒绝写入（防 sql.js flush 覆写）。
+// 🔴 注意：写锁必须放在 spawn 之后（引用 child.pid），否则 const TDZ 崩溃。
 const LOCK_PATH = path.join(__dirname, 'data', 'webui', 'server.lock');
-let _lockInfo = null;
+
+// [1] 启动前：检测残留锁（持有进程已死则清理；仍存活则告警）
 try {
   if (fs.existsSync(LOCK_PATH)) {
-    _lockInfo = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
-    // 检查进程是否还存活
-    try {
-      process.kill(_lockInfo.pid, 0);
-      console.warn(`[Start] ⚠️ 检测到服务已在运行 (PID ${_lockInfo.pid}, host ${_lockInfo.host})`);
-      console.warn(`[Start]    锁文件: ${_lockInfo.path}`);
-      console.warn(`[Start]    启动时间: ${_lockInfo.startedAt}`);
+    const prev = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+    let alive = false;
+    try { process.kill(prev.pid, 0); alive = true; } catch (_) { alive = false; }
+    if (alive) {
+      console.warn(`[Start] ⚠️ 检测到服务已在运行 (PID ${prev.pid}, host ${prev.host})`);
+      console.warn(`[Start]    启动时间: ${prev.startedAt}`);
       console.warn(`[Start]    如需重启，请先停止现有实例。`);
-    } catch (e) {
-      // 进程不存在，清理残留锁
-      console.warn(`[Start] 清理残留锁文件 (PID ${_lockInfo.pid} 已终止)`);
+    } else {
+      console.warn(`[Start] 清理残留锁文件 (PID ${prev.pid} 已终止)`);
       fs.unlinkSync(LOCK_PATH);
-      _lockInfo = null;
     }
   }
 } catch (e) {
   console.warn('[Start] 锁文件解析失败，清理后继续:', e.message);
-  try { fs.unlinkSync(LOCK_PATH); } catch {}
-  _lockInfo = null;
+  try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
 }
-
-// 创建新锁（子进程启动前）
-const newLock = { pid: process.pid, host: os.hostname(), startedAt: new Date().toISOString(), path: LOCK_PATH };
-fs.writeFileSync(LOCK_PATH, JSON.stringify(newLock, null, 2), 'utf8');
-console.log('[Start] 已创建服务器锁:', LOCK_PATH);
-// 子进程退出时释放锁
-child.on('exit', () => {
-  try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch {}
-  console.log('[Start] 已释放服务器锁');
-});
 
 // 启动 server.ts
 console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')...');
@@ -120,6 +112,35 @@ const child = spawn(process.execPath, [TSC_CLI, 'src/webui/server.ts'], {
   windowsHide: true,
   env: { ...process.env, NODE_OPTIONS: memLimit },
 });
+
+// [2] spawn 之后：用子进程 PID 写锁（锁归属真实写库进程）
+let _lockHeld = false;
+try {
+  fs.mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
+  fs.writeFileSync(LOCK_PATH, JSON.stringify({
+    pid: child.pid,
+    host: os.hostname(),
+    startedAt: new Date().toISOString(),
+    path: LOCK_PATH,
+    supervisorPid: process.pid,
+  }, null, 2), 'utf8');
+  _lockHeld = true;
+  console.log('[Start] 已创建服务器锁 (server PID ' + child.pid + ')');
+} catch (e) {
+  console.warn('[Start] 创建锁失败（不影响启动）:', e.message);
+}
+
+// [3] 锁释放：子进程退出 / 监督进程退出 / 收到信号
+function releaseLock() {
+  if (!_lockHeld) return;
+  _lockHeld = false;
+  try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch (_) {}
+  console.log('[Start] 已释放服务器锁');
+}
+child.on('exit', releaseLock);
+process.on('exit', releaseLock);
+process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 
 child.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
