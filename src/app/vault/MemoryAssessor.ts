@@ -207,6 +207,20 @@ export class MemoryAssessor {
         const normalizedCalcium = clamp(calciumScore / MEMORY_CONFIG.recall.calciumMax, 0, 1);
         const narrativeTag = deriveNarrativeTag(text, conv.topic);
         const entityGenes = parseConversationEntities(conv.entity_names);
+        // 🔴 2026-09-11: 兜底 — 若 conv.entity_names 为空（历史数据/旧路径写入），
+        //   从已存在记忆的 entity_genes 派生，避免 fg_entity_names 被清成 NULL。
+        if (entityGenes.length === 0) {
+          try {
+            const sqlite = this.storage.getSQLite();
+            const existing = sqlite.queryAll(
+              "SELECT entity_genes FROM memories WHERE dialog_group_id = ? AND entity_genes IS NOT NULL AND entity_genes != '[]' AND entity_genes != '' LIMIT 1",
+              [conv.dialog_group_id]
+            ) as any[];
+            if (existing.length > 0) {
+              try { const g = JSON.parse(String(existing[0]?.entity_genes || '[]')); if (Array.isArray(g) && g.length > 0) entityGenes.push(...g.filter((x: any) => x?.name)); } catch {}
+            }
+          } catch { /* 兜底失败不阻塞 */ }
+        }
         const now = new Date().toISOString();
         const record: EmotionalMemoryRecord = {
           id: memoryId,
