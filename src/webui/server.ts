@@ -112,6 +112,7 @@ import { handleChatRoutes } from './server-chat-routes.js';
 import { handleJinghuanRoutes } from './server-jinghuan-routes.js';
 import { MasterHarris, initMasterHarris, loadDomainSpecs } from '../tianquan-rpc/index.js';
 import type { SpecLoadResult } from '../tianquan-rpc/index.js';
+import { ServerLock, DEFAULT_LOCK_PATH } from '../app/locking/ServerLock.js';
 
 // ── 路径 ──
 const __filename = fileURLToPath(import.meta.url);
@@ -2691,6 +2692,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 // ── Hooks 监控看板页面 ──
 async function main(): Promise<void> {
+  // P1: ServerLock — 由「真正写库的进程」（本进程）持有生产库写锁。
+  // 锁 PID = process.pid，因此 SQLiteAdapter 的 assertWriteAllowed 判定为「自身持有」→ 放行；
+  // 外部进程（better-sqlite3 / 第二实例）→ 被拒（防 sql.js 内存态 flush 覆写）。
+  // 进程退出时自动释放（ServerLock 内部注册 exit 钩子）。
+  new ServerLock(DEFAULT_LOCK_PATH).acquire();
+
   await initPipeline();
   mkdirSync(path.join(DATA_DIR, 'audio'), { recursive: true });
 

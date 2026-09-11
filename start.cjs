@@ -43,6 +43,42 @@ const prestartScripts = [
 ];
 
 const prestartResults = [];
+
+// ── V21: ServerLock — 生产数据库写保护（监督进程侧）──
+// 🔴 锁由「真正写库的 server 进程」自己持有（见 server.ts main() → ServerLock.acquire()）。
+//   进程树: start.cjs(P0) → tsx CLI(P1) → node server.ts(P2)，写库的是 P2。
+//   若由 P0/P1 代写锁，P2 会判定「他人持锁」而被自己拒绝 → 服务无法启动。
+//   本监督进程职责仅两件：① 启动前拒绝重复实例 ② 清理陈旧锁。
+const LOCK_PATH = path.join(__dirname, 'data', 'webui', 'server.lock');
+
+// [1] 启动前：陈旧锁清理 / 存活则拒绝启动
+if (fs.existsSync(LOCK_PATH)) {
+  let prev = null;
+  try {
+    prev = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+  } catch (e) {
+    console.warn('[Start] 锁文件损坏，清理后继续:', e.message);
+    try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
+  }
+  if (prev && typeof prev.pid === 'number') {
+    // 他机锁 → 本机视为陈旧
+    const foreignHost = typeof prev.host === 'string' && prev.host !== os.hostname();
+    let alive = false;
+    if (!foreignHost) {
+      try { process.kill(prev.pid, 0); alive = true; }
+      catch (e) { alive = e && e.code === 'EPERM'; } // Windows: 无权限 = 进程存在
+    }
+    if (alive) {
+      console.error('[Start] ❌ 服务已在运行 (PID ' + prev.pid + ', host ' + prev.host + ')');
+      console.error('[Start]    启动时间: ' + prev.startedAt);
+      console.error('[Start]    请先停止现有实例（或删除 data/webui/server.lock 后重试）。');
+      process.exit(1);
+    }
+    console.warn('[Start] 清理陈旧锁 (PID ' + prev.pid + ', host ' + prev.host + ')');
+    try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
+  }
+}
+
 // V20: 写库脚本守卫 — 若端口 3000 已被旧实例占用，跳过所有写库脚本（并发写 fusion_memory.db 会 SQLITE_CORRUPT）
 const PORT = process.env.PORT || '3000';
 let _portBusy = false;
@@ -71,33 +107,6 @@ if (failed.length > 0) {
   for (const f of failed) console.warn('  - ' + f.label + ': ' + (f.reason || 'unknown'));
 }
 
-// ── V21: ServerLock — 生产数据库写保护 ──
-// 锁语义：锁归属「真正写库的 server 进程」(child.pid)，而非 start.cjs 监督进程。
-//   服务内 SQLiteAdapter: lock.pid === process.pid → 自身写入放行；
-//   外部脚本 (better-sqlite3): 锁存在且 PID 不同 → 拒绝写入（防 sql.js flush 覆写）。
-// 🔴 注意：写锁必须放在 spawn 之后（引用 child.pid），否则 const TDZ 崩溃。
-const LOCK_PATH = path.join(__dirname, 'data', 'webui', 'server.lock');
-
-// [1] 启动前：检测残留锁（持有进程已死则清理；仍存活则告警）
-try {
-  if (fs.existsSync(LOCK_PATH)) {
-    const prev = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
-    let alive = false;
-    try { process.kill(prev.pid, 0); alive = true; } catch (_) { alive = false; }
-    if (alive) {
-      console.warn(`[Start] ⚠️ 检测到服务已在运行 (PID ${prev.pid}, host ${prev.host})`);
-      console.warn(`[Start]    启动时间: ${prev.startedAt}`);
-      console.warn(`[Start]    如需重启，请先停止现有实例。`);
-    } else {
-      console.warn(`[Start] 清理残留锁文件 (PID ${prev.pid} 已终止)`);
-      fs.unlinkSync(LOCK_PATH);
-    }
-  }
-} catch (e) {
-  console.warn('[Start] 锁文件解析失败，清理后继续:', e.message);
-  try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
-}
-
 // 启动 server.ts
 console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')...');
 const memLimit = process.env.TIANQUAN_LITE === 'true'
@@ -113,34 +122,8 @@ const child = spawn(process.execPath, [TSC_CLI, 'src/webui/server.ts'], {
   env: { ...process.env, NODE_OPTIONS: memLimit },
 });
 
-// [2] spawn 之后：用子进程 PID 写锁（锁归属真实写库进程）
-let _lockHeld = false;
-try {
-  fs.mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
-  fs.writeFileSync(LOCK_PATH, JSON.stringify({
-    pid: child.pid,
-    host: os.hostname(),
-    startedAt: new Date().toISOString(),
-    path: LOCK_PATH,
-    supervisorPid: process.pid,
-  }, null, 2), 'utf8');
-  _lockHeld = true;
-  console.log('[Start] 已创建服务器锁 (server PID ' + child.pid + ')');
-} catch (e) {
-  console.warn('[Start] 创建锁失败（不影响启动）:', e.message);
-}
-
-// [3] 锁释放：子进程退出 / 监督进程退出 / 收到信号
-function releaseLock() {
-  if (!_lockHeld) return;
-  _lockHeld = false;
-  try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch (_) {}
-  console.log('[Start] 已释放服务器锁');
-}
-child.on('exit', releaseLock);
-process.on('exit', releaseLock);
-process.on('SIGINT', () => { releaseLock(); process.exit(0); });
-process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+// 锁由 server 进程自己持有（server.ts main() → ServerLock.acquire()），
+// 监督进程不代写、不代删（避免与 server 的双实现漂移）。
 
 child.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

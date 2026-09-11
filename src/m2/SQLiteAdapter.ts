@@ -39,6 +39,7 @@ import type { PerceptionV40 } from './types/perception-40d.js';
 import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from './types/perception-40d.js';
 import { migrateSchema } from './MigrationManager.js';
 import { createHash } from 'node:crypto';
+import { assertWriteAllowed } from '../app/locking/ServerLock.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -197,6 +198,8 @@ export class SQLiteAdapter {
   private _flushTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly _FLUSH_BATCH = 50;  // 硬上限：突发积压超过 50 次才强制同步落盘
   private readonly _FLUSH_INTERVAL = 150; // 防抖窗口：150ms 内的写入合并为一次落盘
+  /** P1: ServerLock 写入准入检查的 TTL 缓存到期时间戳（0 = 待检查） */
+  private _writeAllowedUntil = 0;
 
   /** P5: 热点查询缓存（2秒 TTL） */
   private _queryCache = new Map<string, { result: any; expiresAt: number }>();
@@ -224,6 +227,10 @@ export class SQLiteAdapter {
   }
 
   async initialize(): Promise<void> {
+    // P1: ServerLock 写保护 — 若另一进程正在托管生产库（持锁），禁止本进程加载/写入。
+    // 防第二 sql.js 实例与运行中服务并发写同一库，互相 flush 覆写（经验 #19）。
+    assertWriteAllowed(this.dbPath, '初始化生产库');
+
     // @ts-ignore
     const SQL = await initSqlJs();
     const dir = dirname(this.dbPath);
@@ -2249,7 +2256,20 @@ export class SQLiteAdapter {
   }
 
   /** sql.js 的 run 方法运行时接受 params，但类型定义可能不完整 */
+  /**
+   * P1: ServerLock 写入准入（fail-open）。
+   * 仅对生产库生效；非生产库（测试/临时库）直接放行。
+   * 5 秒 TTL 缓存，避免每条 SQL 都读锁文件。
+   */
+  private _ensureWriteAllowed(): void {
+    const now = Date.now();
+    if (now < this._writeAllowedUntil) return;
+    assertWriteAllowed(this.dbPath, '生产库 SQL 写入');
+    this._writeAllowedUntil = now + 5000;
+  }
+
   private runSql(sql: string, params?: any[]): void {
+    this._ensureWriteAllowed();
     (this.db as any).run(sql, params);
   }
 
