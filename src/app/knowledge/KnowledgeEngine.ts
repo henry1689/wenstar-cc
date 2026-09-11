@@ -680,7 +680,9 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     let kbTotal = 0;
     try {
       const { rebuildAllIndexes } = await import('../../m4/SearchIndexBuilder.js');
-      const _idxDb = (sqlite as any).rawDb;
+      // 🆕 P3 修复: sql.js 内存态无 rawDb → fallback 到 sqlite 本身（sql.js Database 有 run/exec 方法）
+      // 根因: rebuildAllIndexes 原只接受 better-sqlite3 原始实例，导致 memory 索引永不上线
+      const _idxDb = (sqlite as any).rawDb ?? sqlite;
       if (_idxDb && typeof _idxDb.run === 'function') {
         const res = rebuildAllIndexes(_idxDb);
         kbTotal = res.total;

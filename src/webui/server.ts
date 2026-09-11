@@ -1163,20 +1163,30 @@ async function initPipeline(): Promise<void> {
   (async () => {
     try {
       const _si = storage.getSQLite();
-      if (_si?.rawDb) {
+      // 🆕 P3 修复: sql.js 内存态无 rawDb → fallback 到 _si 本身（sql.js Database 有 run/exec 方法）
+      // 根因: rebuildAllIndexes 原只接受 better-sqlite3 原始实例，导致 memory 索引永不上线
+      const _idxDb = _si?.rawDb ?? _si;
+      if (_idxDb) {
         const { isIndexEmpty, rebuildAllIndexes } = await import('../m4/SearchIndexBuilder.js');
-        if (isIndexEmpty(_si.rawDb)) {
+        if (isIndexEmpty(_idxDb)) {
           console.log('[SearchIndex] 首次启动，开始存量回填…');
-          const _report = rebuildAllIndexes(_si.rawDb);
+          const _report = rebuildAllIndexes(_idxDb);
           console.log(`[SearchIndex] 回填完成: ${_report.total} 条文档 (砂金${_report.bySource.conversation || 0} 金库${_report.bySource.memory || 0} 黑钻${_report.bySource.black_diamond || 0} 知识库${_report.bySource.knowledge_base || 0})`);
         } else {
           // V12.1: 检查各 source_type 索引是否缺失，缺失则增量补建
           try {
-            const _bdCnt = _si.rawDb.exec("SELECT COUNT(*) as cnt FROM search_index WHERE source_type='black_diamond'");
+            const _bdCnt = (_idxDb as any).exec("SELECT COUNT(*) as cnt FROM search_index WHERE source_type='black_diamond'");
             if (_bdCnt[0]?.values[0]?.[0] === 0) {
               console.log('[SearchIndex] 黑钻索引缺失，增量补建…');
-              const _report = rebuildAllIndexes(_si.rawDb);
+              const _report = rebuildAllIndexes(_idxDb);
               console.log(`[SearchIndex] 黑钻增量: ${_report.bySource.black_diamond || 0} 条`);
+            }
+            // 🆕 P3: memory 索引缺失检查
+            const _memCnt = (_idxDb as any).exec("SELECT COUNT(*) as cnt FROM search_index WHERE source_type='memory'");
+            if (_memCnt[0]?.values[0]?.[0] === 0) {
+              console.log('[SearchIndex] memory 索引缺失，补建…');
+              const _report = rebuildAllIndexes(_idxDb);
+              console.log(`[SearchIndex] memory 补建: ${_report.bySource.memory || 0} 条`);
             }
           } catch { /* 非关键 */ }
         }
