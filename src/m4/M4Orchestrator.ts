@@ -109,6 +109,10 @@ export class M4Orchestrator {
     let memories = await this.memoryRetriever.retrieveMemories(locusPath, enhancedEntities, {
       perception: decision.enhanced.perception,
       entityUuids: personUuids.length > 0 ? personUuids : undefined,
+      // 🔴 2026-09-12 召回窗口修复: 显式抬升检索窗口（原为默认 5 条）。
+      //   会晤实体记忆量大（实测徐诗雨 570 条），默认窗口下实体通道候选被挤出 merged
+      //   → 表现为"聊过的内容再聊就不记得"。窗口随实体规模抬升，配合分层召回。
+      limit: 15,
     });
 
     // ── V3.2 门阀过滤: 必须先过滤，再进入任何压缩、缓存、回调或快照链路 ──

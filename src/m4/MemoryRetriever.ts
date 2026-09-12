@@ -9,6 +9,8 @@ import type { DNA } from '../m1/types/dna.js';
 import type { Perception24D } from '../m3/types/perception.js';
 import type { MemorySummary } from './types/index.js';
 import { RETRIEVAL_THRESHOLDS, BATCH_SIZES, MIN_MATCHED_FOR_BREAK } from '../m2/retrieval-constants.js';
+// 🔴 2026-09-12 召回窗口修复: 实体分层召回的归属过滤统一走公安过滤器（户籍管理法第九条 搜索闸门）
+import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
 import { LocalCache } from '../app/tools/LocalCache.js';
 import { HippocampalIndex } from '../engine/tianquan/temporal/HippocampalIndex.js';
 import { SURNAME_CHARS } from '../config/app-identity.js';
@@ -48,6 +50,57 @@ export class MemoryRetriever {
   constructor(storage: FusionStorageAdapter, knowledgeBase?: KnowledgeBase) {
     this.knowledgeBase = knowledgeBase ?? null;
     this.storage = storage;
+  }
+
+  /**
+   * 实体 UUID 分层召回（2026-09-12 召回窗口修复）
+   *
+   * 根因：实体通道原为「按 seq_pos 倒序取最新 10 条」单窗口 —— 会晤实体记忆量大
+   *   （实测徐诗雨 TXS-000000007 名下 570 条），早期高钙化/地标记忆（如中秋之约）
+   *   永远进不了上下文，表现为"聊过的内容再聊就不记得"。
+   *
+   * 分层：① 最新层（近期对话上下文）② 重要层（地标 > 高钙化 > 高召回）——
+   *   两层均按 UUID 白名单过滤（deny-by-default），去重合并后截断到 window。
+   * 异常：查询失败返回空，由调用方回退存储公共 API，不阻断其余五路召回。
+   *
+   * @param uuid  会晤实体 UUID（归属唯一依据；裸名不参与判定）
+   * @param limit 分层窗口大小
+   */
+  private recallEntityMemoriesRanked(uuid: string, limit: number): any[] {
+    if (!uuid || limit <= 0) return [];
+    try {
+      const sqlite = (this.storage as any)?.getSQLite?.();
+      if (!sqlite || typeof sqlite.queryAll !== 'function') return [];
+      // 🔴 户籍管理法（第九条 搜索闸门）: 归属过滤唯一来源 = UUIDPoliceFilter。
+      //   白名单仅含目标实体；参数为空则 fail-closed（宁拒不放）。
+      const police = buildSqlClause({ visibleUuids: new Set([uuid]) });
+      if (!police.params.length) return [];
+      const window = Math.max(10, limit);
+      const half = Math.max(1, Math.ceil(window / 2));
+      const seen = new Set<string>();
+      const out: any[] = [];
+      const take = (rows: any[]) => {
+        for (const row of rows || []) {
+          const key = row?.id ?? row?.branch_id;
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          out.push(row);
+        }
+      };
+      take(sqlite.queryAll(
+        `SELECT * FROM memories WHERE 1=1${police.clause} ORDER BY seq_pos DESC LIMIT ?`,
+        [...police.params, half],
+      ));
+      take(sqlite.queryAll(
+        `SELECT * FROM memories WHERE 1=1${police.clause}
+         ORDER BY is_landmark DESC, calcium_score DESC, recall_count DESC, seq_pos DESC LIMIT ?`,
+        [...police.params, window],
+      ));
+      return out.slice(0, window);
+    } catch (e) {
+      console.warn('[M4] 实体分层召回失败:', (e as Error)?.message);
+      return [];
+    }
   }
 
   /** P1-2: 由上层（chat.ts/orchestrator）每轮注入当前会话ID */
@@ -251,12 +304,19 @@ export class MemoryRetriever {
     }
 
     // 4. 🆕 实体归属检索（belong_entity_uuid 直查，不依赖 memory_kind）
+    //    🔴 2026-09-12 召回窗口修复: 原「单窗口取最新 10 条」→ 分层召回（最新层 + 地标/高钙化层），
+    //       窗口随调用方 limit 抬升。会晤实体（实测徐诗雨 570 条）的早期记忆不再被最新记忆挤掉。
     const byEntityUuid: DNA[] = [];
     const entityUuids = options?.entityUuids || [];
-    if (entityUuids.length > 0 && typeof this.storage.findByEntityUuid === 'function') {
+    if (entityUuids.length > 0) {
+      const _entityWindow = Math.max(20, limit * 2);
       for (const uuid of entityUuids) {
         try {
-          const entityMems = this.storage.findByEntityUuid(uuid, 10);
+          let entityMems: any[] = this.recallEntityMemoriesRanked(uuid, _entityWindow);
+          // 回退：分层查询不可用（无 getSQLite / 查询异常）→ 走存储公共 API 单窗口
+          if (entityMems.length === 0 && typeof this.storage.findByEntityUuid === 'function') {
+            entityMems = this.storage.findByEntityUuid(uuid, _entityWindow) as any;
+          }
           if (entityMems && entityMems.length > 0) {
             for (const em of entityMems) {
               byEntityUuid.push({
@@ -641,10 +701,16 @@ export class MemoryRetriever {
     const runEntity = async (): Promise<RankedItem[]> => {
       const items: RankedItem[] = [];
       // V12.6: FusionStorageAdapter.findByEntityUuid 透传补齐（原 only-SQLiteAdapter → 恒 false 空转）
-      if (entityUuids.length > 0 && typeof this.storage.findByEntityUuid === 'function') {
+      // 🔴 2026-09-12 召回窗口修复: 与主路径同源 —— 分层召回 + 窗口随 limit 抬升（原硬编码 10 条）。
+      if (entityUuids.length > 0) {
+        // 本路所属接口无 limit 概念 → 固定分层窗口 20（旧实现硬编码取最新 10 条）
+        const _entityWindow = 20;
         for (const uuid of entityUuids) {
           try {
-            const entityMems = this.storage.findByEntityUuid(uuid, 10);
+            let entityMems: any[] = this.recallEntityMemoriesRanked(uuid, _entityWindow);
+            if (entityMems.length === 0 && typeof this.storage.findByEntityUuid === 'function') {
+              entityMems = this.storage.findByEntityUuid(uuid, _entityWindow) as any;
+            }
             if (entityMems?.length) {
               for (const em of entityMems) {
                 // S4 P0-1 修复: memory_type 从未被 rowToRecord 回填（恒 undefined）→ 死过滤。

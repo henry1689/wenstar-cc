@@ -119,6 +119,99 @@ const REFLECTIVE_VERB_RE = /权衡|草稿|折中|打磨|语气要|如何回应|�
 // V3 修复: [。！——] 的"—"误匹配正文"痛是美好的开始——"（名词短语破折号），把最终稿从中间截断。
 // 改为只认句末标点[。！？]或"开始吧"（转场句），不认"—"。
 const REFLECTIVE_GO_RE = /开始[。！？]|开始吧|让我来写[^。]{0,10}(?:回应|回答|一段|回复)[：:]|让我来写[^。]{0,10}[：:]|这样回应吧|让我再完善[^。]{0,20}[：:.]|让我再重写[^。]{0,20}[：:.]|让我定稿|让我稍微收紧[^。]{0,10}[：:.]|让我微调|让我收紧|嗯，这很好[^。]{0,30}让我定稿|再检查一遍|再润色一下[^。]{0,10}[：:.]|保持简短|不越界|最终确认|最终稿|修改流畅/g;
+/** V22(2026-09-12) 英文起草/元推理信号 —— 生产泄漏实测（徐诗雨会晤）：
+ *  模型先输出完整中文答案，随后**继续用英文输出起草自检**
+ *  （"Count: let me count roughly." → "Revised: …" → "~68 chars." → "Final: …"）。
+ *  既有 tailEvalRe / isAnalysisSentence 只枚举中文特征词 → 英文段落被判为答案直推前台。
+ *  本信号与语言无关：①词法签名 ②纯拉丁文长串（中文角色扮演中的成段英文必为元推理）。
+ *  安全原则沿用项目既有约定：拿不准宁可少推，也不洩漏后台话。 */
+const LATIN_META_SIG_RE = /(?:Count|Revised|Final|Draft|Version|Note)\s*[:：]|let me count|let me reconsider|let me check|let me revise|let me think|rule says|Alternatively\b|~?\d+\s*chars?\b|chars\.|\bHmm\b\s*,|I'll (?:go|write|keep|make|use)|Let's (?:count|go|check)/;
+/** 连续 ≥4 个英文词（含英文标点/空格分隔）—— 中文答案中不会出现的成段英文 */
+const LATIN_RUN_RE = /(?:[A-Za-z][A-Za-z''\-]{0,24}[ ,.:;!?~'"()\[\]{}\-]*){4,}/;
+/** V22: 英文起草起点（无则 -1）。流式直推与非流式提取共用同一判据。 */
+export function findLatinMetaStart(s: string): number {
+    if (!s) return -1;
+    const m = LATIN_META_SIG_RE.exec(s);
+    const r = LATIN_RUN_RE.exec(s);
+    const i1 = m ? m.index : -1;
+    const i2 = r ? r.index : -1;
+    if (i1 < 0) return i2;
+    if (i2 < 0) return i1;
+    return Math.min(i1, i2);
+}
+/** V22: 尾部元推理截断（保留真答案，丢弃其后的英文起草段）。
+ *  截断后为空 → 若命中词法签名则返回 ''（宁可空也不洩漏）；仅为拉丁长串则保留原文（避免误删纯英文答案）。 */
+export function truncateLatinMetaTail(text: string): string {
+    if (!text) return text;
+    const i = findLatinMetaStart(text);
+    if (i < 0) return text;
+    const head = text.slice(0, i).replace(/[\s，。、；：]+$/, '');
+    if (head.length > 0) return head;
+    return LATIN_META_SIG_RE.test(text) ? '' : text;
+}
+
+/** V22b 草稿/复述形态判据（生产实测 id=1784 / id=1770）：
+ *  剥离器可能把模型**整理上下文的草稿列表**当成答案返回：
+ *    `- "鸿艺，深更半夜的…"`（草稿引用）
+ *    `- 鸿艺: 你好 → 瑶瑶: 鸿艺，瑶瑶在呢。…`（对话复述）
+ *  正常角色回复以「（动作）」或对话直接起句，**不会**以列表项开头、也不会含复述箭头。 */
+export function isDraftShapedReply(text: string): boolean {
+    const s = (text || '').trim();
+    if (!s) return false;
+    // ① 以列表项开头（- / * / • / 1. / 1) ）—— 正常回复不会这样起句
+    if (/^[-*•]\s+/.test(s) || /^\d{1,2}[.)]\s+/.test(s)) return true;
+    // ② 含对话复述箭头（"角色A: 内容 → 角色B: 内容" = 模型整理上下文的草稿）
+    if (s.includes('→')) return true;
+    return false;
+}
+
+/** V22 回复字段择取（fail-closed 护栏）—— 生产洩漏修复（2026-09-12）
+ *
+ *  背景：V4-flash 是思维链模型，content 常为空、答复在 reasoning_content 里。
+ *  原实现：content 空 → 取 reasoning 原文 → extractAnswerFromReasoning 剥离失败时**返回原文**
+ *         → 整段思维链（英文分析 + 中文草稿 + 指令复述）被当前台回复输出（生产实测多条）。
+ *
+ *  现约定（字段边界优先 + 宁可空也不洩漏）：
+ *    ① content 有值 → 直接用 content（不让 reasoning 参与；但草稿形态仍判无效）
+ *    ② content 空   → reasoning 仅作**最后手段**，必须真正剥出答案：
+ *         剥离结果为空 / 长度≈原文（未剥下任何东西）/ 形态仍是草稿 → 返回 ''
+ *    ③ 两者都空 → ''
+ */
+export function resolveReplyFromFields(content?: string, reasoning?: string): string {
+    // ① 字段边界优先（content 也可能被模型用来承载思维链，同样不得原样透传）
+    const c = (content || '').trim();
+    if (c) {
+        if (isDraftShapedReply(c)) return '';
+        if (!looksLikeReasoning(c)) return c;
+        const ex = extractAnswerFromReasoning(c).trim();
+        if (!ex || isDraftShapedReply(ex)) return '';
+        return ex;
+    }
+    // ② content 空 → reasoning 仅作最后手段（必须真正剥出答案）
+    const r = (reasoning || '').trim();
+    if (!r) return '';
+    const extracted = extractAnswerFromReasoning(r).trim();
+    if (!extracted) return '';
+    // ③ fail-closed: 剥离未生效（≈原文）**且**文本确具思维链特征 → 判无可用答案。
+    //    ❗ 必须要求「具思维链特征」：V4-flash 降级模式会把正常短答案放进 reasoning_content，
+    //      若只看「未剥下东西」就判空，会误杀合法回复（实测 S4-m4 回归：“好的呀。” 被吞字）。
+    if (extracted.length >= r.length * 0.9 && looksLikeReasoning(r)) return '';
+    if (isDraftShapedReply(extracted)) return '';
+    return extracted;
+}
+
+/** V22c 思维链特征判据（fail-closed 判定用：区分「思维链」与「无标记的简洁答案」）
+ *  ❗ 仅取强信号：英文起草/元推理、草稿列表形态、引用系统指令。
+ *    刻意不含 REFLECTIVE_VERB_RE 类宽泛元认知词（"考虑/结构" 等正常回复也会出现）——避免误拦合法回复。 */
+export function looksLikeReasoning(text: string): boolean {
+    const t = text || '';
+    if (!t) return false;
+    if (findLatinMetaStart(t) >= 0) return true;
+    if (isDraftShapedReply(t)) return true;
+    if (SYSTEM_REFERENCE_RE.test(t)) return true;
+    return false;
+}
+
 /** 分析句特征 — 复盘思维链中的复述他人话语/自我权衡/系统引用/自我要求计划。
  * V2 修复: findAnswerStartRobust 用此区分分析句与真实答案句（防止"（他在接我刚才的话…"被当答案起点）。 */
 function isAnalysisSentence(s: string): boolean {
@@ -143,6 +236,9 @@ function isAnalysisSentence(s: string): boolean {
     //   （区别于动作描写答案：主语是角色本人"梓铭/她/玉瑶"+身体动作，或"他"+直接身体动词如"他愣了一下"。）
     //   注意: s 可能是含"（…）"的完整括号段（findAnswerStart 传入），开括号可选。
     if (/^[（(]?(?:他|鸿艺先生?)[^）]{0,50}?(?:惦记|在乎|关心|问我|说我|觉得|知道|认为|担心|在意|重视|主动)[^）]{0,40}?(?:作为|让我|我既|我得|我心里|我应该|我要|我不必|回应要|语气要)/.test(s))
+        return true;
+    // V22: 英文起草/元推理签名（仅词法签名，不含拉丁长串——避免误伤含少量英文的正常答案）
+    if (LATIN_META_SIG_RE.test(s))
         return true;
     return false;
 }
@@ -436,6 +532,12 @@ function dedupeRepeatedBlock(text: string): string {
     return t;
 }
 export function extractAnswerFromReasoning(text: string): string {
+    // V22: 尾部英文起草截断统一兜底（①②③④⑤ 全部策略链均经此出口）
+    return truncateLatinMetaTail(extractAnswerFromReasoningInner(text));
+}
+
+/** 原提取主体（V1–V21 策略链）。尾部元推理截断由外层 truncateLatinMetaTail 统一处理。 */
+function extractAnswerFromReasoningInner(text: string): string {
     if (!text)
         return '';
     // ① 复盘型思维链（引用系统指令标记）→ 专用剥离。'' = 宁空不泄漏后台话。
@@ -611,10 +713,17 @@ class StreamThinkingStripper {
             this.tailBuf += c;
             // 注意: search 是 String 方法，不是 RegExp 方法（V14 bug: tailEvalRe.search 抛异常吞后续 content）
             const evalIdx = this.tailBuf.search(StreamThinkingStripper.tailEvalRe);
-            if (evalIdx >= 0) {
-                const out = this.tailBuf.slice(0, evalIdx);
+            // V22: 英文起草/元推理截断 —— tailEvalRe 只枚举中文特征词，
+            //   模型在真答案后继续用英文写起草自检（Count:/Revised:/Final:/~68 chars）会整段洩漏前台。
+            //   两个判据取**更早**的截断点，任一命中即停止推送。
+            const latinIdx = findLatinMetaStart(this.tailBuf);
+            let cutIdx = evalIdx;
+            if (latinIdx >= 0 && (cutIdx < 0 || latinIdx < cutIdx))
+                cutIdx = latinIdx;
+            if (cutIdx >= 0) {
+                const out = this.tailBuf.slice(0, cutIdx);
                 this.tailBuf = '';
-                this.crossed = false; // 进入尾部评估 → 停止推送
+                this.crossed = false; // 进入尾部评估/英文起草 → 停止推送
                 return out;
             }
             const out = this.tailBuf;
@@ -671,7 +780,8 @@ class StreamThinkingStripper {
         const extracted = extractAnswerFromReasoning(this.buf);
         this.crossed = true;
         this.buf = '';
-        return extracted;
+        // V22b: 剥离结果若仍是草稿/复述形态 → 判无可用答案（宁可空也不洩漏）
+        return isDraftShapedReply(extracted) ? '' : extracted;
     }
 }
 
@@ -788,18 +898,17 @@ export class DeepSeekLLMProvider implements LLMProvider {
 
         const data = (await response.json()) as DeepSeekResponse;
         const msg = data.choices?.[0]?.message;
-        // DeepSeek V4-flash 是思维链模型，content 始终为空，回复在 reasoning_content 中
-        // 需要清理 reasoning 前缀，只保留真正回复
-        let text = '';
-        if (msg?.content && msg.content.trim()) {
-          text = msg.content.trim();
-        } else if (msg?.reasoning_content) {
-          text = msg.reasoning_content.trim();
+        // 🔴 V22(2026-09-12) 字段边界优先 + fail-closed（生产洩漏修复）
+        //   原实现: content 空 → 取 reasoning_content 原文 → extractAnswerFromReasoning 剥离失败时
+        //   **返回原文** → 整段思维链（英文分析 + 中文草稿 + 指令复述）被当回复输出（生产实测多条）。
+        //   现约定: content 有值即用；content 空时 reasoning 仅作最后手段，且必须真正剥出答案，
+        //   剥离失败(≈原文) 或 形态仍是草稿 → 判「无可用答案」，宁可失败重试也绝不洩漏。
+        const _rawReasoning = msg?.reasoning_content ?? (msg as any)?.reasoning;
+        if (!String(msg?.content || '').trim() && !String(_rawReasoning || '').trim()) {
+          throw new Error('Empty response from DeepSeek');
         }
-        if (!text) throw new Error('Empty response from DeepSeek');
-        // 🔴 P1-6: 从 reasoning_content 结构提取真正答案（过渡标记 + 计划句 + 降级）
-        //   S3 实测诊断: 关键词逐句剥离对 V4-flash 模板失效，整个思考过程被当答案返回
-        text = extractAnswerFromReasoning(text);
+        const text = resolveReplyFromFields(msg?.content, _rawReasoning as string | undefined);
+        if (!text) throw new Error('No usable answer after reasoning strip (fail-closed, 拒绝洩漏思维链)');
 
         return {
           text,
@@ -965,7 +1074,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
       //   流式期间 text 只累积 content 答案（reasoning 已丢弃，草稿/评估段绝不流式展示）。
       //   content 有答案 → 信任 text；content 空（降级模式: 答案在 reasoning）→ 用 reasoningBuf 全量剥离兜底。
       if (!text.trim()) {
-        const full = extractAnswerFromReasoning(stripper.reasoningBuf);
+        // 🔴 V22: fail-closed 兜底 —— 原实现直接信任 extractAnswerFromReasoning 的非空结果，
+        //   剥离失败（长度≈原文）时会把整段思维链当回复推出。现统一走 resolveReplyFromFields：
+        //   剥不出答案 或 形态仍是草稿 → 返回 ''，宁可空也不洩漏。
+        const full = resolveReplyFromFields('', stripper.reasoningBuf);
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
