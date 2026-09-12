@@ -20,7 +20,65 @@ import {
   extractTopicKeywords,
   keywordRecallMemories,
   recallOriginalConversations,
+  shouldEscalateToLlmPicker,
 } from '../../m4/retrieval/meeting-recall.js';
+
+/**
+ * C LLM 兜底挑选（2026-09-12）
+ *
+ * 场景：关键词与情感向量都拿不准（回忆问句 / 候选稀疏）时，把候选交 LLM 挑选。
+ * 通道：走 LLMProvider.rawCall（V3.2 既有「提取/分析类任务」通道，绕过 persona 与角色路由，
+ *   FGRelationExtractor 已有先例）—— 不构成第二个对话生成调用点。
+ * 成本：候选上限 30 条 × 每条截断 130 字，约 5500 token 输入；maxTokens 200 / temperature 0.1。
+ * 异常：无 rawCall 能力 / 抛错 / 输出无编号（含思维链散文）/ 越界编号 → 返回空数组，
+ *   由调用方回退原候选，绝不阻断对话。
+ *
+ * @param llm           提供 rawCall 的 LLM provider
+ * @param message       用户当前消息（挑选依据）
+ * @param candidates    候选池（id + 文本）
+ * @param maxCandidates 提交给 LLM 的候选上限
+ * @returns 被挑中的候选 id（保持候选原顺序），无命中返回 []
+ */
+export async function pickRelevantByLlm(
+  llm: { rawCall?: (messages: Array<{ role: string; content: string }>, maxTokens: number, temperature: number) => Promise<string> },
+  message: string,
+  candidates: Array<{ id: string; text: string }>,
+  maxCandidates = 30,
+): Promise<string[]> {
+  if (!llm || typeof llm.rawCall !== 'function') return [];
+  if (!candidates || candidates.length === 0) return [];
+  const pool = candidates.slice(0, Math.max(1, maxCandidates));
+  const listing = pool
+    .map((c, i) => `[${i}] ${String(c.text || '').replace(/\s+/g, ' ').slice(0, 130)}`)
+    .join('\n');
+  try {
+    const out = await llm.rawCall(
+      [
+        { role: 'system', content: '你是记忆检索助手。只输出与用户问题相关的候选编号，JSON 数组格式（如 [0,3]），无相关则输出 []。不要输出任何解释，不要复述候选内容。' },
+        { role: 'user', content: `用户问题：${message}\n\n候选记忆：\n${listing}\n\n请返回相关候选编号的 JSON 数组：` },
+      ],
+      200,
+      0.1,
+    );
+    // 允许负号：LLM 偶发输出 [1,-1] 这类含负数的数组，应逐项丢弃非法值而非整批失败
+    const m = String(out || '').match(/\[[\d,\s-]*\]/);
+    if (!m) return [];
+    const idxs = JSON.parse(m[0]);
+    if (!Array.isArray(idxs)) return [];
+    const seen = new Set<number>();
+    const ids: string[] = [];
+    for (const v of idxs) {
+      const i = Number(v);
+      if (!Number.isInteger(i) || i < 0 || i >= pool.length || seen.has(i)) continue;
+      seen.add(i);
+      ids.push(pool[i].id);
+    }
+    return ids;
+  } catch (e) {
+    console.warn('[LLMPicker] 兜底挑选失败，回退原候选:', (e as Error)?.message);
+    return [];
+  }
+}
 
 export interface RetrievalIntent {
   isTopicShift: boolean;
@@ -260,7 +318,29 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         for (const _pn of (_fg?.getAllPersonNames?.()) || []) {
           if (_pn !== _meetingEntityName && _pn !== '玉瑶' && message.includes(_pn)) _topicPrefer.push(_pn);
         }
-        const _topicKw = extractTopicKeywords(message, _exclKwNames, 4, _topicPrefer);
+        // 🔴 2026-09-12 生产实测修复: 原实现直接用 extractTopicKeywords(message, … , 4, …) 取前 4 个，
+        //   但它是**盲目 2/3 字滑窗**，实测在“你怎么什么都不记得”上抽出 `你怎/么什/么都/都不`，
+        //   噪声词占满 limit → 真正的话题词（如“中秋”）被饿死 → **几天前的具体记忆召回为空**
+        //   （用户反馈“几天前说的话都记不起来”）。
+        //   改为：候选放宽到 20 → **数据校验**（必须在实体自有记忆中真实出现）→ 按 (命中数, 词长) 排序取前 4。
+        const _topicKwRaw = extractTopicKeywords(message, _exclKwNames, 20, _topicPrefer);
+        let _topicKw: string[] = _topicKwRaw.slice(0, 4);
+        try {
+          const _scored = _topicKwRaw
+            .map(function (w) {
+              const _cntRows = _sqlite.queryAll(
+                'SELECT COUNT(*) c FROM memories WHERE belong_entity_uuid = ? AND raw_input LIKE ?',
+                [_entityUuid, '%' + w + '%'],
+              );
+              const _n = Number(_cntRows && _cntRows[0] ? _cntRows[0].c : 0) || 0;
+              return { w: w, n: _n };
+            })
+            .filter(function (x) { return x.n > 0; })
+            .sort(function (a, b) { return (b.n - a.n) || (b.w.length - a.w.length); });
+          if (_scored.length > 0) _topicKw = _scored.slice(0, 4).map(function (x) { return x.w; });
+          console.log('[EntityMem·抽词校验] 候选 ' + _topicKwRaw.length + ' → 命中 ' + _scored.length +
+            ' → 采用 [' + _topicKw.join('/') + ']');
+        } catch (_kw2e) { /* 校验失败→回退原前4 */ }
         if (_topicKw.length > 0) {
           try {
             const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4);
@@ -275,37 +355,93 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             if (_kwRows.length > 0) console.log(`[EntityMem·内容相关] 关键词 ${_topicKw.join('/')} 召回 ${_kwRows.length} 条 → 前置注入`);
           } catch (_kwcErr) { /* 内容相关召回失败不阻塞，保持纯钙化序 */ }
         }
-        for (const _em of _rankedMems.slice(0, 15)) {
+        // 🔴 注入质量闸门（2026-09-12 MEMPROBE 生产实测）:
+        //   近期槽 `ORDER BY calcium_score DESC` 在钙化值接近时退化为“最新优先”，
+        //   实测把下列东西当成“记忆”注入给了实体：
+        //     - 用户自己的消息碎片（"小老婆在哪去了" / "你咋又不记得了"）
+        //     - 上一轮洩漏出来的思维链（"or Body: - 心跳快…"）
+        //     - 键盘乱码（"AAAA…"）与纯符号（"…"）
+        //   → 实体拿到的全是垃圾，真正的“聊过的事”被挤掉（用户反馈：她用不上记忆）。
+        //   此处按**信息密度**剔除低价值记忆，宁少勿脏。
+        const _isLowValueMem = function (s: string): boolean {
+          const t = String(s || '').trim();
+          if (!t) return true;
+          // ① 有效字符（去空白与标点）少于 4 → 无效
+          if (t.replace(/[\s\p{P}\p{S}]/gu, '').length < 4) return true;
+          // ② 无中文 → 非中文角色记忆（含纯英文/数字/乱码）
+          const _cjk = (t.match(/[\u4e00-\u9fff]/g) || []).length;
+          if (_cjk === 0) return true;
+          // ③ 中文占比过低（乱码/英文夹杂）
+          if (_cjk / t.length < 0.15) return true;
+          // ④ 洩漏的思维链特征（含实测变体：The system says / The memory / 对话延续块）
+          if (/(?:^|\s)(?:Body\s*:|Draft\s*\d|Count\s*:|Revised\s*:|Final\s*:|Hmm\s*,|Let me\b|The system\s*says|The memory\s*:|对话延续)\b/i.test(t)) return true;
+          // ⑤ 草稿列表/对话复述形态
+          if (/^[-*•]\s/.test(t) || t.indexOf('→') >= 0) return true;
+          // ⑥ 过短且不是【核心】类完整交换记录 → 多为用户消息碎片
+          if (t.length < 12 && t.indexOf('【') < 0) return true;
+          return false;
+        };
+        let _injectedMems = 0, _junkSkipped = 0;
+        for (const _em of _rankedMems) {
+          if (_injectedMems >= 15) break;
           // 🔴 P0-3 修复: 会晤记忆截断 100 → 250（避免关键记忆细节丢失导致 LLM 编造）
           const _t = (_em.raw_input || '').substring(0, 250);
-          if (_t.length > 4) memoryFragments.push('【' + _meetingEntityName + '的记忆】' + _t);
+          if (_t.length <= 4) continue;
+          if (_isLowValueMem(_t)) { _junkSkipped++; continue; }
+          memoryFragments.push('【' + _meetingEntityName + '的记忆】' + _t);
+          _injectedMems++;
         }
+        if (_junkSkipped > 0) console.log('[EntityMem] 低价值记忆拦截: ' + _junkSkipped + ' 条（注入 ' + _injectedMems + ' 条）');
+        // [MEMPROBE] 临时排障（用完即删）: 会晤模式注入明细
+        try {
+          console.log('[MEMPROBE-1] entity=' + _meetingEntityName + ' uuid=' + _entityUuid +
+            ' recent=' + _recentRows.length + ' hist=' + _histRows.length +
+            ' entityMems=' + _entityMems.length + ' clean=' + _cleanMems.length +
+            ' ranked=' + _rankedMems.length + ' recallQ=' + _isRecallQuestion +
+            ' fragments=' + memoryFragments.length);
+          console.log('[MEMPROBE-2] heads=' + memoryFragments.slice(0, 4).map(function (f) { return String(f).replace(/\s+/g, ' ').slice(0, 34); }).join(' || '));
+        } catch {}
         if (_entityMems.length > 0) console.log('[EntityMem] 会晤实体自有记忆: ' + _cleanMems.length + ' 条(原' + _entityMems.length + ')');
         // 🔴 S2-J1b: 记忆不足时注入反编造强化 — 用户问"过去/经历/几岁"但无真实记忆时，
         // 明确告知 LLM: 无记录的经历 = 不存在，不得编造。宁说"记不清/档案没写"。
         if (_cleanMems.length < 3) {
           memoryFragments.push('【反编造铁律】如果你的档案和以上记忆中都没有用户问到的某个具体经历（如"几岁做了什么""某年某件事"），说明那件事没有记录。**绝不能编造**——诚实地说"这个我没印象了，档案里没写"或"我不记得有这样的事"。编造是系统级错误。');
         }
+        // 🔴 2026-09-12 生产实测修复（决定性命中）: 原查询只取"最新 5 条"且不过滤，
+        //   而她最新的 vault_log 多是 landmark 噪声（"AAAA…"/"散会"/"徐诗雨"/"…"）与空 content_md
+        //   → 实测注入的 5 条里 2 条空白 + 2 条碎片；真正有内容的条目（中秋 10 / 诗韵 68 / 诗涵 11 = 89 条）
+        //   永远进不了上下文。**这就是「她用不上记忆、还满口金库」的直接原因。**
+        //   现改为：只取有实质内容的条目（content_md 非空 ≥12 字 + 过质量闸门），最多 8 条。
         const _goldRows = _sqlite.queryAll(
-          "SELECT detail, content_md FROM vault_log WHERE belong_entity_uuid = ? ORDER BY created_at DESC LIMIT 5",
+          'SELECT content_md, detail, created_at FROM vault_log ' +
+          'WHERE belong_entity_uuid = ? AND content_md IS NOT NULL AND length(trim(content_md)) >= 12 ' +
+          'ORDER BY created_at DESC LIMIT 40',
           [_entityUuid]
         ) || [];
+        let _goldInjected = 0, _goldSkipped = 0;
         for (const _gr of _goldRows) {
-          // 🔴 P0-3 修复: 会晤金库记忆截断 100 → 250
-          const _t = (_gr.content_md || _gr.detail || '').substring(0, 250);
-          if (_t.length > 4 && !memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); }))
-            memoryFragments.push('【金库记忆】' + _t);
+          if (_goldInjected >= 8) break;
+          const _t = String(_gr.content_md || '').trim().substring(0, 250);
+          if (_t.length < 12) continue;
+          if (_isLowValueMem(_t)) { _goldSkipped++; continue; }
+          if (memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); })) continue;
+          memoryFragments.push('【金库记忆】' + _t);
+          _goldInjected++;
         }
+        console.log('[EntityMem] 金库: 候选 ' + _goldRows.length + ' → 注入 ' + _goldInjected + ' 条（拦截低价值 ' + _goldSkipped + '）');
         const _sandRows = _sqlite.queryAll(
-          "SELECT raw_input, calcium_level FROM memories WHERE belong_entity_uuid = ? AND calcium_level >= 2 ORDER BY calcium_score DESC LIMIT 5",
+          "SELECT raw_input, calcium_level FROM memories WHERE belong_entity_uuid = ? AND calcium_level >= 2 ORDER BY calcium_score DESC LIMIT 15",
           [_entityUuid]
         ) || [];
-        for (const _sr of _sandRows.slice(0, 3)) {
+        let _sandInjected = 0;
+        for (const _sr of _sandRows) {
+          if (_sandInjected >= 3) break;
           // 🔴 P0-3 修复: 会晤重要记忆截断 80 → 250
           const _t = (_sr.raw_input || '').substring(0, 250);
-          if (_t.length > 4 && !memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); })) {
+          if (_t.length > 4 && !_isLowValueMem(_t) && !memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); })) {
             const _tag = _sr.calcium_level >= 3 ? '💎' : '📌';
             memoryFragments.push('【' + _tag + '重要记忆】' + _t);
+            _sandInjected++;
           }
         }
         // 🔴 记忆召回彻底解决: 内容匹配召回 — 用户问具体过去的事（记得/聊过/上次）时，
@@ -433,6 +569,26 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
           }
         } catch (_mlErr) { /* 会晤长文直取失败不阻塞 */ }
+
+        // 🔴 2026-09-12 C: LLM 兜底挑选 —— 关键词/情感向量都拿不准时，把候选交 LLM 挑选。
+        //   触发（两者取或，业主 2026-09-12 定）：回忆问句（RECALL_TRIGGER_RE）或 候选稀疏（<3）。
+        //   无 llmProvider / 无命中 / 任一异常 → 保持原候选不变，不阻塞主流程。
+        if (memoryFragments.length > 0) {
+          try {
+            if (shouldEscalateToLlmPicker(message, memoryFragments.length) && ctx?.llmProvider) {
+              const _pkBefore = memoryFragments.length;
+              const _pkCands = memoryFragments.map(function (f: string, _pi: number) { return { id: String(_pi), text: f }; });
+              const _picked = await pickRelevantByLlm(ctx.llmProvider, message, _pkCands, 30);
+              if (_picked.length > 0) {
+                const _pkKeep = new Set(_picked);
+                for (let _pk = memoryFragments.length - 1; _pk >= 0; _pk--) {
+                  if (!_pkKeep.has(String(_pk))) memoryFragments.splice(_pk, 1);
+                }
+                console.log(`[LLMPicker] 兜底挑选: ${_pkBefore}→${memoryFragments.length} 条`);
+              }
+            }
+          } catch (_pkErr) { /* 兜底挑选失败不阻塞 — 保持原候选 */ }
+        }
       }
     } catch (_e) { /* non-critical */ }
     return {

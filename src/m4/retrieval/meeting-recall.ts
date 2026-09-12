@@ -42,6 +42,27 @@ export interface RecallConversationRow {
 export const RECALL_TRIGGER_RE =
   /(?:记得|聊过|说过|之前|以前|上次|那件事|那次|回忆|是不是|上次说|聊起|什么内容|最早|第一次|当初|刚认识|还是.{1,10}(?:的|的?事)|继续说|接着说|接着聊|接着刚才|回到刚才|再说说|再聊聊|再讲讲|刚才说|刚才讲到)/;
 
+/** C: 候选稀疏门槛 — 召回候选低于此数即触发 LLM 兜底挑选（业主 2026-09-12 定） */
+export const RECALL_SPARSE_THRESHOLD = 3;
+
+/**
+ * C 兜底挑选触发判定（2026-09-12）—— 回忆问句 **或** 候选稀疏，两者取或（业主 2026-09-12 定）。
+ *
+ * 背景：会晤召回已有「近期槽 + 历史槽 + 回忆问句追加最早 + 关键词 LIKE + 原文取回」五路，
+ *   但 ① 候选稀少时没有任何补强；② 候选池无论多少都直接注入，未按"与本次问题相关性"挑选。
+ *   关键词/情感向量都拿不准的场景即在此处兜底 —— 交 LLM 从候选中挑选（见 retrieval-stage.pickRelevantByLlm）。
+ *
+ * 纯函数、零依赖，供 retrieval-stage 与 MeetingWallAdapter 共用（与 RECALL_TRIGGER_RE 同源，防漂移）。
+ */
+export function shouldEscalateToLlmPicker(
+  message: string,
+  candidateCount: number,
+  threshold: number = RECALL_SPARSE_THRESHOLD,
+): boolean {
+  if (RECALL_TRIGGER_RE.test(message || '')) return true;
+  return candidateCount < threshold;
+}
+
 /** 无关词/高频结构词/触发词 — 关键词抽取时过滤（防"还是诗韵的事"只抽出"还是""的事"） */
 const STOP_KW = new Set([
   '我们', '你们', '他们', '那个', '这个', '什么', '怎么', '今天', '明天', '昨天',
