@@ -45,6 +45,29 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+/**
+ * 归属 UUID 推导（②-1，2026-09-13）
+ *
+ * 原实现：`String(conv.belong_entity_uuid || conv.entity_uuid || null)`
+ *   —— 两个来源都为空时 `String(null)` 产生**字符串 'null'**（真值），能绕过所有
+ *   `IS NOT NULL` / `!= ''` 判空判断写入库中。实测污染：memories 64 条（真实对话，
+ *   时间跨度 2026-08-28 ~ 09-12，因检索侧 UUIDPoliceFilter 白名单 fail-closed 而永远召不回）、
+ *   vault_log 38 条、black_diamond 4 条（后两者为其下游传播）。
+ *
+ * 收口为单一入口：修正陷阱，并主动拦截历史/未来脏值（字符串 'null' / 'undefined' /
+ *   空串 / 纯空白 / 非字符串原语）→ 统一返回 undefined 交由写入侧落 NULL。
+ *   这样检索侧的 fail-closed 判定才有意义（脏值不再伪装成合法归属）。
+ */
+export function deriveBelongUuid(conv: any): string | undefined {
+  for (const raw of [conv?.belong_entity_uuid, conv?.entity_uuid]) {
+    if (typeof raw !== 'string') continue;   // 非字符串原语（null/undefined/0/false）一律视为无归属
+    const s = raw.trim();
+    if (!s || s === 'null' || s === 'undefined') continue;
+    return s;
+  }
+  return undefined;
+}
+
 function normalizeTopicTag(topic: unknown): string | undefined {
   if (typeof topic !== 'string') return undefined;
   const normalized = topic.trim().replace(/\s+/g, '_').replace(/[^\w.\-\u4e00-\u9fa5]/g, '_');
@@ -251,8 +274,11 @@ export class MemoryAssessor {
           archived_at: null,
           healed_at: null,
           fg_entity_names: entityGenes.length > 0 ? formatNames(entityGenes.map((gene) => gene.name)) || undefined : undefined,
-          // V13: 从 source conversation 继承 entity 归属
-          belongEntityUuid: String(conv.belong_entity_uuid || conv.entity_uuid || null),
+          // V13 / ②-1(2026-09-13): 从 source conversation 继承 entity 归属。
+          //   原为 String(conv.belong_entity_uuid || conv.entity_uuid || null) —— 两者皆空时
+          //   String(null) 产生字符串 'null'（真值），绕过判空写入库并污染 vault_log/black_diamond。
+          //   收口到 deriveBelongUuid：修正陷阱 + 拦截脏值 + 无归属落 NULL。
+          belongEntityUuid: deriveBelongUuid(conv),
           primary_emotion: derivePrimaryEmotion(perception),
           recall_count: 0,
           last_recalled_at: null,
