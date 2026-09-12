@@ -11,6 +11,8 @@ import type { MemorySummary } from './types/index.js';
 import { RETRIEVAL_THRESHOLDS, BATCH_SIZES, MIN_MATCHED_FOR_BREAK } from '../m2/retrieval-constants.js';
 // 🔴 2026-09-12 召回窗口修复: 实体分层召回的归属过滤统一走公安过滤器（户籍管理法第九条 搜索闸门）
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
+// 🔴 2026-09-12 B1 关键词倒排召回: 查询词由用户当前消息派生（与索引生产端同源切词）
+import { buildNgrams } from './SearchIndexBuilder.js';
 import { LocalCache } from '../app/tools/LocalCache.js';
 import { HippocampalIndex } from '../engine/tianquan/temporal/HippocampalIndex.js';
 import { SURNAME_CHARS } from '../config/app-identity.js';
@@ -103,6 +105,73 @@ export class MemoryRetriever {
     }
   }
 
+  /**
+   * B1 关键词倒排召回（2026-09-12）
+   *
+   * 根因：旧实现走 findBySeqPosRange(limit 200) 拉最新 200 条再内存 includes 过滤 ——
+   *   会晤实体（实测徐诗雨 599 条，索引 470 文档）的早期记忆被挤出窗口，永远翻不到；
+   *   且查询词只取「实体名 + locus 末段」，用户消息正文里的词根本不进关键词集合。
+   *
+   * 实现：查询词由用户当前消息 buildNgrams 派生 → search_index 倒排命中
+   *   （term IN + UUID 白名单）→ 按命中词数排序取 topN → 回 memories 取正文。
+   * 归属：entityUuids 非空走 UUIDPoliceFilter.buildSqlClause（第九条 搜索闸门）；
+   *   为空（户主钥匙场景）不过滤，与既有 _entityUuidClause 语义一致。
+   * 异常：索引不可用/抛错/零命中 → 返回空，由调用方回退原路径。
+   *
+   * @param rawQuery    用户当前消息（查询词来源）
+   * @param entityUuids 会晤实体 UUID 白名单
+   * @param topN        倒排召回上限
+   */
+  private recallByKeywordIndex(rawQuery: string | undefined, entityUuids: string[] | undefined, topN: number): DNA[] {
+    if (!rawQuery || rawQuery.length < 2 || topN <= 0) return [];
+    try {
+      const sqlite = (this.storage as any)?.getSQLite?.();
+      if (!sqlite || typeof sqlite.queryAll !== 'function') return [];
+      const terms = buildNgrams(rawQuery).slice(0, 40);
+      if (terms.length === 0) return [];
+      const uuids = (entityUuids || []).filter(Boolean);
+      const police = uuids.length > 0
+        ? buildSqlClause({ visibleUuids: new Set(uuids) })
+        : { clause: '', params: [] as string[] };
+      if (uuids.length > 0 && police.params.length === 0) return [];  // fail-closed
+      const phs = terms.map(() => '?').join(',');
+      const hits = sqlite.queryAll(
+        `SELECT source_id, COUNT(DISTINCT term) AS hit
+         FROM search_index
+         WHERE source_type = 'memory' AND term IN (${phs})${police.clause}
+         GROUP BY source_id ORDER BY hit DESC LIMIT ?`,
+        [...terms, ...police.params, topN],
+      ) as any[];
+      if (!hits || hits.length === 0) return [];
+      const ids = hits.map(h => h.source_id).filter(Boolean);
+      if (ids.length === 0) return [];
+      const idPhs = ids.map(() => '?').join(',');
+      const rows = sqlite.queryAll(`SELECT * FROM memories WHERE id IN (${idPhs})`, ids) as any[];
+      const out: DNA[] = [];
+      for (const r of rows || []) {
+        out.push({
+          branch_id: r.id,
+          locus_path: r.locus_path ?? '',
+          taxonomy_version: '1.0',
+          seq_pos: r.seq_pos ?? 0,
+          leaf_zone: r.leaf_zone ?? 'language_semantic_zone',
+          ref: '',
+          entity_genes: [],
+          raw_input: r.raw_input ?? '',
+          created_at: r.created_at ?? '',
+          calcium_score: r.calcium_score,
+          calcium_level: r.calcium_level,
+          memory_kind: r.memory_kind,
+          memory_type: r.memory_type,
+        } as any);
+      }
+      return out;
+    } catch (e) {
+      console.warn('[M4] 关键词倒排召回失败:', (e as Error)?.message);
+      return [];
+    }
+  }
+
   /** P1-2: 由上层（chat.ts/orchestrator）每轮注入当前会话ID */
   setSessionId(sessionId: string): void {
     this._sessionId = sessionId;
@@ -123,7 +192,7 @@ export class MemoryRetriever {
   async retrieveMemories(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean }
+    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean; rawQuery?: string }
   ): Promise<DNA[]> {
     const limit = options?.limit ?? 5;
     const startTs = Date.now();
@@ -193,14 +262,28 @@ export class MemoryRetriever {
         const _cached = await keywordCache.get(cacheKey);
         if (_cached) { byKeyword.push(..._cached); }
         else {
-          const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids });
+          // 🔴 2026-09-12 B1 关键词倒排召回
+          //   旧实现：findBySeqPosRange(limit 200) 拉最新 200 条再内存 includes
+          //     → 会晤实体（实测徐诗雨 599 条）的早期记忆被挤出窗口，永远翻不到。
+          //   新实现：查询词由用户当前消息 buildNgrams 派生 → search_index 倒排命中
+          //     （term + UUID 白名单）→ 按命中词数排序 → 回表取正文。
+          //   索引不可用/零命中 → 回退下方原路径，不阻断其余五路召回。
           const seen = new Set<string>();
-          for (const dna of recent) {
-            for (const kw of keywords) {
-              if (dna.raw_input.includes(kw) && !seen.has(dna.branch_id)) {
-                seen.add(dna.branch_id);
-                byKeyword.push(dna);
-                break;
+          for (const dna of this.recallByKeywordIndex(options?.rawQuery, options?.entityUuids, 30)) {
+            if (!seen.has(dna.branch_id)) {
+              seen.add(dna.branch_id);
+              byKeyword.push(dna);
+            }
+          }
+          if (byKeyword.length === 0) {
+            const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids });
+            for (const dna of recent) {
+              for (const kw of keywords) {
+                if (dna.raw_input.includes(kw) && !seen.has(dna.branch_id)) {
+                  seen.add(dna.branch_id);
+                  byKeyword.push(dna);
+                  break;
+                }
               }
             }
           }
