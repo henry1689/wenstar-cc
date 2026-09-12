@@ -22,6 +22,75 @@ function calciumLevel(score: number): 0 | 1 | 2 | 3 {
   return 3;
 }
 
+/**
+ * P0-① 锚点归属解析 + 守卫（2026-09-12）
+ *
+ * 原实现在 flushDialogGroup 内联三层降级（dg.entities → characterName → conversations 按 seq_pos 反查），
+ * **三层全失败即静默写 belong_entity_uuid = null** —— 与会话逐轮写入（persistence-stage 有强制三级兜底）
+ * 规则不一致。实测代价：117 条无归属记忆在会晤场景被 fail-closed 拒（永远召不回），
+ * 且服务重启时 _rebuildMemoryAnchors 无条件 DELETE 后只重建有归属的组 → 永久消失。
+ *
+ * 守链（对齐《UUID户籍管理法》第五条 会晤写入强制 / 第七条 无户口写入拒绝）：
+ *   三层解析 → 会晤实体 UUID → 玉瑶 UUID → 仍为空返回 null，由调用方拒绝写入（宁拒不放）。
+ */
+export function resolveAnchorOwnership(
+  dg: any,
+  sql: any,
+  fg: any,
+  fallbacks: { meetingUuid?: string | null; yuyaoUuid?: string | null; characterName?: string | null } = {},
+): { uuid: string | null; source: string } {
+  let entityUuid: string | null = null;
+  try {
+    if (dg?.entities && dg.entities.length > 0) {
+      const personNames = dg.entities.filter((n: string) => n && n !== '我' && n !== '玉瑶');
+      for (const name of personNames) {
+        const uuid = fg?.getUUIDByName?.(name);
+        if (uuid) { entityUuid = uuid; break; }
+      }
+      if (!entityUuid && fallbacks.characterName) {
+        entityUuid = fg?.getUUIDByName?.(fallbacks.characterName) ?? null;
+      }
+    }
+    // V18: FG 解析失败时降级 — 从 conversations 表取该对话组已标注的实体 UUID
+    //      🔧 S4-FIX: 改用 seq_pos 定位（conversations 每轮插入即带 belong_entity_uuid），
+    //      不依赖 dialog_group_id 三段回填时序（回填在本函数尾部才执行，此前恒为 NULL）
+    if (!entityUuid) {
+      const seqs = (dg?.rounds || [])
+        .map((r: any) => r?.seqPos)
+        .filter((s: any) => typeof s === 'number' && s > 0)
+        .flatMap((s: number) => [s, s + 1]);
+      if (seqs.length > 0 && typeof sql?.queryAll === 'function') {
+        const convRow = sql.queryAll(
+          "SELECT belong_entity_uuid FROM conversations WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' LIMIT 1"
+        );
+        if (convRow && (convRow as any[]).length > 0) {
+          entityUuid = (convRow[0] as any)?.belong_entity_uuid ?? null;
+        }
+      }
+    }
+  } catch { /* 解析失败不阻塞 — 交由下方守链处理 */ }
+
+  if (entityUuid) return { uuid: entityUuid, source: 'resolved' };
+  if (fallbacks.meetingUuid) return { uuid: fallbacks.meetingUuid, source: 'meeting' };
+  if (fallbacks.yuyaoUuid) return { uuid: fallbacks.yuyaoUuid, source: 'yuyao' };
+  return { uuid: null, source: 'none' };
+}
+
+/**
+ * P2 锚点说话人署名（2026-09-12）
+ * 原实现硬编码 '玉瑶: '，会晤徐诗雨时锚点里也写"玉瑶说" → 召回后 LLM 看到错误署名。
+ * 改为按归属实体解析真实姓名；无归属或户籍查不到 → 回退玉瑶（不抛错）。
+ */
+export function resolveAnchorSpeaker(fg: any, entityUuid: string | null): string {
+  if (!entityUuid) return '玉瑶';
+  try {
+    const name = fg?.getEntityByUUID?.(entityUuid)?.name;
+    return name || '玉瑶';
+  } catch {
+    return '玉瑶';
+  }
+}
+
 export async function flushDialogGroup(
   ctx: any,
   dg: any,
@@ -83,39 +152,27 @@ export async function flushDialogGroup(
       catch { return 'null'; }
     };
 
-    // V13: 解析实体 UUID（从 dg.entities 取第一个 person 名查 FamilyGraph）
-    let entityUuid: string | null = null;
-    if (dg.entities && dg.entities.length > 0) {
-      try {
-        const fg = ctx.m4?.getFamilyGraph?.();
-        if (fg) {
-          const personNames = dg.entities.filter((n: string) => n && n !== '我' && n !== '玉瑶');
-          for (const name of personNames) {
-            const uuid = fg.getUUIDByName?.(name);
-            if (uuid) { entityUuid = uuid; break; }
-          }
-          if (!entityUuid && ctx.ctx?.characterName) {
-            entityUuid = fg.getUUIDByName?.(ctx.ctx.characterName) ?? null;
-          }
-        }
-        // V18: FG 解析失败时降级 — 从 conversations 表取该对话组已标注的实体 UUID
-        //      🔧 S4-FIX: 改用 seq_pos 定位（conversations 每轮插入即带 belong_entity_uuid），
-        //      不依赖 dialog_group_id 三段回填时序（回填在本函数尾部才执行，此前 dialog_group_id 恒为 NULL）
-        if (!entityUuid) {
-          const seqs = (dg.rounds || [])
-            .map((r: any) => r.seqPos)
-            .filter((s: any) => typeof s === 'number' && s > 0)
-            .flatMap((s: number) => [s, s + 1]);
-          if (seqs.length > 0) {
-            const convRow = sql.queryAll?.(
-              "SELECT belong_entity_uuid FROM conversations WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' LIMIT 1"
-            );
-            if (convRow && (convRow as any[]).length > 0) {
-              entityUuid = (convRow[0] as any)?.belong_entity_uuid ?? null;
-            }
-          }
-        }
-      } catch { /* UUID 解析不阻塞 */ }
+    // V13 / 🔴 2026-09-12 P0-①：归属解析收口到 resolveAnchorOwnership（含守链与拒绝语义）。
+    //   原实现在三层解析全失败时静默写 belong_entity_uuid = null —— 实测产生 117 条无归属记忆，
+    //   在会晤场景被 fail-closed 拒之门外（永远召不回），且重启时被 _rebuildMemoryAnchors
+    //   的 DELETE 清掉而不重建（永久消失）。对齐《UUID户籍管理法》第五条/第七条：无户口不得写入。
+    const _anchorFg = ctx.m4?.getFamilyGraph?.();
+    const _own = resolveAnchorOwnership(dg, sql, _anchorFg, {
+      characterName: ctx.ctx?.characterName ?? null,
+      meetingUuid: ctx._entityMeeting?.getEntityUUID?.() ?? null,
+      yuyaoUuid: _anchorFg?.getUUIDByName?.('玉瑶') ?? null,
+    });
+    const entityUuid = _own.uuid;
+    if (!entityUuid) {
+      // 宁拒不放：归属无法确定的对话组不写锚点（后续碎片/黑钻/图谱写入一并跳过，
+      // 因为整组数据的归属同源 —— 写下去即制造新的无归属僵尸记忆）
+      console.warn('[DG] 归属解析全失败且无兜底 — 拒绝写入本组（户籍管理法第七条 无户口写入拒绝）: 组=' + (dg && dg.id));
+      return;
+    }
+    // P2: 署名改用归属实体真实姓名（原硬编码 '玉瑶: '，会晤徐诗雨时也写"玉瑶说"）
+    const _speakerName = resolveAnchorSpeaker(_anchorFg, entityUuid);
+    if (_speakerName !== '玉瑶') {
+      anchorText = anchorText.split('\n玉瑶: ').join('\n' + _speakerName + ': ');
     }
 
     // 写入核心锚点（高钙化分，带anchor_score标记）

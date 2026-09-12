@@ -434,10 +434,16 @@ export class MemoryRetriever {
     }
 
     // 5. 检索规则：正常模式排除角色扮演记忆（memory_kind='roleplay' 或 memory_type='rp_dialog'）
+    // 🔴 2026-09-12 P0-② 过滤对称化: 原条件仅 `isBackgroundTask` → **非会晤场景（和玉瑶聊天）
+    //   完全不过滤**，byLocus/byEmotion/byKeyword 三路把他人会晤记忆注入玉瑶上下文
+    //   （实测症状：玉瑶频道自称"诗雨"）。现对称判定：
+    //     会晤场景(entityUuids 非空) → 保留本实体的会晤记忆；
+    //     非会晤场景 → 排除（他人会晤记忆不得注入）；后台任务 → 维持排除。
+    const _nonMeetingContext = (options?.entityUuids?.length ?? 0) === 0;
     const _filtered = merged.filter(dna => {
       // V12.7(批1): memory_kind 已由 toDNA 回填（此前恒 undefined 死过滤）；
       // memory_type 从未被 rowToRecord 回填 → 删死判定，统一用 memory_kind。
-      if (options?.isBackgroundTask && dna.memory_kind === 'roleplay') return false;
+      if ((options?.isBackgroundTask || _nonMeetingContext) && dna.memory_kind === 'roleplay') return false;
       return true;
     });
     if (_filtered.length < merged.length) {
