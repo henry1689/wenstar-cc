@@ -199,11 +199,15 @@ export class InductionScheduler {
             const snippet = highCalcium[i].substring(0, 40);
             const exists = this.dreamQueue.getPending().some((d: any) => d.content?.includes(snippet));
             if (!exists) {
-              this.dreamQueue.add({
+              const dream = this.dreamQueue.add({
                 source: 'Induction',
                 content: '小时归纳发现一段高钙化记忆: ' + snippet,
                 affected_traits: topEntities.length > 0 ? topEntities.slice(0, 3) : ['extraversion'],
               });
+              // add() 可能返回 null（内容被过滤）
+              if (!dream) {
+                console.warn('[Induction→Dream] 梦境内容被过滤，跳过生成');
+              }
             }
           } catch (err) { console.warn('[Induction→Dream] 联动失败:', err); }
         }

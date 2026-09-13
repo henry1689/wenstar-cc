@@ -141,12 +141,17 @@ export class M7Orchestrator {
     const calcium = decision.enhanced?.calcium_score ?? 0;
     if (!rawInput || calcium < M3_CONFIG.calcium.level3Threshold) return;
 
-    this.queue.add({
+    const dream = this.queue.add({
       source: 'dialog_trigger',
       content: rawInput.substring(0, 200),
       affected_traits: [],
       related_memory_id: dna.branch_id || undefined,
     });
+    // add() 可能返回 null（内容被过滤）
+    if (!dream) {
+      console.warn(`[M7] triggerInduction: 梦境内容被过滤，跳过生成 (calcium=${calcium.toFixed(2)})`);
+      return;
+    }
     console.log(`[M7] triggerInduction: 推入梦境队列 (calcium=${calcium.toFixed(2)})`);
   }
 
