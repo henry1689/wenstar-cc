@@ -12,6 +12,8 @@
  * 不依赖 conversationHistory RAM 数组。
  */
 import type { ConversationTurn } from '../../m5/types/index.js';
+// V23.1(2026-09-13): 上下文窗口下限取自配置唯一事实源（MemoryConfig 为纯配置，无循环依赖）
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 
 export interface EmotionSnapshot {
   pleasure: number;
@@ -34,13 +36,23 @@ export class EntityContextStore {
    */
   queryEntityContext(uuid: string, limit: number = 200, includeCompacted: boolean = false): ConversationTurn[] {
     try {
-      const compactedFilter = includeCompacted ? '' : 'AND is_compacted = 0';
+      // 🔴 V23.1(2026-09-13): 下限保护 —— 调用点此前硬编码 40，而"归档保留窗口"是 100（keepFullTurns）。
+      //   两者脱节导致"保留了 100 条却只注入 40 条"，余下约 30 轮留而不用，
+      //   是"聊久了记不住前面的事"的直接成因之一。
+      //   此处按配置下限兜底：调用方传得比它小也按配置取（窗口策略属存储层职责，避免散落在各调用点）。
+      const _floor = (() => {
+        try { return Number(MEMORY_CONFIG.compaction.contextWindowTurns) || 0; } catch { return 0; }
+      })();
+      const _limit = _floor > 0 ? Math.max(limit, _floor) : limit;
+      // 🔴 2026-09-12 隔离区过滤: is_test=1 的对话永不得进入实体上下文。
+      //   用途: 已将洩漏污染型回复标记为 is_test=1（不删数据），此处保证它们不再被当作“聊过的事”回灌给实体。
+      const compactedFilter = (includeCompacted ? '' : 'AND is_compacted = 0') + ' AND (is_test IS NULL OR is_test = 0)';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp, belong_entity_uuid
          FROM conversations
          WHERE belong_entity_uuid = ? ${compactedFilter}
          ORDER BY timestamp DESC LIMIT ?`,
-        [uuid, limit],
+        [uuid, _limit],
       );
       if (!rows?.length) return [];
       return rows
@@ -66,7 +78,8 @@ export class EntityContextStore {
     try {
       const { recent, early, mid, includeCompacted } = opts;
       const compactedFlag = includeCompacted ? 1 : 0;
-      const compactedFilter = compactedFlag ? '' : 'AND is_compacted = 0';
+      // 🔴 2026-09-12 隔离区过滤（同 queryEntityContext）: is_test=1 永不进入实体上下文
+      const compactedFilter = (compactedFlag ? '' : 'AND is_compacted = 0') + ' AND (is_test IS NULL OR is_test = 0)';
       const totalRow = this._sqlite.queryAll(
         `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? ${compactedFilter}`,
         [uuid],

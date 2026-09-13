@@ -17,6 +17,9 @@ type AnyStorage = { getStatus(): Promise<{ totalRecords: number }> | { totalReco
 import { SURNAME_LIST, SURNAME_CHARS } from '../config/app-identity.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — 人名抢救也过闸门(句子残留以姓开头假名不入户籍)
 import { checkPersonEntity } from '../m4/household/EntityWriteGate.js';
+// 🔴 V23.1(2026-09-13): 压缩/窗口参数唯一事实源 —— 原为本地硬编码，与 MemoryConfig、config.ts
+//   三处漂移（40/20 vs 200/100）。现统一从 MEMORY_CONFIG.compaction 取。
+import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
 
 // ──────────────────────────────────────────────
 // 类型定义
@@ -72,8 +75,11 @@ const DEFAULT_CONFIG: MaintenanceConfig = {
   compactionInterval: 5 * 60 * 1000,      // 5 分钟
   gcInterval: 30 * 60 * 1000,             // 30 分钟
   decayInterval: 15 * 60 * 1000,          // 15 分钟
-  compactionThreshold: 200,                // 200 轮触发压缩（之前40太小，一超20轮就吞原文）
-  keepFullTurns: 100,                      // 保留最近 100 轮完整原文
+  // V23.1: 取自 MEMORY_CONFIG.compaction（唯一事实源），不再本地硬编码。
+  //   历史：此处曾是 200/100 硬编码，而 config.ts/maintenance 是 40/20、MemoryConfig 是 200/100，
+  //   三处漂移且只有本处生效 —— 现归一。
+  compactionThreshold: MEMORY_CONFIG.compaction.threshold,
+  keepFullTurns: MEMORY_CONFIG.compaction.keepFullTurns,
   maxStorageRecords: 500,                  // M2 最多 500 条
   healthCheckInterval: 15 * 1000,         // 15 秒
   eventLoopWarnThreshold: 200,            // 200ms 告警
@@ -279,15 +285,23 @@ export class MaintenanceService {
     const sqlite = this._sqliteGetter ? this._sqliteGetter() : null;
     if (sqlite) {
       try {
-        const totalRaw = sqlite.queryAll("SELECT COUNT(*) as cnt FROM conversations WHERE is_compacted=0 AND is_test=0");
+        // V23.1: 统计口径与归档 SQL 保持一致 —— `is_test=0` 会漏掉 NULL（实测库中大量 is_test 为 NULL），
+        //   同时排除摘要条目（摘要不参与压缩，见下方归档 SQL 注释）。
+        const totalRaw = sqlite.queryAll(
+          "SELECT COUNT(*) as cnt FROM conversations WHERE is_compacted=0 AND (is_test IS NULL OR is_test=0) AND (is_summary IS NULL OR is_summary=0)",
+        );
         const rawCount = totalRaw[0]?.cnt || 0;
         if (rawCount > this.config.compactionThreshold) {
           // 标记最早的 half 为已压缩（只标记，不删除）
           const keep = typeof this.config.keepFullTurns === 'number' && isFinite(this.config.keepFullTurns) ? this.config.keepFullTurns : 200;
           const toMark = Math.max(0, rawCount - keep);
           if (toMark > 0 && !isNaN(toMark)) {
+            // 🔴 V23.1(2026-09-13): 归档必须**豁免摘要条目**（`is_summary=0`）。
+            //   原 SQL 不带该条件 → 摘要条目被自己所属的压缩流程压掉，
+            //   随即失去"摘要"身份（实测 11 条【对话摘要】全部 is_compacted=1、is_summary=0）。
+            //   摘要本就是压缩的**产物**，不是待压缩的原始对话。
             sqlite.writeRaw(
-              "UPDATE conversations SET is_compacted=1 WHERE id IN (SELECT id FROM conversations WHERE is_compacted=0 AND is_test=0 ORDER BY rowid ASC LIMIT ?)",
+              "UPDATE conversations SET is_compacted=1 WHERE id IN (SELECT id FROM conversations WHERE is_compacted=0 AND (is_test IS NULL OR is_test=0) AND (is_summary IS NULL OR is_summary=0) ORDER BY rowid ASC LIMIT ?)",
               [toMark]
             );
             console.log(`[Maintenance] DB压缩: 标记 ${toMark} 条对话为已压缩 (砂金库共 ${rawCount} 条)`);
@@ -329,15 +343,28 @@ export class MaintenanceService {
           const firstTs = toCompact.length > 0 ? (toCompact[0].timestamp || new Date().toISOString()) : new Date().toISOString();
           const lastTs = toCompact.length > 0 ? (toCompact[toCompact.length - 1].timestamp || new Date().toISOString()) : new Date().toISOString();
           if (summaries.length > 0) {
-            const summaryText = summaries.map(function(s) { return s.content; }).filter(Boolean).join(' | ');
+            // 🔴 V23.1(2026-09-13) 防嵌套：生成摘要时排除**已有的摘要条目**。
+            //   原实现把 `summaries`（含历史摘要）直接拼进来 → 实测出现
+            //   `【对话摘要】【历史对话】【历史对话】…` 反复摘要嵌套。
+            const _plainSummaries = summaries.filter(function (s: any) {
+              const c = String(s?.content || '');
+              return c && !c.startsWith('【对话摘要】') && !c.startsWith('【历史对话】');
+            });
+            const summaryText = _plainSummaries.map(function (s: any) { return s.content; }).filter(Boolean).join(' | ');
             if (summaryText) {
-              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 200), { seqPos: 0 });
+              // 🔴 V23.1: 传 isSummary=1 —— 摘要必须可被识别（否则 is_summary 恒 0，摘要通道失效）。
+              //   is_compacted 保持 0：摘要是压缩产物，不应被归档流程压掉。
+              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 200), { seqPos: 0, isSummary: 1 } as any);
             }
           }
           const cutoff = remaining.length > 0 ? remaining[0].timestamp : null;
           // 🔴 铁律：砂金库永久留存原始对话，仅做压缩标记，不物理删除
           if (cutoff) {
-            sqlite.writeRaw('UPDATE conversations SET is_compacted = 1 WHERE timestamp < ? AND is_compacted = 0', [cutoff]);
+            // V23.1: 同样豁免摘要条目（与 runCompaction 的归档 SQL 保持同一口径）
+            sqlite.writeRaw(
+              'UPDATE conversations SET is_compacted = 1 WHERE timestamp < ? AND is_compacted = 0 AND (is_summary IS NULL OR is_summary = 0)',
+              [cutoff],
+            );
             console.log('[Maintenance] 标记压缩完成: < ' + cutoff + ' (原始数据永久保留)');
           }
         }

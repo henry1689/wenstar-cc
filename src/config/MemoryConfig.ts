@@ -124,12 +124,26 @@ export const MEMORY_CONFIG = {
     calciumMin: 0.0,
   },
 
-  // ── 对话压缩 ──
+  // ── 对话压缩 / 砂金库上下文窗口 ──
+  // 🔴 V23.1(2026-09-13) 本段是**唯一事实源**。
+  //   历史教训：同一概念曾在三处各自定义且取值不同 ——
+  //     MemoryConfig.ts（本处 200/100）、config.ts.maintenance（40/20，零引用死配置）、
+  //     webui/maintenance.ts 的 DEFAULT_CONFIG（硬编码 200/100，唯一实际生效）。
+  //   现归一：本处为准，maintenance.ts 从此读本配置；config.ts 的遗留段删除。
   compaction: {
-    /** 触发压缩的对话轮次阈值 */
+    /** 触发压缩的对话条数阈值（超过则把最早的归档，保留 keepFullTurns 条原文不压缩） */
     threshold: 200,
-    /** 压缩后保留的完整轮次数 */
+    /** 归档后保留的完整对话条数（不参与归档的"近期全量"窗口） */
     keepFullTurns: 100,
+    /**
+     * 注入 LLM 上下文的近期对话条数。
+     *
+     * 🔴 此前该值硬编码在调用点（chat.ts 的 queryEntityContext(…, 40, …) / getContextWindow(…, 40, …)），
+     *   与 keepFullTurns(100) **脱节** —— 保留了 100 条却只注入 40 条，
+     *   余下 60 条（约 30 轮）"留而不用"，是"聊久了记不住前面的事"的直接成因之一。
+     *   现统一为本配置项，与 keepFullTurns 联动取用。
+     */
+    contextWindowTurns: 80,
   },
 
   // ── 黑钻快查情绪标签 ──

@@ -150,6 +150,17 @@ export class ConversationDB {
     dialogRound?: number;
     isTest?: number;
     isCompacted?: number;
+    /**
+     * V23.1(2026-09-13) 摘要条目标记 —— **与 isCompacted 独立**。
+     *
+     * 原实现没有本字段，写入时把 `is_compacted` 的值同时赋给 `is_summary`（注释称"过渡兼容"），
+     * 导致摘要条目**永远落不了 `is_summary=1`** —— 生产实测 11 条 `【对话摘要】` 记录
+     * 全部 `is_summary=0`，砂金库的"压缩→摘要"通道形同虚设。
+     *
+     * 语义：摘要条目应 `is_summary=1` 且 `is_compacted=0` —— 它本身是压缩的**产物**，
+     * 不应再被归档流程压掉（归档 SQL 也已同步加 `is_summary=0` 豁免）。
+     */
+    isSummary?: number;
     roleplayChar?: string;
     namespace?: string;
     /** V3.2: 户籍卷宗归档 — 此对话归属的实体 UUID */
@@ -165,14 +176,17 @@ export class ConversationDB {
     // C3(2026-09-11): 逗号分隔的写入格式定义收口到 EntityNameCodec.formatNames（唯一事实源）
     const entityNames = formatNames(options?.entityNames);
     const perceptionSummary = options?.perception ? JSON.stringify(options.perception) : '';
-    // is_summary 与 is_compacted 同步写入（过渡兼容，后续统一为 is_summary）
+    // V23.1(2026-09-13): is_summary 与 is_compacted **独立取值**。
+    //   原实现是 `compactVal, compactVal`（联动），使摘要条目永远落不了 is_summary=1 ——
+    //   实测 11 条【对话摘要】全部 is_summary=0，摘要通道失效。
     const compactVal = options?.isCompacted ?? 0;
+    const summaryVal = options?.isSummary ?? 0;
     this.db.run(
       `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, global_uid, location_fingerprint, dialog_group_id, dialog_round, is_test, is_compacted, is_summary, roleplay_char, is_promoted, namespace, belong_entity_uuid, mentioned_entity_uuids, message_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       [role, content, timestamp, seqPos, options?.topic || '', entityNames, perceptionSummary,
        options?.calciumScore || 0, options?.dnaRootId || null, options?.globalUid || null, options?.locationFingerprint || null,
-       options?.dialogGroupId || null, options?.dialogRound ?? null, options?.isTest ?? 0, compactVal, compactVal,
+       options?.dialogGroupId || null, options?.dialogRound ?? null, options?.isTest ?? 0, compactVal, summaryVal,
        options?.roleplayChar || null, options?.namespace || 'default', options?.belongEntityUuid || null,
        options?.mentionedEntityUuids ? JSON.stringify(options.mentionedEntityUuids) : null,
        options?.messageId ?? null],
