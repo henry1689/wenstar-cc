@@ -18,6 +18,8 @@ import type { ConversationTurn } from '../../m5/types/index.js';
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 // V12.4 阶段B 根除24D: perception_json 列已删，金库写入用 40D 默认向量 / 提炼读 40D 列
 import { encodeEmptyPerceptionV40, decodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
+// 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（本文件原有 2 处 `x || null` 回查透传，挡不住字符串 'null'）
+import { sanitizeBelongUuid } from './belong-uuid.js';
 
 // ─── 类型定义 ───
 
@@ -98,11 +100,13 @@ export function logVaultOperation(
 ): void {
   const id = 'vl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
   // V13: 写入 belong_entity_uuid — 确保金库记忆可被 UUID 检索系统找到
-  let euuid = belongEntityUuid || null;
+  // ②-1补漏(2026-09-13): 入参与回查值都过净化 —— 原 `x || null` 挡不住字符串 'null'（真值），
+  //   源记忆带脏值时会把 'null' 原样搬进 vault_log。
+  let euuid = sanitizeBelongUuid(belongEntityUuid) ?? null;
   if (!euuid && sourceId) {
     try {
       const mem = sqlite.queryAll("SELECT belong_entity_uuid FROM memories WHERE id = ?", [sourceId]) as any[];
-      if (mem.length > 0) euuid = mem[0]?.belong_entity_uuid || null;
+      if (mem.length > 0) euuid = sanitizeBelongUuid(mem[0]?.belong_entity_uuid) ?? null;
     } catch { /* 回查失败不阻塞 */ }
   }
   sqlite.writeRaw(
@@ -196,11 +200,14 @@ export function addBlackDiamond(
     } catch { /* 解析失败则 l2_norm=NULL */ }
   }
   // V13: 回查 memories.belong_entity_uuid 确保黑钻标注实体归属
+  // 🔴 ②-1补漏(2026-09-13): 实测传播点 —— 原 `memRow[0]?.belong || null` 挡不住字符串 'null'，
+  //   源记忆带脏值时黑钻继承 'null'（取证：4 条脏黑钻的 source_id 全部回查为 typeof=text 的 'null'；
+  //   清库后重启即重现，正是此处再次回查所致）。
   let _bdeuuid: string | null = null;
   if (params.source_id) {
     try {
       const memRow = sqlite.queryAll('SELECT belong_entity_uuid FROM memories WHERE id = ?', [params.source_id]) as any[];
-      _bdeuuid = memRow?.[0]?.belong_entity_uuid || null;
+      _bdeuuid = sanitizeBelongUuid(memRow?.[0]?.belong_entity_uuid) ?? null;
     } catch { /* 回查不阻塞 */ }
   }
   sqlite.writeRaw(

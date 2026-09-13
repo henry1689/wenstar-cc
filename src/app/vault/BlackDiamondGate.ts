@@ -17,6 +17,8 @@
  */
 
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
+// 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（审计日志回查黑钻归属时不得透传字符串 'null'）
+import { sanitizeBelongUuid } from './belong-uuid.js';
 
 export interface ManualAddResult {
   success: boolean;
@@ -210,10 +212,11 @@ export class BlackDiamondGate {
     try {
       const id = `vd_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 4)}`;
       // V13: 回查 black_diamond.belong_entity_uuid 确保审计日志可被 UUID 检索
+      // ②-1补漏(2026-09-13): 原 `bd[0]?.belong || null` 挡不住字符串 'null'，会把它搬进 vault_log
       let euuid: string | null = null;
       try {
         const bd = this.sqlite.queryAll('SELECT belong_entity_uuid FROM black_diamond WHERE id = ?', [targetId]) as any[];
-        if (bd.length > 0) euuid = bd[0]?.belong_entity_uuid || null;
+        if (bd.length > 0) euuid = sanitizeBelongUuid(bd[0]?.belong_entity_uuid) ?? null;
       } catch { /* 回查不阻塞 */ }
       this.sqlite.writeRaw(
         `INSERT INTO vault_log (id, operation, source_type, target_id, detail, created_at, belong_entity_uuid)

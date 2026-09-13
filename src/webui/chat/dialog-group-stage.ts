@@ -7,6 +7,8 @@
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { computeCalcium } from '../../m2/math.js';
 import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
+// 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
+import { sanitizeBelongUuid } from '../../app/vault/belong-uuid.js';
 // V13.0: 在线 DAG 建边（feature flag 控制，不阻塞闭组主流程）
 let _dagEdgeBuilders: { entity: any; causal: any; repo: any } | null = null;
 let _lastGroupCtx: any = null;  // V13: 上一个闭组上下文（供因果边构建）
@@ -60,11 +62,13 @@ export function resolveAnchorOwnership(
         .filter((s: any) => typeof s === 'number' && s > 0)
         .flatMap((s: number) => [s, s + 1]);
       if (seqs.length > 0 && typeof sql?.queryAll === 'function') {
+        // ②-1补漏(2026-09-13): SQL 层排除字符串 'null' 脏值（它是真值，能穿过 IS NOT NULL / != ''），
+        //   并在取值处再过一次净化 —— 双保险，避免脏值被当作合法归属写进锚点。
         const convRow = sql.queryAll(
-          "SELECT belong_entity_uuid FROM conversations WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' LIMIT 1"
+          "SELECT belong_entity_uuid FROM conversations WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND belong_entity_uuid != 'null' LIMIT 1"
         );
         if (convRow && (convRow as any[]).length > 0) {
-          entityUuid = (convRow[0] as any)?.belong_entity_uuid ?? null;
+          entityUuid = sanitizeBelongUuid((convRow[0] as any)?.belong_entity_uuid) ?? null;
         }
       }
     }

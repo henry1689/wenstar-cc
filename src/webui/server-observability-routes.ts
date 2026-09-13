@@ -974,6 +974,13 @@ export async function handleObservabilityRoutes(
 
   // ── SSE 实时推送 ──
   if (req.method === 'GET' && url.pathname === '/events') {
+    // 🔴 2026-09-13 [遗留③]: server.ts:1700-1724 **已经**处理过 /events —— 它 writeHead(200)、
+    //   sseClients.add(res) 并挂心跳，但该分支**漏了 return**，流程继续流到 server.ts:1780
+    //   调用的本函数，于是这里的 writeHead 二次写头 → 抛 ERR_HTTP_HEADERS_SENT
+    //   （实测单会话日志 144 次，每次附带一条「[Server] ⛪ 未捕获Promise拒绝」噪音）。
+    //   守卫：响应头已发出则视为已被上游处理，直接返回 true，不再重复写。
+    //   （本分支在现行 server.ts 下实为不可达；保留是为了万一上游那段被移除时仍有实现。）
+    if (res.headersSent) return true;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',

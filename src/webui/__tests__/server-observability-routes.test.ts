@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCommandCenterSnapshot } from '../server-observability-routes.js';
+import { buildCommandCenterSnapshot, handleObservabilityRoutes } from '../server-observability-routes.js';
 
 describe('buildCommandCenterSnapshot', () => {
   it('aggregates hooks, memory, heart, and module signals into one snapshot', async () => {
@@ -168,5 +168,62 @@ describe('buildCommandCenterSnapshot', () => {
     expect(snapshot.memory.knowledge.classified).toBe(16);
     expect(snapshot.modules.m8.scars).toBe(1);
     expect(snapshot.heart.state.emotionLabel.label).toBe('安心');
+  });
+});
+
+// [遗留③] /events 重复写头守卫（2026-09-13）
+//
+// 根因（实测取证）：server.ts:1700-1724 **已经**处理过 GET /events —— 它 writeHead(200)
+//   并 sseClients.add(res)，但该分支**漏了 return**，流程继续流到 L1780 的
+//   handleObservabilityRoutes，于是本模块的 /events 分支再次 writeHead(200)
+//   → 抛 ERR_HTTP_HEADERS_SENT（实测单会话日志 144 次，且每次都产生一条
+//     "[Server] ⛑️ 未捕获Promise拒绝" 噪音）。
+//
+// 契约：响应头已发送时**不得重复写**，直接返回 true 表示已被处理。
+//   本模块的 /events 分支在现行 server.ts 下实为不可达的死代码；保留是为了
+//   万一 server.ts 那侧被移除时仍有实现，但必须加守卫而非盲目写头。
+describe('handleObservabilityRoutes — /events 重复写头守卫', () => {
+  /** 造 res 桩：记录 writeHead / write 调用，并可控 headersSent */
+  function makeRes(headersSent: boolean) {
+    const calls: string[] = [];
+    const res = {
+      headersSent,
+      writeHead: () => { calls.push('writeHead'); },
+      write: () => { calls.push('write'); return true; },
+      on: () => {},
+    } as any;
+    return { res, calls };
+  }
+
+  const deps = (res: any, sseClients: Set<any>) => ({
+    req: { method: 'GET', url: '/events', on: () => {} },
+    res,
+    url: new URL('http://localhost/events'),
+    sseClients,
+  }) as any;
+
+  it('🔴 headersSent 为 true → 不得再次 writeHead，且返回 true 表示已处理', async () => {
+    const { res, calls } = makeRes(true);
+    const handled = await handleObservabilityRoutes(deps(res, new Set()));
+    expect(handled).toBe(true);
+    expect(calls).not.toContain('writeHead');
+  });
+
+  it('headersSent 为 false → 正常写 200 并注册 SSE 客户端（不回归）', async () => {
+    const { res, calls } = makeRes(false);
+    const clients = new Set<any>();
+    const handled = await handleObservabilityRoutes(deps(res, clients));
+    expect(handled).toBe(true);
+    expect(calls).toContain('writeHead');
+    expect(clients.has(res)).toBe(true);
+  });
+
+  it('非 /events 路径不受影响（不误吞其他路由）', async () => {
+    const { res, calls } = makeRes(true);
+    const d: any = deps(res, new Set());
+    d.url = new URL('http://localhost/api/health');
+    const handled = await handleObservabilityRoutes(d);
+    expect(calls).not.toContain('writeHead');
+    expect(handled).toBe(false);
   });
 });

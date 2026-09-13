@@ -54,19 +54,15 @@ function clamp(value: number, min: number, max: number): number {
  *   时间跨度 2026-08-28 ~ 09-12，因检索侧 UUIDPoliceFilter 白名单 fail-closed 而永远召不回）、
  *   vault_log 38 条、black_diamond 4 条（后两者为其下游传播）。
  *
- * 收口为单一入口：修正陷阱，并主动拦截历史/未来脏值（字符串 'null' / 'undefined' /
- *   空串 / 纯空白 / 非字符串原语）→ 统一返回 undefined 交由写入侧落 NULL。
- *   这样检索侧的 fail-closed 判定才有意义（脏值不再伪装成合法归属）。
+ * 2026-09-13 举一反三：实现迁移至零依赖的 `./belong-uuid.js` 作为**唯一事实源**，
+ *   因为下游还有 6 处同类透传点（VaultManager / BlackDiamondGate / M8FusionAdapter /
+ *   WorkRepository / dialog-group-stage），跨模块引用需要一个无循环依赖的落脚点
+ *   （本文件已 import './VaultManager.js'，不能反向）。此处保留 re-export 以维持既有调用面。
  */
-export function deriveBelongUuid(conv: any): string | undefined {
-  for (const raw of [conv?.belong_entity_uuid, conv?.entity_uuid]) {
-    if (typeof raw !== 'string') continue;   // 非字符串原语（null/undefined/0/false）一律视为无归属
-    const s = raw.trim();
-    if (!s || s === 'null' || s === 'undefined') continue;
-    return s;
-  }
-  return undefined;
-}
+import { deriveBelongUuid, sanitizeBelongUuid } from './belong-uuid.js';
+// 注意：必须用 import + export 两步，不能写 `export { X } from './y.js'` ——
+// 后者是纯重导出，不会在本文件创建本地绑定，本文件内部的 deriveBelongUuid 调用会 TS2304。
+export { deriveBelongUuid, sanitizeBelongUuid };
 
 function normalizeTopicTag(topic: unknown): string | undefined {
   if (typeof topic !== 'string') return undefined;

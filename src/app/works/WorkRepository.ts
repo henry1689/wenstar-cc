@@ -11,6 +11,8 @@
  */
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { filterRows as policeFilterRows, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
+// 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（回填时不得把 conversations 的字符串 'null' 搬进 works）
+import { sanitizeBelongUuid } from '../vault/belong-uuid.js';
 
 export interface WorkRecord {
   work_id: string;
@@ -163,7 +165,7 @@ export class WorkRepository {
           source_conversation_ids, created_at, updated_at)
          VALUES (?, ?, 'story', ?, ?, ?, ?, ?, ?, ?)`,
         `wk_${cryptoRandom(12)}`, _titleFrom(text), _firstSent(text),
-        _summaryOf(text), text.substring(0, 5000), row.belong_entity_uuid ?? null,
+        _summaryOf(text), text.substring(0, 5000), sanitizeBelongUuid(row.belong_entity_uuid) ?? null,
         JSON.stringify([row.id]), new Date().toISOString(), new Date().toISOString(),
       );
       count++;
