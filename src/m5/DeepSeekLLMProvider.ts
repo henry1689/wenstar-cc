@@ -250,6 +250,40 @@ const CN_META_PLAN_RE = new RegExp([
     '不错[。，][^。\\n]{0,20}但要控制|再调整[。，]|避免太文艺|要口语化',
 ].join('|'));
 
+/**
+ * V23.1(2026-09-13) **出口守卫 —— 唯一把关点**
+ *
+ * 为什么需要它（用户实测暴露的教训）：
+ *   本文件要推送给用户 / 落库的文本**出口曾有 5 处**，各自判断：
+ *     · StreamThinkingStripper 内 3 处（各自调 extractAnswerFromReasoning）
+ *     · 流式兜底 1 处（content 空时取 reasoningBuf）
+ *     · 流式收尾护栏 1 处（只查草稿形态与记忆括注）
+ *   V23 修好了判据本身，却只接入了**非流式**那一处 → 流式路径继续泄漏并落库
+ *   （实测 id=2321，服务已加载修复后仍产生）。
+ *   **这就是"打补丁"的恶果：修了 2 处，还剩 3 处漏网。**
+ *
+ * 治理方式：**收口**——不再往每个出口各加一条判据，而是让所有出口统一经过本函数，
+ *   使"漏网"这一类别从结构上消失。新增出口时也只需记得过这一关。
+ *
+ * ❗ 判据必须是**高置信度、零误杀**的三条：
+ *     · isDraftShapedReply —— 列表项开头 / 对话复述箭头（正常回复不会有）
+ *     · CN_META_PLAN_RE    —— 元指令句式（正常回复不会有）
+ *     · 【…的记忆】原样回显 —— 注入片段被吐回
+ *   ⚠️ **刻意不含 findLatinMetaStart**：它会把含 ≥4 个英文词（如 `A和"test"`）的正常回复
+ *      误判为思维链（2026-09-13 实测 37 条误报）。它只适合作为「剥离起点」使用，
+ *      不适合放进出口守卫 —— 那会造成大面积误杀（回复变空）。
+ *
+ * @returns 通过守卫的原文；判定为思维链/回显时返回空串（宁可空也不泄漏）
+ */
+export function gateOutgoingReply(text: string): string {
+    const t = (text || '').trim();
+    if (!t) return '';
+    if (isDraftShapedReply(t)) return '';
+    if (CN_META_PLAN_RE.test(t)) return '';
+    if (/【[^】]*的记忆】/.test(t)) return '';
+    return t;
+}
+
 /** V22c 思维链特征判据（fail-closed 判定用：区分「思维链」与「无标记的简洁答案」）
  *  ❗ 仅取强信号：英文起草/元推理、草稿列表形态、中文元指令（V23 补）。
  *    刻意不含 REFLECTIVE_VERB_RE 类宽泛元认知词（"考虑/结构" 等正常回复也会出现）——避免误拦合法回复。 */
@@ -811,7 +845,8 @@ class StreamThinkingStripper {
         }
         // ②b V14: 缓冲上限保护——buf 超长仍未识别答案起点（content 全思维链），用 extractAnswerFromReasoning 剥离
         if (this.buf.length > 200) {
-            const extracted = extractAnswerFromReasoning(this.buf);
+            // V23.1: 出口过守卫 —— extractAnswerFromReasoning 对剥不动的文本原样返回
+            const extracted = gateOutgoingReply(extractAnswerFromReasoning(this.buf));
             if (extracted && extracted.trim().length > 0 && extracted.length < this.buf.length - 10) {
                 this.crossed = true;
                 this.buf = '';
@@ -822,7 +857,8 @@ class StreamThinkingStripper {
         if (/^好的，现在/.test(this.buf) && this.buf.length < 200)
             return '';
         // ④ 无标记/无答案起点：非流式提取兜底（剥角色建立/关键词/计划句）
-        const extracted = extractAnswerFromReasoning(this.buf);
+        // V23.1: 出口过守卫 —— 同上，防「剥不动即原样返回」
+        const extracted = gateOutgoingReply(extractAnswerFromReasoning(this.buf));
         if (extracted && extracted.trim().length > 0 && extracted.length < this.buf.length - 10) {
             this.crossed = true;
             this.buf = '';
@@ -835,11 +871,11 @@ class StreamThinkingStripper {
     flush() {
         if (this.crossed || !this.buf)
             return '';
-        const extracted = extractAnswerFromReasoning(this.buf);
+        // V23.1: 出口过统一守卫（原实现只查 isDraftShapedReply，中文元指令型会漏出）
+        const extracted = gateOutgoingReply(extractAnswerFromReasoning(this.buf));
         this.crossed = true;
         this.buf = '';
-        // V22b: 剥离结果若仍是草稿/复述形态 → 判无可用答案（宁可空也不洩漏）
-        return isDraftShapedReply(extracted) ? '' : extracted;
+        return extracted;
     }
 }
 
@@ -1137,7 +1173,11 @@ export class DeepSeekLLMProvider implements LLMProvider {
         //   「…（抱歉，我暂时无法回应，请稍后再试。）」（实测 15 分钟内 3 次）。
         //   保留「宁可空也不洩漏」的意图，但改为**尽力提取**：extractAnswerFromReasoning
         //   内部已含 V22 语言无关尾截断（英文起草段照样被切掉），仅当整段确为思维链时才返回空。
-        const full = extractAnswerFromReasoning(stripper.reasoningBuf);
+        // 🔴 V23.1(2026-09-13): 出口统一过 gateOutgoingReply —— 实测此出口曾漏出中文元指令型
+        //   思维链并落库（id=2321）。extractAnswerFromReasoning 对"剥不动"的文本会**原样返回**，
+        //   必须由守卫兜底判断。守卫判据零误杀，不会让降级模式下的合法短答被吞
+        //   （与上方注释担心的"退化成抱歉无法回应"无关：那只发生在无条件判空时）。
+        const full = gateOutgoingReply(extractAnswerFromReasoning(stripper.reasoningBuf));
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
@@ -1149,8 +1189,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
       //     `- "【徐诗雨的记忆】 鸿艺——（好像在斟酌用词），你是问诗韵和诗涵吧？…"`（草稿列表）。
       //   流式 token 已推出（done 帧会覆盖气泡），但**返回值必须判空**，
       //   交给 M5Orchestrator 重试，避免把草稿/回显当回复落库。
-      if (text && (isDraftShapedReply(text) || /【[^】]*的记忆】/.test(text))) {
-        console.error('[DeepSeek] 流式收尾护栏: 拒绝草稿/记忆回显形态 (len=' + text.length + ')');
+      // 🔴 V23.1(2026-09-13): 改用统一出口守卫（原实现只查草稿形态 + 记忆括注，
+      //   中文元指令型从这里溜过去并落库）。gateOutgoingReply 是超集且判据零误杀。
+      if (text && gateOutgoingReply(text) !== text) {
+        console.error('[DeepSeek] 流式收尾护栏: 拒绝思维链/草稿/记忆回显形态 (len=' + text.length + ')');
         text = '';
         sawToken = false;
       }
