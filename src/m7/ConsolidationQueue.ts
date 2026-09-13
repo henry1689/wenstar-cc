@@ -80,12 +80,16 @@ export class ConsolidationQueue {
               try {
                 const traits: string[] = ['extraversion'];
                 if (candidate.calcium_score > 0.4) traits.push('agreeableness');
-                this.dreamQueue.add({
+                const dream = this.dreamQueue.add({
                   source: 'Consolidation',
                   content: `系统注意到一条重要记忆: ${candidate.raw_input.substring(0, 40)}`,
                   affected_traits: traits,
                   related_memory_id: candidate.id,
                 });
+                // add() 可能返回 null（内容被过滤）
+                if (!dream) {
+                  console.warn('[Consolid→Dream] 梦境内容被过滤，跳过生成');
+                }
               } catch (err) {
                 console.warn('[Consolid→Dream] 联动失败:', err);
               }

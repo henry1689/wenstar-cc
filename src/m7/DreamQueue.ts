@@ -7,6 +7,24 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { PendingDream } from './types/index.js';
 
+// 🔴 梦境内容过滤：拦截 LLM 拒绝话术/安全提示，防止固化进梦境系统
+const DREAM_CONTENT_BLOCKLIST = [
+  // 拒绝/安全提示关键词
+  '没法', '不能', '无法', '禁止', '拒绝', '不合适', '不应该',
+  // 未成年人相关
+  '14岁', '15岁', '16岁', '未成年', '初中生', '初三', '高一',
+  // 敏感场景
+  '角色扮演', '性相关', '亲密行为', '身体接触',
+  // 系统提示词特征
+  '系统注意到', '重要记忆', '高钙化记忆',
+];
+
+/** 检查梦境内容是否应该被拦截 */
+function isDreamContentBlocked(content: string): boolean {
+  if (!content) return false;
+  return DREAM_CONTENT_BLOCKLIST.some(keyword => content.includes(keyword));
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DREAM_FILE = join(__dirname, '..', '..', 'data', 'dreams', 'pending_dreams.json');
@@ -34,8 +52,14 @@ export class DreamQueue {
     fs.writeFileSync(this.filePath, JSON.stringify(this.dreams, null, 2), 'utf-8');
   }
 
-  /** 添加新梦境条目 */
-  add(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream {
+  /** 添加新梦境条目（带内容过滤）*/
+  add(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream | null {
+    // 🔴 内容过滤：拦截 LLM 拒绝话术/安全提示
+    if (isDreamContentBlocked(dream.content)) {
+      console.warn("[DreamQueue] 拦截敏感梦境:", dream.content.substring(0, 50));
+      return null;
+    }
+    
     const entry: PendingDream = {
       id: `dream_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
       ...dream,
