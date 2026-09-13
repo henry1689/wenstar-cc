@@ -181,11 +181,25 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     // ① 字段边界优先（content 也可能被模型用来承载思维链，同样不得原样透传）
     const c = (content || '').trim();
     if (c) {
-        if (isDraftShapedReply(c)) return '';
-        if (!looksLikeReasoning(c)) return c;
+        // content 非空: ① 默认视为答案；② 但若剥离器能真正剥下东西（变短 >10 字）
+        //   → 说明 content 里裹着思维链（含中文复盘型，由 extractAnswerFromReasoning 内部 V2–V20 判据负责）→ 用剥离结果。
+        // ❗ 无论如何**不得整体判空**——判空会让会晤模式退化成「…（抱歉，我暂时无法回应…）」
+        //   （2026-09-12 生产实测回归），而不是掉回旧版的「返回原文」。
         const ex = extractAnswerFromReasoning(c).trim();
-        if (!ex || isDraftShapedReply(ex)) return '';
-        return ex;
+        if (ex && ex.length < c.length - 10)
+            return isDraftShapedReply(ex) ? '' : ex;
+        const tail = truncateLatinMetaTail(c).trim();
+        if (tail.length < c.length - 10)
+            return isDraftShapedReply(tail) ? '' : tail;
+        // 🔴 V23(2026-09-13): 两条剥离**都没生效**（≈原文）→ 与分支② 同口径 fail-closed：
+        //   仅当文本**确具思维链特征**时才判空，否则原样返回。
+        //   为何必须补这一步：原实现此处无条件 `return tail` —— 剥不动就把原文（整段思维链）
+        //   当回复返回。实测泄漏形态为中文元指令型（"我要以徐诗雨身份回答…要带自称，40-80字，
+        //   可以稍微说：…"），而当时的 looksLikeReasoning 对纯中文恒 false，闸门形同虚设。
+        //   保留「无条件判空」的旧 V22 写法也不行：会误杀 V4-flash 降级模式下把正常短答放进
+        //   content 的合法形态 → 会晤退化成「抱歉，我暂时无法回应」。
+        if (looksLikeReasoning(c)) return '';
+        return isDraftShapedReply(c) ? '' : c;
     }
     // ② content 空 → reasoning 仅作最后手段（必须真正剥出答案）
     const r = (reasoning || '').trim();
@@ -200,15 +214,56 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     return extracted;
 }
 
+/**
+ * V23(2026-09-13) 中文「元指令型」思维链判据 —— 正常角色回复**绝不可能**出现的
+ * 「打算怎么答」句式。
+ *
+ * 背景：V22 期间从 looksLikeReasoning 移除了 SYSTEM_REFERENCE_RE（因为它含 `【…记忆…】`
+ * 模式，会误杀引用「【徐诗雨的记忆】」的合法会晤回复）。那个理由本身成立，但**连带后果**是
+ * 中文元指令型思维链再无判据认领 —— findLatinMetaStart 只认英文起草，isDraftShapedReply
+ * 只认草稿列表，于是纯中文元指令恒返回 false → fail-closed 闸门（下方 L202）永不触发 →
+ * reasoning 原文被当回复返回。
+ *
+ * 生产实测（用户直接提供的两条原文）：
+ *   ①「鸿艺问：…他在确认：…我要以徐诗雨身份回答。这是事实回忆。…要带自称，简洁，
+ *      40-80字。以徐诗雨口吻。可以稍微说：你给诗雨看的那篇…」
+ *   ②「用户说"再来一次"——指的是刚才那个吻。我是徐诗雨…长度按亲密互动，200-400字左右。
+ *      …写：…不错。但要控制长度和自然度。再调整。…最终版本：…」
+ *
+ * ❗ 本判据只收**高置信度**句式，且**刻意不含任何 `【…】` 括注模式** —— 从而在修复泄漏的
+ *   同时，保住 V22 那项「不误杀记忆括注」的成果。
+ * ❗ 仅在「剥离未生效」时用于 fail-closed 判定，正常回复不会走到那条路径，误杀面极小。
+ */
+const CN_META_PLAN_RE = new RegExp([
+    // ① 身份 / 角色元指令
+    '我要以[^。！？\\n]{0,12}身份(?:回答|回应|说话)',
+    '自称铁律|要带自称|要带上[「"“]?自?称',
+    '保持角色[：:]|保持状态一致|不要内心独白|旁白短',
+    '按会晤模式|按规则[：:]|根据规则[：:]',
+    // ② 事实 / 诚实元指令
+    '事实回忆|事实优先|记忆优先|当前问题是事实',
+    '不能编造|不要编造|不要添加|绝对禁止',
+    // ③ 写作计划 / 草稿迭代
+    '\\d{2,3}\\s*[-~～至]\\s*\\d{2,3}\\s*字',
+    '可以稍微说[：:]|最终版本[：:]|(?:^|\\n)\\s*回应[：:]',
+    '让我(?:来|再)?(?:写|完善|重写|定稿|确认|微调|收紧|理清|梳理)',
+    '不错[。，][^。\\n]{0,20}但要控制|再调整[。，]|避免太文艺|要口语化',
+].join('|'));
+
 /** V22c 思维链特征判据（fail-closed 判定用：区分「思维链」与「无标记的简洁答案」）
- *  ❗ 仅取强信号：英文起草/元推理、草稿列表形态、引用系统指令。
+ *  ❗ 仅取强信号：英文起草/元推理、草稿列表形态、中文元指令（V23 补）。
  *    刻意不含 REFLECTIVE_VERB_RE 类宽泛元认知词（"考虑/结构" 等正常回复也会出现）——避免误拦合法回复。 */
 export function looksLikeReasoning(text: string): boolean {
     const t = text || '';
     if (!t) return false;
     if (findLatinMetaStart(t) >= 0) return true;
     if (isDraftShapedReply(t)) return true;
-    if (SYSTEM_REFERENCE_RE.test(t)) return true;
+    // ✅ V23: 中文元指令型（见 CN_META_PLAN_RE 说明）。
+    if (CN_META_PLAN_RE.test(t)) return true;
+    // ❌ 仍然**不含** SYSTEM_REFERENCE_RE：它匹配任何含「记忆/规则/优先」等词的【…】块，
+    //    而合法会晤回复会引用「【徐诗雨的记忆】」这类括注 → 会被误判为思维链并被整条判空。
+    //    生产实测（2026-09-12）: 误杀后会晤模式退化为「…（抱歉，我暂时无法回应，请稍后再试。）」。
+    //    V23 的 CN_META_PLAN_RE 已用「只收元指令句式、零括注模式」的方式补上这块空白。
     return false;
 }
 
@@ -560,6 +615,9 @@ function extractAnswerFromReasoningInner(text: string): string {
     // ⑤ legacy 逻辑（残留系统标记由 removeSystemMarks 兜底清理）
     return removeSystemMarks(extractAnswerFromReasoningLegacy(text));
 }
+// ⚠️ 2026-09-12 去重说明: 此处曾出现**第二份** resolveReplyFromFields（并行窗口 W2 写入）。
+//   同文件两份定义 → tsc TS2323/TS2393 → **整个 webui 无法启动**（生产实例掉线实测）。
+//   唯一权威实现见本文件上方（含 fail-closed 收窄 / content 分支不判空 / 语言无关英文起草截断）。
 /** 草稿迭代型评估段强信号 —— 统一 V17/V18/V20 三类漂移措辞（正常角色回答绝不含，不依赖漂移措辞）。
  * V17: 最终确认/最终稿；V18: ✓/最终写出来/检查；V20: 让我+元认知动词（重写/优化/定稿/再试）。
  * 注意不收录"差不多/保持了…语气"等弱词——它们在正常对话里常见（"收拾得差不多了"），靠强信号触发。 */
@@ -1074,15 +1132,27 @@ export class DeepSeekLLMProvider implements LLMProvider {
       //   流式期间 text 只累积 content 答案（reasoning 已丢弃，草稿/评估段绝不流式展示）。
       //   content 有答案 → 信任 text；content 空（降级模式: 答案在 reasoning）→ 用 reasoningBuf 全量剥离兜底。
       if (!text.trim()) {
-        // 🔴 V22: fail-closed 兜底 —— 原实现直接信任 extractAnswerFromReasoning 的非空结果，
-        //   剥离失败（长度≈原文）时会把整段思维链当回复推出。现统一走 resolveReplyFromFields：
-        //   剥不出答案 或 形态仍是草稿 → 返回 ''，宁可空也不洩漏。
-        const full = resolveReplyFromFields('', stripper.reasoningBuf);
+        // 🔴 V22 复评（2026-09-12 生产回归实测）: 此处**不得**用 fail-closed 的 resolveReplyFromFields
+        //   —— 它把「剥不出答案」判成空串，会直接让会晤模式退化为
+        //   「…（抱歉，我暂时无法回应，请稍后再试。）」（实测 15 分钟内 3 次）。
+        //   保留「宁可空也不洩漏」的意图，但改为**尽力提取**：extractAnswerFromReasoning
+        //   内部已含 V22 语言无关尾截断（英文起草段照样被切掉），仅当整段确为思维链时才返回空。
+        const full = extractAnswerFromReasoning(stripper.reasoningBuf);
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
           onToken({ text: full });
         }
+      }
+      // 🔴 V22c 流式收尾护栏（2026-09-12 生产实测）: 累积文本的最终形态检查。
+      //   实测形态: 模型把**注入的记忆片段原样吐回**——回复变成
+      //     `- "【徐诗雨的记忆】 鸿艺——（好像在斟酌用词），你是问诗韵和诗涵吧？…"`（草稿列表）。
+      //   流式 token 已推出（done 帧会覆盖气泡），但**返回值必须判空**，
+      //   交给 M5Orchestrator 重试，避免把草稿/回显当回复落库。
+      if (text && (isDraftShapedReply(text) || /【[^】]*的记忆】/.test(text))) {
+        console.error('[DeepSeek] 流式收尾护栏: 拒绝草稿/记忆回显形态 (len=' + text.length + ')');
+        text = '';
+        sawToken = false;
       }
       return { text, usage, sawToken };
     } catch (err: any) {
@@ -1344,7 +1414,11 @@ export class DeepSeekLLMProvider implements LLMProvider {
       : (hasSelfProfile && isSelfIntroQuery ? rawInput : `${contextBlock}\n鸿艺: ${rawInput}`);
     messages.push({ role: 'user', content: userMsgContent });
     // LLM params from config center
-    const _isScenario = _isEntityMeeting || kb.includes('## 你是') || kb.includes('【角色扮演】');
+    // 🔴 M-LEAK A(2026-09-12): 会晤与「角色扮演」分开判定 —— 原合并使会晤沿用角色扮演的
+    //   reasoning_effort='max'，思维链吃光 max_tokens → content 为空 → 触发 fail-closed 空回复
+    //   （实测：会晤连续多轮回复变成「抱歉，我暂时无法回应」）。
+    const _isRoleplay = kb.includes('## 你是') || kb.includes('【角色扮演】');
+    const _isScenario = _isEntityMeeting || _isRoleplay;   // 仍共用 roleplay 场景参数(max_tokens/temperature)
     const _llmCfg = _isScenario
       ? getScenarioConfig('roleplay')
       : selectLLMConfig(level, rawInput, params.role);
@@ -1353,7 +1427,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
     const _timeoutMs = _llmCfg.timeoutMs;
     // 🔴 B3 省token(2026-08-23): 正常模式默认 reasoning_effort='low'（V4-flash 思维链模型 reasoning token 消耗大，
     //   日常对话/闲聊/位置问答不需要深思考；场景/亲密仍用配置或 max）
-    const _reasoningEffort = _isScenario ? 'max' : (_llmCfg.reasoningEffort || 'low');
+    //   M-LEAK A: 会晤=实体在场日常对话 → medium（'max' 会让思维链吃光额度致 content 为空）；
+    //   仅真正的角色扮演保留 'max'。
+    const _reasoningEffort = _isRoleplay ? 'max' : _isEntityMeeting ? 'medium' : (_llmCfg.reasoningEffort || 'low');
     const frequencyPenalty = _llmCfg.frequencyPenalty;
     const presencePenalty = _llmCfg.presencePenalty;
 
