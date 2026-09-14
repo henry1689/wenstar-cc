@@ -607,8 +607,50 @@ function computeChecksum(text: string): string {
  * 与 schema 迁移不同：这些是运行时数据回填，每次启动都检查。
  * 幂等：只修 null/缺失项，不覆盖已有数据。
  */
-export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number }> {
-  const result = { globalUid: 0, entityUuid: 0, nullVectors: 0 };
+/**
+ * 批次1(2026-09-11): 统一 FamilyGraph 人名库读取 —— 供 belong_entity_uuid / entity_genes / memory_entities 派生共用。
+ * 🔴 修正: 原内联实现 `WHERE type='person' AND uuid LIKE 'TXS-%'` **未过滤 status='void'**，
+ *    128 个已作废实体仍参与 LIKE 匹配（垃圾归属风险）。此处统一加 `status != 'void'`。
+ * 🔴 别名归一: 主名与别名同优先级可匹配（“诗韵” → 徐诗韵），与运行时 L3/FG 名库口径一致。
+ */
+async function loadFgPersonEntries(
+  fgDbPath?: string,
+): Promise<Array<{ key: string; uuid: string; primary: string }>> {
+  const out: Array<{ key: string; uuid: string; primary: string }> = [];
+  if (!fgDbPath || !existsSync(fgDbPath)) return out;
+  try {
+    const initSqlJs = (await import('sql.js')).default;
+    const SQL = await initSqlJs();
+    const fgDb = new SQL.Database(readFileSync(fgDbPath));
+    const rows = fgDb.exec(
+      "SELECT name, uuid, aliases FROM nodes WHERE type = 'person' AND status != 'void' AND uuid IS NOT NULL AND uuid LIKE 'TXS-%'",
+    );
+    if (rows.length > 0 && rows[0].values) {
+      for (const [n, u, a] of rows[0].values) {
+        const primary = String(n || '').trim();
+        const uuid = String(u || '').trim();
+        if (!primary || !uuid) continue;
+        out.push({ key: primary, uuid, primary });
+        try {
+          const aliases = JSON.parse(String(a || '[]'));
+          if (Array.isArray(aliases)) {
+            for (const al of aliases) {
+              const k = String(al || '').trim();
+              if (k && k !== primary) out.push({ key: k, uuid, primary });
+            }
+          }
+        } catch { /* 别名解析失败跳过 */ }
+      }
+    }
+    fgDb.close();
+  } catch (e) {
+    console.warn('[Repair] FamilyGraph 人名库读取失败:', (e as Error)?.message);
+  }
+  return out;
+}
+
+export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number; entityGenes: number }> {
+  const result = { globalUid: 0, entityUuid: 0, nullVectors: 0, entityGenes: 0 };
   const t0 = Date.now();
 
   // 1. global_uid 回填
@@ -624,6 +666,10 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
     }
   } catch (e) { console.warn('[Repair] global_uid 回填失败:', e); }
 
+  // 批次1(2026-09-11): FG 人名库（统一口径，含 status!='void' 过滤）
+  // —— 函数级加载，供第 2 段(实体归属)与第 4 段(DNA 基因)共用，避免两套读取口径。
+  const _fgEntries = await loadFgPersonEntries(fgDbPath);
+
   // 2. belong_entity_uuid 回填（V13: 从 FamilyGraph 动态获取真实 TXS UUID，替代硬编码假 UUID）
   try {
     // 先清理旧假 UUID（uuid-* 格式全是错误的）
@@ -634,49 +680,9 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
       console.log(`[Repair] 清理假 UUID (uuid-*格式): ${fakeCount} 条 → 重置为 NULL`);
     }
 
-    // 从 FamilyGraph 获取真实 person name → TXS UUID 映射
-    let nameToUuid: Array<[string, string]> = [];
-    try {
-      if (fgDbPath) {
-        const { existsSync, readFileSync } = await import('node:fs');
-        if (existsSync(fgDbPath)) {
-          const initSqlJs = (await import('sql.js')).default;
-          const SQL = await initSqlJs();
-          const fgBuf = readFileSync(fgDbPath);
-          const fgDb = new SQL.Database(fgBuf);
-          const rows = fgDb.exec(
-            "SELECT name, uuid FROM nodes WHERE type = 'person' AND uuid IS NOT NULL AND uuid LIKE 'TXS-%'"
-          );
-          if (rows.length > 0 && rows[0].values) {
-            nameToUuid = rows[0].values.map(([n, u]: any) => [String(n), String(u)]);
-            // 补充别名映射：从 aliases JSON 中展开
-            const aliasRows = fgDb.exec(
-              "SELECT name, aliases FROM nodes WHERE type = 'person' AND aliases IS NOT NULL AND aliases != '[]'"
-            );
-            if (aliasRows.length > 0 && aliasRows[0].values) {
-              for (const [fn, aliasesJson] of aliasRows[0].values) {
-                try {
-                  const aliases = JSON.parse(String(aliasesJson));
-                  // sql.js exec() 不支持参数化，用 JS 过滤 name→uuid 表
-                  const puuidMap = new Map(nameToUuid);
-                  const puuid = puuidMap.get(String(fn)) ?? null;
-                  if (puuid && Array.isArray(aliases)) {
-                    for (const alias of aliases) {
-                      if (typeof alias === 'string' && alias.length >= 1) {
-                        nameToUuid.push([alias, puuid]);
-                      }
-                    }
-                  }
-                } catch { /* alias 解析失败跳过 */ }
-              }
-            }
-          }
-          fgDb.close();
-        }
-      }
-    } catch (fgErr) {
-      console.warn('[Repair] FamilyGraph 读取失败，跳过 entity 回填:', (fgErr as Error)?.message);
-    }
+    // 从 FamilyGraph 获取真实 person name/别名 → TXS UUID 映射
+    // 🔴 批次1(2026-09-11): 收口到 loadFgPersonEntries（函数级 _fgEntries）——统一口径 + status!='void' 过滤
+    const nameToUuid: Array<[string, string]> = _fgEntries.map((e) => [e.key, e.uuid]);
 
     if (nameToUuid.length > 0) {
       // 去重：同一名字只保留一个 UUID
@@ -753,9 +759,51 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
     }
   } catch (e) { console.warn('[Repair] null 向量修复失败:', e); }
 
+  // 4. entity_genes 幂等派生（批次1, 2026-09-11: 四要素契约 —— DNA 基因纳入守护）
+  //    🔴 语义: DNA 基因 = 本条记忆“**提及**”的实体（与 belong_entity_uuid 的“归属”互补）。
+  //    数据源与运行时 L3 同源（FamilyGraph person 主名+别名），保证读写口径一致。
+  //    🔴 roleplay 豁免: 扮演记忆按设计不建基因（见 persistence-stage.ts 隔离注释），显式排除。
+  //    幂等: 仅补空（IS NULL / '' / '[]'），可重复跑；同时同源派生 fg_entity_names。
+  try {
+    const _missRows = db.exec(
+      "SELECT id, raw_input FROM memories WHERE (entity_genes IS NULL OR entity_genes = '' OR entity_genes = '[]') AND COALESCE(memory_kind, '') != 'roleplay' AND raw_input IS NOT NULL AND raw_input != ''",
+    );
+    if (_missRows.length > 0 && _missRows[0].values && _fgEntries.length > 0) {
+      let filledGenes = 0;
+      for (const [id, rawInput] of _missRows[0].values) {
+        const text = String(rawInput || '');
+        if (!text) continue;
+        const hit = new Map<string, { name: string; allele: string }>(); // primary -> 首次命中 key
+        for (const e of _fgEntries) {
+          if (e.key.length < 2) continue;
+          if (text.includes(e.key) && !hit.has(e.primary)) {
+            hit.set(e.primary, { name: e.primary, allele: e.key });
+          }
+        }
+        if (hit.size === 0) continue;
+        const genes = [...hit.values()].map((h) => ({
+          name: h.name,
+          type: 'person',
+          allele: h.allele,
+          phenotype: 'neutral',
+          knowledge_type: 'factual',
+        }));
+        db.run(
+          "UPDATE memories SET entity_genes = ?, fg_entity_names = ? WHERE id = ?",
+          [JSON.stringify(genes), [...hit.keys()].join(','), String(id)],
+        );
+        filledGenes++;
+      }
+      result.entityGenes = filledGenes;
+      if (filledGenes > 0) {
+        console.log(`[Repair] entity_genes 幂等派生: ${filledGenes} 条（源=FamilyGraph 人名/别名，已排除 roleplay）`);
+      }
+    }
+  } catch (e) { console.warn('[Repair] entity_genes 派生失败:', e); }
+
   const elapsed = Date.now() - t0;
-  if (result.globalUid > 0 || result.entityUuid > 0 || result.nullVectors > 0) {
-    console.log(`[Repair] 数据完整性修复完成 (${elapsed}ms): global_uid=${result.globalUid} entity_uuid=${result.entityUuid} nullVectors=${result.nullVectors}`);
+  if (result.globalUid > 0 || result.entityUuid > 0 || result.nullVectors > 0 || result.entityGenes > 0) {
+    console.log(`[Repair] 数据完整性修复完成 (${elapsed}ms): global_uid=${result.globalUid} entity_uuid=${result.entityUuid} nullVectors=${result.nullVectors} entity_genes=${result.entityGenes}`);
   }
 
   return result;

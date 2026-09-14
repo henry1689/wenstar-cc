@@ -8,6 +8,8 @@
  */
 
 import type { ChatContext } from '../chat.js';
+// 🔴 批次1(2026-09-11): 实体建档统一闸门（防滑窗误检垃圾入 FG）
+import { checkPersonEntity } from '../../m4/household/EntityWriteGate.js';
 import type { DNA } from '../../m1/types/dna.js';
 import type { M3Decision } from '../../m3/types/perception.js';
 import type { ScoredMemory } from '../../m2/types/index.js';
@@ -43,7 +45,24 @@ export async function executePostProcess(input: PostProcessInput): Promise<void>
     const personGenes = dna.entity_genes.filter((g: any) => g.type === 'person' && g.name !== '我');
     if (personGenes.length > 0 && ctx.m4?.getFamilyGraph) {
       const fg = ctx.m4.getFamilyGraph();
+      // 🔴 批次1(2026-09-11): 建档前过统一实体闸门。
+      //   问题：原实现直接 updatePersonProfile(personGenes)，而 personGenes 来自 L3 滑窗检测，
+      //   跨词边界会切出垃圾片段 → 被当人物建档（实测 9 个：关心/高峰电/计雷灵/文气/
+      //   方情绪/终给人/常漂亮/路轻盈/常多情，TXS-154~162，均为 2026-09-11 新建）。
+      //   传 FG 现有名库（含别名）→ 已登记实体直接放行（不误伤真实昵称如“阿珍/阿苏”），
+      //   仅对新候选施判据。名库读取失败 = 空集（判据更严，宁多拦不漏垃圾）。
+      let existingNames = new Set<string>();
+      try {
+        const withAliases = fg.getAllPersonNamesWithAliases?.();
+        if (withAliases instanceof Map) existingNames = new Set(withAliases.keys());
+        else existingNames = new Set<string>(fg.getAllPersonNames?.() ?? []);
+      } catch { /* 名库不可用时退化为空集 */ }
       for (const pg of personGenes) {
+        const verdict = checkPersonEntity(pg.name, existingNames);
+        if (!verdict.allowed) {
+          console.warn(`[EntityGate] 拦截 person 建档: "${pg.name}" — ${verdict.reason}`);
+          continue;
+        }
         fg.updatePersonProfile(pg.name, {
           last_mentioned: new Date().toISOString(),
         } as any, { countMention: false });

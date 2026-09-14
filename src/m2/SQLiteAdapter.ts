@@ -161,6 +161,17 @@ export function missingMemoryCriticalColumns(columnList: readonly string[]): str
   return MEMORY_IDENTITY_CRITICAL_COLUMNS.filter((c) => !present.has(c));
 }
 
+/** 解析 memories.entity_genes 列（JSON 文本 → EntityGene[]）。空/非法 → [] */
+export function parseEntityGenes(value: unknown): EntityGene[] {
+  if (value === null || value === undefined) return [];
+  try {
+    const parsed = typeof value === 'string' ? (value.trim() ? JSON.parse(value) : []) : value;
+    return Array.isArray(parsed) ? (parsed as EntityGene[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 从 INSERT 语句文本中提取 column list（纯函数）。
  * 仅识别首对圆括号，兼容 `INSERT [OR REPLACE] INTO <table> (c1, c2, ...)`。
@@ -338,11 +349,12 @@ export class SQLiteAdapter {
       console.error('[SQLiteAdapter] 数据完整性修复结果:', JSON.stringify(repairResult));
       // 🔴 修复后立即强制落盘：repairDataIntegrity 直接操作 sql.js db.run()，绕过了 _dirtyCount 计数
       // flushNow() 依赖 _dirtyCount>0 才执行 export，所以这里直接 export+write
-      if (repairResult.entityUuid > 0 || repairResult.globalUid > 0) {
+      // 🔴 批次1(2026-09-11): 新派生段（entity_genes）也需触发落盘，否则内存派生不持久
+      if (repairResult.entityUuid > 0 || repairResult.globalUid > 0 || repairResult.entityGenes > 0) {
         try {
           const data = (this.db as any).export();
           writeFileSync(this.dbPath, Buffer.from(data));
-          console.error('[SQLiteAdapter] 修复数据已直接 export 落盘 (' + (repairResult.entityUuid + repairResult.globalUid) + ' 条变更)');
+          console.error('[SQLiteAdapter] 修复数据已直接 export 落盘 (' + (repairResult.entityUuid + repairResult.globalUid + repairResult.entityGenes) + ' 条变更)');
         } catch (e) { console.error('[SQLiteAdapter] 修复落盘失败:', e); }
       }
     } catch (err) {
@@ -741,8 +753,51 @@ export class SQLiteAdapter {
 
   // ─── 写入 ───
 
+  /** D8 值保留守卫（2026-09-12）——「列在清单里」≠「值被保留」
+   *
+   *  背景：memories 用 `INSERT OR REPLACE` 覆盖写 = DELETE + INSERT，未携带的列会被静默重置。
+   *  D8 已建 MEMORY_IDENTITY_CRITICAL_COLUMNS 列清单，但只校验「列是否出现在 column list」，
+   *  不校验「值是否被传递」：上游拿着**部分字段**的记录（undefined）调用 write() 时，
+   *  关键列照样被写成 NULL（实测 runDecayMaintenance 会把整片派生基因抹掉）。
+   *
+   *  语义边界（刻意保守）：
+   *    - 仅对 undefined / null 继承旧值 —— 显式 `[]` / `''` 视为调用方的**有意赋值**，不得覆盖
+   *      （roleplay 隔离等设计依赖显式 `entity_genes='[]'` 这一标记）。
+   *    - entity_genes 已显式携带（含 []）时不继承 fg_entity_names —— 后者由 write() 同源派生，保持二者一致。
+   *    - 继承失败不阻塞写入（fail-open 仅影响该列，不影响主流程）。
+   */
+  private _preserveIdentityCriticalValues(record: EmotionalMemoryRecord): void {
+    const r = record as any;
+    if (!r.id) return;
+    const fieldOf = (col: string): string => (col === 'belong_entity_uuid' ? 'belongEntityUuid' : col);
+    const missing = MEMORY_IDENTITY_CRITICAL_COLUMNS.filter((col) => {
+      if (col === 'fg_entity_names' && Array.isArray(r.entity_genes)) return false;
+      const v = r[fieldOf(col)];
+      return v === undefined || v === null;
+    });
+    if (missing.length === 0) return;
+    try {
+      const res = this.execSql(`SELECT ${missing.join(', ')} FROM memories WHERE id = ?`, [String(r.id)]);
+      const vals = res[0]?.values?.[0];
+      if (!vals) return;
+      missing.forEach((col, i) => {
+        const v = vals[i];
+        if (v === undefined || v === null) return;
+        const field = fieldOf(col);
+        if (col === 'entity_genes') {
+          const parsed = parseEntityGenes(v);
+          if (parsed.length > 0) r[field] = parsed;
+        } else if (String(v).trim() !== '') {
+          r[field] = v;
+        }
+      });
+    } catch { /* 继承失败不阻塞主写入 */ }
+  }
+
   write(record: EmotionalMemoryRecord): void {
     this.ensureReady();
+    // 🔴 D8 值保留守卫: 入参未携带的 6 个身份关键列 → 继承旧行值（REPLACE 会把未携带列重置为 NULL）
+    this._preserveIdentityCriticalValues(record);
     // V12.4 阶段B 根除24D: perception_json 列已删，24D 不再落库（仅作 M3 内部语义引擎/计算介质）。
     // 40D 强制恒写：record.perceptionV40 优先，缺失时从 record.perception(24D) 派生，防读-改-写清空。
     const p40 = record.perceptionV40 ?? map24DTo40D(record.perception);
@@ -2068,14 +2123,16 @@ export class SQLiteAdapter {
 
     // 清理旧 ANCHOR
     try { this.db.run("DELETE FROM memories WHERE id LIKE '%_ANCHOR' OR id LIKE '%_CHUNK%'"); } catch {}
-
     // 按对话组聚合
+    // 🔴 2026-09-12 隔离区过滤: 不得从被隔离的对话（is_test=1，已标记的洩漏污染型回复）重生成锚点记忆，
+    //   否则污染会通过“删除旧锚点→从 conversations 重建”这条路径**回流**进 memories。
     const groups = this.db.exec(
       "SELECT dg.dialog_group_id, dg.belong_entity_uuid, dg.tc, dg.first_ts, dg.last_ts, dg.avg_ca, dg.max_ca " +
       "FROM (SELECT dialog_group_id, belong_entity_uuid, COUNT(*) as tc, MIN(timestamp) as first_ts, " +
       "MAX(timestamp) as last_ts, AVG(COALESCE(calcium_score,0.5)) as avg_ca, " +
       "MAX(COALESCE(calcium_score,0.5)) as max_ca FROM conversations " +
       "WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND dialog_group_id IS NOT NULL " +
+      "AND (is_test IS NULL OR is_test = 0) " +
       "GROUP BY dialog_group_id, belong_entity_uuid) dg ORDER BY dg.belong_entity_uuid, dg.first_ts"
     );
     if (!groups.length || !groups[0]?.values?.length) return 0;
@@ -2149,19 +2206,29 @@ export class SQLiteAdapter {
         // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零（S4 P1-2 修复：
         //   与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
         const anchor40D = encodeEmptyPerceptionV40();
+        // 🔴 批次1(2026-09-11) 修复：锚点重建器列清单缺 entity_genes/fg_entity_names。
+        //   本写入器在**每次启动**重建全部对话组锚点（INSERT OR REPLACE），
+        //   缺失列被重置为 NULL → 实测把 repairDataIntegrity 刚派生的 735 条里的
+        //   ~387 个锚点基因全抹掉（log 写 735，落库仅 348）。
+        //   锚点本身含归属实体 ename，直接同源生成基因（与派生逻辑同格式）。
+        const anchorGenes = ename
+          ? JSON.stringify([{ name: ename, type: 'person', allele: ename, phenotype: 'neutral', knowledge_type: 'factual' }])
+          : null;
         this.db!.run(
           "INSERT OR REPLACE INTO memories (id,seq_pos,created_at,perception_40d,calcium_score,calcium_level," +
           "locus_path,leaf_zone,raw_input,memory_kind,lifecycle_state,confidence_score,stability_score," +
           "thread_id,recall_count,promoted_to_diamond,effective_strength,strength_updated_at," +
           "is_landmark,primary_emotion,memory_type,dialog_group_id,belong_entity_uuid," +
+          "entity_genes,fg_entity_names," +
           "global_uid,dna_root_id,location_fingerprint," +
           "is_foresight,valid_until_ms,foresight_status,source_type) " +
-          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,0,NULL,'none','conversation')",
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,?,?,0,NULL,'none','conversation')",
           [id, seq++, String(firstTs || now),
            anchor40D,
            ca, cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
            cl >= 2 ? 'active' : 'candidate', 0.55, cl >= 2 ? 0.45 : 0.2,
            dg, es, now, '平静', dg, eu,
+           anchorGenes, ename,
            anchorGlobalUid, anchorDnaRootId, anchorLocationFp || '0'.repeat(32)]
         );
         n++;
@@ -2319,7 +2386,14 @@ export class SQLiteAdapter {
       calcium_level: obj.calcium_level as 0 | 1 | 2 | 3,
       raw_input: obj.raw_input,
       locus_path: obj.locus_path,
-      entity_genes: [], // 实体会在 rowsToRecords 或 findById 中填充
+      // 🔴 批次1-A(2026-09-12 实测根治): 必须从**行本身**的 entity_genes 列读取。
+      //   原实现固定为 [] —— 而 write() 的绑定是 `record.entity_genes ? JSON.stringify(...) : null`，
+      //   `[]` 是**真值** → 落库成 "[]"，把已派生的基因抹空。
+      //   实测链路: runDecayMaintenance()（约 80s 一轮）SELECT * → rowToRecord(entity_genes=[]) → write() REPLACE
+      //   → 全库派生结果（741 条）在 20 秒内被逐步清回基线（388）。
+      //   memory_entities JOIN 仅覆盖 708 条，故「能被 JOIN 补上的记录」幸存 ——
+      //   与实测「幸存 389 条 100% 落在该集合内」完全吻合。
+      entity_genes: parseEntityGenes(obj.entity_genes), // 列值优先；rowsToRecords 的 memory_entities 仅作兜底
       leaf_zone: obj.leaf_zone,
       memory_kind: obj.memory_kind ?? 'episodic',
       lifecycle_state: obj.lifecycle_state ?? 'candidate',
