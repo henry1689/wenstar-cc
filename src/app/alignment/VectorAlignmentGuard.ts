@@ -429,8 +429,32 @@ export class VectorAlignmentGuard {
       detail: `当前对话轮次: ~${Math.round(convHistoryLen / 2)}轮（${convHistoryLen}条消息）`,
     });
 
+    // 检查点⑦：DNA双螺旋覆盖（entity_genes + memory_entities，V12.5 新增）
+    // 语义: DNA双螺旋 = UUID归属(belong_entity_uuid) + 基因提及(entity_genes)
+    let geneCoverageRate = 0;
+    let meCoverageRate = 0;
+    try {
+      const geneRows = sqlite.queryAll("SELECT COUNT(*) as c FROM memories WHERE entity_genes NOT IN ('','[]') AND entity_genes IS NOT NULL");
+      geneCoverageRate = totalReadable > 0 ? (geneRows[0]?.c || 0) / totalReadable : 0;
+      const meRows = sqlite.queryAll('SELECT COUNT(DISTINCT memory_id) as c FROM memory_entities');
+      meCoverageRate = totalReadable > 0 ? (meRows[0]?.c || 0) / totalReadable : 0;
+    } catch (e: any) { console.error('[VectorAlignmentGuard] DNA覆盖检查失败:', e?.message); }
+    const dnaScore = Math.round((geneCoverageRate + meCoverageRate) / 2 * 100);
+    checkpoints.push({
+      checkpoint: 'DNA双螺旋覆盖',
+      passed: geneCoverageRate >= 0.8,
+      score: dnaScore,
+      detail: `entity_genes=${Math.round(geneCoverageRate*100)}% memory_entities覆盖=${Math.round(meCoverageRate*100)}% (阈值≥80%)`,
+      suggestion: geneCoverageRate < 0.8
+        ? '运行MigrationManager.repairDataIntegrity批次4派生entity_genes，或检查滑窗过滤是否过严'
+        : undefined,
+    });
+    if (geneCoverageRate < 0.8) {
+      recommendations.push(`🔧 DNA双螺旋genes覆盖仅${(geneCoverageRate*100).toFixed(0)}%，建议运行派生补全`);
+    }
+
     // 计算复合健康分（加权平均）
-    const WEIGHTS = [0.25, 0.20, 0.15, 0.15, 0.20, 0.05]; // 对应6个检查点
+    const WEIGHTS = [0.25, 0.20, 0.15, 0.15, 0.20, 0.05, 0.10]; /// ①钙化 ②40D ③强度 ④黑钻 ⑤检索 ⑥对话历史 ⑦DNA双螺旋
     const scores = checkpoints.map(cp => cp.score);
     const weightedSum = scores.reduce((s, score, i) => s + score * (WEIGHTS[i] || 0), 0);
 
