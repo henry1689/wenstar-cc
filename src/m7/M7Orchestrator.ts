@@ -125,7 +125,7 @@ export class M7Orchestrator {
   cleanResolvedQueue(): void { this.queue.cleanResolved(); }
   getPendingDreams(): PendingDream[] { return this.queue.getPending(); }
   getDreamCount(): number { return this.queue.getCount(); }
-  addDream(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream {
+  addDream(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream | null {
     return this.queue.add(dream);
   }
   getDreamsByStatus(status: PendingDream['status']): PendingDream[] {

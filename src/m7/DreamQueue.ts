@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { PendingDream } from './types/index.js';
+import { isDreamContentBlocked } from '../config/dream-content-filter-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -34,8 +35,14 @@ export class DreamQueue {
     fs.writeFileSync(this.filePath, JSON.stringify(this.dreams, null, 2), 'utf-8');
   }
 
-  /** 添加新梦境条目 */
-  add(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream {
+  /** 添加新梦境条目 — 入口过滤敏感内容（M7 结构修复 2026-09-14） */
+  add(dream: Omit<PendingDream, 'id' | 'created_at' | 'status'>): PendingDream | null {
+    // 🔴 M7 结构修复: 在唯一写入入口统一拦截敏感内容，防止 LLM 拒绝话术/安全提示固化进梦境系统
+    // 敏感词表在 config/dream-content-filter.config.yaml 定义，代码层统一读取
+    if (isDreamContentBlocked(dream.content)) {
+      console.warn(`[DreamQueue] 拦截敏感梦境:`, dream.content.substring(0, 50));
+      return null;
+    }
     const entry: PendingDream = {
       id: `dream_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
       ...dream,
