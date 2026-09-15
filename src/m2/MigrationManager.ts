@@ -12,6 +12,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 // C3(2026-09-11): 实体名解析收口到 EntityNameCodec（唯一事实源）
 import { parseNames } from './EntityNameCodec.js';
+import { hasSurname } from '../config/app-identity.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -630,13 +631,17 @@ async function loadFgPersonEntries(
         const primary = String(n || '').trim();
         const uuid = String(u || '').trim();
         if (!primary || !uuid) continue;
+        // 🔴 批次2(2026-09-15): 姓氏过滤 — 滑窗误检垃圾（"周末"/"宿舍"/"边吃边"等）
+        //   这些条目 status=active 但不在姓氏表里，会被 isPersonName 排除；此处同源过滤，
+        //   避免修复阶段把它们带入 belong_entity_uuid / entity_genes / memory_entities。
+        if (!hasSurname(primary)) continue;
         out.push({ key: primary, uuid, primary });
         try {
           const aliases = JSON.parse(String(a || '[]'));
           if (Array.isArray(aliases)) {
             for (const al of aliases) {
               const k = String(al || '').trim();
-              if (k && k !== primary) out.push({ key: k, uuid, primary });
+              if (k && k !== primary && hasSurname(k)) out.push({ key: k, uuid, primary });
             }
           }
         } catch { /* 别名解析失败跳过 */ }
@@ -649,8 +654,8 @@ async function loadFgPersonEntries(
   return out;
 }
 
-export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number; entityGenes: number }> {
-  const result = { globalUid: 0, entityUuid: 0, nullVectors: 0, entityGenes: 0 };
+export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number; entityGenes: number; memoryEntities?: number }> {
+  const result: any = { globalUid: 0, entityUuid: 0, nullVectors: 0, entityGenes: 0, memoryEntities: 0 };
   const t0 = Date.now();
 
   // 1. global_uid 回填
@@ -801,9 +806,62 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
     }
   } catch (e) { console.warn('[Repair] entity_genes 派生失败:', e); }
 
+  // 5. memory_entities 幂等重建（批次2, 2026-09-15）
+  //    语义: entity_genes 是 "本条记忆提及了哪些人"；memory_entities 是同信息的结构化 JOIN 视图。
+  //    幂等: DELETE + INSERT OR IGNORE，可重复跑；结果完全由 entity_genes 决定。
+  try {
+    // 5a. 从 FG 名库（已姓氏过滤）构建 uuid→entity_id 映射
+    const fgUuidToEntityId = new Map<string, string>();
+    const _fgUuidRows = db.exec(
+      "SELECT id, uuid FROM entities WHERE type='person' AND uuid IS NOT NULL AND uuid LIKE 'TXS-%'",
+    );
+    if (_fgUuidRows.length > 0 && _fgUuidRows[0].values) {
+      for (const [id, uuid] of _fgUuidRows[0].values) {
+        fgUuidToEntityId.set(String(uuid), String(id));
+      }
+    }
+    console.log(`[Repair] 批次2: FG UUID→entity_id 映射 ${fgUuidToEntityId.size} 条`);
+
+    // 5b. 清掉旧 memory_entities（含滑窗垃圾），从 entity_genes 重建
+    db.run('DELETE FROM memory_entities');
+    const _missRows = db.exec(
+      "SELECT id, entity_genes FROM memories WHERE entity_genes IS NOT NULL AND entity_genes != '' AND entity_genes != '[]'",
+    );
+    if (_missRows.length > 0 && _missRows[0].values) {
+      let filled = 0;
+      let skippedNoMatch = 0;
+      for (const [memId, geneJson] of _missRows[0].values) {
+        let parsed;
+        try { parsed = JSON.parse(String(geneJson || '')); } catch { continue; }
+        if (!Array.isArray(parsed)) continue;
+        for (const g of parsed) {
+          if (!g || g.type !== 'person' || !g.name) continue;
+          // 再次用姓氏过滤兜底（entity_genes 可能含陈旧数据）
+          if (!hasSurname(g.name)) { skippedNoMatch++; continue; }
+          // 主名取 primary，alias 也允许（兼容旧数据）
+          const nameKey = g.allele ? g.allele : g.name;
+          const entry = _fgEntries.find(e => e.key === nameKey || e.primary === g.name);
+          if (!entry) { skippedNoMatch++; continue; }
+          const entityId = fgUuidToEntityId.get(entry.uuid);
+          if (!entityId) { skippedNoMatch++; continue; }
+          db.run(
+            'INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, allele, phenotype, knowledge_type) VALUES (?, ?, ?, ?, ?)',
+            [String(memId), entityId, g.allele || g.name, g.phenotype || 'neutral', g.knowledge_type || 'factual'],
+          );
+          filled++;
+        }
+      }
+      result.memoryEntities = filled;
+      if (filled > 0 || skippedNoMatch > 0) {
+        console.log(`[Repair] 批次2 memory_entities 重建: 插入${filled}条, 跳过(无FG匹配/无姓氏)${skippedNoMatch}条`);
+      }
+    }
+  } catch (e) { console.warn('[Repair] 批次2 memory_entities 重建失败:', e); }
+
   const elapsed = Date.now() - t0;
-  if (result.globalUid > 0 || result.entityUuid > 0 || result.nullVectors > 0 || result.entityGenes > 0) {
-    console.log(`[Repair] 数据完整性修复完成 (${elapsed}ms): global_uid=${result.globalUid} entity_uuid=${result.entityUuid} nullVectors=${result.nullVectors} entity_genes=${result.entityGenes}`);
+  const totalFilled = result.globalUid + result.entityUuid + result.nullVectors + result.entityGenes + (result.memoryEntities ?? 0);
+  if (totalFilled > 0) {
+    console.log(`[Repair] 数据完整性修复完成 (${elapsed}ms): global_uid=${result.globalUid} entity_uuid=${result.entityUuid} nullVectors=${result.nullVectors} entity_genes=${result.entityGenes} memory_entities=${result.memoryEntities ?? 0}`);
   }
 
   return result;
