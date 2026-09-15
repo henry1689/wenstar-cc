@@ -52,6 +52,23 @@ function detectTopic(message: string): string {
   return '';
 }
 
+// 批次3: 实时计算时空标签（无需依赖 aggregator，直接算）
+function getPeriod(hour: number): string {
+  return hour < 6 ? 'dawn' : hour < 9 ? 'morning' : hour < 12 ? 'midday' : hour < 18 ? 'afternoon' : hour < 20 ? 'evening' : hour < 23 ? 'night' : 'midnight';
+}
+function getSeason(month: number): string {
+  return month >= 3 && month <= 5 ? 'spring' : month >= 6 && month <= 8 ? 'summer' : month >= 9 && month <= 11 ? 'autumn' : 'winter';
+}
+function getLunarTermLabel(now: Date): string {
+  // 简易节气估算：24节气，每30天约2个，从冬至(12/21)起算
+  const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
+    '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
+  const start = new Date(now.getFullYear(), 0, 6); // 小寒约1/6
+  const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
+  const idx = ((diff / 15) | 0) % 24;
+  return solarTerms[Math.max(0, idx)];
+}
+
 /** V13: 使用文本指纹编码，确保中性文本也有微量可区分的向量基线 */
 function buildPerceptionJson(p: Perception24D, text?: string): string {
   if (text) return encodeEmotionVectorWithFingerprint(p, text);
@@ -253,11 +270,14 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       dnaRootId: (input.dna as any).dna_root_id ?? null,          // P0-1: DNA根码落库
       entityGenes: (input.dna as any).entity_genes ?? null,       // P0-2: L3实体基因落库
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: null, topicLabel: null,
+      dialogGroupId: null, topicLabel: topic || null,
       belongEntityUuid: belongUUID || undefined,  // V10.4: 实体归属标注
       isForesight: foresight.isForesight,         // V13: 前瞻标记
       validUntilMs: foresight.validUntilMs ?? null,
       foresightStatus: foresight.status,
+      timePeriod: getPeriod(new Date().getHours()),
+      season: getSeason((new Date().getMonth() + 1)),
+      lunarTerm: getLunarTermLabel(new Date()),
     })) {
       hadError = true;
     }
@@ -311,8 +331,11 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       dnaRootId: (input.dna as any).dna_root_id ?? null,          // P0-1: DNA根码落库
       entityGenes: (input.dna as any).entity_genes ?? null,       // P0-2: L3实体基因落库
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: null, topicLabel: null,
+      dialogGroupId: null, topicLabel: topic || null,
       belongEntityUuid: asstUUID || undefined,  // P1-2: 统一走 EntityOwnershipResolver
+      timePeriod: getPeriod(new Date().getHours()),
+      season: getSeason((new Date().getMonth() + 1)),
+      lunarTerm: getLunarTermLabel(new Date()),
     })) {
       hadError = true;
     }

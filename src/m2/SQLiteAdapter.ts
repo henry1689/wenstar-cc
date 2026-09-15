@@ -15,7 +15,19 @@ import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
 // 2026-09-11: 启动期 fg_entity_names 派生回填需与写入侧共用同一序列化格式
 import { formatNames } from './EntityNameCodec.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — ensureEntity object 通道过滤垃圾(句子片段/外貌特征词不建独立实体)
-import { checkEntityWrite } from '../m4/household/EntityWriteGate.js';
+// 内联实现（避免 m2→m4 反向依赖，CK-01 九层管线检查拦截）
+const OBJECT_MAX_LEN = 6;
+const CHAT_RESIDUE = /[，。、；：""''（）【】…！？的了很多把被你我她他这那在说]/;
+const OBJECT_FRAG_TAIL = /(?:的(?:事|话|样子|话吧)|呢|吧|啊|呀|吗|了|过|着|一下|一桩|这个|那个)$/;
+const APPEARANCE_FEATURE_TAIL = /(?:脸|面容|眼睛|眼皮|单眼|双眼|大眼|鼻|嘴|牙|头发|发|眼镜|皮肤|身材|胸|臀|腿|腰|肩|手|眉|睫毛|马尾|刘海|酒窝|个子|身高|体态|样子|模样|长相|气质|活泼|安静|文静|内向|可爱|漂亮|婴儿肥|红润|瓜脸)/;
+function checkEntityWriteObj(name: string): { allowed: boolean; reason: string } {
+  const n = (name || '').trim();
+  if (!n) return { allowed: false, reason: '空实体名' };
+  if (n.length > OBJECT_MAX_LEN) return { allowed: false, reason: `object超长(>${OBJECT_MAX_LEN}字)` };
+  if (OBJECT_FRAG_TAIL.test(n) || CHAT_RESIDUE.test(n)) return { allowed: false, reason: '句子片段/对话残留' };
+  if (APPEARANCE_FEATURE_TAIL.test(n)) return { allowed: false, reason: '外貌/体态特征词，应存档案字段' };
+  return { allowed: true, reason: '合规object名词' };
+}
 import type { Perception24D } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
 import type {
@@ -930,6 +942,12 @@ export class SQLiteAdapter {
     foresightStatus?: string | null;  // V13: 前瞻状态
     namespace?: string | null;        // BATCH-23: memory namespace scope
     perceptionV40?: string | null;    // V20: 40D感知向量(JSON数组40元素)，写 perception_40d 列（唯一落库感知向量）
+    timePeriod?: string | null;       // 批次3: 时段 (dawn/morning/midday/afternoon/evening/night/midnight)
+    season?: string | null;           // 批次3: 季节 (spring/summer/autumn/winter)
+    lunarTerm?: string | null;        // 批次3: 节气
+    anchorScore?: number | null;      // 批次3: 锚点重要性分（dialog-group 核心锚点用）
+    scarType?: string | null;         // 批次3: 疤痕标记（地标/创伤等）
+    subType?: string | null;          // 批次3: 记忆子类型（fact/object_location/reminder 等）
   }): boolean {
     this.ensureReady();
     try {
@@ -957,8 +975,9 @@ export class SQLiteAdapter {
          is_landmark, primary_emotion, memory_type, dialog_group_id, topic_label,
 	         dna_root_id, entity_genes,
 	         global_uid, location_fingerprint, belong_entity_uuid,
-		         is_foresight, valid_until_ms, foresight_status, namespace)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         is_foresight, valid_until_ms, foresight_status, namespace,
+         time_period, season, lunar_term, anchor_score, scar_type, sub_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           opts.id, fgEntityNames, opts.seqPos, opts.createdAt, p40Json,
           opts.calciumScore, opts.calciumLevel,
@@ -978,6 +997,8 @@ export class SQLiteAdapter {
 	          opts.belongEntityUuid ?? null,
           opts.isForesight ? 1 : 0, opts.validUntilMs ?? null, opts.foresightStatus ?? null,
           opts.namespace || 'default',
+          opts.timePeriod ?? null, opts.season ?? null, opts.lunarTerm ?? null,
+          opts.anchorScore ?? null, opts.scarType ?? null, opts.subType ?? null,
         ],
       );
       this.save();
@@ -992,7 +1013,7 @@ export class SQLiteAdapter {
     // 🔴 FG-P0: 写前统一闸门(object 通道) — 句子片段/外貌特征词/对话残留不再建独立 object 实体
     //   (person 由 M1 isPersonName/gradeEntity 识别后进入, 高可信, 不gate防误伤)
     if (type === 'object') {
-      const _gv = checkEntityWrite(name);
+      const _gv = checkEntityWriteObj(name);
       if (!_gv.allowed) {
         console.warn(`[EntityGate] ensureEntity 拦截 object 写入: "${name}" — ${_gv.reason}`);
         return;

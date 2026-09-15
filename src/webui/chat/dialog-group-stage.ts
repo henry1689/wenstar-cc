@@ -200,11 +200,11 @@ export async function flushDialogGroup(
       const roundP = dg.perceptions[i] || peakP;
       const chunkCalcium = Math.round(computeCalcium(roundP as any).score * 1000) / 1000;
       sql.writeRaw(
-        "INSERT OR IGNORE INTO memories (id, seq_pos, created_at, perception_40d, calcium_score, calcium_level, locus_path, leaf_zone, raw_input, effective_strength, strength_updated_at, primary_emotion, dialog_group_id, round_count, topic_label, belong_entity_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO memories (id, seq_pos, created_at, perception_40d, calcium_score, calcium_level, locus_path, leaf_zone, raw_input, effective_strength, strength_updated_at, primary_emotion, dialog_group_id, round_count, topic_label, anchor_score, belong_entity_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         chunkId, -dg.rounds.length - i, now, vec40(roundP), chunkCalcium,
         calciumLevel(chunkCalcium), dg.locusPath || 'general',
         'language_semantic_zone', chunkText, 0.3 + chunkCalcium * 0.2, now,
-        decision.primary_emotion || '对话', dg.id, dg.rounds.length, dg.topic, entityUuid
+        decision.primary_emotion || '对话', dg.id, dg.rounds.length, dg.topic, chunkCalcium * 0.5, entityUuid
       );
     }
 
