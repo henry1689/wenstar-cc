@@ -68,21 +68,17 @@ export class MemoryWriteGateway {
    * @returns true = 写入成功；false = 被守卫拒绝或写入失败
    */
   write(opts: MemoryWriteOpts): boolean {
-    // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不写入记忆（对话落库统一收口）
-    //    本 Gateway 是对话类 memory 写入的统一门户 —— dialog-group-stage（闭组锚点/碎片）
-    //    与 persistence-stage（逐轮写入）两条路径均经此处。在源头拦截后，
-    //    砂金→金库→黑钻→地标 整条升级链自然断开，也覆盖未来新增调用方。
-    if (isMetaDiscourse(opts.rawInput)) {
-      console.log(`[MemoryWriteGateway] 🚫 元对话拦截: 命中 metaDiscourse 规则，拒绝写入 id=${opts.id} dg=${opts.dialogGroupId ?? 'none'}`);
-      return false;
-    }
-
-    // 五要素守卫生效：entity_genes 为空时拒绝（roleplay 豁免）
-    const isRoleplay = opts.memoryKind === 'roleplay';
-    if (!isRoleplay && (!opts.entityGenes || opts.entityGenes.length === 0)) {
-      console.warn(
-        `[MemoryWriteGateway] 🚫 拒绝写入：entity_genes 为空（五要素守护）id=${opts.id} zone=${opts.leafZone} dg=${opts.dialogGroupId ?? 'none'}`
-      );
+    // 🔴 守卫检查（复用 checkWriteGuard）
+    const guard = checkWriteGuard({
+      rawInput: opts.rawInput,
+      entityGenes: opts.entityGenes,
+      memoryKind: opts.memoryKind,
+      id: opts.id,
+      leafZone: opts.leafZone,
+      dialogGroupId: opts.dialogGroupId,
+    });
+    if (!guard.allowed) {
+      console.warn(`[MemoryWriteGateway] 🚫 ${guard.reason}`);
       return false;
     }
 
@@ -107,4 +103,35 @@ export class MemoryWriteGateway {
 /** 工厂函数：从 ctx.storage 快速获取 Gateway 实例 */
 export function createMemoryWriteGateway(ctx: { storage: { getSQLite: () => SQLiteAdapter } }): MemoryWriteGateway {
   return new MemoryWriteGateway(ctx.storage.getSQLite());
+}
+
+// ── 守卫逻辑导出（供 FusionStorageAdapter 等外部路径复用） ──
+
+export interface GuardResult {
+  allowed: boolean;
+  reason?: string;
+}
+
+/**
+ * 五要素守卫生效检查
+ * @returns allowed=true 放行；allowed=false 拒绝 + reason 说明
+ */
+export function checkWriteGuard(opts: {
+  rawInput: string;
+  entityGenes?: any[] | null;
+  memoryKind?: string;
+  id?: string;
+  leafZone?: string;
+  dialogGroupId?: string | null;
+}): GuardResult {
+  // 🔴 元对话拦截
+  if (isMetaDiscourse(opts.rawInput)) {
+    return { allowed: false, reason: `元对话拦截: id=${opts.id ?? 'unknown'}` };
+  }
+  // 🔴 五要素守护：entity_genes 为空时拒绝（roleplay 豁免）
+  const isRoleplay = opts.memoryKind === 'roleplay';
+  if (!isRoleplay && (!opts.entityGenes || opts.entityGenes.length === 0)) {
+    return { allowed: false, reason: `entity_genes 为空（五要素守护）id=${opts.id ?? 'unknown'} zone=${opts.leafZone ?? 'unknown'}` };
+  }
+  return { allowed: true };
 }

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 // C3(2026-09-11): 实体名序列化收口到 EntityNameCodec（唯一事实源）
 import { formatNames } from './EntityNameCodec.js';
 import { isMetaDiscourse } from '../config/ingestion-guard.js';
+import { checkWriteGuard } from './MemoryWriteGateway.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
@@ -77,6 +78,18 @@ export class FusionStorageAdapter {
 
   async write(dna: DNA, perception: Perception24D, primaryEmotion?: string, secondaryEmotions?: string[]): Promise<WriteResult> {
     this.ensureReady();
+    // 🔴 五要素守卫：entity_genes 为空时拒绝写入（roleplay 豁免）
+    const guard = checkWriteGuard({
+      rawInput: dna.raw_input || '',
+      entityGenes: dna.entity_genes,
+      memoryKind: 'episodic',
+      id: dna.branch_id,
+      leafZone: dna.leaf_zone,
+    });
+    if (!guard.allowed) {
+      console.warn(`[FusionStorage] 🚫 ${guard.reason}`);
+      return { success: false, real_ref: '', seq_pos: -1, error: guard.reason };
+    }
     // 优先用 dna.seq_pos（预分配），否则自增
     const pos = dna.seq_pos > 0 ? dna.seq_pos : (this.seqCounter + 1);
     if (dna.seq_pos <= 0) this.seqCounter++;
