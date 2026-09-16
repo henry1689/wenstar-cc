@@ -5,6 +5,7 @@
  * 包含：flushDialogGroup — 锚点/碎片/黑钻/图谱写入
  */
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
+import { MemoryWriteGateway } from '../../m2/MemoryWriteGateway.js';
 import { computeCalcium } from '../../m2/math.js';
 import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
@@ -17,6 +18,22 @@ const WS_DAG_ONLINE_EDGES = process.env.WS_DAG_ONLINE_EDGES === 'true';
 // H3: 单一钙化标度 [0,1] — 与 m2.computeCalcium / M3Config 阈值(0.3/0.6/0.8)完全一致的等级映射。
 // 闭组写入必须与逐轮砂金写入(persistence-stage 用 decision.enhanced.calcium_score/level)同标度，
 // 否则同一段内容在库里出现两套分数，检索排序错乱。
+// 批次3: 实时计算时空标签（与 persistence-stage.ts 保持一致）
+function getPeriod(hour: number): string {
+  return hour < 6 ? 'dawn' : hour < 9 ? 'morning' : hour < 12 ? 'midday' : hour < 18 ? 'afternoon' : hour < 20 ? 'evening' : hour < 23 ? 'night' : 'midnight';
+}
+function getSeason(month: number): string {
+  return month >= 3 && month <= 5 ? 'spring' : month >= 6 && month <= 8 ? 'summer' : month >= 9 && month <= 11 ? 'autumn' : 'winter';
+}
+function getLunarTermLabel(now: Date): string {
+  const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
+    '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
+  const start = new Date(now.getFullYear(), 0, 6);
+  const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
+  const idx = ((diff / 15) | 0) % 24;
+  return solarTerms[Math.max(0, idx)];
+}
+
 function calciumLevel(score: number): 0 | 1 | 2 | 3 {
   if (score < 0.3) return 0;
   if (score < 0.6) return 1;
@@ -107,7 +124,8 @@ export async function flushDialogGroup(
 ): Promise<void> {
   try {
     const sql = ctx.storage.getSQLite() as SQLiteAdapter;
-    if (!sql || typeof sql.writeRaw !== 'function') return;
+    if (!sql) return;
+    const gw = new MemoryWriteGateway(sql);
 
     const combined = dg.rounds.map((r: any, i: number) =>
       '【第' + (i + 1) + '轮】\n用户: ' + r.q + '\n玉瑶: ' + r.a
@@ -179,15 +197,25 @@ export async function flushDialogGroup(
       anchorText = anchorText.split('\n玉瑶: ').join('\n' + _speakerName + ': ');
     }
 
-    // 写入核心锚点（高钙化分，带anchor_score标记）
+    // 写入核心锚点（高钙化分，带anchor_score标记）—— 经 MemoryWriteGateway 值守卫
+    const anchorDate = new Date(now);
     const anchorId = dg.id + '_ANCHOR';
-    sql.writeRaw(
-      "INSERT OR IGNORE INTO memories (id, seq_pos, created_at, perception_40d, calcium_score, calcium_level, locus_path, leaf_zone, raw_input, effective_strength, strength_updated_at, primary_emotion, dialog_group_id, round_count, topic_label, anchor_score, belong_entity_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      anchorId, -(dg.rounds.length + 100), now, vec40(peakP), anchorCalcium,
-      calciumLevel(anchorCalcium), dg.locusPath || 'general',
-      'language_semantic_zone', anchorText, 0.5 + anchorCalcium * 0.3, now,
-      decision.primary_emotion || '对话', dg.id, dg.rounds.length, dg.topic, anchorCalcium, entityUuid
-    );
+    const anchorOk = gw.write({
+      id: anchorId, seqPos: -(dg.rounds.length + 100), createdAt: now,
+      perceptionV40: vec40(peakP), calciumScore: anchorCalcium,
+      calciumLevel: calciumLevel(anchorCalcium), locusPath: dg.locusPath || 'general',
+      leafZone: 'language_semantic_zone', rawInput: anchorText,
+      primaryEmotion: decision.primary_emotion || '对话', memoryType: 'dialog',
+      memoryKind: ctx._entityMeeting ? 'roleplay' : 'episodic',
+      dialogGroupId: dg.id,
+      topicLabel: dg.topic, anchorScore: anchorCalcium,
+      belongEntityUuid: entityUuid,
+      entityGenes: (dna as any).entity_genes ?? null,
+      timePeriod: getPeriod(anchorDate.getHours()),
+      season: getSeason((anchorDate.getMonth() + 1)),
+      lunarTerm: getLunarTermLabel(anchorDate),
+    });
+    if (anchorOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, anchorId);
 
     // 写入细节碎片（其余轮次）
     // H3: 每条碎片按其所在轮次的真实感知向量计算钙化分（同标度 [0,1]），
@@ -199,13 +227,22 @@ export async function flushDialogGroup(
       const chunkId = dg.id + '_CHUNK_' + String(i).padStart(3, '0');
       const roundP = dg.perceptions[i] || peakP;
       const chunkCalcium = Math.round(computeCalcium(roundP as any).score * 1000) / 1000;
-      sql.writeRaw(
-        "INSERT OR IGNORE INTO memories (id, seq_pos, created_at, perception_40d, calcium_score, calcium_level, locus_path, leaf_zone, raw_input, effective_strength, strength_updated_at, primary_emotion, dialog_group_id, round_count, topic_label, anchor_score, belong_entity_uuid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        chunkId, -dg.rounds.length - i, now, vec40(roundP), chunkCalcium,
-        calciumLevel(chunkCalcium), dg.locusPath || 'general',
-        'language_semantic_zone', chunkText, 0.3 + chunkCalcium * 0.2, now,
-        decision.primary_emotion || '对话', dg.id, dg.rounds.length, dg.topic, chunkCalcium * 0.5, entityUuid
-      );
+      const chunkOk = gw.write({
+        id: chunkId, seqPos: -dg.rounds.length - i, createdAt: now,
+        perceptionV40: vec40(roundP), calciumScore: chunkCalcium,
+        calciumLevel: calciumLevel(chunkCalcium), locusPath: dg.locusPath || 'general',
+        leafZone: 'language_semantic_zone', rawInput: chunkText,
+        primaryEmotion: decision.primary_emotion || '对话', memoryType: 'dialog',
+        memoryKind: ctx._entityMeeting ? 'roleplay' : 'episodic',
+        dialogGroupId: dg.id,
+        topicLabel: dg.topic, anchorScore: chunkCalcium * 0.5,
+        belongEntityUuid: entityUuid,
+        entityGenes: (dna as any).entity_genes ?? null,
+        timePeriod: getPeriod(anchorDate.getHours()),
+        season: getSeason((anchorDate.getMonth() + 1)),
+        lunarTerm: getLunarTermLabel(anchorDate),
+      });
+      if (chunkOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, chunkId);
     }
 
     // 情感轨迹标签
