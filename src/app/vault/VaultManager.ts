@@ -20,6 +20,7 @@ import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 import { encodeEmptyPerceptionV40, decodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（本文件原有 2 处 `x || null` 回查透传，挡不住字符串 'null'）
 import { sanitizeBelongUuid } from './belong-uuid.js';
+import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
 // ─── 类型定义 ───
 
@@ -98,6 +99,12 @@ export function logVaultOperation(
   contentMd?: string,
   belongEntityUuid?: string | null,
 ): void {
+  // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不进金库日志
+  //    本函数是金库写入唯一收口，任何路径（自动晋升/批量操作/巡检提炼）必经此处。
+  if (isMetaDiscourse(detail) || isMetaDiscourse(contentMd)) {
+    console.log('[VaultManager] 金库写入拦截: 命中元对话规则，不入 vault_log');
+    return;
+  }
   const id = 'vl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
   // V13: 写入 belong_entity_uuid — 确保金库记忆可被 UUID 检索系统找到
   // ②-1补漏(2026-09-13): 入参与回查值都过净化 —— 原 `x || null` 挡不住字符串 'null'（真值），
@@ -153,6 +160,11 @@ export function addBlackDiamond(
     namespace?: string;
   },
 ): BlackDiamondEntry {
+  // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不允许固化进黑钻（fail-closed 最后防线）
+  if (isMetaDiscourse(params.summary) || isMetaDiscourse(params.notes)) {
+    console.warn('[VaultManager] 黑钻写入拦截: 命中元对话规则，拒绝固化');
+    throw new Error('META_DISCOURSE_REJECTED: 元对话/自我陈述不允许固化进黑钻');
+  }
   const id = `bd_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
   const now = new Date().toISOString();
   const tags = params.tags || [];
@@ -403,6 +415,14 @@ export function getAlluvialSummary(
  * 钙质≥2 + (recall≥3 或 钙质==3 或 landmark) → 提炼
  */
 export function promoteToBlackDiamond(sqlite: SQLiteAdapter, memoryId: string): BlackDiamondEntry | null {
+  // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不晋升黑钻（回查原文作为第一道拦截）
+  try {
+    const _meta = sqlite.queryAll('SELECT raw_input FROM memories WHERE id = ? LIMIT 1', [memoryId]) as any[];
+    if (_meta.length > 0 && isMetaDiscourse(_meta[0]?.raw_input)) {
+      console.log('[VaultManager] 黑钻晋升拦截: 命中元对话规则，跳过 ' + memoryId);
+      return null;
+    }
+  } catch { /* 回查失败不阻塞，交由 evaluateDiamondPromotion 兜底 */ }
   // 去重：检查是否已存在
   const existing = sqlite.queryAll(
     `SELECT id FROM black_diamond WHERE source_id = ? LIMIT 1`,
@@ -456,6 +476,10 @@ export function promoteToBlackDiamond(sqlite: SQLiteAdapter, memoryId: string): 
 }
 
 export function evaluateDiamondPromotion(memory: Record<string, any>): DiamondPromotionDecision {
+  // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不具备黑钻晋升资格（与钙化分无关）
+  if (isMetaDiscourse(memory.raw_input) || isMetaDiscourse(memory.summary)) {
+    return { eligible: false, reason: 'meta-discourse', targetState: 'candidate' };
+  }
   const calciumScore = Number(memory.calcium_score ?? memory.calcium_level ?? 0);
   const recallCount = Number(memory.recall_count ?? 0);
   const isLandmark = Number(memory.is_landmark ?? 0) === 1 || memory.is_landmark === true;

@@ -13,6 +13,7 @@ import type { EmotionalMemoryRecord } from '../../m2/types/index.js';
 import { initialStrength } from '../../m2/math.js';
 import { autoPromoteCandidatesV2, logVaultOperation } from './VaultManager.js';
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
+import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
 const NEUTRAL_PERCEPTION: Perception24D = {
   pleasure: 0,
@@ -215,6 +216,8 @@ export class MemoryAssessor {
         if (conv.role !== 'user') continue;
         const text = (conv.content || '') as string;
         if (text.length < cfg.minContentLength) continue;
+        // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不晋升金库（不进 vault_log）
+        if (isMetaDiscourse(text)) continue;
 
         const conversationId = Number(conv.id ?? 0);
         const dnaRootId = String(conv.dna_root_id || `sand_fallback_${conversationId || Date.now()}`);

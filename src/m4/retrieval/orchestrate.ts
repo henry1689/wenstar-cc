@@ -80,6 +80,17 @@ export async function runFoundationRoutes(
     gatekeeper: ctx?._gatekeeper ?? null,
     activeEntityUuids: opts.activeEntityUuids,
     meetingMode: opts.meetingMode,
+    // 🔴 2026-09-16 数据卫生: 本体白名单（玉瑶 + 用户本人）。
+    //   普通模式（非会晤）下作为可见集合基底 → 所有会晤角色（A/B/G/X 类）的记录被排除。
+    //   取不到时返回空数组，buildPolicePolicy 自动回退原语义（向后兼容）。
+    householdUuids: (() => {
+      try {
+        const fg: any = ctx?.m4?.getFamilyGraph?.() ?? null;
+        const yuyao = fg?.getUUIDByName?.('玉瑶') ?? null;
+        const self = fg?.getUUIDByName?.('我') ?? null;
+        return [yuyao, self].filter(Boolean) as string[];
+      } catch { return []; }
+    })(),
   };
   const policy = buildPolicePolicy(policeSrc);
 

@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, appendF
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -81,6 +82,11 @@ export class MemoryVault {
   /** 写入一条记忆 */
   write(entry: VaultEntry): void {
     if (!this.ready) return;
+    // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不写入金库
+    if (isMetaDiscourse(entry.raw_input)) {
+      console.log('[MemoryVault] 金库写入拦截: 命中元对话规则，跳过 ' + entry.id);
+      return;
+    }
     const pJson = JSON.stringify(entry.perception);
     this.db.run(
       `INSERT OR REPLACE INTO memories

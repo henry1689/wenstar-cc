@@ -17,6 +17,7 @@ import type { ConversationTurn } from '../../m5/types/index.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { promoteToBlackDiamond } from '../vault/VaultManager.js';
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
+import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
 // P2-1: 质检反馈开关（可关闭以恢复纯标记模式）
 const ENABLE_QC_FEEDBACK = true;
@@ -50,6 +51,8 @@ export function runSandQC(
     if (text.length < 4) continue;
 
     scanned++;
+    // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不参与质检加权（不加速晋升金库/黑钻）
+    if (isMetaDiscourse(text)) continue;
     const snippet = text.substring(0, 80);
     let score = 0;
 
@@ -120,6 +123,8 @@ export function runGoldQC(sqlite: SQLiteAdapter, limit = 50): GoldQCResult {
 
     for (const row of rows) {
       scanned++;
+      // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不参与金库质检，不触发黑钻晋升
+      if (isMetaDiscourse(row.raw_input)) { rejected++; continue; }
       const calcium = row.calcium_level ?? 0;
       const recall = row.recall_count ?? 0;
       const landmark = row.is_landmark ?? 0;

@@ -275,12 +275,31 @@ const CN_META_PLAN_RE = new RegExp([
  *
  * @returns 通过守卫的原文；判定为思维链/回显时返回空串（宁可空也不泄漏）
  */
+/** 🔴 2026-09-16 数据卫生: chat.ts 注入前把系统标签改写成自然语形式（chat.ts 内 replace 表），
+ *  原出口守卫只认改写前的「【X的记忆】」，导致改写后的方括号标签从出口溜过并落库进对话历史。
+ *  本常量与 chat.ts 改写表一一对应，用于输出侧剥离。 */
+const OUTGOING_MEMORY_LABEL_RE = /\[你(记得的(相关)?往事|珍视的记忆|珍惜的记忆|你的档案|和鸿艺的对话)\]/;
+
 export function gateOutgoingReply(text: string): string {
     const t = (text || '').trim();
     if (!t) return '';
     if (isDraftShapedReply(t)) return '';
     if (CN_META_PLAN_RE.test(t)) return '';
     if (/【[^】]*的记忆】/.test(t)) return '';
+
+    // 🔴 2026-09-16 记忆回显剥离（策略 B：整段丢弃 + 上游兜底）
+    //   按段落切分，丢弃命中自然语标签的整段；若全部段落均被丢弃 → 判空交上游重试/兜底。
+    if (OUTGOING_MEMORY_LABEL_RE.test(t)) {
+      const _segs = t.split(/\n+/);
+      const _kept = _segs.filter(p => !OUTGOING_MEMORY_LABEL_RE.test(p));
+      const _out = _kept.join('\n').trim();
+      if (!_out) {
+        console.error('[DeepSeek] 出口剥离: 整条均为记忆回显，判空交由上游兜底');
+        return '';
+      }
+      console.error('[DeepSeek] 出口剥离: 丢弃记忆回显段落 ' + (_segs.length - _kept.length) + '/' + _segs.length);
+      return _out;
+    }
     return t;
 }
 

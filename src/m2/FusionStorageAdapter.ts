@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 // C3(2026-09-11): 实体名序列化收口到 EntityNameCodec（唯一事实源）
 import { formatNames } from './EntityNameCodec.js';
+import { isMetaDiscourse } from '../config/ingestion-guard.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
@@ -240,6 +241,16 @@ export class FusionStorageAdapter {
 
   promoteToLandmark(memoryId: string, narrativeTag?: string, sensoryAnchor?: string): boolean {
     this.ensureReady();
+    // 🔴 2026-09-16 数据卫生: 本方法是「晋升地标」的唯一包装层 —— 全仓所有晋升路径
+    //    （m7/ConsolidationQueue、m8/M8FusionAdapter 等）必经此处，在此收口可杜绝遗漏。
+    //    元对话/自我陈述不得晋升地标：地标会进入巩固、梦境队列并最终影响人格演化。
+    try {
+      const _rec: any = this.sqlite.findById(memoryId);
+      if (isMetaDiscourse(_rec?.raw_input ?? _rec?.rawInput)) {
+        console.log('[FusionStorage] 地标晋升拦截: 命中元对话规则，跳过 ' + memoryId);
+        return false;
+      }
+    } catch { /* 回查失败不阻塞，按原语义继续 */ }
     const ok = this.sqlite.promoteToLandmark(memoryId, narrativeTag, sensoryAnchor);
     if (!ok) return false;
     const record = this.sqlite.findById(memoryId);

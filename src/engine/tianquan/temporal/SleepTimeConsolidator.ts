@@ -18,6 +18,7 @@
  */
 import type { FusionStorageAdapter } from '../../../m2/FusionStorageAdapter.js';
 import { MEMORY_CONFIG } from '../../../config/MemoryConfig.js';
+import { isMetaDiscourse } from '../../../config/ingestion-guard.js';
 // V12.4 阶段B 根除24D: perception_json 列已删，读 perception_40d 列反解（pleasure=D12 / intimacy=D15，arousal 无槽位=0.5）
 import { decodePerceptionV40, encodeEmptyPerceptionV40 } from '../../../m2/PerceptionVector40DCodec.js';
 // C3(2026-09-11): 实体名解析已收口到 m2/EntityNameCodec（唯一事实源）——
@@ -243,6 +244,8 @@ export class SleepTimeConsolidator {
         const threshold = uniquePersons >= 2 ? _cfg.multiPersonThreshold : _cfg.singlePersonThreshold;
 
         if (elasticScore < threshold) continue;
+        // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不参与睡眠期巩固（不进金库）
+        if (isMetaDiscourse(_content)) continue;
 
         sqlite.writeRaw(
           `INSERT OR IGNORE INTO memories (id, raw_input, calcium_score, seq_pos, created_at, memory_kind, belong_entity_uuid)
@@ -305,6 +308,8 @@ export class SleepTimeConsolidator {
       );
       let count = 0;
       for (const row of rows) {
+        // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不晋升黑钻
+        if (isMetaDiscourse((row as any).raw_input)) continue;
         // black_diamond 表结构: id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, ...
         sqlite.writeRaw(
           `INSERT OR IGNORE INTO black_diamond (id, summary, tags, created_at)
@@ -606,6 +611,8 @@ export class SleepTimeConsolidator {
           // 提取摘要
           const summary = gateway.getMDSummary(change.path) || '';
           if (!summary) continue;
+          // 🔴 2026-09-16 数据卫生: 元对话/自我陈述摘要不入记忆
+          if (isMetaDiscourse(summary)) continue;
 
           // 写入 memories 表（标记 source_type='knowledge_vault'）
           const entryId = `kv_${manifest.uuid}_${Date.now().toString(36)}`.substring(0, 64);

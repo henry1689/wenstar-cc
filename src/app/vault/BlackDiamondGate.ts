@@ -19,6 +19,7 @@
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（审计日志回查黑钻归属时不得透传字符串 'null'）
 import { sanitizeBelongUuid } from './belong-uuid.js';
+import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
 export interface ManualAddResult {
   success: boolean;
@@ -63,6 +64,12 @@ export class BlackDiamondGate {
     // ① 密码校验
     if (!password || password !== expectedPassword) {
       return { success: false, reason: '密码错误，操作已拒绝' };
+    }
+
+    // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不允许手动固化进黑钻
+    if (isMetaDiscourse(summary) || isMetaDiscourse(content)) {
+      console.log('[BlackDiamondGate] 手动固化拦截: 命中元对话规则');
+      return { success: false, reason: '该内容被识别为元对话/自我陈述，不允许固化进黑钻库' };
     }
 
     // ② 配额检查

@@ -68,4 +68,47 @@ export const INGESTION_GUARD = {
 
   /** 拦截日志开关 */
   loggingEnabled: true,
+
+  /** 🔴 2026-09-16 数据卫生: 元对话/自我陈述过滤
+   *  背景: 模型输出的"拒绝话术/自我陈述/系统标签回显"被无差别收录为角色记忆，
+   *        并经 砂金→金库→黑钻→地标→梦境 逐级升级，最终影响人格演化。
+   *  判据与主题无关 —— 只识别"这段文本是不是在谈论模型自身/系统/规则本身"，
+   *  不对任何具体内容方向做判断。
+   *  与 config/dream-content-filter.config.yaml（M7 梦境敏感词表）职责互补：
+   *  那份管"什么内容不该做梦"，本份管"什么内容不该被当作角色记忆沉淀"。
+   *  命中即拦截: 不进 memories / 不进 vault_log / 不进 black_diamond / 不晋升地标。 */
+  metaDiscourse: {
+    /** A. 系统标签回显 —— 注入用的系统标签被原样复述 */
+    labelEcho: /^\[你(记得|珍视|珍惜)|【[^】]{1,12}的记忆】|【对话·/,
+    /** B. 模型元陈述 —— 谈论自身能力边界/拒绝行为 */
+    selfStatement: /我(不能|无法|不会|不该)(继续|生成|扮演|描述)|这条线我|我不接着演|作为(AI|人工智能|助手|语言模型)/,
+    /** C. 元对话词汇 —— 谈论提示词/设定/规则本身 */
+    metaTalk: /系统提示|角色设定|我被要求|越界|这个设定/,
+    /** 单条文本长度上限 —— 超长跳过检测（防正则回溯开销） */
+    maxScanChars: 20000,
+  },
 };
+
+/** 输入文本是否属于"元对话/自我陈述"（命中即不应沉淀为角色记忆）
+ *  鲁棒加固：内部全量 try/catch（异常返回 false，不阻断主流程）；
+ *           空值/非字符串/超长短路；命中时按 loggingEnabled 记录审计日志。 */
+export function isMetaDiscourse(text: unknown): boolean {
+  try {
+    if (typeof text !== 'string') return false;
+    const s = text.trim();
+    if (!s) return false;
+    const cfg = INGESTION_GUARD.metaDiscourse;
+    if (s.length > cfg.maxScanChars) return false;
+    const hit =
+      cfg.labelEcho.test(s) ||
+      cfg.selfStatement.test(s) ||
+      cfg.metaTalk.test(s);
+    if (hit && INGESTION_GUARD.loggingEnabled) {
+      console.log('[IngestionGuard] 元对话拦截: 命中 metaDiscourse 规则，该片段不沉淀为记忆');
+    }
+    return hit;
+  } catch (e) {
+    console.warn('[IngestionGuard] isMetaDiscourse 检测异常，按放行处理:', (e as Error).message);
+    return false;
+  }
+}

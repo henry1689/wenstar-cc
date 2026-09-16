@@ -134,6 +134,9 @@ export interface PoliceSource {
   activeEntityUuids?: string[];
   /** 是否处于会晤隔离墙场景（deny-by-default，无归属记录 deny） */
   meetingMode?: boolean;
+  /** 🔴 2026-09-16: 本体白名单（玉瑶 UUID + 用户本人 UUID）。
+   *  普通模式（非会晤）下作为可见集合基底，使所有会晤角色的记录被排除。 */
+  householdUuids?: string[];
 }
 
 /**
@@ -151,6 +154,18 @@ export function buildPolicePolicy(src: PoliceSource): PolicePolicy {
   if (src.meetingMode) {
     return { visibleUuids: uuids, allowUnowned: false };
   }
+
+  // 🔴 2026-09-16 数据卫生: 普通模式（非会晤）排除所有会晤角色的记录。
+  //    原实现无白名单时 enforce:false（完全不限）→ 会晤实体的记忆被普通对话召回。
+  //    现改为：可见集 = 本体白名单（玉瑶 + 用户本人）；无归属记录仍放行（allowUnowned:true，
+  //    避免误伤历史无归属数据）；其余实体（A/B/G/X 等会晤角色）的记录一律拒绝 ——
+  //    与会晤模式的严格隔离互为对称。
+  if (src.householdUuids && src.householdUuids.length > 0) {
+    const own = new Set<string>(uuids);
+    for (const u of src.householdUuids) if (u) own.add(u);
+    return { visibleUuids: own, allowUnowned: true, enforce: true };
+  }
+
   // 户主钥匙：无任何白名单 → 最高权限（enforce:false，不限制）；有白名单 → allowUnowned=true
   if (uuids.size === 0) {
     return { visibleUuids: uuids, allowUnowned: true, enforce: false };
