@@ -146,13 +146,13 @@ export class FusionStorageAdapter {
       strength_updated_at: now,
       is_landmark: false,
       landmarked_at: null,
-      // P0-1: 时空标签（由 chat.ts 每轮通过 setTemporalContext 注入）
+      // P0-1: 时空标签 — 优先用注入上下文，fallback 实时计算
       fg_entity_names: fgNames,
       // V13: 实体归属
       belongEntityUuid,
-      time_period: this.temporalContext.period,
-      season: this.temporalContext.season,
-      lunar_term: this.temporalContext.lunarTerm,
+      time_period: this.temporalContext.period ?? this._nowPeriod(),
+      season: this.temporalContext.season ?? this._nowSeason(),
+      lunar_term: this.temporalContext.lunarTerm ?? this._nowLunarTerm(),
     };
 
     // SQLite 写入（主存储）
@@ -395,10 +395,34 @@ export class FusionStorageAdapter {
     const status = this.sqlite.getStatus();
     return {
       totalRecords: status.totalRecords,
-      zoneCounts: {},
+      zoneCounts: this.computeZoneCounts(),
       currentSeqPos: this.seqCounter,
       storagePath: this.dataDir,
     };
+  }
+
+  /**
+   * 按 leaf_zone 统计记忆分布 —— M2「存储状态」面板分区分栏的数据源。
+   *
+   * 🔴 原实现硬编码 `zoneCounts: {}`：端口 3000 的 M2 卡片因此只显示总数，
+   *   分区网格一格不出（前端 renderM2 遍历 zone_counts 渲染分区）。
+   *   口径与 /api/health 的 topLeafZones 一致（同一 COALESCE 兜底 + GROUP BY），
+   *   避免同一语义出现第二套算法。
+   */
+  private computeZoneCounts(): Record<string, number> {
+    try {
+      const rows = this.sqlite.queryAll(
+        `SELECT COALESCE(leaf_zone, 'unknown') as leaf_zone, COUNT(*) as cnt
+         FROM memories
+         GROUP BY COALESCE(leaf_zone, 'unknown')`
+      ) as Array<{ leaf_zone: string; cnt: number }>;
+      const out: Record<string, number> = {};
+      for (const r of rows) out[r.leaf_zone] = Number(r.cnt ?? 0);
+      return out;
+    } catch (e) {
+      console.warn('[FusionStorage] zone 统计失败:', (e as Error).message);
+      return {};
+    }
   }
 
   async nextSeqPos(): Promise<number> {
@@ -447,6 +471,25 @@ export class FusionStorageAdapter {
   /** 清除时空上下文（跨日或会话封存时调用） */
   clearTemporalContext(): void {
     this.temporalContext = {};
+  }
+
+  // ── 实时计算时间标签（fallback） ──
+  private _nowPeriod(): string {
+    const h = new Date().getHours();
+    return h < 6 ? 'dawn' : h < 9 ? 'morning' : h < 12 ? 'midday' : h < 18 ? 'afternoon' : h < 20 ? 'evening' : h < 23 ? 'night' : 'midnight';
+  }
+  private _nowSeason(): string {
+    const m = new Date().getMonth() + 1;
+    return m >= 3 && m <= 5 ? 'spring' : m >= 6 && m <= 8 ? 'summer' : m >= 9 && m <= 11 ? 'autumn' : 'winter';
+  }
+  private _nowLunarTerm(): string {
+    const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
+      '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
+    const now = new Date();
+    const start = new Date(now.getFullYear(), 0, 6);
+    const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
+    const idx = ((diff / 15) | 0) % 24;
+    return solarTerms[Math.max(0, idx)];
   }
 
   // ─── SQLite 直通 ───
