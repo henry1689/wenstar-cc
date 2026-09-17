@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { formatNames } from './EntityNameCodec.js';
 import { isMetaDiscourse } from '../config/ingestion-guard.js';
 import { checkWriteGuard } from './MemoryWriteGateway.js';
+import { getPeriod, getSeason, getLunarTerm } from '../engine/temporal/global-types.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
@@ -163,9 +164,9 @@ export class FusionStorageAdapter {
       fg_entity_names: fgNames,
       // V13: 实体归属
       belongEntityUuid,
-      time_period: this.temporalContext.period ?? this._nowPeriod(),
-      season: this.temporalContext.season ?? this._nowSeason(),
-      lunar_term: this.temporalContext.lunarTerm ?? this._nowLunarTerm(),
+      time_period: this.temporalContext.period ?? getPeriod(new Date().getHours()),
+      season: this.temporalContext.season ?? getSeason(new Date().getMonth() + 1),
+      lunar_term: this.temporalContext.lunarTerm ?? getLunarTerm(new Date()),
     };
 
     // SQLite 写入（主存储）
@@ -484,25 +485,6 @@ export class FusionStorageAdapter {
   /** 清除时空上下文（跨日或会话封存时调用） */
   clearTemporalContext(): void {
     this.temporalContext = {};
-  }
-
-  // ── 实时计算时间标签（fallback） ──
-  private _nowPeriod(): string {
-    const h = new Date().getHours();
-    return h < 6 ? 'dawn' : h < 9 ? 'morning' : h < 12 ? 'midday' : h < 18 ? 'afternoon' : h < 20 ? 'evening' : h < 23 ? 'night' : 'midnight';
-  }
-  private _nowSeason(): string {
-    const m = new Date().getMonth() + 1;
-    return m >= 3 && m <= 5 ? 'spring' : m >= 6 && m <= 8 ? 'summer' : m >= 9 && m <= 11 ? 'autumn' : 'winter';
-  }
-  private _nowLunarTerm(): string {
-    const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
-      '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
-    const now = new Date();
-    const start = new Date(now.getFullYear(), 0, 6);
-    const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
-    const idx = ((diff / 15) | 0) % 24;
-    return solarTerms[Math.max(0, idx)];
   }
 
   // ─── SQLite 直通 ───

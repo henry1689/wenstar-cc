@@ -8,6 +8,7 @@ import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { MemoryWriteGateway } from '../../m2/MemoryWriteGateway.js';
 import { computeCalcium } from '../../m2/math.js';
 import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
+import { getPeriod, getSeason, getLunarTerm } from '../../engine/temporal/global-types.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
 import { sanitizeBelongUuid } from '../../app/vault/belong-uuid.js';
 // V13.0: 在线 DAG 建边（feature flag 控制，不阻塞闭组主流程）
@@ -18,21 +19,6 @@ const WS_DAG_ONLINE_EDGES = process.env.WS_DAG_ONLINE_EDGES === 'true';
 // H3: 单一钙化标度 [0,1] — 与 m2.computeCalcium / M3Config 阈值(0.3/0.6/0.8)完全一致的等级映射。
 // 闭组写入必须与逐轮砂金写入(persistence-stage 用 decision.enhanced.calcium_score/level)同标度，
 // 否则同一段内容在库里出现两套分数，检索排序错乱。
-// 批次3: 实时计算时空标签（与 persistence-stage.ts 保持一致）
-function getPeriod(hour: number): string {
-  return hour < 6 ? 'dawn' : hour < 9 ? 'morning' : hour < 12 ? 'midday' : hour < 18 ? 'afternoon' : hour < 20 ? 'evening' : hour < 23 ? 'night' : 'midnight';
-}
-function getSeason(month: number): string {
-  return month >= 3 && month <= 5 ? 'spring' : month >= 6 && month <= 8 ? 'summer' : month >= 9 && month <= 11 ? 'autumn' : 'winter';
-}
-function getLunarTermLabel(now: Date): string {
-  const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
-    '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
-  const start = new Date(now.getFullYear(), 0, 6);
-  const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
-  const idx = ((diff / 15) | 0) % 24;
-  return solarTerms[Math.max(0, idx)];
-}
 
 function calciumLevel(score: number): 0 | 1 | 2 | 3 {
   if (score < 0.3) return 0;
@@ -213,7 +199,7 @@ export async function flushDialogGroup(
       entityGenes: (dna as any).entity_genes ?? null,
       timePeriod: getPeriod(anchorDate.getHours()),
       season: getSeason((anchorDate.getMonth() + 1)),
-      lunarTerm: getLunarTermLabel(anchorDate),
+      lunarTerm: getLunarTerm(anchorDate),
     });
     if (anchorOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, anchorId);
 
@@ -240,7 +226,7 @@ export async function flushDialogGroup(
         entityGenes: (dna as any).entity_genes ?? null,
         timePeriod: getPeriod(anchorDate.getHours()),
         season: getSeason((anchorDate.getMonth() + 1)),
-        lunarTerm: getLunarTermLabel(anchorDate),
+        lunarTerm: getLunarTerm(anchorDate),
       });
       if (chunkOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, chunkId);
     }

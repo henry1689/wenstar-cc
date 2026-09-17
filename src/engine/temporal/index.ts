@@ -44,6 +44,8 @@ export type {
   UnifiedTemporalContext,
 } from './global-types.js';
 
+export { getPeriod, getSeason, getLunarTerm } from './global-types.js';
+
 export {
   MOON_PHASE_LABELS, SOLAR_TERM_LABELS,
   SEASON_LABELS, SUB_SEASON_LABELS,

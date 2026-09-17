@@ -238,3 +238,48 @@ export interface IPromptConfig {
   /** 月相雅称映射 */
   moonPoetic: Record<string, string>;
 }
+
+// ═══════════════════════════════════════════
+// 时间标签计算工具函数
+// ═══════════════════════════════════════════
+
+/**
+ * 根据小时计算时间段标签
+ * @param hour 0-23
+ * @returns 'dawn' | 'morning' | 'midday' | 'afternoon' | 'evening' | 'night' | 'midnight'
+ */
+export function getPeriod(hour: number): TimePeriod {
+  if (hour < 6) return 'dawn';
+  if (hour < 9) return 'morning';
+  if (hour < 12) return 'midday';
+  if (hour < 18) return 'afternoon';
+  if (hour < 20) return 'evening';
+  if (hour < 23) return 'night';
+  return 'midnight';
+}
+
+/**
+ * 根据月份计算季节标签
+ * @param month 1-12
+ * @returns 'spring' | 'summer' | 'autumn' | 'winter'
+ */
+export function getSeason(month: number): Season {
+  if (month >= 3 && month <= 5) return 'spring';
+  if (month >= 6 && month <= 8) return 'summer';
+  if (month >= 9 && month <= 11) return 'autumn';
+  return 'winter';
+}
+
+/**
+ * 计算当前节气标签（简易估算）
+ * @param now 当前日期
+ * @returns 24节气中文标签
+ */
+export function getLunarTerm(now: Date = new Date()): string {
+  const solarTerms = ['大雪','冬至','小寒','大寒','立春','雨水','惊蛰','春分','清明','谷雨',
+    '立夏','小满','芒种','夏至','小暑','大暑','立秋','处暑','白露','秋分','寒露','霜降','立冬','小雪'];
+  const start = new Date(now.getFullYear(), 0, 6); // 小寒约1/6
+  const diff = Math.floor((now.getTime() - start.getTime()) / 86400000);
+  const idx = ((diff / 15) | 0) % 24;
+  return solarTerms[Math.max(0, idx)];
+}
