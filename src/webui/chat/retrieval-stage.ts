@@ -1039,14 +1039,14 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   }  // 🔴 Foundation: 旧 KB+金库 作用域结束（S5 后由适配器路由接管；砂金块 S6 MemoryAdapter 再收编）
 
   // V10.0: 砂金库高钙化检索 — memories 中 calcium_level>=2 的经过加权检索
-  // 🔴 S5 后仍执行（无对应适配器，S6 MemoryAdapter 收编 memory 域后再跳过）
+  // 🔴 2026-09-17 修复：原逻辑只取高钙化记录（可能是很久以前的），导致无法回忆最近对话
+  //     改为：优先检索最近的对话组摘要（按时间倒序），确保上下文连贯
   try {
     const _sLimit = isTopicShift ? 3 : 1;
     const _sqlite = ctx.storage.getSQLite();
     if (_sqlite && typeof _sqlite.queryAll === 'function') {
-      // V13: 加上 entity UUID 过滤，不跨人物泄露重要记忆
       // 🔴 户籍管理法：收编 → UUIDPoliceFilter（deny-by-default，杜绝 OR IS NULL 逃生口）
-      let _sandQuery = "SELECT raw_input, calcium_level FROM memories WHERE leaf_zone='user' AND calcium_level >= 2";
+      let _sandQuery = "SELECT raw_input, calcium_level, created_at FROM memories WHERE leaf_zone='user' AND calcium_level >= 2";
       const _sandParams: any[] = [];
       if (_activeEntityUuids.length > 0) {
         const { buildSqlClause: _policeClause } = await import('../../governance/police/UUIDPoliceFilter.js');
@@ -1054,7 +1054,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         _sandQuery += _police.clause;
         _sandParams.push(..._police.params);
       }
-      _sandQuery += ' ORDER BY calcium_score DESC LIMIT 10';
+      // 🔴 关键修改：按创建时间倒序排列，优先返回最近的对话内容
+      _sandQuery += ' ORDER BY created_at DESC LIMIT 10';
       const _sandRows = _sqlite.queryAll(_sandQuery, _sandParams) || [];
       for (const _sr of _sandRows.slice(0, _sLimit)) {
         const _t = (_sr.raw_input || '').substring(0, 80);
