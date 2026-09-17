@@ -192,7 +192,7 @@ export class MemoryRetriever {
   async retrieveMemories(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean; rawQuery?: string }
+    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean; rawQuery?: string; searchScope?: 'strict' | 'allow-unowned' | 'full' }
   ): Promise<DNA[]> {
     const limit = options?.limit ?? 5;
     const startTs = Date.now();
@@ -228,7 +228,8 @@ export class MemoryRetriever {
     // ─── 1. 按话题前缀检索（基于分类树路由） ───
     // V12.7(批2): 补 entityUuids 透传 — 会晤模式下 M4Orchestrator 已传 entityUuids，
     // 此处未透传 → findByLocus 跨实体全库扫描，他人同话题记忆经 timeline 注入 LLM（会晤绕过）。
-    const byLocus = await this.storage.findByLocus(locusPath, { limit: 20, entityUuids: options?.entityUuids });
+    // 🔴 Foundation V2.0: 透传搜索范围限定
+    const byLocus = await this.storage.findByLocus(locusPath, { limit: 20, entityUuids: options?.entityUuids, searchScope: options?.searchScope });
 
     // ─── 2. 关键词全文搜索 ───
     const byKeyword: DNA[] = [];
@@ -276,7 +277,8 @@ export class MemoryRetriever {
             }
           }
           if (byKeyword.length === 0) {
-            const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids });
+            // 🔴 Foundation V2.0: 透传搜索范围限定
+            const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids, searchScope: options?.searchScope });
             for (const dna of recent) {
               for (const kw of keywords) {
                 if (dna.raw_input.includes(kw) && !seen.has(dna.branch_id)) {
@@ -611,7 +613,7 @@ export class MemoryRetriever {
   async retrieveMultiRank(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { perception?: Perception24D; entityUuids?: string[]; sessionId?: string; isBackgroundTask?: boolean }
+    options?: { perception?: Perception24D; entityUuids?: string[]; sessionId?: string; isBackgroundTask?: boolean; searchScope?: 'strict' | 'allow-unowned' | 'full' }
   ): Promise<MultiRankResult> {
     const sessionId = options?.sessionId ?? this._sessionId;
     const lists: RankedList[] = [];
@@ -649,6 +651,9 @@ export class MemoryRetriever {
     // 🔴 每路守卫条件原样保留（emotion 需 perception、spine 会晤跳过、entity 需 uuid、work 需关键词）。
     // 🔴 不剪枝：keyword/spine 的 200 条候选窗口原样保留（改动会改变召回范围）。
     const entityUuids = options?.entityUuids ?? [];
+    
+    // 🔴 Foundation V2.0: 搜索范围限定
+    const searchScope = options?.searchScope ?? 'strict';
 
     // 1. 情感/情绪路 (emotion)
     const runEmotion = async (): Promise<RankedItem[]> => {
@@ -663,6 +668,7 @@ export class MemoryRetriever {
             similarity_mode: 'mood_congruent',
             limit: 30,
             entityUuids: options?.entityUuids,
+            searchScope: options?.searchScope,
           });
           for (const sm of scored) {
             if (sm?.record) {
@@ -688,7 +694,7 @@ export class MemoryRetriever {
       const items: RankedItem[] = [];
       if (keywords.size > 0) {
         try {
-          const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids });
+          const recent = await this.storage.findBySeqPosRange(0, 999_999_999, { limit: 200, entityUuids: options?.entityUuids, searchScope: options?.searchScope });
           const seen = new Set<string>();
           for (const dna of recent) {
             if (seen.has(dna.branch_id)) continue;
@@ -767,7 +773,8 @@ export class MemoryRetriever {
     const runLocus = async (): Promise<RankedItem[]> => {
       const items: RankedItem[] = [];
       try {
-        const byLocus = await this.storage.findByLocus(locusPath, { limit: 20, entityUuids: options?.entityUuids });
+        // 🔴 Foundation V2.0: 透传搜索范围限定
+        const byLocus = await this.storage.findByLocus(locusPath, { limit: 20, entityUuids: options?.entityUuids, searchScope: options?.searchScope });
         for (const dna of byLocus) {
           const kind = dna.memory_kind;
           if (options?.isBackgroundTask && kind === 'roleplay') continue;

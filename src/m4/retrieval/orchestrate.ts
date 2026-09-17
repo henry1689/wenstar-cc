@@ -101,6 +101,8 @@ export async function runFoundationRoutes(
     perception40d: opts.perception40d,
     entityUuids: opts.activeEntityUuids,
     mode: opts.isTopicShift ? 'full' : 'balanced',
+    // 🔴 Foundation V2.0: 搜索范围限定（会晤场景严格隔离，户主场景允许无归属）
+    searchScope: opts.meetingMode ? 'strict' : 'allow-unowned',
     // opts 显式传入优先（retrieval-stage 提供当前轮 DNA），缺省回退 ctx._dna（旧隐式路径）。
     // 修复契约漂移：此前忽略 opts 传入值从 ctx._dna 隐式取，ctx._dna 若滞后于当前轮 DNA 则检索域选错。
     locusPath: opts.locusPath ?? ((ctx?._dna as any)?.locus_path || 'default'),

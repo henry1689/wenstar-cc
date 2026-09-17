@@ -36,12 +36,15 @@ export interface MultiRankLike {
   }>;
 }
 
+/** 🔴 Foundation V2.0: 搜索范围限定 */
+export type SearchScope = 'strict' | 'allow-unowned' | 'full';
+
 /** 记忆召回数据源（M4Orchestrator.retrieveMultiRankForSearch 形状） */
 export interface MemoryRetrieverSource {
   retrieveMultiRank(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { perception?: unknown; entityUuids?: string[]; sessionId?: string },
+    options?: { perception?: unknown; entityUuids?: string[]; sessionId?: string; searchScope?: SearchScope },
   ): Promise<MultiRankLike>;
 }
 
@@ -55,10 +58,12 @@ export class MemoryAdapter implements RetrievalAdapter {
     const locusPath = ctx.locusPath || 'default';
     const entities = ctx.entities ?? [];
     try {
+      // 🔴 Foundation V2.0: 透传搜索范围限定
       const result = await this.retriever.retrieveMultiRank(locusPath, entities, {
         perception: ctx.perception,
         entityUuids: ctx.entityUuids,
         sessionId: ctx.sessionId,
+        searchScope: ctx.searchScope,
       });
       const hits: SearchHit[] = [];
       for (const list of result.lists) {

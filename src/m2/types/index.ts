@@ -136,6 +136,9 @@ export interface EmotionalMemoryRecord {
   foresightStatus?: string | null;
 }
 
+/** 🔴 Foundation V2.0: 搜索范围限定模式 */
+export type SearchScope = 'strict' | 'allow-unowned' | 'full';
+
 /** 检索查询 */
 export interface RetrievalQuery {
   current_perception: Perception24D;
@@ -149,6 +152,8 @@ export interface RetrievalQuery {
   entityUuids?: string[];
   /** P0-3: 后台任务标记 — true 时排除 roleplay 记忆（梦境/金库/分析）；聊天检索 false/缺省 不过滤 */
   isBackgroundTask?: boolean;
+  /** 🔴 Foundation V2.0: 搜索范围限定（默认 'strict'） */
+  searchScope?: SearchScope;
 }
 
 /** 评分后的记忆 */
@@ -242,6 +247,8 @@ export interface QueryOptions {
   entity_names?: string[];
   /** V13: 实体UUID过滤 — 限定检索到特定人物 */
   entityUuids?: string[];
+  /** 🔴 Foundation V2.0: 搜索范围限定（默认 'strict'） */
+  searchScope?: SearchScope;
 }
 
 /** 存储状态 */

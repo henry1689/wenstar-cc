@@ -26,6 +26,12 @@ export interface PolicePolicy {
   allowUnowned?: boolean;
   /** 默认 true；false 时返回全部（仅供离线巡检探针用） */
   enforce?: boolean;
+  /** 🔴 Foundation V2.0: 搜索范围限定（2026-09-17）
+   *  - 'strict': 仅在该 UUID 范围内搜索（会晤场景默认）
+   *  - 'allow-unowned': UUID 范围内搜索 + 允许无归属记录（户主场景）
+   *  - 'full': 全库搜索（离线巡检）
+   *  默认 'strict'（deny-by-default 硬边界）。 */
+  searchScope?: 'strict' | 'allow-unowned' | 'full';
 }
 
 /** 文本片段（带源 UUID 或纯文本） */
@@ -52,23 +58,39 @@ export function passes(uuid: string | null | undefined, p: PolicePolicy): boolea
 /**
  * 构建 SQL 过滤子句（唯一公共来源）。
  * 空白名单 → AND 1=0（fail-closed，永不返回空 clause）。
+ * 
+ * 🔴 Foundation V2.0 (2026-09-17): 支持 searchScope 限定搜索范围
+ *  - 'strict': 仅在该 UUID 范围内搜索（会晤场景默认）
+ *  - 'allow-unowned': UUID 范围内 + 无归属记录（户主场景）
+ *  - 'full': 全库搜索（离线巡检）
  */
 export function buildSqlClause(p: PolicePolicy): { clause: string; params: string[] } {
   if (p.enforce === false) return { clause: '', params: [] };
   const uuids = [...p.visibleUuids].filter(Boolean);
+  
+  // 🔴 Foundation V2.0: 搜索范围限定
+  const scope = p.searchScope ?? 'strict';
+  if (scope === 'full') {
+    return { clause: '', params: [] };
+  }
+  
   if (uuids.length === 0) {
     // fail-closed：无白名单 → 拒绝一切
     return { clause: ' AND 1=0', params: [] };
   }
+  
   const phs = uuids.map(() => '?').join(',');
-  if (p.allowUnowned) {
+  if (scope === 'strict') {
+    // 🔴 Foundation V2.0: 严格模式 — 仅在该 UUID 范围内搜索（不走 OR IS NULL）
     return {
-      clause: ` AND (belong_entity_uuid IN (${phs}) OR belong_entity_uuid IS NULL OR belong_entity_uuid = '')`,
+      clause: ` AND belong_entity_uuid IN (${phs})`,
       params: uuids,
     };
   }
+  
+  // allow-unowned 模式：UUID 范围内 + 允许无归属记录（户主场景）
   return {
-    clause: ` AND belong_entity_uuid IN (${phs})`,
+    clause: ` AND (belong_entity_uuid IN (${phs}) OR belong_entity_uuid IS NULL OR belong_entity_uuid = '')`,
     params: uuids,
   };
 }

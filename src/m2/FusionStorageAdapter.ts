@@ -16,7 +16,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
 import type { Perception24D } from '../m3/types/perception.js';
-import type { WriteResult, ReadResult, QueryOptions, StorageStatus } from './types/index.js';
+import type { WriteResult, ReadResult, QueryOptions, StorageStatus, SearchScope } from './types/index.js';
 import { SQLiteAdapter } from './SQLiteAdapter.js';
 import { computeCalcium, initialStrength } from './math.js';
 import type { EmotionalMemoryRecord, RetrievalQuery, ScoredMemory, EmotionalLandscape } from './types/index.js';
@@ -195,27 +195,31 @@ export class FusionStorageAdapter {
 
   async findByLocus(locusPath: string, options?: QueryOptions): Promise<DNA[]> {
     this.ensureReady();
-    const records = this.sqlite.findByLocusWithStrength(locusPath, options?.limit ?? 20, 0.05, options?.entityUuids);
+    // 🔴 Foundation V2.0: 透传搜索范围限定
+    const records = this.sqlite.findByLocusWithStrength(locusPath, options?.limit ?? 20, 0.05, options?.entityUuids, options?.searchScope);
     return records.map(r => this.toDNA(r));
   }
 
   async findBySeqPosRange(start: number, end: number, options?: QueryOptions): Promise<DNA[]> {
     this.ensureReady();
-    const records = this.sqlite.findBySeqPosRangeWithStrength(start, end, options?.limit ?? 50, 0.05, options?.entityUuids);
+    // 🔴 Foundation V2.0: 透传搜索范围限定
+    const records = this.sqlite.findBySeqPosRangeWithStrength(start, end, options?.limit ?? 50, 0.05, options?.entityUuids, options?.searchScope);
     return records.map(r => this.toDNA(r));
   }
 
   /** 带衰减门控的范围检索 */
   async findBySeqPosRangeFiltered(start: number, end: number, options?: QueryOptions & { minStrength?: number }): Promise<DNA[]> {
     this.ensureReady();
-    const records = this.sqlite.findBySeqPosRangeWithStrength(start, end, options?.limit ?? 50, options?.minStrength ?? 0.05, options?.entityUuids);
+    // 🔴 Foundation V2.0: 透传搜索范围限定
+    const records = this.sqlite.findBySeqPosRangeWithStrength(start, end, options?.limit ?? 50, options?.minStrength ?? 0.05, options?.entityUuids, options?.searchScope);
     return records.map(r => this.toDNA(r));
   }
 
   /** 带衰减门控的话题检索 */
   async findByLocusFiltered(locusPath: string, options?: QueryOptions & { minStrength?: number }): Promise<DNA[]> {
     this.ensureReady();
-    const records = this.sqlite.findByLocusWithStrength(locusPath, options?.limit ?? 20, options?.minStrength ?? 0.05, options?.entityUuids);
+    // 🔴 Foundation V2.0: 透传搜索范围限定
+    const records = this.sqlite.findByLocusWithStrength(locusPath, options?.limit ?? 20, options?.minStrength ?? 0.05, options?.entityUuids, options?.searchScope);
     return records.map(r => this.toDNA(r));
   }
 

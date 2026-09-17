@@ -98,6 +98,12 @@ export interface RetrievalContext {
   perception40d?: PerceptionV40 | null;
   /** 活跃实体 UUID（会晤白名单） */
   entityUuids: string[];
+  /** 🔴 Foundation V2.0: 搜索范围限定（2026-09-17）
+   *  - 'strict': 仅在该 UUID 范围内搜索（会晤场景默认）
+   *  - 'allow-unowned': UUID 范围内 + 无归属记录（户主场景）
+   *  - 'full': 全库搜索（离线巡检）
+   *  默认 'strict'。 */
+  searchScope?: 'strict' | 'allow-unowned' | 'full';
   /** 检索力度 */
   mode: SearchMode;
   /** 话题路径（emotion/keyword/locus 路用） */

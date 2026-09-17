@@ -1040,14 +1040,20 @@ export class SQLiteAdapter {
    *   - 默认 deny-by-default（allowUnowned=false，杜绝 OR IS NULL 逃生口）
    * 🔴 P0-A5 修复: 户主钥匙语义 — entityUuids 为空（户主/无活跃实体）时放行全部，
    *   不再 fail-closed 返回 AND 1=0（否则户主本人记忆永远检索不到，主场景功能退化）。 */
-  private _entityUuidClause(entityUuids?: string[], allowUnowned = false): { clause: string; params: string[] } {
+  /** 🔴 Foundation V2.0 (2026-09-17): 支持 searchScope 搜索范围限定 */
+  private _entityUuidClause(entityUuids?: string[], allowUnowned = false, searchScope?: 'strict' | 'allow-unowned' | 'full'): { clause: string; params: string[] } {
     // 户主钥匙场景：无活跃实体白名单 → 放行所有（户主是全库最高权限）
     if (!entityUuids || entityUuids.length === 0) {
       return { clause: '', params: [] };
     }
+    
+    // 🔴 Foundation V2.0: 搜索范围限定
+    const scope = searchScope ?? (allowUnowned ? 'allow-unowned' : 'strict');
+    
     return buildSqlClause({
       visibleUuids: new Set(entityUuids.filter(Boolean)),
       allowUnowned,
+      searchScope: scope,
     });
   }
 
@@ -1065,9 +1071,9 @@ export class SQLiteAdapter {
   }
 
   /** 带衰减门控的检索 — 过滤低强度记忆，按 (strength * calcium) 排序 */
-  findBySeqPosRangeWithStrength(start: number, end: number, limit = 50, minStrength = 0.05, entityUuids?: string[]): EmotionalMemoryRecord[] {
+  findBySeqPosRangeWithStrength(start: number, end: number, limit = 50, minStrength = 0.05, entityUuids?: string[], searchScope?: 'strict' | 'allow-unowned' | 'full'): EmotionalMemoryRecord[] {
     this.ensureReady();
-    const euClause = this._entityUuidClause(entityUuids);
+    const euClause = this._entityUuidClause(entityUuids, false, searchScope);
     // 先拉取较多候选，再在应用层排序
     const res = this.execSql(
       `SELECT * FROM memories WHERE seq_pos >= ? AND seq_pos <= ?${euClause.clause}
@@ -1083,9 +1089,9 @@ export class SQLiteAdapter {
   }
 
   /** 按 strength 过滤的 findByLocus */
-  findByLocusWithStrength(locusPath: string, limit = 20, minStrength = 0.05, entityUuids?: string[]): EmotionalMemoryRecord[] {
+  findByLocusWithStrength(locusPath: string, limit = 20, minStrength = 0.05, entityUuids?: string[], searchScope?: 'strict' | 'allow-unowned' | 'full'): EmotionalMemoryRecord[] {
     this.ensureReady();
-    const euClause = this._entityUuidClause(entityUuids);
+    const euClause = this._entityUuidClause(entityUuids, false, searchScope);
     const res = this.execSql(
       `SELECT * FROM memories WHERE locus_path LIKE ?${euClause.clause}
        ORDER BY seq_pos DESC LIMIT ?`,
@@ -1178,6 +1184,8 @@ export class SQLiteAdapter {
    *   - 记录感知：record.perceptionV40（perception_40d 列，v2 兼容 decode）
    *   - 相似度：cosineSimilarity40D（扇区加权）
    * 40D 缺失行（perceptionV40 空）→ 降级按钙化分排序，不崩不泄漏。
+   * 
+   * 🔴 Foundation V2.0 (2026-09-17): 支持 searchScope 搜索范围限定
    */
   findByEmotionalSimilarity40D(query: RetrievalQuery): ScoredMemory[] {
     this.ensureReady();
@@ -1194,7 +1202,11 @@ export class SQLiteAdapter {
     const rpExclude = query.isBackgroundTask
       ? " AND (memory_kind IS NULL OR (memory_kind != 'roleplay' AND memory_type != 'rp_dialog'))"
       : "";
-    const euClause = this._entityUuidClause(query.entityUuids);
+    
+    // 🔴 Foundation V2.0: 搜索范围限定
+    const searchScope = query.searchScope ?? 'strict';
+    const euClause = this._entityUuidClause(query.entityUuids, searchScope === 'allow-unowned');
+    
     const landmarkRows = this.execSql(
       `SELECT * FROM memories WHERE is_landmark = 1${rpExclude}${euClause.clause} ORDER BY calcium_score DESC LIMIT 20`,
       euClause.params,
@@ -1211,8 +1223,10 @@ export class SQLiteAdapter {
     }
 
     if (allScored.length < query.limit) {
+      // 🔴 Foundation V2.0: 搜索范围限定 — strict 模式不走 OR IS NULL
+      const recentClause = searchScope === 'strict' ? euClause.clause : `${rpExclude}${euClause.clause}`;
       const all = this.execSql(
-        `SELECT * FROM memories WHERE 1=1${rpExclude}${euClause.clause} ORDER BY created_at DESC LIMIT 200`,
+        `SELECT * FROM memories WHERE 1=1${recentClause} ORDER BY created_at DESC LIMIT 200`,
         euClause.params,
       );
       const records = this.rowsToRecords(all)
