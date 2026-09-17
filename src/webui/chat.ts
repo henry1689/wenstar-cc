@@ -2441,7 +2441,7 @@ if (_meetingExited) {
         _locusPath.split('.')[1] !== _dg.locusPath?.split('.')[1];
 
       const _shouldCloseGroup = _dg && (
-        _locusChanged || isTopicShift || _meetingExited ||
+        _locusChanged || _meetingExited ||
         _dg.rounds.length >= 10 ||
         (Date.now() - _dg.startTime) > 30 * 60 * 1000
       );
