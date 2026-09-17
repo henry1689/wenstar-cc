@@ -1,0 +1,11 @@
+const D = require('better-sqlite3');
+const f = new D('data/webui/knowledge/family_graph.db');
+const row = f.prepare("SELECT id, properties FROM nodes WHERE name='徐诗涵'").get();
+const p = JSON.parse(row.properties || '{}');
+console.log('更新前 relation_to_user:', p.relation_to_user);
+p.relation_to_user = '朋友';
+f.prepare('UPDATE nodes SET properties = ? WHERE id = ?').run(JSON.stringify(p), row.id);
+const verify = f.prepare("SELECT properties FROM nodes WHERE name='徐诗涵'").get();
+const p2 = JSON.parse(verify.properties || '{}');
+console.log('更新后 relation_to_user:', p2.relation_to_user);
+f.close();

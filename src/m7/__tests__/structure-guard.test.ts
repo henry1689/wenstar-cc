@@ -98,6 +98,9 @@ describe('[M7守卫] 核心功能', () => {
     try { require('node:fs').unlinkSync(tmp); } catch {}
     const dq = new DreamQueue(tmp);
     const d = dq.add({ source: 'M3', content: 'test', affected_traits: ['extraversion'] });
+    // add() 对命中敏感词表的梦境返回 null（M7 统一拦截入口），类型上必须收窄
+    expect(d).not.toBeNull();
+    if (!d) return;
     expect(d.status).toBe('pending');
     dq.updateStatus(d.id, 'confirmed');
     dq.cleanResolved();

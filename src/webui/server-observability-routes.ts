@@ -25,6 +25,14 @@ export type ObservabilityRouteDeps = {
   m8: any;
   clueTracker: any;
   topicTracker: any;
+  /**
+   * 躯体感知记忆实例 —— 必须是 server.ts 注入的**同一实例**。
+   * 🔴 禁止在本模块内 new SomaticMemory：它的 signalBuffer/patterns 是纯内存态，
+   *   第二个实例只会读到 DATA_FILE 的旧快照 → 与主线记录分叉（违背「状态单一 owner」）。
+   */
+  somaticMemory?: {
+    getStats: () => { totalSignals: number; totalPatterns: number; activePattern: string | null; intensity: number };
+  };
   alignmentGuard: any;
   inductionScheduler: any;
   masterProfile: any;
@@ -967,7 +975,7 @@ export async function handleObservabilityRoutes(
   const {
     req, res, url,
     storage, familyGraph, conversationHistory, maintenance,
-    m6, m7, m8, clueTracker, topicTracker, alignmentGuard,
+    m6, m7, m8, clueTracker, topicTracker, somaticMemory, alignmentGuard,
     inductionScheduler, masterProfile, getSelfModel, sseClients,
     orchestrator, hybridSearch, enableNewArch,
   } = deps;
@@ -1098,6 +1106,20 @@ export async function handleObservabilityRoutes(
   }
 
   // ── M6-M8 模块数据 ──
+  // ── 躯体感知记忆状态（前端 somaticService.fetchSomaticState 消费）──
+  // 🔴 2026-09-16 恢复：本路由在 7/12「pre-tianquan-refactor」重构中丢失，
+  //   此后前端 /api/somatic 恒 404 → somaticService 回退 intensity:0
+  //   → App.tsx 每 5s 把粒子强度写回 0（情感条死寂）。
+  //   后端 SomaticMemory 一直活着（server.ts 持有实例、chat.ts 每轮 record()），
+  //   缺的只是一个只读出口 —— 此处补上，不新增状态、不新增计算。
+  if (req.method === 'GET' && url.pathname === '/api/somatic') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(somaticMemory?.getStats() ?? {
+      totalSignals: 0, totalPatterns: 0, activePattern: null, intensity: 0,
+    }));
+    return true;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/modules') {
     const m6Model = m6?.getModel();
     const m6Traits = m6?.getTraits() ?? getSelfModel().traits;
@@ -1111,8 +1133,14 @@ export async function handleObservabilityRoutes(
     const dreamTags = storage.getSQLite().queryAll("SELECT id, summary, emotion_tag FROM black_diamond WHERE tags LIKE '%dream_%' ORDER BY created_at DESC LIMIT 5") as any[];
     const landscape = storage.getEmotionalLandscape();
     const m8Status = storage.getSQLite().getStatus();
+    // M2「记忆存储」读数：复用 getStatus 的 count（同一查询，不额外扫描）+ getDecayStats 强度分布
+    //   （与 /api/health 同源同口径，避免第二套算法）。
+    // 🔴 语义边界：M2 = 存储层**存量**；M4 = 本轮**检索结果**（m4.timeline）。
+    //   二者不可混用 —— 拿检索条数充当 M2 会与 M4 重复（违反「同一业务规则不得多处实现」）。
+    const m2Decay = storage.getDecayStats();
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
+      m2: { total_memories: m8Status.totalRecords, landmarks: m8Status.landmarks, entities: m8Status.totalEntities, avg_strength: m2Decay.avgStrength, strong_count: m2Decay.strongCount, weak_count: m2Decay.weakCount },
       m6: { traits: m6Traits, preferences: m6Prefs.slice(0, 10), boundaries: m6Bounds.slice(0, 10), narrative_layers: m6Layers.slice(0, 5), version: m6Model?.version ?? '1.0' },
       m7: { pending_dreams: m7Pending.slice(0, 10), total_pending: m7Pending.length, total_confirmed: m7All.length, interaction_logs: m7Logs.slice(-10), total_logs: m7Logs.length, research_stats: topicTracker?.getStats?.() ?? {}, dream_analysis: { total_dream_entries: dreamDiamondCount?.[0]?.c ?? 0, recent_entries: (dreamTags ?? []).map((r: any) => ({ id: r.id, summary: (r.summary || '').substring(0, 80), emotion: r.emotion_tag || '未分类' })) } },
       m8: { total_entries: m8Status.landmarks, total_scars: landscape.scars.length, healed_scars: 0, unhealed_scars: landscape.scars.length, recent_entries: landscape.peaks.slice(0, 5).map((p: any) => ({ id: p.id, sensory_anchor: p.snippet?.substring(0, 20) ?? '', created_at: p.created_at, narrative_tag: p.narrative_tag ?? '日常', calcium: p.calcium })) },

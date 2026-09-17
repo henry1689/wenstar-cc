@@ -38,14 +38,50 @@ body{
 .dot-on{width:5px;height:5px;border-radius:50%;background:var(--gn);display:inline-block;animation:pd 2s ease-in-out infinite}
 @keyframes pd{0%,100%{opacity:1}50%{opacity:.4}}
 
-/* ═══ LEFT: 3/4 ═══ */
+/* ═══ LEFT: 3/4 ═══
+   上 1/4 = 3D 感知粒子流；下 3/4 = 左右对分承载观测卡片。
+   （拆分前为单列 flex 全滚动 —— 所有卡片挤一条竖列） */
 #left{
   flex:3;margin-top:var(--hd);
-  display:flex;flex-direction:column;gap:5px;
-  padding:6px 5px 10px 8px;overflow-y:auto;min-width:0
+  display:grid;grid-template-rows:1fr 3fr;gap:5px;
+  padding:6px 5px 10px 8px;min-width:0;overflow:hidden
 }
-#left::-webkit-scrollbar{width:3px}
-#left::-webkit-scrollbar-thumb{background:var(--bd);border-radius:2px}
+/* 上 1/4：3D 粒子流 */
+#ltop{
+  position:relative;border:1px solid var(--bd);border-radius:7px;
+  background:radial-gradient(ellipse 130% 130% at 50% 50%,rgba(232,160,180,0.05) 0%,transparent 70%);
+  overflow:hidden;min-height:0
+}
+#lcanvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#ltop .lcap{
+  position:absolute;top:5px;left:9px;font-size:9px;letter-spacing:1px;
+  color:var(--tm);pointer-events:none;user-select:none
+}
+#ltop .lcap b{color:var(--rose);font-weight:600}
+/* 下 3/4：左右对分 */
+#lbot{display:grid;grid-template-columns:1fr 1fr;gap:5px;min-height:0}
+#lbot > .lcol{
+  display:flex;flex-direction:column;gap:5px;min-height:0;
+  overflow-y:auto;overflow-x:hidden;padding-right:2px
+}
+#lbot > .lcol::-webkit-scrollbar,#left::-webkit-scrollbar{width:3px}
+#lbot > .lcol::-webkit-scrollbar-thumb,#left::-webkit-scrollbar-thumb{background:var(--bd);border-radius:2px}
+/* 感知阈值条 · 40D（6 大扇区分组 + 中性阈值线） */
+#p-th .thmeta{font-size:8px;color:var(--ts);margin-bottom:4px;line-height:1.6}
+#p-th .thmeta b{color:var(--rose)}
+#p-th .thsec{margin-bottom:5px}
+#p-th .ths{font-size:8px;color:var(--tm);letter-spacing:.5px;margin:4px 0 3px;padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,0.05)}
+#p-th .throw{display:grid;grid-template-columns:46px 1fr 34px;align-items:center;gap:5px;margin-bottom:2px}
+#p-th .thl{font-size:8px;color:var(--ts);letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#p-th .tht{position:relative;height:4px;border-radius:2px;background:rgba(255,255,255,0.05)}
+#p-th .thf{display:block;height:100%;border-radius:2px;opacity:.38;transition:width .45s ease,opacity .25s ease,background .45s ease}
+#p-th .throw.on .thf{opacity:1}
+#p-th .thk{position:absolute;top:-2px;bottom:-2px;width:1px;background:rgba(245,215,110,0.5)}
+#p-th .thv{font-size:8px;text-align:right;color:var(--tm);font-family:ui-monospace,Consolas,monospace}
+/* 26 个客观维当前无数据源（等瑶光回填）—— 压灰标注，不把占位值当信号看 */
+#p-th .throw.nosrc .thl{color:rgba(255,255,255,0.22)}
+#p-th .throw.nosrc .thv{color:rgba(255,255,255,0.18)}
+#p-th .throw.nosrc .thf{opacity:.12}
 .pc{
   background:var(--cd);border:1px solid var(--bd);border-radius:7px;flex-shrink:0
 }
@@ -255,6 +291,16 @@ body{
 <!-- ═══ LEFT: 观测面板区 ═══ -->
 <div id="left">
 
+  <!-- ═══ 上 1/4：3D 感知粒子流 ═══ -->
+  <div id="ltop">
+    <canvas id="lcanvas"></canvas>
+    <div class="lcap">🌌 <b>感知粒子流</b> · <span id="lstat">待机</span></div>
+  </div>
+
+  <!-- ═══ 下 3/4：左列 ═══ -->
+  <div id="lbot">
+  <div class="lcol">
+
   <!-- M1: DNA 编码 -->
   <div class="pc" id="p-m1">
     <div class="ch" onclick="tp('p-m1')">
@@ -306,6 +352,11 @@ body{
     <div class="cb"><div id="m5-c" class="emp">发送消息后显示</div></div>
   </div>
 
+  </div><!-- /左列 -->
+
+  <!-- ═══ 下 3/4：右列 ═══ -->
+  <div class="lcol">
+
   <!-- M6: 自我进化 -->
   <div class="pc" id="p-m6">
     <div class="ch" onclick="tp('p-m6')">
@@ -331,6 +382,15 @@ body{
       <span class="bdg" id="m8-bdg">加载中</span>
     </div>
     <div class="cb"><div id="m8-c" class="emp">加载中…</div></div>
+  </div>
+
+  <!-- 感知阈值条 · 40D：6 大扇区分组 + 中性阈值线（数据源 = m3 载荷的 perceptionV40） -->
+  <div class="pc" id="p-th">
+    <div class="ch" onclick="tp('p-th')">
+      <span class="ti"><span class="ic">📊</span> 感知阈值 · 40D</span>
+      <span class="bdg" id="th-bdg">等待数据</span>
+    </div>
+    <div class="cb"><div id="th-c" class="emp">发送消息后显示</div></div>
   </div>
 
   <!-- 知识库 -->
@@ -381,6 +441,9 @@ body{
     </div>
   </div>
 
+  </div><!-- /右列 -->
+  </div><!-- /lbot -->
+
 </div><!-- /left -->
 
 <!-- ═══ RIGHT: 聊天区 ═══ -->
@@ -421,6 +484,7 @@ const st=document.getElementById('st'),tc=document.getElementById('tc');
 const M=(id)=>document.getElementById(id);
 const mc=M('m1-c'),m1b=M('m1-bdg'),m2c=M('m2-c'),m2b=M('m2-bdg'),m3c=M('m3-c'),m3b=M('m3-bdg'),m4c=M('m4-c'),m4b=M('m4-bdg');
 const m5c=M('m5-c'),m5b=M('m5-bdg'),m6c=M('m6-c'),m6b=M('m6-bdg'),m7c=M('m7-c'),m7b=M('m7-bdg'),m8c=M('m8-c'),m8b=M('m8-bdg');
+const thc=M('th-c'),thb=M('th-bdg'),lstat=M('lstat');
 
 let busy=false,last=null,refreshTimer=null;
 
@@ -775,6 +839,165 @@ async function loadM68(){
   }catch(e){console.warn(`[webui-index] 操作失败`,e)}
 }
 
+// ── 感知阈值条 · 40D（6 大扇区分组 + 中性阈值线）──
+// 数据源：m3 载荷的 perceptionV40（M3 decide 产出的 40 维向量）。
+// 归一：单极维 [0,1] → 宽度 = v；双极维 D36/D37 [-1,1] → 宽度 = (v+1)/2。
+// 两种口径下 50% 都 ≡ 原始中性，所以阈值线固定画在 50% —— 条压在线上 = 该维无偏离。
+// 🔴 26 个客观维（D01-D08 / D10/D11/D13/D16/D18/D20 / D21-D32）当前**没有数据源**：
+//    瑶光回填未产出，实测库里最近 300 条这 26 维全 0。它们标 nosrc 压灰，
+//    避免把 buildPerceptionV40 的中性占位值（0.35，为不跳变钙化分而设）当成真实信号。
+const TH40=[
+ {s:'肉身 / 生理',r:'D01-D08',c:'#7dd3fc',d:[
+   ['d01_muscle_load','肌负荷'],['d02_pain_level','疼痛'],['d03_nerve_arousal','神经'],
+   ['d04_endocrine_hormones','内分泌'],['d05_pheromone','信息素'],['d06_metabolic_cycle','代谢'],
+   ['d07_self_heal','自愈'],['d08_sensory_env','感官']]},
+ {s:'精神内核',r:'D09-D14',c:'#a78bfa',d:[
+   ['d09_self_identity','自我'],['d10_desire_drive','欲望'],['d11_fear_fatigue','恐惧'],
+   ['d12_enjoyment','愉悦'],['d13_empathy','共情'],['d14_self_protection','自保']]},
+ {s:'圈层人际',r:'D15-D20',c:'#34d399',d:[
+   ['d15_partner_attachment','依恋'],['d16_partner_protection','护偶'],['d17_family_belonging','归属'],
+   ['d18_family_protection','护家'],['d19_social_fit','社交'],['d20_team_protection','护群']]},
+ {s:'时空环境',r:'D21-D26',c:'#fbbf24',d:[
+   ['d21_private_space','私域'],['d22_home_environment','居所'],['d23_workplace','职场'],
+   ['d24_public_space','公共'],['d25_spatiotemporal','时空'],['d26_seasonal_climate','季候']]},
+ {s:'动态成长',r:'D27-D32',c:'#f472b6',d:[
+   ['d27_micro_physiology','微生理'],['d28_nature_expansion','自然'],['d29_social_refinement','社交精修'],
+   ['d30_spiritual_growth','精神'],['d31_quantum_coupling','量子'],['d32_global_overview','全局']]},
+ {s:'伴侣情感纹理',r:'D33-D40',c:'#ff6b9d',d:[
+   ['d33_sexual_attraction','性吸引'],['d34_energy_merge','能量交融'],['d35_sincerity','真诚'],
+   ['d36_dominance','支配'],['d37_moral_judgment','道德'],['d38_humor','幽默'],
+   ['d39_dependency','依赖'],['d40_possessiveness','占有']]},
+];
+// 14 个语义维 —— 由 24D 投影而来，是 40D 里唯一会随对话变化的维度
+const TH40_SRC=new Set(['d09_self_identity','d12_enjoyment','d14_self_protection','d15_partner_attachment','d17_family_belonging','d19_social_fit','d33_sexual_attraction','d34_energy_merge','d35_sincerity','d36_dominance','d37_moral_judgment','d38_humor','d39_dependency','d40_possessiveness']);
+const TH40_BIPOLAR=new Set(['d36_dominance','d37_moral_judgment']);
+
+function thFlat(d){                        // 24D 象限拍平（仅供粒子流 pFeed 取 4 个驱动量）
+  const flat={};
+  for(const q of ['quadrant1','quadrant2','quadrant3','quadrant4'])
+    for(const dm of (d[q]||[])) flat[dm.key]=dm.value;
+  return flat;
+}
+function th40Render(p40,src){
+  if(!thc)return;
+  if(!p40){thc.innerHTML='<div class="emp">等待数据</div>';if(thb)thb.textContent='—';return}
+  let on=0,hh='';
+  for(const sec of TH40){
+    hh+='<div class="thsec"><div class="ths">'+sec.s+' · '+sec.r+'</div>';
+    for(const kv of sec.d){
+      const k=kv[0],l=kv[1];
+      const has=TH40_SRC.has(k);
+      const raw=Number(p40[k]??0)||0;
+      const n=Math.max(0,Math.min(1,TH40_BIPOLAR.has(k)?(raw+1)/2:raw));
+      const act=has&&Math.abs(n-0.5)>0.05;
+      if(act)on++;
+      const col=has?sec.c:'rgba(255,255,255,0.25)';
+      hh+='<div class="throw'+(has?'':' nosrc')+(act?' on':'')+'">'
+        +'<span class="thl"'+(act?' style="color:'+col+'"':'')+'>'+l+'</span>'
+        +'<span class="tht"><span class="thf" style="width:'+(n*100).toFixed(1)+'%;background:'+col+'"></span>'
+        +'<span class="thk" style="left:50%"></span></span>'
+        +'<span class="thv"'+(act?' style="color:'+col+'"':'')+'>'+(raw>=0?'+':'')+raw.toFixed(2)+'</span></div>';
+    }
+    hh+='</div>';
+  }
+  hh='<div class="thmeta">'+(src||'快照')+' · 14 维有源 · <b>'+on+'</b> 维偏离中性 ｜ 26 维待瑶光填充</div>'+hh;
+  thc.innerHTML=hh;
+  if(thb)thb.textContent=on>0?on+'/14 偏离':'全部中性';
+}
+// 页面加载即回填：m3 只在发消息后才到，没有这层持久化，刷新后阈值条会一直空着
+const TH40_LS='wenstar_p40_last';
+function th40Save(p40){try{localStorage.setItem(TH40_LS,JSON.stringify({t:Date.now(),v:p40}))}catch(e){}}
+function th40Restore(){
+  try{
+    const s=localStorage.getItem(TH40_LS);if(!s)return;
+    const o=JSON.parse(s);if(!o||!o.v)return;
+    th40Render(o.v,'存档 '+new Date(o.t).toLocaleTimeString('zh-CN').slice(0,5));
+  }catch(e){}
+}
+function th40Feed(d){
+  const p40=d&&d.perceptionV40;
+  if(!p40)return;
+  th40Render(p40,'实时');
+  th40Save(p40);
+}
+
+// ── 3D 感知粒子流（自包含 canvas，零外部依赖）──
+// 粒子做伪三维投影（z 纵深），能量/色温由最近一次 m3 快照驱动（愉悦/唤醒/依恋/高潮）。
+// 无数据时退回低能量待机态 —— 不伪造随机活跃。
+const P_ST={n:[],W:0,H:0,energy:0,warmth:0,raf:0,t:0,dpr:1};
+function pCanvas(){return M('lcanvas')}
+function pResize(){
+  const cv=pCanvas();if(!cv)return;
+  const par=cv.parentElement;if(!par)return;
+  const r=par.getBoundingClientRect();
+  if(r.width<2||r.height<2)return;             // 布局未就绪时不写 0，免得 pDraw 空转且永不复测
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  P_ST.W=r.width;P_ST.H=r.height;P_ST.dpr=dpr; // W/H 保持 CSS 逻辑尺寸，绘制按 dpr 放大
+  cv.width=Math.max(1,Math.round(r.width*dpr));
+  cv.height=Math.max(1,Math.round(r.height*dpr));
+}
+function pSeed(){
+  // 粒子数随可视面积走：上区是 ~1400×225 的宽横条，固定 110 颗会显得稀
+  const N=Math.max(90,Math.min(260,Math.round(P_ST.W*P_ST.H/1500)));
+  P_ST.n=[];
+  for(let i=0;i<N;i++)P_ST.n.push({x:Math.random()*2-1,y:Math.random()*2-1,z:Math.random(),ph:Math.random()*6.2832,sp:0.5+Math.random()*0.8});
+}
+function pDraw(){
+  const cv=pCanvas();
+  if(!cv){return}
+  if(P_ST.W<2)pResize();                       // 首帧布局未就绪 → 重新量一次
+  const ctx=cv.getContext('2d');
+  if(!ctx||P_ST.W<2){P_ST.raf=requestAnimationFrame(pDraw);return}
+  const W=P_ST.W,H=P_ST.H;
+  ctx.setTransform(P_ST.dpr,0,0,P_ST.dpr,0,0); // HiDPI：逻辑坐标绘制，物理像素渲染
+  ctx.clearRect(0,0,W,H);
+  P_ST.t+=0.016;
+  // 🔴 投影半径必须 x/y 分开算：上区是宽横条，原先 x 也用 min(W,H)，
+  //    于是粒子全被压进中央 ~20% 宽度，左右各留一大片空白（"面积太小"的根因）。
+  const push=0.25+P_ST.energy*1.1,cx=W/2,cy=H/2,fx=W*0.46,fy=H*0.46;
+  const R=Math.round(200+55*P_ST.warmth),G=Math.round(150+40*P_ST.warmth),B=Math.round(190-40*P_ST.warmth);
+  const pts=[];
+  for(const p of P_ST.n){
+    p.z+=0.0016*p.sp*(0.4+P_ST.energy);
+    if(p.z>1)p.z-=1;
+    const zz=0.25+p.z*0.75;
+    const sx=cx+(p.x+Math.sin(P_ST.t*p.sp+p.ph)*0.06*push)*fx*zz;
+    const sy=cy+(p.y+Math.cos(P_ST.t*p.sp*0.8+p.ph)*0.05*push)*fy*zz;
+    const r=0.5+zz*2.1*(0.6+P_ST.energy*0.8);
+    const a=(0.18+zz*0.5)*(0.5+P_ST.energy*0.5);
+    ctx.beginPath();ctx.arc(sx,sy,r,0,6.2832);
+    ctx.fillStyle=`rgba(${R},${G},${B},${a.toFixed(3)})`;ctx.fill();
+    pts.push([sx,sy]);
+  }
+  // 近邻连线：能量越高越密（待机态不连线）
+  if(P_ST.energy>0.12){
+    ctx.lineWidth=0.5;
+    for(let i=0;i<pts.length;i+=2){
+      for(let j=i+1;j<pts.length;j+=7){
+        const d=Math.hypot(pts[i][0]-pts[j][0],pts[i][1]-pts[j][1]);
+        if(d<34){
+          ctx.beginPath();ctx.moveTo(pts[i][0],pts[i][1]);ctx.lineTo(pts[j][0],pts[j][1]);
+          ctx.strokeStyle=`rgba(${R},${G},${B},${((1-d/34)*0.22*P_ST.energy).toFixed(3)})`;ctx.stroke();
+        }
+      }
+    }
+  }
+  P_ST.raf=requestAnimationFrame(pDraw);
+}
+function pFeed(d){
+  if(!d||!d.quadrant1)return;
+  const flat=thFlat(d);
+  const pl=flat.pleasure??0,ar=flat.arousal??0,inm=flat.intimacy??0,ec=flat.ecstasy??0;
+  P_ST.energy=Math.min(1,Math.abs(pl)*0.5+ar*0.5+inm*0.4+ec*0.5);
+  P_ST.warmth=Math.min(1,(Math.max(0,pl)+inm+ec)/1.5);
+  if(lstat)lstat.textContent=P_ST.energy>0.35?'活跃':P_ST.energy>0.12?'微动':'待机';
+}
+// 容器尺寸变化（窗口缩放/版式切换）后重测，别只监听 window
+if(window.ResizeObserver){const _lt=M('ltop');if(_lt)new ResizeObserver(()=>{pResize();pSeed();}).observe(_lt);}
+window.addEventListener('resize',()=>{pResize();pSeed();});
+pResize();pSeed();pDraw();
+th40Restore();   // 刷新后立刻回填上一次的 40D 阈值条（m3 只在发消息后才到）
+
 // ── Render M1 DNA ──
 function renderM1(d){
   if(!d||!d.branch_id){mc.innerHTML='<div class="emp">等待输入</div>';m1b.textContent='等待';return}
@@ -798,7 +1021,8 @@ function renderM1(d){
 function renderM2(s){
   if(!s){m2c.innerHTML='<div class="emp">等待数据</div>';m2b.textContent='—';return}
   const zones=s.zone_counts||{};
-  const lab={'language_semantic_zone':'语言','emotion_valence_zone':'情感','embodied_perception_zone':'感知','spatiotemporal_episode_zone':'时空','social_schema_zone':'社交'};
+  // 分区中文名 —— 覆盖 memories.leaf_zone 的全部取值，缺失项回退原始 key
+  const lab={'language_semantic_zone':'语言','emotion_valence_zone':'情感','embodied_perception_zone':'感知','spatiotemporal_episode_zone':'时空','social_schema_zone':'社交','note_zone':'笔记','assistant':'助手','user':'用户','unknown':'未分类'};
   let zh='<div class="zg">',total=0;
   for(const[k,v]of Object.entries(zones)){zh+=`<div class="zz"><div class="zv">${v}</div><div class="zl">${lab[k]||k}</div></div>`;total+=Number(v)}
   zh+='</div>';
@@ -808,6 +1032,8 @@ function renderM2(s){
 
 // ── Render M3 24-dim + Calcium ──
 function renderM3(d){
+  // 同一份 m3 快照同时喂给：40D 阈值条 + 3D 粒子流（口径单点，不各自解析）
+  th40Feed(d);pFeed(d);
   if(!d||!d.quadrant1){m3c.innerHTML='<div class="emp">等待数据</div>';m3b.textContent='—';return}
   const qs=[
     {k:'quadrant1',t:'情绪效价 · 能量',c:'q1',ic:'🔥',fc:'p'},

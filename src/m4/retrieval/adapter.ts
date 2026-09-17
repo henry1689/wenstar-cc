@@ -151,8 +151,11 @@ export function buildPolicePolicy(src: PoliceSource): PolicePolicy {
   }
   for (const u of src.activeEntityUuids ?? []) if (u) uuids.add(u);
 
+  // 🔴 Foundation V2.0: 搜索范围限定
+  const searchScope = src.meetingMode ? 'strict' : 'allow-unowned';
+
   if (src.meetingMode) {
-    return { visibleUuids: uuids, allowUnowned: false };
+    return { visibleUuids: uuids, allowUnowned: false, searchScope };
   }
 
   // 🔴 2026-09-16 数据卫生: 普通模式（非会晤）排除所有会晤角色的记录。
@@ -163,12 +166,12 @@ export function buildPolicePolicy(src: PoliceSource): PolicePolicy {
   if (src.householdUuids && src.householdUuids.length > 0) {
     const own = new Set<string>(uuids);
     for (const u of src.householdUuids) if (u) own.add(u);
-    return { visibleUuids: own, allowUnowned: true, enforce: true };
+    return { visibleUuids: own, allowUnowned: true, enforce: true, searchScope: 'allow-unowned' };
   }
 
   // 户主钥匙：无任何白名单 → 最高权限（enforce:false，不限制）；有白名单 → allowUnowned=true
   if (uuids.size === 0) {
-    return { visibleUuids: uuids, allowUnowned: true, enforce: false };
+    return { visibleUuids: uuids, allowUnowned: true, enforce: false, searchScope: 'full' };
   }
-  return { visibleUuids: uuids, allowUnowned: true };
+  return { visibleUuids: uuids, allowUnowned: true, searchScope: 'allow-unowned' };
 }

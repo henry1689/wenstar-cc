@@ -1,13 +1,90 @@
 [
   {
-    "id": "dream_mtzzqu4r_3usz",
+    "id": "dream_mu5sasv3_qfut",
     "source": "M3",
-    "content": "鸿艺提到: 不行，你妈还在阳江上班。她下周才回来。今晚就住我这，我心里烦",
+    "content": "鸿艺提到: 你知道阿芬是谁吗",
     "affected_traits": [
-      "neuroticism"
+      "extraversion"
     ],
-    "related_memory_id": "evt_20260913_1214",
-    "created_at": "2026-09-13T15:50:52.683Z",
+    "related_memory_id": "evt_20260918_042",
+    "created_at": "2026-09-17T17:09:04.287Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5sc4nj_y5iv",
+    "source": "M3",
+    "content": "鸿艺提到: 不管她，咱们继续日",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_046",
+    "created_at": "2026-09-17T17:10:06.223Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5sgxyj_d53o",
+    "source": "M3",
+    "content": "鸿艺提到: 在你兴奋时就喜欢你叫爸爸",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_050",
+    "created_at": "2026-09-17T17:13:50.827Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5skwcq_ohgy",
+    "source": "M3",
+    "content": "鸿艺提到: 玉瑶，你只要舒服，怎么叫都行",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_058",
+    "created_at": "2026-09-17T17:16:55.370Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5ss9w1_uahk",
+    "source": "M3",
+    "content": "鸿艺提到: 仔细说说屄这个毛毛有什么用",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_068",
+    "created_at": "2026-09-17T17:22:39.505Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5sukhn_xkda",
+    "source": "M3",
+    "content": "鸿艺提到: 说说掰开后是什么样子",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_074",
+    "created_at": "2026-09-17T17:24:26.555Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5u19mr_ihvp",
+    "source": "M3",
+    "content": "鸿艺提到: 找徐诗韵聊聊",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_122",
+    "created_at": "2026-09-17T17:57:38.691Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mu5u3umf_utfv",
+    "source": "M3",
+    "content": "鸿艺提到: 找徐诗雨聊聊",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20260918_128",
+    "created_at": "2026-09-17T17:59:39.207Z",
     "status": "pending"
   }
 ]
