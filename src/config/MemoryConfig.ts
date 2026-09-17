@@ -16,7 +16,7 @@ export const MEMORY_CONFIG = {
     /** 最少内容长度 */
     minContentLength: 10,
     /** 每批最大处理数 */
-    batchSize: 30,
+    batchSize: 100,  // V14: 30→100，减少晋升积压（原需2.2天清空）
   },
 
   // ── 金库→黑钻 晋升 ──

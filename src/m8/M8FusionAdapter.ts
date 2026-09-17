@@ -16,6 +16,8 @@ import type {
 } from './types/index.js';
 import { derivePhysiologicalSnapshot, physiologicalCosineSimilarity, calculateCompositeScore, calculateEntryWeight } from './PhysiologicalDeriver.js';
 
+import { sanitizeBelongUuid } from '../app/vault/belong-uuid.js';
+
 export class M8FusionAdapter implements M8Engine {
   private storage: FusionStorageAdapter;
 
@@ -247,7 +249,7 @@ export class M8FusionAdapter implements M8Engine {
           const r = mem[0] as any;
           sqlite.writeRaw(
             "INSERT INTO vault_log (detail, content_md, source_id, operation, created_at, belong_entity_uuid) VALUES (?, ?, ?, 'scar', datetime('now','localtime'), ?)",
-            [`人生地标: ${scarType}`, (r.raw_input || '').substring(0, 500), memoryId, r.belong_entity_uuid || null],
+            [`人生地标: ${scarType}`, (r.raw_input || '').substring(0, 500), memoryId, sanitizeBelongUuid(r.belong_entity_uuid) ?? null],
           );
         }
       } catch { /* 不阻塞 */ }
@@ -265,7 +267,7 @@ export class M8FusionAdapter implements M8Engine {
           const r = mem[0] as any;
           sqlite.writeRaw(
             "INSERT INTO vault_log (detail, content_md, source_id, operation, created_at, belong_entity_uuid) VALUES (?, ?, ?, 'landmark', datetime('now','localtime'), ?)",
-            [`记忆地标: ${narrativeTag}`, (r.raw_input || '').substring(0, 500), memoryId, r.belong_entity_uuid || null],
+            [`记忆地标: ${narrativeTag}`, (r.raw_input || '').substring(0, 500), memoryId, sanitizeBelongUuid(r.belong_entity_uuid) ?? null],
           );
         }
       } catch { /* 不阻塞 */ }

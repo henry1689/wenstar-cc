@@ -220,7 +220,20 @@ export class MemoryAssessor {
         if (isMetaDiscourse(text)) continue;
 
         const conversationId = Number(conv.id ?? 0);
-        const dnaRootId = String(conv.dna_root_id || `sand_fallback_${conversationId || Date.now()}`);
+        // 🔴 P0修复: DNA根码必须从conversation正确继承
+        // 原代码使用 Date.now() 生成fallback，导致dna_root_id与实际对话组不匹配
+        let dnaRootId = String(conv.dna_root_id || '');
+        if (!dnaRootId && conv.dialog_group_id) {
+          // 兜底：从同对话组的其他记录获取正确的dna_root_id
+          const groupConvs = sqlite.queryAll(
+            'SELECT dna_root_id FROM conversations WHERE dialog_group_id = ? AND dna_root_id IS NOT NULL AND dna_root_id != ? LIMIT 1',
+            [conv.dialog_group_id, '']
+          );
+          const fallbackDnaRootId = String(groupConvs[0]?.dna_root_id || '');
+          dnaRootId = fallbackDnaRootId || `sand_fallback_${conversationId}`;
+        } else if (!dnaRootId) {
+          dnaRootId = `sand_fallback_${conversationId}`;
+        }
         const calciumScore = Number(conv.calcium_score || 1.0);
         const memoryId = `mem_${dnaRootId.replace(/[^\w-]/g, '_')}_${conversationId || nextSeq}`;
         const perception = parseSandPerception(conv.perception_summary);

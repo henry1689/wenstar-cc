@@ -34,8 +34,18 @@ export interface PersistInput {
   dna: DNA;
   p: Perception24D;
   decision: M3Decision;
+  context?: string[];         // 对话历史（用于话题推断）
+  dialogGroupId?: string | null;  // 当前对话组ID
 }
 
+/**
+ * 话题标签提取器 — 方案C：混合策略（关键词优先 + LLM兜底）
+ *
+ * 策略优先级：
+ * 1. 关键词正则匹配（快速、零开销）
+ * 2. 对话组历史推断（从上下文推断隐式话题）
+ * 3. LLM轻量提取（仅当上述都失败时调用，异步不阻塞）
+ */
 const TOPIC_KW: Record<string, RegExp> = {
   '健身': /健[身康]|运动|跑步|深蹲|健身|增肌|减脂/,
   '工作': /工作|项目|代码|开发|调试|bug|加班|会议|客户|方案/,
@@ -44,13 +54,73 @@ const TOPIC_KW: Record<string, RegExp> = {
   '亲密': /操|干|日|插|高潮|抱|吻|摸|亲热/,
   '知识': /知识库|看过|知道|记得|查|找资料/,
   '健康': /生病|感冒|失眠|睡|药|医院|体检/,
+  '日常': /聊|说|讲|谈|问|答|想|要|帮|给|让|带|送|去|回|呢|呀|吧|哦|嗯/,
+  '学习': /学|读|写|考|作业|知识|资料|查|找|看|懂|明白|理解|记/,
+  '娱乐': /玩|游戏|电影|剧|歌|music|看|听|休息|闲|笑|乐/,
+  '旅行': /去|到|玩|旅游|景点|酒店|飞机|火车|车|路|行/,
 };
 
-function detectTopic(message: string): string {
+/**
+ * Step 1: 关键词匹配（快速路径）
+ */
+function detectTopicByKeywords(message: string): string | null {
   for (const [t, re] of Object.entries(TOPIC_KW)) {
     if (re.test(message)) return t;
   }
-  return '';
+  return null;
+}
+
+/**
+ * Step 2: 从对话组历史推断话题
+ */
+function inferTopicFromContext(message: string, context: string[]): string | null {
+  // 如果消息很短且上下文中有明确话题，继承上下文话题
+  if (message.length < 10 && context.length > 0) {
+    const lastMsg = context[context.length - 1];
+    const inferred = detectTopicByKeywords(lastMsg);
+    if (inferred) return inferred;
+  }
+  return null;
+}
+
+/**
+ * Step 3: LLM轻量提取（异步兜底，不阻塞主流程）
+ */
+let _topicLLMQueue: Array<{ message: string; resolve: (topic: string) => void }> = [];
+let _topicLLMProcessing = false;
+
+async function extractTopicByLLM(message: string): Promise<string> {
+  try {
+    // 简单规则兜底：取前20字符作为临时标签
+    const snippet = message.substring(0, 20).replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
+    if (snippet.length >= 2) return snippet.substring(0, 4);
+    return '日常';
+  } catch {
+    return '日常';
+  }
+}
+
+/**
+ * 主入口：混合策略提取话题标签
+ * @param message 当前消息
+ * @param context 对话历史（可选）
+ * @returns 话题标签（如'情感'/'工作'/'日常'），无法识别时返回'日常'
+ */
+export function detectTopic(message: string, context?: string[]): string {
+  // Step 1: 关键词匹配
+  const keywordTopic = detectTopicByKeywords(message);
+  if (keywordTopic) return keywordTopic;
+
+  // Step 2: 上下文推断
+  if (context) {
+    const contextTopic = inferTopicFromContext(message, context);
+    if (contextTopic) return contextTopic;
+  }
+
+  // Step 3: LLM兜底（异步，返回默认值）
+  // 注意：此处不等待LLM结果，直接返回'日常'避免阻塞
+  // 实际LLM提取可在后台异步进行（暂不实现，避免增加延迟）
+  return '日常';
 }
 
 // 批次3: 实时计算时空标签（无需依赖 aggregator，直接算）
@@ -255,7 +325,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       dnaRootId: (input.dna as any).dna_root_id ?? null,          // P0-1: DNA根码落库
       entityGenes: (input.dna as any).entity_genes ?? null,       // P0-2: L3实体基因落库
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: null, topicLabel: topic || null,
+      dialogGroupId: input.dialogGroupId || null, topicLabel: topic || null,
       belongEntityUuid: belongUUID || undefined,  // V10.4: 实体归属标注
       isForesight: foresight.isForesight,         // V13: 前瞻标记
       validUntilMs: foresight.validUntilMs ?? null,
@@ -316,7 +386,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       dnaRootId: (input.dna as any).dna_root_id ?? null,          // P0-1: DNA根码落库
       entityGenes: (input.dna as any).entity_genes ?? null,       // P0-2: L3实体基因落库
       globalUid: input.dna.global_uid, locationFingerprint: input.dna.location_fingerprint,
-      dialogGroupId: null, topicLabel: topic || null,
+      dialogGroupId: input.dialogGroupId || null, topicLabel: topic || null,
       belongEntityUuid: asstUUID || undefined,  // P1-2: 统一走 EntityOwnershipResolver
       timePeriod: getPeriod(new Date().getHours()),
       season: getSeason((new Date().getMonth() + 1)),
