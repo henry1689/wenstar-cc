@@ -20,6 +20,8 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+// memories 身份列定义的单一事实源（本文件是全仓守卫，不重复列举该表的 6 个字面量）
+import { MEMORY_IDENTITY_CRITICAL_COLUMNS } from '../m2/SQLiteAdapter.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SRC = join(REPO, 'src');
@@ -476,5 +478,162 @@ describe('[SQL-schema 守卫] 词法扫描器夹具（防引号失同步 → 静
     const normal = 'no such column: perception_json';
     expect(COL_ERR.test(normal)).toBe(true);
     expect(COL_NAME.exec(normal)?.[2]).toBe('perception_json');
+  });
+});
+
+/**
+ * [D8v2-表级全覆盖] 所有写入形态的关键列守卫（2026-09-19）
+ * ========================================================
+ * 事故来源：`black_diamond.dna_root_id` 全库 0/390 覆盖。
+ *
+ * 根因不是「谁忘了写一列」，而是 [D8-全表] 守卫的**扫描范围只有一半**：
+ * 它的正则 `/INSERT\s+OR\s+REPLACE\s+INTO/` 只认 REPLACE 形态，而全仓普通
+ * `INSERT INTO` 有 49 处、覆盖 30 张表 —— 这半边写入路径的列清单不受任何守卫约束。
+ * dna_root_id 的四条写入路径全部落在盲区里：
+ *
+ *   ├ VaultManager.addBlackDiamond      `INSERT INTO`       → 不在扫描范围 ✗
+ *   ├ BlackDiamondGate.manualAdd        `INSERT INTO`       → 不在扫描范围 ✗
+ *   ├ FamilyGraph.syncToBlackDiamond ①  `INSERT OR REPLACE` → 扫到，但该列未登记 ✗
+ *   └ FamilyGraph.syncToBlackDiamond ②  `INSERT OR REPLACE` → 扫到，但该列未登记 ✗
+ *   ⇒ 四条全缺 ⇒ 0% 是必然，不是巧合。
+ *
+ * 活体标本（打补丁之弊）：`FamilyGraph.ts:5390` 注释记载 2026-09-11 刚在此处修过
+ * **belong_entity_uuid**（「webui 每次启动使 32 条关系镜像丢失归属，黑钻标注率
+ * 91.2% → 76.5%」）—— 而**同一行的 dna_root_id 继续缺**。因为守卫只保护登记过的列：
+ * 没登记的列，在守卫眼里不存在。
+ *
+ * 本守卫把范围从「语句类型」升级为「表 + 全部写入形态」：INSERT / INSERT OR REPLACE /
+ * INSERT OR IGNORE 三者后果等价（目标列为 NULL），且普通 INSERT **更隐蔽** —— 它从不
+ * 重写已有行，字段只是「从来没被写进去过」，因此永远不会被观察到「被抹掉」。
+ *
+ * ⚠️ 本轮为**报告模式**（REPORT_ONLY = true）：只产出存量违规清单，不 fail-closed。
+ *    存量规模摸清、逐条判定「真缺失」或「合理豁免」后，将 REPORT_ONLY 置 false
+ *    即转为 fail-closed 回归防线。
+ */
+
+/** 报告模式开关：true = 只报告不失败（存量摸底期）；false = fail-closed（存量清零后切换） */
+const REPORT_ONLY = true;
+
+/**
+ * 表 → 该表**所有写入形态**都必须携带的关键列（未列出 ⇒ 静默为 NULL）。
+ *
+ * 登记判据：该列承载**身份 / 归属 / 溯源**语义，且在系统中有真实消费方（被读）。
+ * 无消费方的列不登记 —— 避免登记表膨胀成形式主义。
+ * 不登记的表：entity_relations（无任何身份列）、master_* / hwg_* / temporal_events /
+ * decay_log / hallucination_log / retrieval_log（独立子系统）、black_diamond_terms /
+ * knowledge_chunks / memory_entities（纯关联表）。
+ */
+const TABLE_CRITICAL_COLUMNS: Record<string, readonly string[]> = {
+  // 核心记忆表：复用 m2 侧的身份列定义（单一事实源，不重复列举 6 个字面量）
+  memories: [...MEMORY_IDENTITY_CRITICAL_COLUMNS],
+  // 黑钻库：dna_root_id = 金库→黑钻的溯源锚点（本轮事故主角）
+  black_diamond: ['belong_entity_uuid', 'dna_root_id'],
+  // 砂金库：dna_root_id = 对话链溯源锚点；message_id = 业务幂等键
+  conversations: ['belong_entity_uuid', 'entity_names', 'dna_root_id', 'message_id'],
+  // 知识库：V3.2 户籍卷宗归档
+  knowledge_base: ['belong_entity_uuid'],
+  // 三库操作日志：V13 归属标注
+  vault_log: ['belong_entity_uuid'],
+  // 实体表：V5.0 TXS-ID 户籍标识（无它无法参与户籍体系）
+  entities: ['uuid'],
+  // 统一语义搜索索引：V11.0 实体归属
+  search_index: ['belong_entity_uuid'],
+  // FG 节点表（family_graph.db）：节点身份
+  nodes: ['uuid'],
+};
+
+/**
+ * 按**写入路径**豁免（粒度必须细到路径级 —— 同一张表的不同写入路径豁免条件不同）。
+ *
+ * 判据：列清单中出现 `marker` 特征列 ⇒ 该写入点豁免对 `column` 的检查。
+ * 用**列指纹**而非文件级豁免，可精确区分同一文件/同一表的不同写入路径。
+ */
+const PATH_EXEMPTIONS: ReadonlyArray<{
+  table: string;
+  column: string;
+  marker: string;
+  reason: string;
+}> = [
+  {
+    table: 'black_diamond',
+    column: 'dna_root_id',
+    marker: 'entry_channel',
+    reason:
+      'FG 同步路径（FamilyGraph.syncToBlackDiamond）的 source_id 恒为 null，dna_root_id ' +
+      '本就无从获取，NULL 是正确值；该路径列清单显式含 entry_channel。而 ' +
+      "VaultManager.addBlackDiamond 走 DEFAULT 'auto'、列清单不含该列 ⇒ 指纹天然区分，" +
+      '不会被误豁免（它才是真正丢了值的路径）。',
+  },
+];
+
+describe('[D8v2-表级全覆盖] 所有写入形态的列清单必须携带该表登记的关键列', () => {
+  it('扫描 INSERT / OR REPLACE / OR IGNORE 全部写入形态', () => {
+    const offenders: string[] = [];
+    const exempted: string[] = [];
+    let scanned = 0;
+    let skipped = 0;
+
+    for (const file of walkTs(SRC)) {
+      const rel = relative(REPO, file).replace(/\\/g, '/');
+      const src = readFileSync(file, 'utf-8');
+      for (const lit of extractLogicalStrings(src)) {
+        // 规则 3：含 ${} 插值的动态 SQL 无法静态判定列清单，跳过
+        if (lit.text.includes('${')) continue;
+        // 放宽后的写入点识别：INSERT / INSERT OR REPLACE / INSERT OR IGNORE 全形态
+        const w = /INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+([A-Za-z_][\w$]*)\s*\(([^)]*)\)/i.exec(
+          lit.text,
+        );
+        if (!w) continue;
+        const table = w[1];
+        const critical = TABLE_CRITICAL_COLUMNS[table];
+        if (!critical) {
+          skipped++;
+          continue;
+        }
+        // 拼接式 SQL 会产生 `" +\n "col` 这类 token → 剥引号与加号（与既有守卫同源处理）
+        const cols = w[2]
+          .split(',')
+          .map((c) => c.replace(/["'`+]/g, '').trim())
+          .filter(Boolean);
+        scanned++;
+
+        const missing: string[] = [];
+        for (const col of critical) {
+          if (cols.includes(col)) continue;
+          const ex = PATH_EXEMPTIONS.find(
+            (e) => e.table === table && e.column === col && cols.includes(e.marker),
+          );
+          if (ex) {
+            exempted.push(`${rel}:${lit.line}  ${table} 缺 [${col}]（路径豁免：命中特征列 ${ex.marker}）`);
+            continue;
+          }
+          missing.push(col);
+        }
+        if (missing.length) {
+          offenders.push(`${rel}:${lit.line}  ${table} 缺 [${missing.join(', ')}]`);
+        }
+      }
+    }
+
+    console.log(
+      `[D8v2] 受检写入点 = ${scanned} 个（未登记表跳过 ${skipped} 个），覆盖表: ${Object.keys(TABLE_CRITICAL_COLUMNS).join(', ')}`,
+    );
+    if (exempted.length) {
+      console.log(`[D8v2] 路径豁免 ${exempted.length} 处:\n  ` + exempted.join('\n  '));
+    }
+    console.log(
+      `[D8v2] 存量违规 ${offenders.length} 处${REPORT_ONLY ? '（⚠️ 报告模式，本轮不失败）' : ''}:\n  ` +
+        (offenders.join('\n  ') || '(无)'),
+    );
+
+    // 防「扫描器失效 → 空转通过」：与既有守卫同源的防线
+    expect(scanned, '未扫描到任何受登记表的写入点，守卫可能失效').toBeGreaterThan(0);
+
+    if (!REPORT_ONLY) {
+      expect(
+        offenders,
+        `以下写入点缺少登记的关键列（该列将恒为 NULL）:\n  ${offenders.join('\n  ')}`,
+      ).toEqual([]);
+    }
   });
 });
