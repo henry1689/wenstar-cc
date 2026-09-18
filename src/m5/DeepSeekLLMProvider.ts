@@ -1021,7 +1021,11 @@ export class DeepSeekLLMProvider implements LLMProvider {
           throw new Error('Empty response from DeepSeek');
         }
         const text = resolveReplyFromFields(msg?.content, _rawReasoning as string | undefined);
-        if (!text) throw new Error('No usable answer after reasoning strip (fail-closed, 拒绝洩漏思维链)');
+        if (!text) {
+          const e: any = new Error('No usable answer after reasoning strip (fail-closed, 拒绝洩漏思维链)');
+          e.noUsableAnswer = true;
+          throw e;
+        }
 
         return {
           text,
@@ -1239,6 +1243,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     role?: RoleType;
     isEntityMeeting?: boolean;
     onToken?: (delta: LLMTokenDelta) => void;
+    reasoningEffortOverride?: string;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
     const rawInput = params.userMessage ?? params.cognition.current.raw_input ?? '';
     const history = params.conversationHistory ?? [];
@@ -1500,9 +1505,14 @@ export class DeepSeekLLMProvider implements LLMProvider {
         presence_penalty: presencePenalty,
         level: level,
         timeoutMs: _timeoutMs,
-        reasoning_effort: _reasoningEffort,
+        reasoning_effort: params.reasoningEffortOverride || _reasoningEffort,
       } as any, params.onToken ? { onToken: params.onToken } : undefined);
-    } catch (err) {
+    } catch (err: any) {
+      // V25: noUsableAnswer → 空串让 M5Orchestrator 重试
+      if (err?.noUsableAnswer) {
+        console.warn('[DeepSeek] 判空：思维链吃光额度，返回空串触发重试');
+        return { text: '' };
+      }
       const msg = err instanceof Error ? err.message : String(err);
       if (!process.env['DEEPSEEK_API_KEY'] && !resolveApiKey()) {
         console.warn('[DeepSeek] 未配置 API Key，使用降级回复');

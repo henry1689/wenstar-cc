@@ -92,6 +92,15 @@ export interface LLMProvider {
     isEntityMeeting?: boolean;
     /** 🔴 P1-5 流式: 可选回调，服务端按 token 增量推送（已剥离思维链）。返回契约不变 */
     onToken?: (delta: LLMTokenDelta) => void;
+    /**
+     * 🔴 V25(2026-09-13) 重试降级参数: 覆盖本次调用的场景默认 reasoning_effort。
+     *
+     * 用途单一 —— **空回复重试**。思维链泄漏的根因不是判据不够，而是 content 为空：
+     * V4-flash 把"打算怎么写"整段写进 reasoning，思维链吃光 max_tokens → 最终稿无处安放。
+     * 此时**同参重试**只会复现同样的输出（M5Orchestrator 原实现即如此，重试形同虚设）；
+     * 降 effort 才能让模型把最终稿落进 content，从源头消除"从 reasoning 里猜答案"的需求。
+     */
+    reasoningEffortOverride?: string;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }>;
 
   /** 切换角色 (可选实现) */

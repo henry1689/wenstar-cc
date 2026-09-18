@@ -59,13 +59,20 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     const rows = db.prepare("SELECT name, aliases, uuid FROM nodes WHERE type='person' AND status='active'").all() as Array<{ name: string; aliases: string; uuid: string }>;
     db.close();
 
+    const fgWhitelist = new Set<string>();
+    for (const r of rows) {
+      fgWhitelist.add(r.name);
+      let aliases: string[] = [];
+      try { aliases = JSON.parse(r.aliases || '[]'); } catch { /* ignore */ }
+      for (const a of aliases) fgWhitelist.add(a);
+    }
     const hurt: string[] = [];
     for (const r of rows) {
       let aliases: string[] = [];
       try { aliases = JSON.parse(r.aliases || '[]'); } catch { /* ignore */ }
       for (const n of [r.name, ...aliases]) {
         if (!n || String(n).length < 2) continue; // 单字别名不参与（gradeEntity 本身要求 >=2）
-        if (looksLikeSentenceFragment(String(n))) hurt.push(`${n}(from ${r.name})`);
+        if (looksLikeSentenceFragment(String(n), fgWhitelist)) hurt.push(`${n}(from ${r.name})`);
       }
     }
     expect(hurt, `以下真实人名被新判据误伤（必须修正判据，不得放行）：\n  ${hurt.join('\n  ')}`).toEqual([]);

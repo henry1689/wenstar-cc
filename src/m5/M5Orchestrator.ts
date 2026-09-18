@@ -94,6 +94,26 @@ export class M5Orchestrator {
       draft = '';
     }
 
+    // 🔴 2026-09-12 生产实测: 空回复的绝大多数成因是「模型整段输出皆为思维链/草稿，被护栏判空」，
+    //   而非网络故障 —— 此时**重试一次往往能拿到正常台词**。
+    //   先重试（不带 onToken，避免二次流式污染气泡），仍无可用答案才降级为明确错误。
+    // 🔴 V25(2026-09-13) 重试必须**换参数** —— 原实现是同参重试，几乎无效：
+    //   空回复的成因是模型把"打算怎么写"整段写进 reasoning 并吃光 max_tokens，content 因此为空；
+    //   同样的 reasoning_effort 只会复现同样的输出。故重试强制降到 'low'：
+    //   思维链变短 → 最终稿落回 content → 出口根本不需要"从 reasoning 里猜答案"。
+    //   这是思维链泄漏的**根因治理** —— 判据再多，都不如让 content 一开始就有值。
+    if (!draft) {
+      console.warn('[M5] 首次生成无可解析答案 → 降级重试(low reasoning_effort)');
+      try {
+        const _retry = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime: new Date().toISOString(), userMessage, role: this._currentRole, isEntityMeeting, reasoningEffortOverride: 'low' });
+        draft = _retry && _retry.text ? _retry.text : '';
+        if (draft) console.warn('[M5] 重试成功，已拿到可用回复');
+      } catch (_rErr) {
+        console.error('[M5] 重试也失败:', _rErr);
+        draft = '';
+      }
+    }
+
     // 如果主 LLM 失败，不伪装——直接返回明确错误
     if (!draft) {
       console.error('[M5] LLM生成失败，返回降级提示（非MockLLM）');

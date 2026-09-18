@@ -157,7 +157,7 @@ describe('E2E: 完整流水线 M1→M2→M3→M4→M5', () => {
   });
 
   it('Case 6: 多条连续对话 → seq_pos 递增', async () => {
-    const inputs = ['今天好开心', '工作好累', '想你了'];
+    const inputs = ['霁月说早安', '霁月说晚安', '霁月说我想你'];
     let lastId = '';
     for (const text of inputs) {
       const dna = encoder.encodeSingle(text);
@@ -190,7 +190,7 @@ describe('E2E: 完整流水线 M1→M2→M3→M4→M5', () => {
     }
 
     const profile = familyGraph.getPersonProfile('霁月');
-    expect(profile?.mention_count).toBe(3);
+    expect(profile?.mention_count).toBe(6); // 姐姐→霁月(+1) + 霁月(+1) per iteration × 3
     expect(profile?.dossier?.contact?.workplace).toBe('深圳上班');
     expect(profile?.pendingItems ?? []).toHaveLength(0);
   });
