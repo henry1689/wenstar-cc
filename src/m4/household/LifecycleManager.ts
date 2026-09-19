@@ -18,7 +18,7 @@
  */
 
 import type { FamilyGraph } from './FamilyGraph.js';
-import { computeTargetStatus } from './shared/StatusRules.js';
+import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
 
 export interface LifecycleReport {
   activeToDormant: number;
@@ -67,10 +67,13 @@ export class LifecycleManager {
         try {
           const props = JSON.parse(p.properties || '{}');
           const lastMentioned = props.last_mentioned;
-          if (!lastMentioned) continue;
-
-          const daysSince = Math.floor((now - new Date(lastMentioned).getTime()) / MS_PER_DAY);
           const currentStatus = p.status || 'active';
+          // 批13(F2/A): 与 FamilyGraph 同一保守边界（唯一真源在 StatusRules）
+          if (isExemptFromExpiry(currentStatus, props)) continue;
+          const lastActivity = resolveLastActivityAt(props) ?? lastMentioned;
+          if (!lastActivity) continue;
+
+          const daysSince = Math.floor((now - new Date(lastActivity).getTime()) / MS_PER_DAY);
 
           const result = computeTargetStatus(currentStatus, daysSince);
           if (result.changed) {

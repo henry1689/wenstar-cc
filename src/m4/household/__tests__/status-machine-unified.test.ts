@@ -10,7 +10,7 @@
  *   - 新增：candidate 专属生命周期（30 天 → void），且不走 dormant/archived
  */
 import { describe, it, expect } from 'vitest';
-import { computeTargetStatus, STATUS_THRESHOLDS } from '../shared/StatusRules.js';
+import { computeTargetStatus, STATUS_THRESHOLDS, resolveLastActivityAt, isExemptFromExpiry } from '../shared/StatusRules.js';
 
 const D = STATUS_THRESHOLDS;
 
@@ -75,5 +75,41 @@ describe('批13 · candidate 专属生命周期（本批新增能力）', () => 
     const r = computeTargetStatus('candidate', 500);
     expect(r.changed).toBe(true);
     if (r.changed) expect(r.to).toBe('void');
+  });
+});
+
+
+describe("批13(F2) · 保守边界：活动基准 + noise 豁免", () => {
+  it("resolveLastActivityAt: evidence.lastSeen 优先于 last_mentioned", () => {
+    const props = {
+      last_mentioned: "2020-01-01T00:00:00.000Z",
+      evidence: { lastSeen: "2026-09-19T00:00:00.000Z" },
+    };
+    expect(resolveLastActivityAt(props)).toBe("2026-09-19T00:00:00.000Z");
+  });
+
+  it("resolveLastActivityAt: 无 evidence 时回退 last_mentioned", () => {
+    expect(resolveLastActivityAt({ last_mentioned: "2026-01-01T00:00:00.000Z" }))
+      .toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("resolveLastActivityAt: 两者皆无 → null（调用方跳过）", () => {
+    expect(resolveLastActivityAt({})).toBeNull();
+    expect(resolveLastActivityAt(null)).toBeNull();
+    expect(resolveLastActivityAt({ evidence: {} })).toBeNull();
+  });
+
+  it("🔴 isExemptFromExpiry: 已判 noise 的 candidate 豁免", () => {
+    expect(isExemptFromExpiry("candidate", { _judge: { verdict: "noise" } })).toBe(true);
+  });
+
+  it("isExemptFromExpiry: 仅对 candidate 生效（active/void 不豁免）", () => {
+    expect(isExemptFromExpiry("active", { _judge: { verdict: "noise" } })).toBe(false);
+    expect(isExemptFromExpiry("void", { _judge: { verdict: "noise" } })).toBe(false);
+  });
+
+  it("isExemptFromExpiry: 未标注 / 判为 person 的 candidate 不豁免", () => {
+    expect(isExemptFromExpiry("candidate", {})).toBe(false);
+    expect(isExemptFromExpiry("candidate", { _judge: { verdict: "person" } })).toBe(false);
   });
 });

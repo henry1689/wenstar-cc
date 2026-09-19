@@ -175,4 +175,32 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
     const names = fg.collectCandidateItems(200).map((x: any) => x.name);
     expect(names).not.toContain('终审噪声甲');
   });
+
+  // ── ⑧ F2/A 回归：已判 noise 的 candidate 豁免超期回收 ──
+  it("🔴 已判 noise 的 candidate 即使 40 天无提及也不被回收（用户决策 A）", async () => {
+    if (!fg) return;
+    await fg.addNode({ id: "v27b13-exempt-1", type: "person", name: "豁免甲" });
+    expect(statusOf("豁免甲")).toBe("candidate");
+    // 先标注为 noise（模拟离线终审）
+    fg.applyJudgments({ promote: [], annotate: [{ name: "豁免甲", confidence: 0.95, reason: "滑窗片段" }] }, "dream-judge");
+    // 再设为 40 天前
+    setMentionedDaysAgo("豁免甲", 40);
+    fg.runDailyHouseholdMaintenance();
+    expect(statusOf("豁免甲"), "已判 noise → 豁免自动回收，留批14 人工清单").toBe("candidate");
+  });
+
+  // ── ⑨ F2 基准：candidate 用 evidence.lastSeen 而非 last_mentioned ──
+  it("🔴 evidence.lastSeen 较新时 → 不按过期的 last_mentioned 回收", async () => {
+    if (!fg) return;
+    await fg.addNode({ id: "v27b13-base-1", type: "person", name: "基准甲" });
+    const id = idOf("基准甲")!;
+    const r = fg.query("SELECT properties FROM nodes WHERE id = ?", [id]);
+    const props = JSON.parse(r[0].properties || "{}");
+    props.last_mentioned = iso(40);                 // 旧的旧字段
+    props.evidence = { count: 1, lastSeen: iso(2) }; // 真实的近期活动
+    fg.run("UPDATE nodes SET properties = ? WHERE id = ?", [JSON.stringify(props), id]);
+
+    fg.runDailyHouseholdMaintenance();
+    expect(statusOf("基准甲"), "应按 evidence.lastSeen(2天) 判定 → 不回收").toBe("candidate");
+  });
 });

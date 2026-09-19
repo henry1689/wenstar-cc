@@ -35,7 +35,7 @@ import type { EntityGene } from '../../m1/types/dna.js';
 import { validatePersonName, validateRelationType } from '../EntityValidator.js';
 import { dossierRead, dossierWrite } from './shared/DossierPath.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
-import { computeTargetStatus } from './shared/StatusRules.js';
+import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
 import type {
   FamilyGraph as FamilyGraphInterface,
   GraphNode,
@@ -1085,10 +1085,13 @@ export class FamilyGraph implements FamilyGraphInterface {
       const all = this.query("SELECT id, name, status, properties FROM nodes WHERE type = 'person' AND name != '我' AND status NOT IN ('deceased','void')");
       for (const p of all) {
         const props = JSON.parse(p.properties || '{}');
-        const lastMentioned = props.last_mentioned;
-        if (!lastMentioned) continue;
-        const daysSince = (Date.now() - new Date(lastMentioned).getTime()) / 86400000;
         const currentStatus = p.status || 'active';
+        // 批13(F2/A): 保守边界 —— 已判 noise 的观察区实体豁免自动回收（留批14 人工清单）
+        if (isExemptFromExpiry(currentStatus, props)) continue;
+        // 批13(F2): 活动基准统一由 StatusRules 决定（evidence.lastSeen 优先）
+        const lastActivity = resolveLastActivityAt(props);
+        if (!lastActivity) continue;
+        const daysSince = (Date.now() - new Date(lastActivity).getTime()) / 86400000;
         // 🔵 批13(部分1): 委托 StatusRules.computeTargetStatus —— 唯一真源。
         // 原实现硬编码 90/365，是同一规则的【第三份】实现（与本文件其它调用点、
         // 以及 LifecycleManager 并存），三份阈值一旦漂移将难以察觉。
@@ -3644,9 +3647,14 @@ export class FamilyGraph implements FamilyGraphInterface {
   private _checkStatusDowngrade(node: any, profile: PersonProfile): void {
     try {
       const currentStatus = (node as any).status || 'active';
-      if (!profile.last_mentioned) return;
+      // 批13(F2/A): 同一保守边界（此处 node 为行对象，取其 properties 判豁免）
+      let nodeProps: any = {};
+      try { nodeProps = JSON.parse((node as any).properties || '{}'); } catch { nodeProps = {}; }
+      if (isExemptFromExpiry(currentStatus, nodeProps)) return;
 
-      const daysSince = (Date.now() - new Date(profile.last_mentioned).getTime()) / 86400_000;
+      const lastActivity = resolveLastActivityAt(nodeProps) ?? profile.last_mentioned;
+      if (!lastActivity) return;
+      const daysSince = (Date.now() - new Date(lastActivity).getTime()) / 86400_000;
       const result = computeTargetStatus(currentStatus, daysSince);
 
       if (result.changed) {
