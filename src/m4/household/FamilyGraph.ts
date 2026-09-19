@@ -3596,6 +3596,78 @@ export class FamilyGraph implements FamilyGraphInterface {
     return result;
   }
 
+  /**
+   * 批17(性能): 批量版本 —— 一次 SQL 取多份档案，替代 N 次 findPersonNodeByNameOrAlias。
+   *
+   * 动机：batchProfile 实测 705~838ms（m4 内最大头），瓶颈是"每个名字一次查询"，
+   * 而每次查询还含 aliases LIKE 全表扫描。批量后查询次数从 O(N) 降到 O(1~2)。
+   *
+   * **行为等价保证**：
+   *  · profile 组装与 getPersonProfileWithBio 完全一致（同一套默认字段 + props 展开）
+   *  · _checkStatusDowngrade 副作用保留（逐条调用，不做批量状态变更）
+   *  · 返回结构的键为**调用方传入的名字**（与单条版语义一致，便于 M4 按名取用）
+   */
+  getPersonProfilesWithBioBatch(names: string[]): Record<string, {
+    profile: PersonProfile | null;
+    bio: { name: string; birthYear: number | null; age: number | null; gender: '男' | '女' | null; occupation: string | null } | null;
+  }> {
+    const out: Record<string, { profile: PersonProfile | null; bio: any }> = {};
+    const uniq = [...new Set((names || []).filter(Boolean))];
+    if (uniq.length === 0) return out;
+
+    const byId = new Map<string, any>();
+    try {
+      // ① 主查询：name IN (...)（分片 400 防 SQL 变量上限）
+      const byName = new Map<string, any>();
+      for (let i = 0; i < uniq.length; i += 400) {
+        const chunk = uniq.slice(i, i + 400);
+        const ph = chunk.map(() => "?").join(",");
+        const rows = this.query(
+          "SELECT * FROM nodes WHERE type = 'person' AND name IN (" + ph + ") AND (status IS NULL OR status != 'void')",
+          chunk,
+        ) as any[];
+        for (const r of rows) if (!byName.has(r.name)) byName.set(r.name, r);
+      }
+
+      // ② 别名兜底：仅对未命中的名字做一次批量 LIKE 查询
+      const missing = uniq.filter((n) => !byName.has(n));
+      if (missing.length > 0) {
+        const allPersons = this.query(
+          "SELECT * FROM nodes WHERE type = 'person' AND (status IS NULL OR status != 'void')",
+        ) as any[];
+        for (const want of missing) {
+          const needle = '"' + want + '"';   // aliases 存 JSON 数组，元素带引号
+          for (const r of allPersons) {
+            if (byName.has(want)) break;
+            const al = r.aliases || '[]';
+            if (al.indexOf(needle) >= 0) byName.set(want, r);
+          }
+        }
+      }
+
+      // ③ 逐条组装（与单条版同一逻辑，保证等价）
+      for (const want of uniq) {
+        const node = byName.get(want);
+        if (!node) { out[want] = { profile: null, bio: null }; continue; }
+        let props: any = {};
+        try { props = node.properties ? JSON.parse(node.properties) : {}; } catch { props = {}; }
+        const profile = {
+          name: node.name,
+          relation_to_user: '',
+          last_mentioned: '',
+          mention_count: 0,
+          ...props,
+        } as PersonProfile;
+        // 保留副作用：状态降级判定（单条版亦如此）
+        this._checkStatusDowngrade(node, profile);
+        out[want] = { profile, bio: { name: node.name, ...this._normalizeBio(props) } };
+      }
+    } catch (e: any) {
+      console.warn('[FG] 批量档案加载失败，回退空结果(非阻塞): ' + (e?.message || e));
+    }
+    return out;
+  }
+
   getPersonProfileWithBio(personName: string): {
     profile: PersonProfile | null;
     bio: { name: string; birthYear: number | null; age: number | null; gender: '男' | '女' | null; occupation: string | null } | null;

@@ -303,26 +303,27 @@ export class M4Orchestrator {
     const batchProfile = (names: string[]) => {
       const result: Record<string, any> = {};
       if (names.length === 0) return result;
-      const _slow: string[] = [];
-      for (const name of names) {
-        const _tP = Date.now();
-        // 🔴 V27批7: 一次节点查询同时产出 profile + bio ——
-        //   原实现此处调 getPersonProfile，enrichProfile 内又调 getPersonBio，
-        //   两者各走一次 findPersonNodeByNameOrAlias（含 aliases LIKE 全表扫描），
-        //   使档案加载变成 2N 次查询。
-    //   ⚠️ 归因修正（独立评审 P2-2）：实测每档案均耗时不变（13~20ms），
-    //   本批的真实增益来自**限量加载**（339→60），合并读取的贡献未获数据证实。
-        const r = (activeFG as any).getPersonProfileWithBio?.(name);
-        if (r?.profile) {
-          result[name] = { ...r.profile, __bio: r.bio };
-        } else {
-          const profile = activeFG.getPersonProfile(name);
-          if (profile) result[name] = profile;
+      const _t0 = Date.now();
+      // 🔵 批17(性能): 批量化 —— 原为逐个 getPersonProfileWithBio（每次含 name 查询 +
+      //   aliases LIKE 全表扫描），实测 705~838ms。改为一次批量查询（O(1~2) 次 SQL）。
+      //   行为等价：profile 组装/_checkStatusDowngrade 副作用/按传入名取用 均与单条版一致。
+      const batch = (activeFG as any).getPersonProfilesWithBioBatch?.(names);
+      if (batch) {
+        for (const name of names) {
+          const r = batch[name];
+          if (r?.profile) result[name] = { ...r.profile, __bio: r.bio };
         }
-        const _dtP = Date.now() - _tP;
-        if (_dtP > 30) _slow.push(name + ":" + _dtP + "ms");
+      } else {
+        // 兜底：批量方法不可用（旧版本/接口缺失）时退回逐个加载
+        for (const name of names) {
+          const r = (activeFG as any).getPersonProfileWithBio?.(name);
+          if (r?.profile) result[name] = { ...r.profile, __bio: r.bio };
+          else { const p = activeFG.getPersonProfile(name); if (p) result[name] = p; }
+        }
       }
-      if (_slow.length > 0) console.log("[M4·profile] " + names.length + "个档案，慢项: " + _slow.slice(0, 8).join(" "));
+      const _dtTotal = Date.now() - _t0;
+      if (_dtTotal > 300) console.log("[M4·profile] 批量加载 " + names.length + " 个档案耗时 " + _dtTotal + "ms");
+
       return result;
     };
 
