@@ -1,0 +1,102 @@
+#!/bin/sh
+# ========================================
+# pre-commit 模板（v3.0）—— 纳入仓库、可复制部署
+# ========================================
+# 安装（在本机生效）：
+#   sh scripts/install-hooks.sh
+#   或手工： cp hooks/pre-commit.template .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# 为什么要有这个模板：
+#   原先真正生效的 .git/hooks/pre-commit 是**手工创建、不被 git 跟踪**的，
+#   而仓库里的 .husky/pre-commit 因 husky 未安装（缺 .husky/_/husky.sh）**从未执行**——
+#   于是其中「禁止鸿鸣」「禁止临时开关」两项检查长期形同虚设，
+#   且 PAS v1 的三级管控第一级（提交前静态检查）**完全没有落地**。
+#   本模板把三类检查合并并纳入版本控制，杜绝"规范在文档里、执法靠自觉"。
+#
+# 性能：tsc 约 30~60s、规范测试约 2s。提交不频繁，可接受。
+# 若需临时跳过（紧急情况）：SKIP_HOOK_CHECKS=1 git commit ...
+
+fail() {
+  echo ""
+  echo "❌ $1"
+  echo ""
+  exit 1
+}
+
+# 紧急跳过开关（显式使用，便于事后审计）
+if [ "$SKIP_HOOK_CHECKS" = "1" ]; then
+  echo "⚠️  SKIP_HOOK_CHECKS=1 —— 已跳过全部 pre-commit 检查（仅紧急情况使用）"
+  exit 0
+fi
+
+# ──────────────────────────────────────
+# 1. Harness Gate（高危文件写入令牌）
+# ──────────────────────────────────────
+HARNESS_ROOT="D:/AI文件/harness"
+HARNESS_GATE="$HARNESS_ROOT/scripts/harness-gate.cjs"
+if [ -f "$HARNESS_GATE" ]; then
+  node "$HARNESS_GATE"
+  RESULT=$?
+  if [ $RESULT -ne 0 ]; then
+    fail "[Harness] pre-commit blocked by harness-gate.cjs"
+  fi
+fi
+
+# ──────────────────────────────────────
+# 2. 术语检查：禁止"鸿鸣"（应为"鸿艺"）
+#    （源自 .husky/pre-commit —— 因 husky 未装而长期未生效）
+# ──────────────────────────────────────
+if command -v grep > /dev/null 2>&1; then
+  HITS=$(grep -rn "鸿鸣" src/ --include="*.ts" --include="*.json" --include="*.html" 2>/dev/null | grep -v node_modules | head -5)
+  if [ -n "$HITS" ]; then
+    echo "$HITS"
+    fail '代码中包含"鸿鸣"，请替换为"鸿艺"'
+  fi
+fi
+
+# ──────────────────────────────────────
+# 3. 禁止提交测试用临时开关
+#    （源自 .husky/pre-commit，同上）
+# ──────────────────────────────────────
+HITS2=$(grep -rn "WS_DISABLE_MINOR_CHECK\|disableMinor\|_disableMinor\|已临时关闭" src/ --include="*.ts" 2>/dev/null | grep -v node_modules | grep -v ".test.ts" | head -5)
+if [ -n "$HITS2" ]; then
+  echo "$HITS2"
+  fail "检测到测试用临时开关代码，请清理后再提交"
+fi
+
+# ──────────────────────────────────────
+# 4. TypeScript 类型检查（PAS v1 §7 第一级）
+# ──────────────────────────────────────
+if [ -f "node_modules/.bin/tsc" ]; then
+  echo "🔍 [pre-commit] tsc --noEmit ..."
+  # 用临时文件承接输出，避免管道吞掉退出码（且避免重复跑第二遍）
+  TSC_LOG=$(mktemp 2>/dev/null || echo "/tmp/tsc-$$.log")
+  if npx tsc --noEmit > "$TSC_LOG" 2>&1; then
+    rm -f "$TSC_LOG"
+    echo "✅ tsc 通过"
+  else
+    tail -20 "$TSC_LOG"
+    rm -f "$TSC_LOG"
+    fail "TypeScript 类型检查失败（tsc --noEmit）"
+  fi
+fi
+
+# ──────────────────────────────────────
+# 5. 规范守门测试（PAS v1 §7 第三级，仅跑规范相关，保持秒级）
+# ──────────────────────────────────────
+if [ -f "node_modules/.bin/vitest" ]; then
+  echo "🔍 [pre-commit] 规范守门测试 ..."
+  VITEST_LOG=$(mktemp 2>/dev/null || echo "/tmp/vitest-$$.log")
+  if npx vitest run src/__tests__/prompt-assembly-spec.test.ts --reporter=dot > "$VITEST_LOG" 2>&1; then
+    rm -f "$VITEST_LOG"
+    echo "✅ 规范测试通过"
+  else
+    tail -20 "$VITEST_LOG"
+    rm -f "$VITEST_LOG"
+    fail "PAS 规范测试未通过（prompt-assembly-spec.test.ts）"
+  fi
+fi
+
+echo ""
+echo "✅ pre-commit 全部检查通过"
+exit 0
