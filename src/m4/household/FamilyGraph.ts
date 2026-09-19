@@ -1089,14 +1089,22 @@ export class FamilyGraph implements FamilyGraphInterface {
         if (!lastMentioned) continue;
         const daysSince = (Date.now() - new Date(lastMentioned).getTime()) / 86400000;
         const currentStatus = p.status || 'active';
-        if (currentStatus === 'active' && daysSince > 90) {
-          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['dormant', p.id]);
-          lifecycleResult++;
-        } else if (currentStatus === 'dormant' && daysSince > 365) {
-          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['archived', p.id]);
-          lifecycleResult++;
-        } else if (currentStatus === 'dormant' && daysSince < 90) {
-          this.run('UPDATE nodes SET status = ? WHERE id = ?', ['active', p.id]);
+        // 🔵 批13(部分1): 委托 StatusRules.computeTargetStatus —— 唯一真源。
+        // 原实现硬编码 90/365，是同一规则的【第三份】实现（与本文件其它调用点、
+        // 以及 LifecycleManager 并存），三份阈值一旦漂移将难以察觉。
+        // 注：candidate 的回收并非本批新增 —— LifecycleManager.runDaily 早已走
+        // computeTargetStatus（且先于本函数执行）。本批价值 = 去重归一，而非新增能力。
+        // 统一后：阈值/方向/优先级由唯一真源决定；行为等价性由
+        // status-machine-unified.test.ts 固化（active↔dormant↔archived 全路径）。
+        const t = computeTargetStatus(currentStatus, daysSince);
+        if (t.changed) {
+          this.run('UPDATE nodes SET status = ? WHERE id = ?', [t.to, p.id]);
+          // 观察区超期回收属"回收"语义 → 必须同步清理关联边，
+          // 否则 cli/health-check 的「void 参与边」会 fatal（与批12 P1-2 同口径）。
+          if (t.to === 'void') {
+            this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
+            console.log('[FG Lifecycle] 观察区超期回收: "' + p.name + '" (' + Math.floor(daysSince) + '天无提及)');
+          }
           lifecycleResult++;
         }
       }
@@ -2459,6 +2467,26 @@ export class FamilyGraph implements FamilyGraphInterface {
         if (hasStrong) ev.strongHits = (typeof ev.strongHits === 'number' ? ev.strongHits : 0) + 1;
         const hasTitle = this._hasNameTitleContext(rawInput, name);
         if (hasTitle) ev.titleHits = (typeof ev.titleHits === 'number' ? ev.titleHits : 0) + 1;
+
+        // 🔵 批13: 记录语境片段 —— 梦境 LLM 终审需要「这个名字在原句里长什么样」。
+        // 批12 只存了计数，导致离线无法判断（这是证据链的结构性缺口，非补丁）。
+        // 只保留最近 3 条、每条 ≤120 字，避免节点 properties 膨胀。
+        if (rawInput && typeof rawInput === 'string') {
+          // 🔴 批13 评审 F1 修复: 必须取【名字附近的窗口】，而非消息头部。
+          // 原实现取 rawInput 前 120 字 —— 长消息里所有候选会存同一段与名字无关的前缀，
+          // 导致离线 LLM 拿到错误语境（最坏：噪声被判 person 并提升，绕过整个观察区）。
+          // 与同类相邻的 _hasNameTitleContext/_hasNameStrongContext 保持同一手法（indexOf 定位）。
+          const rawIdx = rawInput.indexOf(name);
+          const windowed = rawIdx >= 0
+            ? rawInput.slice(Math.max(0, rawIdx - 60), rawIdx + name.length + 60)
+            : rawInput;
+          const snippet = windowed.replace(/\s+/g, ' ').trim().slice(0, 120);
+          if (snippet) {
+            const ctxs: string[] = Array.isArray(ev.contexts) ? ev.contexts : [];
+            if (ctxs[ctxs.length - 1] !== snippet) ctxs.push(snippet);
+            ev.contexts = ctxs.slice(-3);
+          }
+        }
         props.evidence = ev;
 
         // 🔵 批12(P2-6 二轮): 累计证据分制 —— strong(介绍句/关系词)=3, 弱上下文=1, 每次提及=1。
@@ -2495,6 +2523,147 @@ export class FamilyGraph implements FamilyGraphInterface {
    * 例："张小龙说" → after='说' 命中；"找张小龙" → before='找' 命中。
    * 这是真人出现在对话语法结构中的证据（滑窗片段不会如此出现）。
    */
+  /**
+   * 批13: 收集观察区(candidate)待判条目 —— 数据层，**不依赖 LLM**。
+   *
+   * 分层理由：FamilyGraph 只负责「把 FG 里的证据组装成待判条目」；
+   * 真正的 LLM 调用放在上层编排（M7 梦境 / 维护任务）。这样数据层保持纯净，
+   * 判定器（app/entity/EntityQualityJudge）保持纯函数可测。
+   *
+   * @param limit 单批上限（控制 LLM 批量体积）
+   */
+  collectCandidateItems(limit = 50): Array<{ name: string; mentionCount?: number; contexts?: string[]; relations?: string[] }> {
+    const out: Array<{ name: string; mentionCount?: number; contexts?: string[]; relations?: string[] }> = [];
+    try {
+      // 🔵 批13 评审 F5: 取候选时多取一批，供 JS 层过滤「已被标注为 noise」的行 ——
+      // 否则 annotate 会刷 updated_at 把它们重新顶回队首，导致同一批噪声每天被重复送 LLM
+      // （约 30 次重复计费），且真正的新候选可能挤不进 limit。
+      const rows = this.query(
+        "SELECT id, name, properties FROM nodes WHERE type = 'person' AND status = 'candidate' LIMIT ?",
+        [limit * 3],
+      ) as Array<{ id: string; name: string; properties: string }>;
+
+      const parsed: Array<{ id: string; name: string; props: Record<string, any>; ev: Record<string, any> }> = [];
+      for (const row of rows) {
+        let props: Record<string, any> = {};
+        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+        const ev = (props.evidence && typeof props.evidence === 'object') ? props.evidence : {};
+        // 已判为 noise 的不再重复送审（人工清单由批14 统一出）
+        if (props._judge && props._judge.verdict === 'noise') continue;
+        parsed.push({ id: row.id, name: row.name, props, ev });
+      }
+
+      // 按「证据最后出现时间」升序 —— 最久没动静的先判（时间语义与过期基准一致）
+      parsed.sort((a, b) => {
+        const ta = Date.parse((a.ev.lastSeen as string) || '') || 0;
+        const tb = Date.parse((b.ev.lastSeen as string) || '') || 0;
+        return ta - tb;
+      });
+
+      for (const item of parsed.slice(0, limit)) {
+        const row = { id: item.id, name: item.name };
+        const ev = item.ev;
+
+        const relRows = this.query(
+          'SELECT relation FROM edges WHERE source_id = ? OR target_id = ? LIMIT 6',
+          [row.id, row.id],
+        ) as Array<{ relation: string }>;
+
+        out.push({
+          name: row.name,
+          mentionCount: typeof ev.count === 'number' ? ev.count : undefined,
+          contexts: Array.isArray(ev.contexts) ? ev.contexts.filter((c: any) => typeof c === 'string') : [],
+          relations: [...new Set(relRows.map((r) => r.relation).filter(Boolean))],
+        });
+      }
+    } catch (e: any) {
+      console.warn('[FG Judge] collectCandidateItems 失败(非阻塞): ' + (e?.message || e));
+    }
+    return out;
+  }
+
+  /**
+   * 批13: 应用离线判定结果 —— **保守**：只提升 + 只标注，永不回收。
+   *
+   * 用户决策（2026-09-20）：真人被误 void 的代价远大于噪声多留一阵，
+   * 故 noise 一律只写标记（供批14 出人工清单），不在此处改 status。
+   * 所有变更写入 _changeHistory（可追溯是"很重要"的前提）。
+   */
+  applyJudgments(
+    outcome: { promote: string[]; annotate: Array<{ name: string; confidence: number; reason?: string }> },
+    source = 'dream-judge',
+  ): { promoted: number; annotated: number } {
+    const nowIso = new Date().toISOString();
+    let promoted = 0;
+    let annotated = 0;
+
+    // ① 提升：candidate → active（本次唯一的 status 变更）
+    for (const name of outcome.promote ?? []) {
+      try {
+        const rows = this.query(
+          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
+          [name],
+        ) as Array<{ id: string; properties: string }>;
+        if (rows.length === 0) continue;
+        const row = rows[0];
+        let props: Record<string, any> = {};
+        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+
+        // 审计（沿用本类既有 _changeHistory 格式）
+        if (!Array.isArray(props._changeHistory)) props._changeHistory = [];
+        props._changeHistory.push({
+          field: 'status',
+          oldValue: 'candidate',
+          newValue: 'active',
+          timestamp: nowIso,
+          reason: '离线终审判定为真人（来源:' + source + '）',
+        });
+        if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+        if (!props._judge) props._judge = {};
+        props._judge = { ...props._judge, verdict: 'person', source, at: nowIso };
+
+        this.run(
+          "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",
+          [JSON.stringify(props), nowIso, row.id],
+        );
+        promoted++;
+        console.log('[FG Judge] 提升 active: "' + name + '" (来源:' + source + ')');
+      } catch (e: any) {
+        console.warn('[FG Judge] 提升失败(非阻塞): "' + name + '" — ' + (e?.message || e));
+      }
+    }
+
+    // ② 标注：noise 只写标记，**不改 status**（保守边界）
+    for (const a of outcome.annotate ?? []) {
+      try {
+        const rows = this.query(
+          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
+          [a.name],
+        ) as Array<{ id: string; properties: string }>;
+        if (rows.length === 0) continue;
+        const row = rows[0];
+        let props: Record<string, any> = {};
+        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+        props._judge = {
+          verdict: 'noise',
+          confidence: a.confidence,
+          reason: a.reason,
+          source,
+          at: nowIso,
+          // 明确记录：本次未回收，供批14 人工清单
+          autoReclaimed: false,
+        };
+        this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [JSON.stringify(props), nowIso, row.id]);
+        annotated++;
+      } catch (e: any) {
+        console.warn('[FG Judge] 标注失败(非阻塞): "' + a.name + '" — ' + (e?.message || e));
+      }
+    }
+
+    if (promoted || annotated) this.markDirty(true);
+    return { promoted, annotated };
+  }
+
   /**
    * 批12(P2-6): 弱上下文 —— 仅名字紧邻称谓动词（"张小龙说" / "找张小龙"）。
    * 单次命中不足以判定真人（片段前后邻字可能是任意高频字），需累积 2 次。

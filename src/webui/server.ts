@@ -686,6 +686,26 @@ async function initPipeline(): Promise<void> {
   if (activePersona && llmProvider instanceof DeepSeekLLMProvider) llmProvider.setPersona(activePersona);
   m5 = new M5Orchestrator(llmProvider);
 
+  // ── 批13: 实体质量离线终审装配（消费 FG 观察区 candidate 队列）──
+  // 分层：FamilyGraph(数据) ← EntityTriageService(编排) → EntityQualityJudge(纯函数)
+  // LLM 注入复用 PAE 的既有模式；无 rawCall 时抛错 → 终审服务「不动任何数据」。
+  try {
+    const { EntityTriageService } = await import('../app/entity/EntityTriageService.js');
+    // 🔵 批13 评审 F4: **只建一次** —— 原先每次调度都 new，导致 service 内部的
+    // running 防重入标记形同虚设（跨实例不互斥），叠加定时器残留可造成并发双跑。
+    const entityTriageSvc = new EntityTriageService({
+      familyGraph,
+      rawCall: async (messages, maxTokens, temperature) => {
+        if (llmProvider?.rawCall) return llmProvider.rawCall(messages as any, maxTokens, temperature);
+        throw new Error('rawCall 不可用（LLM 未就绪）');
+      },
+    });
+    maintenance.setEntityTriage(() => entityTriageSvc.runOnce());
+    console.log('  实体离线终审 (EntityTriage) 已装配 ✓  (保守策略：只提升，噪声仅标注)');
+  } catch (e: any) {
+    console.warn('  ⚠️ 实体终审装配失败（不影响主链路）:', e?.message || e);
+  }
+
   // ── V3.2 档案自动采集引擎初始化 ──
   try {
     pae = new ProfileAcquisitionEngine(

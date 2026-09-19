@@ -53,6 +53,8 @@ export interface HealthReport {
 // ──────────────────────────────────────────────
 
 export interface MaintenanceConfig {
+  /** 批13: 实体离线终审间隔（默认 24h；建档不频繁，低频即可） */
+  entityTriageInterval?: number;
   /** 对话压缩间隔 (ms) — 默认 5 分钟 */
   compactionInterval: number;
   /** 存储 GC 间隔 (ms) — 默认 30 分钟 */
@@ -107,6 +109,9 @@ export class MaintenanceService {
   private compactionTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private decayTimer: ReturnType<typeof setInterval> | null = null;
+  private entityTriageTimer: ReturnType<typeof setInterval> | null = null;
+  /** 批13: 实体离线终审执行器（注入式 —— Maintenance 不感知 LLM 与 FamilyGraph） */
+  private entityTriageRunner: (() => Promise<{ scanned: number; promoted: number; annotated: number; kept: number; skipped: boolean; error?: string }>) | null = null;
 
   // 外部依赖（由 server.ts 注入）
   private conversationHistory: ConversationTurn[] = [];
@@ -114,6 +119,34 @@ export class MaintenanceService {
   private setConversationHistory: (h: ConversationTurn[]) => void = () => {};
   private saveConversationHistory: () => void = () => {};
   private storage: AnyStorage | null = null;
+  /**
+   * 批13: 注入实体离线终审执行器。
+   * 注入式设计 —— MaintenanceService 只负责「何时跑」，不关心「怎么判」，
+   * 因此不依赖 LLM provider 与 FamilyGraph（保持本类可独立测试）。
+   */
+  setEntityTriage(runner: typeof this.entityTriageRunner): void {
+    this.entityTriageRunner = runner;
+  }
+
+  /**
+   * 批13: 执行一轮实体离线终审。无候选时 runner 内部直接跳过（零 LLM 调用）。
+   * 失败只记录，绝不影响其他维护任务。
+   */
+  private async runEntityTriage(): Promise<void> {
+    if (!this.entityTriageRunner) return;
+    try {
+      const r = await this.entityTriageRunner();
+      if (r.skipped) return;                     // 无候选 → 静默
+      if (r.error) { console.warn('[Maintenance] 实体终审失败(非阻塞): ' + r.error); return; }
+      console.log(
+        '[Maintenance] 实体终审: 扫描' + r.scanned + ' 提升' + r.promoted +
+        ' 标注' + r.annotated + ' 观察' + r.kept,
+      );
+    } catch (e: any) {
+      console.warn('[Maintenance] 实体终审异常(非阻塞): ' + (e?.message || e));
+    }
+  }
+
   private runDecay: () => Promise<{ total: number; archived: number }> = async () => ({ total: 0, archived: 0 });
   private _sqliteGetter: (() => any | null) | null = null;
   private familyGraph: any | null = null;
@@ -218,9 +251,18 @@ export class MaintenanceService {
       }
     }, this.config.decayInterval);
 
+    // 🔵 批13: 实体离线终审 —— 消费 FG 观察区(candidate)队列，用 LLM 批量判定。
+    // 低频（每日）即可：建档不频繁、不特急，但很重要（用户 2026-09-20）。
+    // 保守策略：只提升真人，噪声仅标注（永不自动回收）。
+    this.entityTriageTimer = setInterval(async () => {
+      await this.runEntityTriage();
+    }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
+
     // 首轮尽快执行
     setTimeout(() => this.runCompaction().catch(() => {}), 30_000);
     setTimeout(() => this.runGC().catch(() => {}), 60_000);
+    // 🔵 批13: 首轮实体终审延迟 5 分钟（等检索/FG 稳定后再跑，避免和启动期任务抢资源）
+    setTimeout(() => { void this.runEntityTriage(); }, 5 * 60_000);
     setTimeout(async () => {
       // 🔴 V27批6（评审 P2-1）: 显式 catch —— 否则衰减失败只落 unhandledRejection，静默不执行
       const result = await this.runDecay().catch((e: any) => {
@@ -235,6 +277,9 @@ export class MaintenanceService {
     if (this.compactionTimer) clearInterval(this.compactionTimer);
     if (this.gcTimer) clearInterval(this.gcTimer);
     if (this.decayTimer) clearInterval(this.decayTimer);
+    // 🔴 批13 评审 F3: 必须清理 —— 否则 /api/reset → initPipeline → start() 后
+    // 旧 interval 残留 + 新建 = 每重置一次多跑一份每日终审（重复 LLM 计费）。
+    if (this.entityTriageTimer) clearInterval(this.entityTriageTimer);
     if (this.knowledgeGcTimer) clearInterval(this.knowledgeGcTimer);
     console.log('[Maintenance] 维护引擎已停止');
   }
