@@ -2441,7 +2441,7 @@ if (_meetingExited) {
         _locusPath.split('.')[1] !== _dg.locusPath?.split('.')[1];
 
       const _shouldCloseGroup = _dg && (
-        _locusChanged || _meetingExited ||
+        _locusChanged || isTopicShift || _meetingExited ||
         _dg.rounds.length >= 10 ||
         (Date.now() - _dg.startTime) > 30 * 60 * 1000
       );
@@ -2505,8 +2505,6 @@ if (_meetingExited) {
 
 	    persistConversation({
 	      ctx, message, reply, seqPos, dna, p, decision,
-	      context: ctx.conversationHistory.map(t => t.content).filter(Boolean),
-	      dialogGroupId: _dg?.id || null,
 	    }).catch((_e: any) => console.warn('[Persist] 异步失败:', _e?.message));
 
     // 躯体感知记录（SomaticMemory — 五重铁律协议③）
@@ -3059,7 +3057,7 @@ if (_meetingExited) {
 
       m1: { branch_id: dna.branch_id, locus_path: dna.locus_path, seq_pos: seqPos, leaf_zone: dna.leaf_zone, ref: `seq_${String(seqPos).padStart(6, '0')}`, entities: dna.entity_genes.map((e: any) => ({ name: e.name, type: e.type })), raw_input: dna.raw_input, entity_genes: dna.entity_genes, scene_tags: dna.scene_tags, ambiguity_score: dna.ambiguity_score },
 
-      m3: { quadrant1: allDims.filter((d: any) => d.q === 1), quadrant2: allDims.filter((d: any) => d.q === 2), quadrant3: allDims.filter((d: any) => d.q === 3), quadrant4: allDims.filter((d: any) => d.q === 4), calcium: { score: Number(decision.enhanced.calcium_score.toFixed(3)), level: cl, label: LEVEL_NAMES[cl] ?? '?', breakdown: { base_core: 0, emotional_boost: 0, threat_bonus: 0 } }, actions: decision.actions, reason: decision.reason, primary_emotion: decision.primary_emotion, secondary_emotions: decision.secondary_emotions, confidence: decision.confidence, perceptionV40: decision.enhanced.perceptionV40 ?? null },
+      m3: { quadrant1: allDims.filter((d: any) => d.q === 1), quadrant2: allDims.filter((d: any) => d.q === 2), quadrant3: allDims.filter((d: any) => d.q === 3), quadrant4: allDims.filter((d: any) => d.q === 4), calcium: { score: Number(decision.enhanced.calcium_score.toFixed(3)), level: cl, label: LEVEL_NAMES[cl] ?? '?', breakdown: { base_core: 0, emotional_boost: 0, threat_bonus: 0 } }, actions: decision.actions, reason: decision.reason, primary_emotion: decision.primary_emotion, secondary_emotions: decision.secondary_emotions, confidence: decision.confidence },
 
       m4: { timeline: ctx_m4.memory_summary.timeline.map(t => ({ time: t.time, summary: t.summary, calcium_level: t.calcium_level })), total: ctx_m4.memory_summary.timeline.length, family: ctx_m4.family_context?.length ?? 0 },
 
