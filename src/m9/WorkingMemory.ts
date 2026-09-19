@@ -38,6 +38,9 @@ export class MemoryWriteBuffer {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private _consolidating = false;
   private _pendingConsolidate = false;
+  /** 🔴 2026-09-20 失败可见性：巩固失败计数（供日志与 getStatus 暴露，不再静默） */
+  private _consolidateFailures = 0;
+  private _consecutiveConsolidateFailures = 0;
 
   constructor(storage: FusionStorageAdapter, maxSize = 50) {
     this.storage = storage;
@@ -46,9 +49,14 @@ export class MemoryWriteBuffer {
 
   startFlushTimer(intervalMs = 60_000): void {
     if (this.flushTimer) clearInterval(this.flushTimer);
-    this.flushTimer = setInterval(async () => {
+    // 🔴 2026-09-20：回调改为**非 async** —— async 回调抛出的 Promise 没人接，会成为
+    //   unhandledRejection（事故链：UNIQUE 冲突 → 未捕获拒绝 → 进程反复重启）。
+    //   这里显式接住；真正的失败计数/告警在 consolidateSafe 内完成（失败可见）。
+    this.flushTimer = setInterval(() => {
       if (this.buffer.length > 0) {
-        await this.consolidateSafe();
+        this.consolidateSafe().catch((e) => {
+          console.error('[WM] 定时巩固出现未预期异常（已兜底，不应发生）:', (e as Error)?.message);
+        });
       }
     }, intervalMs);
   }
@@ -71,11 +79,24 @@ export class MemoryWriteBuffer {
       if (results.length > 0) {
         console.log(`[WM] 刷出: ${results.length} 条`);
       }
+      this._consecutiveConsolidateFailures = 0; // 成功即清零连续计数
+    } catch (e) {
+      // 🔴 2026-09-20：失败必须**可见**且**不丢数据**。
+      //   原先只有 try/finally、没有 catch ⇒ consolidate() 抛错会一路冒到 setInterval 回调，
+      //   变成 unhandledRejection（事故链一环）；而 push() 里的 `.catch(() => {})` 又会静默吞掉。
+      //   现在：① 计数 + 告警（含累计/连续次数与错误）；② 不 rethrow（定时器不再产生未捕获拒绝）；
+      //   ③ buffer 保持不动（失败条留在缓冲，下一轮重试，不静默丢弃）。
+      this._consolidateFailures++;
+      this._consecutiveConsolidateFailures++;
+      console.error(
+        `[WM] 🔴 巩固失败（累计 ${this._consolidateFailures} 次 / 连续 ${this._consecutiveConsolidateFailures} 次）: ` +
+          `${(e as Error)?.message ?? String(e)}；本批 ${this.buffer.length} 条仍留在缓冲，将在下一轮重试`,
+      );
     } finally {
       this._consolidating = false;
       if (this._pendingConsolidate) {
         this._pendingConsolidate = false;
-        await this.consolidateSafe();
+        await this.consolidateSafe(); // 自身不抛（同上 catch）
       }
     }
   }
@@ -118,7 +139,11 @@ export class MemoryWriteBuffer {
     }
 
     if (this.buffer.length >= this.maxSize) {
-      this.consolidateSafe().catch(() => {});
+      // 🔴 2026-09-20：不再静默吞错（原先 `.catch(() => {})`）—— consolidateSafe 内部已计数+告警；
+      //   此处只兜底，防止任何未预期的同步抛出变成未捕获拒绝。
+      this.consolidateSafe().catch((e) => {
+        console.error('[WM] 缓冲满触发的巩固出现未预期异常（已兜底）:', (e as Error)?.message);
+      });
     }
   }
 
@@ -185,13 +210,23 @@ export class MemoryWriteBuffer {
     return this.storage.write(entry.dna, entry.perception, entry.primaryEmotion, entry.secondaryEmotions);
   }
 
-  getStatus(): { size: number; maxSize: number; utilization: number; pendingGraduates: number } {
+  getStatus(): {
+    size: number;
+    maxSize: number;
+    utilization: number;
+    pendingGraduates: number;
+    /** 🔴 2026-09-20：失败可见性 —— 累计/连续巩固失败次数（健康检查可据此告警） */
+    consolidateFailures: number;
+    consecutiveConsolidateFailures: number;
+  } {
     const pending = this.buffer.filter(function(e) { return !!e.hasMeaningfulEntity; }).length;
     return {
       size: this.buffer.length,
       maxSize: this.maxSize,
       utilization: Math.round(this.buffer.length / this.maxSize * 100),
       pendingGraduates: pending,
+      consolidateFailures: this._consolidateFailures,
+      consecutiveConsolidateFailures: this._consecutiveConsolidateFailures,
     };
   }
 
