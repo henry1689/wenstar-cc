@@ -247,6 +247,24 @@
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
 
+### 批8 收口记录（2026-09-19）
+
+| 项 | 内容 |
+|---|---|
+| **改动** | ① `FamilyGraph.getUUIDsByNames()` — 批量名字→UUID（分片 SQL，只读）；② `UUIDGatekeeper.prefillNameToUUID()` — 批量预填缓存（只填缓存、不做判定，隐私语义不变）；③ `M4Orchestrator` 在门阀过滤前调用预填 |
+| **已验证** | `[UUIDGatekeeper] prefill: missing=339 resolved=164 耗时=43ms` → 原 339 次逐名节点查询→ **1 次批量查询（43ms）** ✅ |
+| **⚠️ 未达预期（如实记录）** | `filterFG` 段总耗时**未显著下降**（仍出现 2451~3067ms）。prefill 本身仅 43ms，说明该段还有**未定位**的成分（已排除：`_resolveUUID` 逐名查询、`isInWhitelist` 为 Set 查找、`_mark` 位置正确）。下次需在段内细分（socialContext 构建 / 两次 filterFGMembers / 事件循环阻塞）|
+
+**另发现（非本批引入）**：`pm2 restart wenstar-webui` 会引发 `UNIQUE constraint failed: memories.seq_pos`
+（实测 14 次）——原因是旧进程未完全退出时新进程已开始写，**两个进程并发写 memories**。
+证据：批6/批7 日志（用 stop→start 流程）中该错误 **0 次**；而 restart 后突现。
+✅ **操作纪律**：重启该服务必须 `pm2 stop` → 确认端口释放 → `pm2 start`，禁用 `pm2 restart`。
+
+**⚙环境认知修正（本批最大收获）**：生产服务是 **pm2 的 `wenstar-webui`**（id 11，script=`start.cjs`，
+日志 `logs/pm2-wenstar-out.log`）。此前批5~批7 用 `nohup node start.cjs` 另起实例，
+与 pm2 实例组成**双实例**（端口竞争 + ServerLock 冲突 + 测试数据不可信）。
+—— 这是*多次“验证失败/日志缺失”的真因*，教训：**先确认服务由谁托管，再动手测**。
+
 ### 批7 收口记录（2026-09-19）
 
 | 项 | 内容 |

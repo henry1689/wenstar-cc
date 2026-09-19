@@ -392,6 +392,13 @@ export class M4Orchestrator {
     // ── V3.2 门阀过滤: FG 家族/社交成员按白名单 UUID 过滤 ──
     if (this._gatekeeper?.isActive?.()) {
       try {
+        // 🔴 V27批8: 先批量预填 name→UUID 缓存，再过滤 —— filterFGMembers 处理的是
+        //   **全量**成员（不像 batchProfile 限 60），首次逐名查询实测 1964~3305ms。
+        //   预填只填缓存、不做判定，隐私语义不变。
+        try {
+          const _allNames = [...new Set([...familyContext.map((x: any) => x.entity), ...socialContext.map((x: any) => x.entity)])];
+          (this._gatekeeper as any).prefillNameToUUID?.(_allNames);
+        } catch { /* 预填失败回退逐名 */ }
         familyContext = this._gatekeeper.filterFGMembers(familyContext);
         socialContext = this._gatekeeper.filterFGMembers(socialContext);
       } catch {

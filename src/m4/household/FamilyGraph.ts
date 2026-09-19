@@ -3123,6 +3123,45 @@ export class FamilyGraph implements FamilyGraphInterface {
    *   实测 m4 的 rest 阶段 6031ms（占 m4 总耗时的 88%）。
    *   本方法一次节点查询同时产出二者；**不改动**现有方法与数据语义（纯只读新增）。
    */
+  /**
+   * 🔴 V27批8: **批量名字 → UUID**（一次 SQL）—— 供 UUIDGatekeeper 预填缓存。
+   *   背景：filterFGMembers 对全量成员逐个 _resolveUUID，首次未命中时每名一次
+   *   findPersonNodeByNameOrAlias（含 aliases LIKE 全表扫描），实测 339 项 1964~3305ms。
+   *   本方法分片批量查询（SQLite 变量上限保护），**只读**，不改现有方法语义。
+   */
+  getUUIDsByNames(names: string[]): Map<string, string | null> {
+    const result = new Map<string, string | null>();
+    if (!names || names.length === 0) return result;
+    const CHUNK = 400;
+    try {
+      for (let i = 0; i < names.length; i += CHUNK) {
+        const chunk = names.slice(i, i + CHUNK).filter(Boolean);
+        if (chunk.length === 0) continue;
+        const ph = chunk.map(() => "?").join(",");
+        const rows = this.query(
+          `SELECT name, uuid, aliases FROM nodes WHERE type = ? AND status != ? AND name IN (${ph})`,
+          ["person", "void", ...chunk],
+        ) as any[];
+        for (const r of rows) result.set(r.name, r.uuid || null);
+        // 别名回退：对本片未命中的做一次 LIKE 查询（仍为批量，非逐名）
+        const miss = chunk.filter((n) => !result.has(n));
+        if (miss.length > 0) {
+          const likeConds = miss.map(() => "aliases LIKE ?").join(" OR ");
+          const likeParams = miss.map((n) => `%"${n}"%`);
+          const rows2 = this.query(
+            `SELECT name, uuid, aliases FROM nodes WHERE type = ? AND status != ? AND (${likeConds})`,
+            ["person", "void", ...likeParams],
+          ) as any[];
+          for (const r of rows2) {
+            const aliases: string[] = (() => { try { return JSON.parse(r.aliases || "[]"); } catch { return []; } })();
+            for (const a of aliases) if (miss.includes(a) && !result.has(a)) result.set(a, r.uuid || null);
+          }
+        }
+      }
+    } catch { /* 批量失败 → 调用方逐名回退 */ }
+    return result;
+  }
+
   getPersonProfileWithBio(personName: string): {
     profile: PersonProfile | null;
     bio: { name: string; birthYear: number | null; age: number | null; gender: '男' | '女' | null; occupation: string | null } | null;

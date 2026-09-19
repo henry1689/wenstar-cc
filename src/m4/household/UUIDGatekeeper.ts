@@ -377,6 +377,31 @@ export class UUIDGatekeeper {
   // 内部
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * 🔴 V27批8: **批量预填 name→UUID 缓存** —— filterFGMembers 对全量成员逐个
+   *   _resolveUUID，首次缓存未命中时每名一次节点查询（含 aliases LIKE 全表扫描），
+   *   实测 339 项耗时 1964~3305ms。本方法一次批量 SQL 预填，使逐名查询全部命中缓存。
+   *   ⚠️ 只填缓存，不做任何放行/拒绝判定 —— 隐私语义完全不变。
+   */
+  prefillNameToUUID(names: string[]): void {
+    if (!names || names.length === 0) return;
+    const missing = names.filter((n) => n && !this.nameToUUIDCache.has(n));
+    if (missing.length === 0) return;
+    try {
+      const _t0 = Date.now();
+      const map = (this.familyGraph as any).getUUIDsByNames?.(missing);
+      const _hit = map && typeof map.size === "number" ? map.size : -1;
+      const _el = Date.now() - _t0;
+      // 🔴 V27批8: 预填观测（P-15）—— 仅超阈值时输出，避免高频噪音
+      if (_el > 20 || _hit < missing.length) {
+        console.log("[UUIDGatekeeper] prefill: missing=" + missing.length + " resolved=" + _hit + " 耗时=" + _el + "ms");
+      }
+      if (map && typeof map.forEach === "function") {
+        map.forEach((uuid: string | null, name: string) => this.nameToUUIDCache.set(name, uuid ?? null));
+      }
+    } catch { /* 预填失败 → 回退逐名查询（原行为） */ }
+  }
+
   /** 人名 → UUID（带缓存） */
   private _resolveUUID(name: string): string | null {
     if (!name) return null;
