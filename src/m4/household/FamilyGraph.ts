@@ -1107,6 +1107,8 @@ export class FamilyGraph implements FamilyGraphInterface {
           if (t.to === 'void') {
             this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
             console.log('[FG Lifecycle] 观察区超期回收: "' + p.name + '" (' + Math.floor(daysSince) + '天无提及)');
+            // 注：此处内联删边为"单节点立即清理"（循环内不便整库 prune）；
+            // 同语义的整库版本见 pruneVoidEdges()（批15 唯一咽喉，每日自愈调用）。
           }
           lifecycleResult++;
         }
@@ -1502,6 +1504,35 @@ export class FamilyGraph implements FamilyGraphInterface {
    * 支持 active / dormant / archived / deceased 四态流转。
    * deceased 不可逆；archived 仅可恢复为 active。
    */
+  /**
+   * 批15: 清理所有 void 实体参与的边 —— **唯一咽喉**。
+   *
+   * 背景：void(回收)是软删除，边是独立表，二者一致性原先靠"每处记得删边"维护，
+   * 于是批12/13 只覆盖了新产生的 void，存量 179 条 void 边长期残留并让
+   * cli/health-check 的「void 参与边」fatal。根治方式是把删边收敛为单一实现，
+   * 并由每日维护自愈兜底 —— 任何遗漏路径（含未来新增、人工 SQL）都会在 24h 内被修复。
+   *
+   * @returns 实际删除的边数
+   */
+  pruneVoidEdges(): number {
+    try {
+      const before = (this.query('SELECT COUNT(*) as c FROM edges') as Array<{ c: number }>)[0]?.c ?? 0;
+      this.run(`DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE status='void')
+        OR target_id IN (SELECT id FROM nodes WHERE status='void')`);
+      const after = (this.query('SELECT COUNT(*) as c FROM edges') as Array<{ c: number }>)[0]?.c ?? 0;
+      const deleted = before - after;
+      if (deleted > 0) {
+        this.markDirty(true);
+        console.log('[FG SelfHeal] 清理 void 参与边: ' + deleted + ' 条');
+      }
+      return deleted;
+    } catch (e: any) {
+      // 自愈失败绝不影响主链路
+      console.warn('[FG SelfHeal] void 边清理失败(非阻塞): ' + (e?.message || e));
+      return 0;
+    }
+  }
+
   setEntityStatus(entityName: string, newStatus: string, reason: string = '手动操作'): { success: boolean; error?: string } {
     let node = this.findPersonNodeByNameOrAlias(entityName);
     // void(回收)实体不在常规查找(结构性隔离)中, 但需支持手动恢复 → 按名直查 void
@@ -1519,6 +1550,9 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     const props = JSON.parse(node.properties || '{}');
     this.run('UPDATE nodes SET status = ? WHERE id = ?', [newStatus, node.id]);
+
+    // 批15(A): 手动置 void 必须同步清理关联边（走唯一咽喉，不在此处另写 DELETE）
+    if (newStatus === 'void') this.pruneVoidEdges();
 
     if (!props._changeHistory) props._changeHistory = [];
     props._changeHistory.push({
@@ -1783,9 +1817,32 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.markDirty(true);
   }
 
+  /**
+   * 批15(P1-1): 判断给定节点 id 中是否有 void(回收) 实体。
+   * 用途：addEdge 的源头守卫。全仓约 15 处"裸名字查询"解析节点时不过滤 void，
+   * 使已回收的名字在下次被提及时仍能接边（批14 的 179 条 acquaintance_of 即此成因）。
+   */
+  private _anyNodeVoid(ids: Array<string | null | undefined>): boolean {
+    try {
+      const valid = ids.filter((x): x is string => !!x);
+      if (valid.length === 0) return false;
+      const ph = valid.map(() => '?').join(',');
+      const r = this.query(`SELECT id FROM nodes WHERE id IN (${ph}) AND status = 'void'`, valid);
+      return r.length > 0;
+    } catch { return false; /* 守卫失败不阻塞建边（与既有防御式降级一致） */ }
+  }
+
   async addEdge(edge: GraphEdge): Promise<void> {
     // 🔴 V3.3 自指边拦截: 禁止 source = target
     if (edge.source_id === edge.target_id) return;
+    // 🔵 批15(P1-1): 源头阻断 —— void(回收) 实体不得接边。
+    // 这是【产生侧】的根本防线：即使某条产边路径用裸名字查询命中了 void 节点，
+    // 也不会再产生 void 参与边。与 pruneVoidEdges()（清理侧兜底）互补，
+    // 二者共同覆盖"进程内遗漏路径 / 跨进程写入 / 历史残留"三类情形。
+    if (this._anyNodeVoid([edge.source_id, edge.target_id])) {
+      console.log('[FG] 拒绝为 void 实体建边: ' + edge.source_id + ' -[' + edge.relation + ']-> ' + edge.target_id);
+      return;
+    }
     // 🔴 V10.1 重复边拦截: 同源同目标同关系已存在则跳过（防止 RAG 反复写入同一关系导致边数膨胀）
     const dup = this.query('SELECT id FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?', [edge.source_id, edge.target_id, edge.relation]);
     if (dup.length > 0) return;
@@ -5970,7 +6027,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     // ⑩ V3.3: A 类节点必须有 family_edge 到'我'
     const aWithoutEdge = this.query(
-      "SELECT COUNT(*) as cnt FROM nodes n WHERE n.type = 'person' AND n.category = 'A' AND n.name != '我' AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes n2 ON (e.source_id = n2.id OR e.target_id = n2.id) WHERE (e.source_id = n.id OR e.target_id = n.id) AND n2.name = '我' AND e.relation IN ('mother_of','father_of','spouse_of','sibling_of','child_of','parent_of','grandparent_of','grandchild_of','elder_sister_of','younger_sister_of','elder_brother_of','younger_brother_of'))"
+      "SELECT COUNT(*) as cnt FROM nodes n WHERE n.type = 'person' AND n.category = 'A' AND n.name != '我' AND (n.status IS NULL OR n.status != 'void') AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes n2 ON (e.source_id = n2.id OR e.target_id = n2.id) WHERE (e.source_id = n.id OR e.target_id = n.id) AND n2.name = '我' AND e.relation IN ('mother_of','father_of','spouse_of','sibling_of','child_of','parent_of','grandparent_of','grandchild_of','elder_sister_of','younger_sister_of','elder_brother_of','younger_brother_of'))"
     )[0]?.cnt || 0;
     checks.push({
       name: 'A类全部有家族边', passed: aWithoutEdge === 0,

@@ -128,7 +128,13 @@ describe('批12 · FamilyGraph 观察区集成', () => {
   });
 
   const statusOf = (name: string): string | null => {
-    const rows = fg.query("SELECT status FROM nodes WHERE type='person' AND name = ?", [name]);
+    // 批15: 加 ORDER BY —— 批14 清洗后「明伶俐」等名字在库中同时存在 void 旧节点与
+    // candidate 新节点，无排序会随机取到 void 那条，导致本测试红绿不定（真实发生过）。
+    // 取最近更新的一条，语义即"该名字当前的有效状态"。
+    const rows = fg.query(
+      "SELECT status FROM nodes WHERE type='person' AND name = ? ORDER BY updated_at DESC LIMIT 1",
+      [name],
+    );
     return rows.length ? (rows[0] as any).status : null;
   };
 
@@ -144,14 +150,16 @@ describe('批12 · FamilyGraph 观察区集成', () => {
     // 修复前 _accumulateCandidateEvidence 在 persons 循环【前】调用，
     // 首次提及时候选节点尚不存在 → 首次证据丢失 → 介绍句无法触发晋升。
     const gene = {
-      name: '明伶俐',
+      name: '批12验证壬',
       type: 'person',
-      allele: '我姐姐叫明伶俐',
+      allele: '我姐姐叫批12验证壬',
       phenotype: 'neutral',
       knowledge_type: 'family',
     } as any;
-    await fg.integrateFromEntity([gene], '我姐姐叫明伶俐');
-    expect(statusOf('明伶俐'), '首次提及带介绍句必须立即晋升（P0-1）').toBe('active');
+    // 批15: 改用库中必然不存在的名字。「明伶俐」在批14 已被判为噪声并 void，
+    // 用它会让本用例受存量数据影响（同名 void 节点干扰），失去"首次提及"语义。
+    await fg.integrateFromEntity([gene], '我姐姐叫批12验证壬');
+    expect(statusOf('批12验证壬'), '首次提及带介绍句必须立即晋升（P0-1）').toBe('active');
   });
 
   it('🔴 P1-4 回归：已 void 的名字再次出现不应直接 active', async () => {

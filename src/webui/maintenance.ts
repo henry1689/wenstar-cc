@@ -237,6 +237,15 @@ export class MaintenanceService {
           if (r > 0) console.log('[Maintenance] FG pending清理: ' + r + ' 条');
         }
       } catch (e) { console.warn('[Maintenance] FG pending清理失败:', e); }
+      // 🔵 批15(B): void 边自愈 —— 兜底防线。
+      // 即使任何遗漏路径（未来新增的状态变更、人工 SQL 改动）产生了 void 参与边，
+      // 也会在 24h 内被自动修复，而不是像批14 那样残留 179 条直到人工发现。
+      try {
+        const fg2 = this.familyGraph ?? (this._fgGetter ? this._fgGetter() : null);
+        if (fg2 && typeof fg2.pruneVoidEdges === 'function') {
+          fg2.pruneVoidEdges();   // 内部仅在确有清理时打印 [FG SelfHeal]
+        }
+      } catch (e) { console.warn('[Maintenance] void 边自愈失败(非阻塞):', e); }
     }, 24 * 60 * 60 * 1000);
 
     // 记忆衰减定时器（15 分钟）
@@ -263,6 +272,15 @@ export class MaintenanceService {
     setTimeout(() => this.runGC().catch(() => {}), 60_000);
     // 🔵 批13: 首轮实体终审延迟 5 分钟（等检索/FG 稳定后再跑，避免和启动期任务抢资源）
     setTimeout(() => { void this.runEntityTriage(); }, 5 * 60_000);
+    // 🔵 批15(P1-2): void 边自愈【首轮】—— 原实现只在 24h interval 内，
+    // 进程存活不足 24h（或被 /api/reset 重置计时）时永不执行。
+    // 与其它首轮任务并列（30s/60s/5min），启动后 10 分钟跑一次。
+    setTimeout(() => {
+      try {
+        const fg2 = this.familyGraph ?? (this._fgGetter ? this._fgGetter() : null);
+        if (fg2 && typeof fg2.pruneVoidEdges === 'function') fg2.pruneVoidEdges();
+      } catch (e) { console.warn('[Maintenance] void 边自愈首轮失败(非阻塞):', e); }
+    }, 10 * 60_000);
     setTimeout(async () => {
       // 🔴 V27批6（评审 P2-1）: 显式 catch —— 否则衰减失败只落 unhandledRejection，静默不执行
       const result = await this.runDecay().catch((e: any) => {

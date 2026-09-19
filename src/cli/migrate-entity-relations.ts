@@ -232,8 +232,8 @@ async function preMigration(fmDb: any, fgDb: any): Promise<MigrationReport['preM
 
     if (fgPersons.has(nameA) && fgPersons.has(nameB)) {
       // 双方都在主库中，检查关系边
-      const nodeA = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [nameA]);
-      const nodeB = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [nameB]);
+      const nodeA = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [nameA]);
+      const nodeB = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [nameB]);
       if (nodeA.length > 0 && nodeB.length > 0) {
         const edgeType = RELATION_MAP[rel.relation] || 'acquaintance_of';
         const existingEdge = fgQuery(fgDb,
@@ -323,7 +323,7 @@ async function runMigration(fmDb: any, fgDb: any, dryRun: boolean): Promise<{ me
 
   // 1. 创建节点
   for (const name of allNames) {
-    const existing = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [name]);
+    const existing = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [name]);
     if (existing.length === 0) {
       try {
         fgRun(fgDb,
@@ -351,8 +351,8 @@ async function runMigration(fmDb: any, fgDb: any, dryRun: boolean): Promise<{ me
 
   // 2. 创建边
   for (const edge of edgesToAdd) {
-    const nodeA = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [edge.personA]);
-    const nodeB = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [edge.personB]);
+    const nodeA = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [edge.personA]);
+    const nodeB = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [edge.personB]);
     if (nodeA.length === 0 || nodeB.length === 0) {
       errorCount++;
       continue;
@@ -623,7 +623,7 @@ async function main() {
       const FG_NOISE_CLEANUP = ['亲戚','同事','客户','别说别','平胸','强调'];
       let cleaned = 0;
       for (const noise of FG_NOISE_CLEANUP) {
-        const nodes = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND type = 'person'", [noise]);
+        const nodes = fgQuery(fgDb, "SELECT id FROM nodes WHERE name = ? AND (status IS NULL OR status != 'void') AND type = 'person'", [noise]);
         for (const node of nodes) {
           fgRun(fgDb, 'DELETE FROM edges WHERE source_id = ? OR target_id = ?', [node.id, node.id]);
           fgRun(fgDb, 'DELETE FROM nodes WHERE id = ?', [node.id]);

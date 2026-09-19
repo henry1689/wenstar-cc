@@ -147,6 +147,8 @@ export class LifecycleManager {
       const props = JSON.parse(node.properties || '{}');
 
       fg.run('UPDATE nodes SET status = ? WHERE id = ?', [newStatus, node.id]);
+      // 批15(A): 手动置 void 同步清边（经 FamilyGraph.pruneVoidEdges 唯一咽喉）
+      if (newStatus === 'void' && typeof fg.pruneVoidEdges === 'function') fg.pruneVoidEdges();
       this._appendChangeLog(fg, node.id, props, currentStatus, newStatus, reason);
 
       console.log(`[Lifecycle] ${entityName}: ${currentStatus} → ${newStatus} (${reason})`);

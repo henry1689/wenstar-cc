@@ -506,6 +506,10 @@ async function initPipeline(): Promise<void> {
   await memoryVault.initialize();
   familyGraph = new FamilyGraph(DB_PATH);
   await familyGraph.initialize();
+  // 🔵 批15(P1-3): 启动对账 —— 刚从此文件加载、尚无待写变更，是最安全的对账点。
+  // 可修复"上个进程退出前遗留 / 外部进程（CLI 脚本）改文件产生"的 void 参与边，
+  // 使 health-check 的 fatal 不会跨重启残留。
+  try { familyGraph.pruneVoidEdges(); } catch (e: any) { console.warn('[server] 启动 void 边对账失败(非阻塞):', e?.message || e); }
   markModuleAlive('FG·户籍数据层');
   (globalThis as any).__familyGraph = familyGraph;
   // V3.2.1 调试模式: 全部限制解锁
