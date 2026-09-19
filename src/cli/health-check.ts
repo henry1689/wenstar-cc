@@ -229,13 +229,32 @@ async function run() {
 
   // 4a. 检查 SQLiteAdapter flush 配置
   const sqliteContent = readFileSync(join(PROJECT_ROOT, 'src', 'm2', 'SQLiteAdapter.ts'), 'utf-8');
-  const hasFlushBatch = sqliteContent.includes('_FLUSH_BATCH = 5');
-  const hasFlushInterval = sqliteContent.includes('_FLUSH_INTERVAL = 2000');
-  if (hasFlushBatch && hasFlushInterval) {
-    pass('数据持久化安全', '批量 flush 配置', '5次写入/2秒防抖, 配置正确');
+  // 🔵 批16: 原实现比对魔法数（'= 5' / '= 2000'），配置一经改进便误报（2026-09-20 实际发生：
+  // 另一会话把 flush 改为 50次/150ms —— 那是**改进**：崩溃丢失窗口从 ~2s 缩到 ~150ms，
+  // 但检查仍断言旧值 → 误判 fatal）。现改为「提取实际值 + 校验安全区间」：
+  //   · 配置演进（如 150ms → 100ms）不再误报；
+  //   · 真退化（如 interval 5000ms / batch 100000）仍会报警。
+  const batchMatch = sqliteContent.match(/_FLUSH_BATCH\s*=\s*(\d+)/);
+  const intervalMatch = sqliteContent.match(/_FLUSH_INTERVAL\s*=\s*(\d+)/);
+  const flushBatch = batchMatch ? Number(batchMatch[1]) : NaN;
+  const flushInterval = intervalMatch ? Number(intervalMatch[1]) : NaN;
+
+  // 安全区间依据：
+  //   interval = 崩溃时最多丢失的时间窗 → 上限取旧值 2000ms；下限 50ms（过密会拖慢写入）
+  //   batch    = 内存积压硬上限（防无界）→ 上限 500；下限 1
+  const BATCH_MIN = 1, BATCH_MAX = 500;
+  const INTERVAL_MIN = 50, INTERVAL_MAX = 2000;
+  const batchOk = Number.isFinite(flushBatch) && flushBatch >= BATCH_MIN && flushBatch <= BATCH_MAX;
+  const intervalOk = Number.isFinite(flushInterval) && flushInterval >= INTERVAL_MIN && flushInterval <= INTERVAL_MAX;
+
+  if (batchOk && intervalOk) {
+    pass('数据持久化安全', '批量 flush 配置',
+      flushBatch + '次写入/' + flushInterval + 'ms防抖, 崩溃丢失窗口 ~' + flushInterval + 'ms, 配置合理');
   } else {
-    fatal('数据持久化安全', '批量 flush 配置', '批量 flush 未正确配置',
-      '检查 SQLiteAdapter.ts 中 _FLUSH_BATCH 和 _FLUSH_INTERVAL');
+    fatal('数据持久化安全', '批量 flush 配置',
+      '批量 flush 配置超出安全区间 (batch=' + (batchMatch ? flushBatch : '未找到') +
+      ', interval=' + (intervalMatch ? flushInterval + 'ms' : '未找到') + ')',
+      '要求 _FLUSH_BATCH ∈ [' + BATCH_MIN + ', ' + BATCH_MAX + '] 且 _FLUSH_INTERVAL ∈ [' + INTERVAL_MIN + ', ' + INTERVAL_MAX + ']ms');
   }
 
   // 4b. 检查 JSON Zone 备份
