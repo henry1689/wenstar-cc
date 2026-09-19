@@ -3629,19 +3629,29 @@ export class FamilyGraph implements FamilyGraphInterface {
         for (const r of rows) if (!byName.has(r.name)) byName.set(r.name, r);
       }
 
-      // ② 别名兜底：仅对未命中的名字做一次批量 LIKE 查询
+      // ② 别名兜底：仅对未命中的名字走别名索引
+      //    🔴 批17-3b 自测修正：初版写成 for(want){ for(allPersons) } = O(N×M)，
+      //    实测 12 个未命中 → 12 次全表遍历，优化后只快 15%（687ms，未达预期）。
+      //    改为**一次构建 alias→node 索引**，整体降到 O(N+M)。
       const missing = uniq.filter((n) => !byName.has(n));
       if (missing.length > 0) {
         const allPersons = this.query(
           "SELECT * FROM nodes WHERE type = 'person' AND (status IS NULL OR status != 'void')",
         ) as any[];
-        for (const want of missing) {
-          const needle = '"' + want + '"';   // aliases 存 JSON 数组，元素带引号
-          for (const r of allPersons) {
-            if (byName.has(want)) break;
-            const al = r.aliases || '[]';
-            if (al.indexOf(needle) >= 0) byName.set(want, r);
+        // 构建别名索引：一次解析全部 aliases，之后 O(1) 查找
+        const aliasIndex = new Map<string, any>();
+        for (const r of allPersons) {
+          if (!r.aliases) continue;
+          let arr: string[] = [];
+          try { arr = JSON.parse(r.aliases); } catch { continue; }
+          if (!Array.isArray(arr)) continue;
+          for (const a of arr) {
+            if (typeof a === 'string' && a && !aliasIndex.has(a)) aliasIndex.set(a, r);
           }
+        }
+        for (const want of missing) {
+          const hit = aliasIndex.get(want);
+          if (hit) byName.set(want, hit);
         }
       }
 
