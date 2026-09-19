@@ -387,6 +387,8 @@ const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; vi
 ];
 
 export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
+  // 🔴 P-15（PAS v1 / V27批2）: 拼装阶段耗时计时起点（响应时间必须可测量）
+  const _tAssembleStart = Date.now();
 
   try {
     // 🔥 天权海马体节律调度: 进入 θ 节律（活跃对话），暂停离线巩固
@@ -1471,7 +1473,10 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
 
     if (/感觉|感受|分享|讲讲|说说|回忆|记得.*吗|怎样/.test(message) && !isFactualRecallQuery) {
 
-      feelingGuard = '📖【鸿艺在问你感受。请用300-500字充分展开，详细描述身体感觉和心情。不要简短回答。】';
+      // 🔴 P-01（PAS v1 / V27批2）: 原为硬编码「300-500字」，与 L0 长度标准的
+      //   「说事/说感受：120-180字」直接冲突（同一 prompt 两套数字）。
+      //   现改为引用 L0，不再自带数字。
+      feelingGuard = '📖【鸿艺在问你感受。按核心铁律「说事/说感受」档充分展开，详细描述身体感觉和心情。不要简短回答。】';
 
     }
 
@@ -2196,7 +2201,18 @@ try {
   }
 
   const _mode = _isMeeting ? 'entity_meeting' as const : 'normal' as const;
-  const _assembled = assembler.render({ mode: _mode, maxChars: 12000 });
+  // 🔴 P-14（PAS v1 / V27批2）: maxChars 对齐规范 §3 总预算 8000（原为 12000，与规范脱节）。
+  const _assembled = assembler.render({ mode: _mode, maxChars: 8000 });
+  // 🔴 P-13（PAS v1 / V27批2）: 被截断/冲突丢弃的段必须**告警且可追责**。
+  //   原实现只在 log 里报一个数量，段名与原因全丢。
+  //   ⚠️ 位置必须在下面门控**之前**：若全部块因超限被丢弃，_assembled.text 为空、
+  //   blocks 为空，原位置（门控内）会导致「全部丢弃却零告警」—— 静默丢弃即 P-13 违规。
+  if (_assembled.dropped.length > 0) {
+    const _dropDetail = _assembled.dropped
+      .map(d => d.block.id + '(' + d.block.type + ',prio=' + d.block.priority + '):' + d.reason)
+      .join(' | ');
+    console.warn('[PromptAssembler⚠P-13] 丢弃 ' + _assembled.dropped.length + ' 段: ' + _dropDetail);
+  }
   // 🔴 P0-4 瘦身法: strict 模式下 assembler 是重复块的唯一承载（旧链路已跳过）→ 放宽到 ≥1 块，
   // 避免单块场景丢内容。非 strict 模式保持 ≥2 块旧行为。
   const _minBlocks = PROMPT_ASSEMBLER_STRICT ? 1 : 2;
@@ -2387,6 +2403,11 @@ if (_meetingExited) {
       }
     }
 
+    // 🔴 P-15（PAS v1 / V27批2）: 拼装阶段耗时埋点 —— 从 processChat 入口到调用 LLM 前。
+    //   与 DeepSeekLLMProvider 的 [PromptBudget] 分层字符数配合，回答「慢在哪里」。
+    console.log('[PromptBudget] assemble_ms=' + (Date.now() - _tAssembleStart)
+      + ' final_kb_chars=' + (finalKnowledgeText || '').length
+      + ' mode=' + (_meetingEntityName ? 'meeting' : 'normal'));
     if (_meetingDeny) {
       reply = _meetingDeny;
     } else {

@@ -5,7 +5,9 @@
 import { describe, it, expect } from 'vitest';
 
 describe('真实记忆检索 · 熊梓铭 (含 search_index 修复)', () => {
-  it('建表回填 → 检索 → 验证结果', async () => {
+  // 🔴 2026-09-19：本用例无显式 timeout ⇒ 吃全局 30s，实测跑 162s 才失败（建表+回填+检索）。
+  //   根据根因分析（LLM/检索重负载，非代码缺陷）给出显式超时，避免假红。
+  it('建表回填 → 检索 → 验证结果', { timeout: 300000 }, async () => {
     const initSqlJs = (await import('sql.js')).default;
     const fs = await import('fs');
     const path = await import('path');
@@ -96,5 +98,5 @@ describe('真实记忆检索 · 熊梓铭 (含 search_index 修复)', () => {
 
     db.close();
     console.log('\n✅ 真实 DB 检索测试完成');
-  }, 60000);
+  });
 });

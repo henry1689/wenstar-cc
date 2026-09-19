@@ -1421,8 +1421,8 @@ export class DeepSeekLLMProvider implements LLMProvider {
 
     // ═══ 构建聊天消息流 ═══
         // P0-6: 预估Token并告警
-    const _totalTokens = Math.round((systemPrompt.length + (params.conversationHistory || []).reduce((s: number, t: any) => s + (t.content || '').length, 0) + (rawInput || '').length) / 2);
-    if (_totalTokens > 10000) console.warn('[TokenBudget] 预估Token超限: ' + _totalTokens + ' tokens');
+    // （P-15 分层埋点已移至 messages 构造完成后 —— 必须计入 userMsgContent 与 kb 复注，
+    //   否则 total 系统性低估；见下方 [PromptBudget]）
     const messages: DeepSeekMessage[] = [
       { role: 'system', content: systemPrompt },
     ];
@@ -1481,6 +1481,24 @@ export class DeepSeekLLMProvider implements LLMProvider {
       ? `[当前说话对象: ${entities.join('、')} | ⚠️ 你不是玉瑶] 鸿艺对你说：${rawInput}`  // V9.0: 加强身份校验
       : (hasSelfProfile && isSelfIntroQuery ? rawInput : `${contextBlock}\n鸿艺: ${rawInput}`);
     messages.push({ role: 'user', content: userMsgContent });
+
+    // 🔴 P-15（PAS v1 / V27批2）: 分层预算埋点 —— 必须反映**实际上送内容**。
+    //   原实现在 messages 构造前用减法估算，漏计 ① contextBlock（被嵌入 userMsgContent）
+    //   ② kb 子串复注（人物档案 / 玉瑶自述档案，各至多 2000 字符）→ total 系统性低估
+    //   （独立评审 P2-3）。现改为在 messages 构造完成后按来源分类统计。
+    const _pbKbLen = (params.knowledgeBase || '').length;
+    const _pbHistLen = messages.reduce((s, m) => m.role === 'system' ? s : s + m.content.length, 0);
+    const _pbEchoLen = messages.reduce((s, m, i) => (m.role === 'system' && i > 0) ? s + m.content.length : s, 0);
+    const _pbL0 = Math.max(0, systemPrompt.length - _pbKbLen); // L0（systemPrompt 内嵌 kb 一次）
+    const _pbL1 = userMsgContent.length;                       // L1（含 contextBlock + 本轮输入）
+    const _pbL2 = _pbKbLen + _pbEchoLen + (_pbHistLen - _pbL1 - _pbEchoLen);
+    const _pbTotal = _pbL0 + _pbL1 + _pbL2;
+    const _totalTokens = Math.round(_pbTotal / 2);
+    console.log('[PromptBudget] L0=' + _pbL0 + ' L1=' + _pbL1 + ' L2=' + _pbL2
+      + '(kb=' + _pbKbLen + ',kb_echo=' + _pbEchoLen + ',hist=' + Math.max(0, _pbHistLen - _pbL1 - _pbEchoLen) + ')'
+      + ' total=' + _pbTotal + ' est_tokens=' + _totalTokens
+      + ' mode=' + (_isEntityMeeting ? 'meeting' : 'normal'));
+    if (_totalTokens > 10000) console.warn('[TokenBudget] 预估Token超限: ' + _totalTokens + ' tokens（P-14：需走降级裁剪）');
     // LLM params from config center
     // 🔴 M-LEAK A(2026-09-12): 会晤与「角色扮演」分开判定 —— 原合并使会晤沿用角色扮演的
     //   reasoning_effort='max'，思维链吃光 max_tokens → content 为空 → 触发 fail-closed 空回复
