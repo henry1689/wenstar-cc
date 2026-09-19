@@ -1146,11 +1146,9 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
               continuityParts.push(`${speaker}：${snippet}`);
             }
             if (continuityParts.length > 0) {
-              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。)
-⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';
+              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。）';
             }
           }
-        }
         }
       } catch (e) { /* 实体上下文构建失败不阻塞 */ }
       // 🆕 V3.0: 首轮上下文已注入 → 清除首轮标记，下一轮不再注入开场协议
@@ -2443,7 +2441,7 @@ if (_meetingExited) {
         _locusPath.split('.')[1] !== _dg.locusPath?.split('.')[1];
 
       const _shouldCloseGroup = _dg && (
-        _locusChanged || isTopicShift || _meetingExited ||
+        _locusChanged || _meetingExited ||
         _dg.rounds.length >= 10 ||
         (Date.now() - _dg.startTime) > 30 * 60 * 1000
       );
@@ -2507,6 +2505,8 @@ if (_meetingExited) {
 
 	    persistConversation({
 	      ctx, message, reply, seqPos, dna, p, decision,
+	      context: ctx.conversationHistory.map(t => t.content).filter(Boolean),
+	      dialogGroupId: _dg?.id || null,
 	    }).catch((_e: any) => console.warn('[Persist] 异步失败:', _e?.message));
 
     // 躯体感知记录（SomaticMemory — 五重铁律协议③）
@@ -3059,7 +3059,7 @@ if (_meetingExited) {
 
       m1: { branch_id: dna.branch_id, locus_path: dna.locus_path, seq_pos: seqPos, leaf_zone: dna.leaf_zone, ref: `seq_${String(seqPos).padStart(6, '0')}`, entities: dna.entity_genes.map((e: any) => ({ name: e.name, type: e.type })), raw_input: dna.raw_input, entity_genes: dna.entity_genes, scene_tags: dna.scene_tags, ambiguity_score: dna.ambiguity_score },
 
-      m3: { quadrant1: allDims.filter((d: any) => d.q === 1), quadrant2: allDims.filter((d: any) => d.q === 2), quadrant3: allDims.filter((d: any) => d.q === 3), quadrant4: allDims.filter((d: any) => d.q === 4), calcium: { score: Number(decision.enhanced.calcium_score.toFixed(3)), level: cl, label: LEVEL_NAMES[cl] ?? '?', breakdown: { base_core: 0, emotional_boost: 0, threat_bonus: 0 } }, actions: decision.actions, reason: decision.reason, primary_emotion: decision.primary_emotion, secondary_emotions: decision.secondary_emotions, confidence: decision.confidence },
+      m3: { quadrant1: allDims.filter((d: any) => d.q === 1), quadrant2: allDims.filter((d: any) => d.q === 2), quadrant3: allDims.filter((d: any) => d.q === 3), quadrant4: allDims.filter((d: any) => d.q === 4), calcium: { score: Number(decision.enhanced.calcium_score.toFixed(3)), level: cl, label: LEVEL_NAMES[cl] ?? '?', breakdown: { base_core: 0, emotional_boost: 0, threat_bonus: 0 } }, actions: decision.actions, reason: decision.reason, primary_emotion: decision.primary_emotion, secondary_emotions: decision.secondary_emotions, confidence: decision.confidence, perceptionV40: decision.enhanced.perceptionV40 ?? null },
 
       m4: { timeline: ctx_m4.memory_summary.timeline.map(t => ({ time: t.time, summary: t.summary, calcium_level: t.calcium_level })), total: ctx_m4.memory_summary.timeline.length, family: ctx_m4.family_context?.length ?? 0 },
 

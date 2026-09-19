@@ -236,7 +236,7 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
             continuityParts.push(`${t.role === 'user' ? '鸿艺' : _meetingEntityName}：${(t.content || '').substring(0, 300)}`);
           }
           if (continuityParts.length > 0) {
-            _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';
+            _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n');
           }
         }
       } catch (e) { /* 实体上下文构建失败不阻塞 */ }
