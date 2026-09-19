@@ -563,6 +563,16 @@ function _isValidPendingValue(value: string): boolean {
 const CANDIDATE_PROMOTE_COUNT = 3;
 
 /**
+ * 批18: `_changeHistory` 保留条数上限 —— **单一真源**。
+ *
+ * 历史教训：该值原为 10000（散落在多处代码内联），实测单节点最多累积 2628 条，
+ * 占该节点 properties 的 95~99.8% —— 全部 nodes.properties 30.6MB 中 29.8MB 是它，
+ * 直接拖慢档案加载（JSON.parse 平均 398KB/节点）并使 FG 体积虚高。
+ * 现收敛为 200 条（可追溯近期变更），超出部分由批18 归档脚本写入独立 JSON 文件。
+ */
+export const CHANGE_HISTORY_LIMIT = 200;
+
+/**
  * 批12(P2-6 二轮): 观察区晋升的证据分阈值。
  * 分制替代单一维度硬阈值，避免「首次提及 + 仅弱上下文 + 不再出现」被不可逆 void：
  *   强上下文（介绍句/关系词）×3  弱上下文（紧邻称谓动词）×1  每次提及 ×1
@@ -1178,7 +1188,8 @@ export class FamilyGraph implements FamilyGraphInterface {
             reason,
             source: '占位升级引擎',
           });
-          if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+          // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
           this.run('UPDATE nodes SET properties = ? WHERE id = ?', [JSON.stringify(props), row.id]);
 
           result.details.push(`${row.name}: placeholder→real (${reason})`);
@@ -1588,7 +1599,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       reason,
       source: '用户手动操作',
     });
-    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
       JSON.stringify(props), new Date().toISOString(), node.id,
     ]);
@@ -1633,7 +1645,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       reason,
       source: '图谱同步',
     });
-    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
 
     // 3. 同步到 dossier: 关系变迁叙事
     if (!props.dossier) props.dossier = this.buildDossierFromFlat(props, props);
@@ -2111,7 +2124,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       reason: 'BFS 基因码组成员名单增量同步',
       source: '图谱同步',
     });
-    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
 
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
       JSON.stringify(props), new Date().toISOString(), node.id,
@@ -2702,7 +2716,8 @@ export class FamilyGraph implements FamilyGraphInterface {
           timestamp: nowIso,
           reason: '离线终审判定为真人（来源:' + source + '）',
         });
-        if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+        // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
         if (!props._judge) props._judge = {};
         props._judge = { ...props._judge, verdict: 'person', source, at: nowIso };
 
@@ -3741,7 +3756,8 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (!props._changeHistory) props._changeHistory = [];
     props._changeHistory.push({ field, oldValue, newValue, timestamp: now });
     // V2.0: 卷宗永久存档 — 主表保留10000条，超出自动归档（保留全部记录不删除）
-    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
     this.run('UPDATE nodes SET properties=? WHERE id=?', [JSON.stringify(props), node.id]);
   }
 
@@ -3965,7 +3981,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       if (oldVal !== undefined && newVal !== undefined && JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
         if (!merged._changeHistory) merged._changeHistory = [];
         merged._changeHistory.push({ field, oldValue: oldVal, newValue: newVal, timestamp: new Date().toISOString() });
-        if (merged._changeHistory.length > 10000) merged._changeHistory = merged._changeHistory.slice(-10000);
+        // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (merged._changeHistory.length > CHANGE_HISTORY_LIMIT) merged._changeHistory = merged._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
       }
     }
 
@@ -4026,7 +4043,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       newValue: value,
       timestamp: new Date().toISOString(),
     });
-    if (props._changeHistory.length > 10000) props._changeHistory = props._changeHistory.slice(-10000);
+    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
+        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
 
     // V4.0: 置信度标记（PAE 提取 vs 用户手动）
     const lastEntry = props._changeHistory[props._changeHistory.length - 1];
