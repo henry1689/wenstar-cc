@@ -390,6 +390,17 @@ export class UUIDGatekeeper {
     try {
       const _t0 = Date.now();
       const map = (this.familyGraph as any).getUUIDsByNames?.(missing);
+      // 🔴 V27批9 修复（批8 只做了一半）：批量查询只返回**解析到**的名字
+      //   （实测 missing=339 → resolved=164），未解析的 175 个没写缓存 →
+      //   调用方 _resolveUUID 仍未命中、继续逐名查询（实测 social 段 308 项 1724ms）。
+      //   故：**先给全部 missing 写 null 占位**，再覆盖已解析的。
+      //   null 缓存的语义 = "本次批量确认无 UUID"，由既有 clear 点
+      //   （会话切换/授权变更）失效，不会永久错误。
+      if (map && typeof map.forEach === "function") {
+        for (const n of missing) {
+          if (!map.has(n)) this.nameToUUIDCache.set(n, null);
+        }
+      }
       const _hit = map && typeof map.size === "number" ? map.size : -1;
       const _el = Date.now() - _t0;
       // 🔴 V27批8: 预填观测（P-15）—— 仅超阈值时输出，避免高频噪音

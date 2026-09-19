@@ -388,6 +388,7 @@ export class M4Orchestrator {
       related_entity: '我',
       ...enrichProfile(c.name),
     }));
+    _mark("socialCtx");
 
     // ── V3.2 门阀过滤: FG 家族/社交成员按白名单 UUID 过滤 ──
     if (this._gatekeeper?.isActive?.()) {
@@ -399,7 +400,9 @@ export class M4Orchestrator {
           const _allNames = [...new Set([...familyContext.map((x: any) => x.entity), ...socialContext.map((x: any) => x.entity)])];
           (this._gatekeeper as any).prefillNameToUUID?.(_allNames);
         } catch { /* 预填失败回退逐名 */ }
+        _mark("prefill");
         familyContext = this._gatekeeper.filterFGMembers(familyContext);
+        _mark("filterFamily");
         socialContext = this._gatekeeper.filterFGMembers(socialContext);
       } catch {
         // FG 隐私过滤同样 fail-closed，避免异常时回填未过滤成员。

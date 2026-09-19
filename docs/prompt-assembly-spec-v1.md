@@ -247,6 +247,35 @@
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
 
+### 批9 收口记录（2026-09-19）
+
+**根因（批8 只做了一半，本批修正）**：
+
+段内细分（`socialCtx / prefill / filterFamily / filterFG`）显示：
+```
+family（31 项）→ filterFamily=22ms
+social（308 项）→ filterFG=1724ms     ← 8 倍差异
+```
+原因：批8 的 `prefillNameToUUID` **只把批量查询「解析到」的名字写入缓存**
+（实测 `missing=339 → resolved=164`），**未解析的 175 个没写缓存** →
+调用方 `_resolveUUID` 仍未命中、继续逐名查询。
+
+**修复**：先给全部 `missing` 写 `null` 占位，再覆盖已解析的。
+（`null` 缓存语义 = “本次批量确认无 UUID”，由既有 clear 点（会话切换/授权变更）失效，
+不会永久错误。）
+
+**实测（干净环境，pm2 stop→start）**：
+
+| 指标 | 批8 | 批9（修复后）|
+|---|---|---|
+| filterFG | 1724~3067ms | **0ms** |
+| m4 total | 3922~14168ms | **895~2339ms** |
+| assemble_ms | 6000~17800 | **1537~4588** |
+| 端到端 | ~17s（含失败）| **10.4 / 6.3 / 6.6s** |
+
+**⚠️ 对批8 说明的更正**：批8 提交信息写“339 次逐名查询 → 1 次批量 43ms”**不准确**——
+实际只覆盖了 164/339 个名字，剩余 175 个仍走逐名查询（这才是批8 未达预期的真因）。本批补齐。
+
 ### 批8 收口记录（2026-09-19）
 
 | 项 | 内容 |
