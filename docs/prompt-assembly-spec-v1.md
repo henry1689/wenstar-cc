@@ -247,6 +247,30 @@
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
 
+### 批10 收口记录（2026-09-19）
+
+**方案（选安全路径）**：本批原计划「清理 FG 噪音存量」，但扫描发现 **FG 已有 287 个 void**
+（active 仅 168）——真正的问题不是“没清”，而是 **`getFamilySummary`/`getSocialSummary`
+的 `SELECT * FROM nodes` 不过滤 `status`**，使已回收实体仍进入摘要 → `allProfileNames` 达 339。
+故改为**纯查询过滤**（不动任何数据，风险最低）：
+
+```ts
+const nodes = this.query("SELECT * FROM nodes WHERE status IS NULL OR status != 'void'");
+```
+
+**实测**：
+| 指标 | 批9 | 批10 |
+|---|---|---|
+| 档案加载 | 家人 31 + 熟人 308（**339**）| 家人 29 + 熟人 135（**164**）|
+| batchProfile | 1014~1318ms | **573~878ms** |
+| m4 total | 895~2339ms | **913~1813ms** |
+| 端到端 | 10.4/6.3/6.6s | 10.5/6.8/16.4s（第三次偏慢，待观察）|
+
+**⚠️ 本批我制造并修复的错误（如实记录）**：
+用 `node -e` 写 SQL 字符串时**单引号被 shell 吞掉**，生成 `status != void`（`void` 被当列名）
+→ **7 个 e2e 测试失败**。教训再次应验（已有记录）：**含引号的代码改动一律用独立 .cjs 脚本文件，
+禁用 `node -e` + bash 转义**。已修为 `status != 'void'`，验证 2 处、残留 0。
+
 ### 批9 收口记录（2026-09-19）
 
 **根因（批8 只做了一半，本批修正）**：

@@ -2896,7 +2896,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (meNodes.length === 0) return { connections };
     const meId = meNodes[0].id;
 
-    const nodes = this.query('SELECT * FROM nodes');
+    // 🔴 V27批10: **排除已 void 实体** —— 原实现 `SELECT * FROM nodes` 不过滤 status，
+    //   使 287 个已回收实体仍进入摘要 → M4Orchestrator 的 allProfileNames 达 339
+    //   （而 active 实际仅 168），造成档案加载/门阀过滤的无效开销（独立评审指出）。
+    //   ⚠️ 纯查询过滤，不改任何数据；与 findPersonNodeByNameOrAlias 的 status!=void 口径对齐。
+    const nodes = this.query("SELECT * FROM nodes WHERE status IS NULL OR status != 'void'");
     const socialTypes = new Set([...Object.values(SOCIAL_MAP), 'acquaintance_of']);
 
     for (const node of nodes) {
@@ -2943,7 +2947,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     // 家族关系类型（不包括 acquaintance_of 等社交关系）
     const familyRels = new Set(['mother_of','father_of','spouse_of','sibling_of','grandfather_of','grandmother_of','child_of','grandchild_of','parent_of']);
 
-    const nodes = this.query('SELECT * FROM nodes');
+    // 🔴 V27批10: **排除已 void 实体** —— 原实现 `SELECT * FROM nodes` 不过滤 status，
+    //   使 287 个已回收实体仍进入摘要 → M4Orchestrator 的 allProfileNames 达 339
+    //   （而 active 实际仅 168），造成档案加载/门阀过滤的无效开销（独立评审指出）。
+    //   ⚠️ 纯查询过滤，不改任何数据；与 findPersonNodeByNameOrAlias 的 status!=void 口径对齐。
+    const nodes = this.query("SELECT * FROM nodes WHERE status IS NULL OR status != 'void'");
     for (const node of nodes) {
       if (node.type === 'person' && node.name !== '我') {
         // 查找该人与"我"的关系
