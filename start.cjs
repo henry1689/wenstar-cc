@@ -109,9 +109,16 @@ if (failed.length > 0) {
 
 // 启动 server.ts
 console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')...');
-const memLimit = process.env.TIANQUAN_LITE === 'true'
-  ? '--max-old-space-size=10240'
-  : '--max-old-space-size=12288';
+// 🔴 2026-09-20 宿主机内存紧张下的结构性缓解：把默认 V8 堆上限从 12288 降到 4096。
+//   依据：宿主可用内存仅 ~0.9GB（VS Code / WSL / Docker / llama 常驻，用户工作必须），
+//   12GB 的上限使 V8 **惰性 GC**（推高 RSS 与换页）；而 `db.export()` 的缓冲是 ArrayBuffer
+//   （**不计入 JS 堆**），4GB 对正常操作足够。
+//   收益：① 更早 GC → 更低的 RSS；② 若真撞上限，V8 抛**可捕获的 JS OOM**（可见 + PM2 记日志重启），
+//   而不是被系统静默 OOM-kill（本仓曾多次出现“零日志死亡”，排查代价极高）。
+//   可用 `TIANQUAN_MAX_OLD_SPACE_MB` 覆盖（临时需要大堆：如 =8192）。
+const _heapMb = Number(process.env.TIANQUAN_MAX_OLD_SPACE_MB)
+  || (process.env.TIANQUAN_LITE === 'true' ? 3072 : 4096);
+const memLimit = '--max-old-space-size=' + _heapMb;
 // 🔴 闪屏修复：去 shell:true + windowsHide:true。
 // shell:true 在 Windows 强制走 cmd.exe /c 弹黑窗；process.execPath 是当前 node 绝对路径，
 // windowsHide:true 用 CREATE_NO_WINDOW 创建无控制台子进程 → server 无窗口启动。
