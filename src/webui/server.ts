@@ -2871,7 +2871,27 @@ async function main(): Promise<void> {
     console.error('[Server] ⛑️ 未捕获Promise拒绝:', reason);
   });
 
-  const server = http.createServer(handleRequest);
+  // 🔴 2026-09-19 结构性修复（用户可见故障根治）：分发层统一失败兜底。
+  //   背景：15 个 `server-*-routes.ts` 里存在多处「裸 await」（如 `JSON.parse(await readBody(req))`、
+  //   未经 catch 的服务调用）。任一抛错会让 async 处理器的 promise reject 而**无人接管**
+  //   ⇒ 响应永不返回（客户端表现为无限挂起）+ 未处理 rejection；
+  //   每个挂起请求泄漏一个 socket + pending promise，累积会压垮进程
+  //   （实测：跑完整 smoke 用例后服务被杀，PM2 restarts +1）。
+  //   因为 `handleRequest` 内部**所有子路由都是 await**，在这一处兜底即可覆盖全部路由，
+  //   无需逐个文件打补丁（已实测：`POST /api/knowledge/excel-query` + 非法 JSON 修复前恒挂起）。
+  //   语义：已发响应头 → 仅结束响应；未发头 → 客户端错误 400 / 服务错误 500（均带错误信息 + 日志）。
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch((err: any) => {
+      const msg = String(err?.message || err);
+      console.error('[Server] ❌ 请求处理未捕获错误 → 已兜底响应:', msg);
+      try {
+        if (res.headersSent) { res.end(); return; }
+        const isClientError = /JSON|Unexpected token|required|invalid/i.test(msg);
+        res.writeHead(isClientError ? 400 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: msg }));
+      } catch (e2) { console.error('[Server] 兜底响应失败:', (e2 as Error)?.message); }
+    });
+  });
   // V4.0 Phase 5: WebSocket upgrade 处理 — 将 HTTP 升级到 WS 连接
   server.on('upgrade', (req, socket, head) => {
     const wss = (globalThis as any).__wss;

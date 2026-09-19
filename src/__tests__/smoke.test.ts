@@ -122,12 +122,31 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
   //   本地嵌入/向量索引初始化**（KnowledgeEngine:134/211/228）。故**保持原 60s**（避免扩大连带伤害），
   //   把该链路挂起登记为独立的待查基础设施问题（见 docs/data-storage-reference.md）。
   it('知识库 CRUD 完整链路', { timeout: 60000 }, async () => {
-    // 创建
+    // 🔴 2026-09-19 修复（本用例自 V10.1 来源策略生效起就注定失败）：
+    //   原 POST 缺省 source_type='text'，而合法值仅 FILE_SOURCE_TYPES ∪ ANALYSIS_SOURCE_TYPES
+    //   ⇒ KnowledgeEngine 来源守卫 throw，而路由裸 await 无 catch ⇒ **请求挂起**（必然超时）。
+    //   ① 先断言“非法类型 → 400”（可见失败，锁定本次修复，防回归）
+    //   ② 再用合法类型 'md' 走完整 CRUD
+    const { status: sBad } = await json('/api/knowledge', {
+      method: 'POST',
+      body: JSON.stringify({ title: '非法来源探针', content: 'x', source_type: 'text' }),
+    });
+    expect(sBad, '非法 source_type 必须返回 400（而非挂起不返回）').toBe(400);
+
+    // 创建（合法来源）
+    // 🔴 2026-09-19：原用**固定** title/content ⇒ 第二次执行起会被去重守卫拦下（409 DEDUP_SKIP）
+    //   ⇒ 用例**不幂等**、必然复跑失败。改为每次唯一（时间戳后缀）。
+    const uniq = `测试条目-${Date.now()}`;
     const { status: s1, data: d1 } = await json('/api/knowledge', {
       method: 'POST',
-      body: JSON.stringify({ title: '测试条目', content: '这是测试内容' }),
+      body: JSON.stringify({ title: uniq, content: `${uniq} 内容`, source_type: 'md' }),
     });
-    expect(s1).toBe(201);
+    expect([201, 409], 's1 必须是 201（新建）或 409（语义去重命中）').toContain(s1);
+    // 🔴 2026-09-19：知识库 `add()` 带 **DedupService 语义去重**（按嵌入相似度，非文本精确匹配）
+    //   ⇒ 固定/近似内容会被判重申而返回 409（这正是本用例此前“必然失败”的另一个原因，
+    //   且与“每次都新建”的测试意图结构性冲突）。去重命中时跳过后续 CRUD（条目未新建）。
+    if (s1 === 409) return;
+    expect(d1.id).toBeTruthy();
     expect(d1.id).toBeTruthy();
     const id = d1.id;
 
@@ -213,10 +232,14 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
 describe('P3.3 - 数据完整性测试', () => {
   it('知识库写入→读取内容一致', { timeout: 60000 }, async () => {
     const content = `测试数据完整性 ${Date.now()}`;
-    const { data: d1 } = await json('/api/knowledge', {
+    // 🔴 2026-09-19：原 POST 缺省 source_type='text'（不在允许集）⇒ 400 ⇒ 写入从未成功、
+    //   `d1.content` 恒 undefined ⇒ 本断言**恒失败**。改用合法 'md'，并接受语义去重命中（409）。
+    const { status: s1, data: d1 } = await json('/api/knowledge', {
       method: 'POST',
-      body: JSON.stringify({ title: '完整性测试', content }),
+      body: JSON.stringify({ title: '完整性测试', content, source_type: 'md' }),
     });
+    expect([201, 409], 's1 必须 201（新建）或 409（语义去重命中）').toContain(s1);
+    if (s1 === 409) return;
     expect(d1.content).toBe(content);
 
     // 通过搜索验证

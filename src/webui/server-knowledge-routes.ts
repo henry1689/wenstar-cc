@@ -65,43 +65,76 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
     }
 
     if (req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
-      if (!body.title || !body.content) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'title and content required' }));
-        return true;
+      // 🔴 2026-09-19 修复（用户可见故障：知识库创建“卡住”+ 连带服务死亡）：
+      //   原先这里是**裸 await**，而 `KnowledgeEngine.createKnowledge` 的来源策略守卫会 `throw`
+      //   （合法 source_type 仅 FILE_SOURCE_TYPES ∪ ANALYSIS_SOURCE_TYPES，`text` 等一律拒绝）
+      //   ⇒ 抛错无处可去 ⇒ **响应永不返回（挂起）** + 未处理 rejection；
+      //   每个挂起请求泄漏一个 socket + pending promise，累积会压垮进程。
+      //   现改为“可见失败”：已知客户端错误（来源策略/隐私守卫）→ 400，其余 → 500，均记日志。
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!body.title || !body.content) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'title and content required' }));
+          return true;
+        }
+        const entry = await knowledgeBase.add({
+          title: body.title,
+          content: body.content,
+          source_type: body.source_type ?? 'text',
+          source_name: body.source_name ?? null,
+          file_size: body.file_size ?? 0,
+          tags: body.tags ?? [],
+          interaction_type: body.interaction_type,
+          scene_tags: body.scene_tags,
+          classification: body.classification,
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(entry));
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        const isClientError = /不可入库|隐私内容不可存/.test(msg);
+        // 🔴 2026-09-19：`DEDUP_SKIP` 是**去重守卫的正常拒绝**（内容重复），不是服务错误
+        //   ⇒ 映射为 409 Conflict（而不是 500），便于调用方区分“重复”与“真故障”。
+        const isDedup = /DEDUP_SKIP/.test(msg);
+        const code = isDedup ? 409 : isClientError ? 400 : 500;
+        console.error('[server-knowledge] POST /api/knowledge 失败(' + code + '):', msg);
+        res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(isDedup ? { error: msg, dedup: true } : { error: msg }));
       }
-      const entry = await knowledgeBase.add({
-        title: body.title,
-        content: body.content,
-        source_type: body.source_type ?? 'text',
-        source_name: body.source_name ?? null,
-        file_size: body.file_size ?? 0,
-        tags: body.tags ?? [],
-        interaction_type: body.interaction_type,
-        scene_tags: body.scene_tags,
-        classification: body.classification,
-      });
-      res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(entry));
       return true;
     }
 
     if (req.method === 'DELETE') {
-      const body = JSON.parse(await readBody(req));
-      if (!body.id) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'id required' }));
-        return true;
+      // 🔴 2026-09-19 修复：原先 `knowledgeBase.delete()` **既未 await 也无 catch** ——
+      //   若该方法是异步的，失败会变成未处理 rejection；若它抛错则请求挂起。现补 await + 兜底。
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!body.id) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'id required' }));
+          return true;
+        }
+        const ok = await knowledgeBase.delete(body.id);
+        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ status: ok ? 'deleted' : 'not_found' }));
+      } catch (e: any) {
+        console.error('[server-knowledge] DELETE /api/knowledge 失败:', String(e?.message || e));
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: String(e?.message || e) }));
       }
-      const ok = knowledgeBase.delete(body.id);
-      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ status: ok ? 'deleted' : 'not_found' }));
       return true;
     }
   }
 
-  const knMatch = url.pathname.match(/^\/api\/knowledge\/(kn_[a-z0-9_]+)$/);
+  // 🔴 2026-09-19 修复：原正则只认 `kn_` 前缀，而 `KnowledgeEngine` 生成的 id 实际为
+  //   `DNAEncoder.generateGlobalUID('WK', …)` ⇒ `WK5157…` 一类，**永不匹配**
+  //   ⇒ PUT（更新）与 GET by-id（单条读取）**恒 404**（功能早已失效）。
+  //   另：库内还有 sem_/sysc_/topic_/ps_/kv_/conf_ 等多种前缀（各子系统写入）—— 故改为通用 id 形态；
+  //   存在性校验由 `getById()` / `update()` 自身负责（不存在仍返回 404，语义不变）。
+  //   ⚠️ 必须**排除保留子路径**（dashboard 在本文件里位于 knMatch 之后、upload/excel-query 由
+  //   server-knowledge-file-routes 处理且分发顺序在后）—— 否则会被当成 id 而 404 / 遮蔽。
+  const knMatch = url.pathname.match(/^\/api\/knowledge\/(?!dashboard$|upload$|excel-query$)([A-Za-z0-9_]+)$/);
   if (knMatch && req.method === 'GET') {
     const entry = knowledgeBase.getById(knMatch[1]);
     if (!entry) {
@@ -115,12 +148,19 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
   }
 
   if (knMatch && req.method === 'PUT') {
-    const body = JSON.parse(await readBody(req));
-    const ok = await knowledgeBase.update(knMatch[1], {
-      title: body.title, content: body.content, tags: body.tags, locked: body.locked,
-    });
-    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ status: ok ? 'updated' : 'not_found_or_locked' }));
+    // 🔴 2026-09-19 修复：同 POST —— 裸 await + JSON.parse 均在裸区，抛错即“挂起”。现补兜底。
+    try {
+      const body = JSON.parse(await readBody(req));
+      const ok = await knowledgeBase.update(knMatch[1], {
+        title: body.title, content: body.content, tags: body.tags, locked: body.locked,
+      });
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ status: ok ? 'updated' : 'not_found_or_locked' }));
+    } catch (e: any) {
+      console.error('[server-knowledge] PUT /api/knowledge 失败:', String(e?.message || e));
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: String(e?.message || e) }));
+    }
     return true;
   }
 
