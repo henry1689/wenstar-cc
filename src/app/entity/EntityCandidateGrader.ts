@@ -93,12 +93,13 @@ const NON_NAME_TAIL_CHARS = new Set([
 ]);
 
 /** 判断是否为句子片段/普通名词（非人名）。供 gradeEntity 与 LLMEntityExtractor 复用。 */
-export function looksLikeSentenceFragment(name: string): boolean {
+export function looksLikeSentenceFragment(name: string, fgWhitelist?: Set<string>): boolean {
   if (COMMON_NOUN_BLOCK.has(name)) return true;
   for (const t of SENTENCE_TAIL_BLOCK) if (name.endsWith(t)) return true;
   if (SENTENCE_HEAD_BLOCK.includes(name[0])) return true;
   // 2026-09-11: 名尾落在「非人名高频用字」→ 跨词边界的滑窗片段（"习累"/"满足"/"喜欢"）。
   // 放在尾部字面量判定之后、姓氏判定之前，使所有下游路径（含 hasSurname）都受益。
+  if (fgWhitelist?.has(name)) return false;
   if (name.length >= 2 && NON_NAME_TAIL_CHARS.has(name[name.length - 1])) return true;
   return false;
 }
