@@ -169,6 +169,44 @@ describe('[PAS v1] P-16 / P-11 出口断言存在于主链路', () => {
   });
 });
 
+describe('[PAS v1] P-10 L0 必须最前，L2 参考背景最后', () => {
+  it('🔴 buildSystemPrompt 把 knowledge 放在最末（kb 不得前置）', async () => {
+    const { buildSystemPrompt } = await import('../m5/prompts/core-rules.js');
+    const kb = '【KB-MARKER】实体档案内容';
+    const sp = buildSystemPrompt('2026-01-01 12:00', '【ROLE-MARKER】角色定义', false, kb);
+    const roleIdx = sp.indexOf('【ROLE-MARKER】');
+    const kbIdx = sp.indexOf('【KB-MARKER】');
+    expect(roleIdx).toBeGreaterThan(-1);
+    expect(kbIdx).toBeGreaterThan(-1);
+    // L0（角色/铁律/身份）必须先于 L2（kb）
+    expect(roleIdx).toBeLessThan(kbIdx);
+    expect(sp.indexOf('核心铁律')).toBeLessThan(kbIdx);
+  });
+
+  it('🔴 buildRoleSystemPrompt 不再前置拼接 knowledge', async () => {
+    const { buildRoleSystemPrompt } = await import('../app/role/RoleProfiles.js');
+    const kb = '【KB-MARKER】实体档案';
+    const p = buildRoleSystemPrompt('recaller', 0, kb, true);
+    expect(p.includes('【KB-MARKER】')).toBe(false); // role prompt 不得含 kb
+  });
+});
+
+describe('[PAS v1] P-02 对话历史注入上限与截断', () => {
+  it('🔴 历史注入上限为 20 条（原 200）', () => {
+    const src = read('src/m5/DeepSeekLLMProvider.ts');
+    expect(src).toContain('HISTORY_INJECT_CAP = 20');
+    expect(src).toMatch(/Math\.min\(MAX_HISTORY_TURNS,\s*HISTORY_INJECT_CAP\)/);
+  });
+
+  it('🔴 单条截断必须保留末条（守卫块）且必须告警（P-13）', () => {
+    const src = read('src/m5/DeepSeekLLMProvider.ts');
+    // 守卫块是 history 末条的 assistant 伪轮，截断它会让 7~10 条运行时守卫静默消失
+    expect(src).toContain('_isLast');
+    expect(src).toContain('!\_isLast &&');
+    expect(src).toContain('P-13] 历史注入截断');
+  });
+});
+
 describe('[PAS v1] P-17 注入点清单必须登记且与代码一致', () => {
   it('🟢 规范 §6 登记的注入点，其关键标识在代码中确实存在', () => {
     const spec = read('docs/prompt-assembly-spec-v1.md');

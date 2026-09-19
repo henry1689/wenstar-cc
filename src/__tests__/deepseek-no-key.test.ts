@@ -88,15 +88,14 @@ describe('[NO-KEY] DeepSeekLLMProvider — pre-fetch key guard', () => {
     }
   }, 30000);
 
-  // Test 4: Pre-fetch guards exist in compiled dist (authoritative runtime source)
-  it('compiled dist has both pre-fetch guards', () => {
-    const distPath = path.join(REPO, 'dist/m5/DeepSeekLLMProvider.js');
-    let content = '';
-    try { content = readFileSync(distPath, 'utf8'); } catch {
-      // dist may not be built — skip with note
-      return;
-    }
-    // Check for pre-fetch guards (current implementation has catch guard in generate())
+  // Test 4: 守卫存在于**生产真源 src**（V27批3 修订）
+  //   原实现读 `dist/m5/DeepSeekLLMProvider.js` 并自称 "authoritative runtime source" ——
+  //   该说法现在是**假的**：生产跑 `tsx src/webui/server.ts`（start.cjs），且 vitest 的
+  //   dist alias 已于批3 移除（双源分叉收口）。原实现还有“文件不存在就静默 return”
+  //   的蜜罐——dist 未构建时该断言根本不跑。现改为直接校验 src。
+  it('src 生产真源包含 resolveApiKey 降级守卫', () => {
+    const srcPath = path.join(REPO, 'src/m5/DeepSeekLLMProvider.ts');
+    const content = readFileSync(srcPath, 'utf8');
     const guardCount = (content.match(/!resolveApiKey\(\)/g) || []).length;
     expect(guardCount).toBeGreaterThanOrEqual(1);
   });

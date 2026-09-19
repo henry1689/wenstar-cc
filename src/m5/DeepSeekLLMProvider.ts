@@ -32,9 +32,34 @@ const _providerCfg = getProviderConfig();
 const BASE_URL = _providerCfg.baseUrl;
 const MAX_HISTORY_TURNS = _providerCfg.maxHistoryTurns;
 // FIX-3: 工作消息时缩减历史（防止亲密历史污染工作上下文）
+/**
+ * 🔴 P-02 / P-14（PAS v1 / V27批3）: 对话历史**注入上限**。
+ *
+ * 原实现：`getHistoryLimit()` 直接返回 `MAX_HISTORY_TURNS`（本环境 200，来自
+ *   `common/const/llm-config.ts`），即每轮注入最多 200 条**完整对话原文**。
+ * 实测代价（2026-09-19 [PromptBudget]）：普通模式 L2=28188 字符，其中 hist=23702
+ *   —— 占整个 prompt（31504 字符）的 **75%**，超规范 §3 的 L2 预算（4000）近 6 倍。
+ *
+ * 现改为注入上限 20 条（≈10 轮；会晤模式用 slice(-20)，两者对齐）。
+ * 依据：
+ *   ① 当前话题的上下文由最近 10 轮完全覆盖；
+ *   ② 更早的上下文应由 **maintenance 压缩摘要**（`is_compacted`）与 **M4 记忆检索**
+ *      按需承载，而不是把原文持续堆进 prompt（P-04 按需注入精神）；
+ *   ③ 内存层仍保留 200 条（`loadConversationHistory`）供意图检测/去重等内部逻辑使用，
+ *      仅**注入层**收敛。
+ */
+const HISTORY_INJECT_CAP = 20;
+
+/**
+ * 🔴 P-02（PAS v1 / V27批3）: 单条历史注入的**字符上限**。
+ *   实测 20 条历史中长回复可达 400~600 字符，把 L2 预算吃光。
+ *   截断只影响“细节回忆”，不丢“提到过什么”——更早/更细的内容应由 M4 记忆检索按需提供（P-04）。
+ */
+const HISTORY_TURN_MAX_CHARS = 400;
+
 function getHistoryLimit(txt: string): number {
   if (/工作|项目|客户|会议|方案|报告|公司|合同|预算|数据|分析|策略|设计|电机|采购|成本|温升|版本|产品|技术|报价|订单|生产|测试|样品|图纸|规格|性能|参数|工程|研发|工艺|质量|供应商/.test(txt)) return 10;
-  return MAX_HISTORY_TURNS;
+  return Math.min(MAX_HISTORY_TURNS, HISTORY_INJECT_CAP);
 }
 
 interface DeepSeekMessage {
@@ -1347,7 +1372,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
     const _isEntityMeeting = params.isEntityMeeting === true;
     // 🔴 V27(批1): 传入 isEntityMeeting —— recaller 模板的身份从句据此生成，
     //   避免会晤实体经 role prompt 通道被注入「你的名字是玉瑶」。
-    const systemPrompt = buildCoreSystemPrompt(timeStr, buildRoleSystemPrompt(_effectiveRole, level as -2|-1|0|1|2, params.knowledgeBase, _isEntityMeeting), _isEntityMeeting);
+    // 🔴 P-10（PAS v1 / V27批3）: knowledge 传入 buildCoreSystemPrompt，由它放到最末
+    //   （L0 → 行为约束 → 身份 → L2 参考背景最后）。原实现是 buildRoleSystemPrompt
+    //   内部前置拼接 kb，导致核心铁律被挤到中后段。
+    const systemPrompt = buildCoreSystemPrompt(timeStr, buildRoleSystemPrompt(_effectiveRole, level as -2|-1|0|1|2, params.knowledgeBase, _isEntityMeeting), _isEntityMeeting, params.knowledgeBase);
     console.log("==SPLIT=="); console.log(systemPrompt.substring(0,500)); console.log("==SPLIT_END==");
     console.log('[DIAG] role=' + _effectiveRole + ' level=' + level + ' entityMeeting=' + _isEntityMeeting + ' kb_start=' + _kb.substring(0,200).replace(/\n/g,' '));
     // 构建上下文提示词
@@ -1450,8 +1478,33 @@ export class DeepSeekLLMProvider implements LLMProvider {
       // 跳过历史——防止被之前的亲密对话污染
     } else {
       const recentTurns = history.slice(-getHistoryLimit(rawInput));
-      for (const turn of recentTurns) {
-        messages.push({ role: turn.role, content: turn.content });
+      let _truncatedTurns = 0;
+      let _truncatedChars = 0;
+      for (let _i = 0; _i < recentTurns.length; _i++) {
+        const turn = recentTurns[_i];
+        const _c = turn.content || '';
+        // 🔴 P-02 / P-13（PAS v1 / V27批3）: **末条不截断** ——
+        //   `chat.ts` 把运行时守卫块（allGuardMsgs，最多 11 条 join，单条可达 700+ 字符）
+        //   作为一条 assistant 伪轮 push 到 history **末尾**（chat.ts:1693-1697）。
+        //   它是数组最后一个元素，必落在 slice(-20) 窗口内。
+        //   若对它应用 HISTORY_TURN_MAX_CHARS，会导致 memoryGuard（共同过去铁律）/\n        //   hallucinationGuard（不得假装认识）/timeGuard/dailyGuard 等 7~10 条守卫**静默消失**
+        //   （独立评审 P1-1，阻断级）。
+        //   ⚠️ 守卫的正式收口（迁往 assembler，不再走 history 通道）登记在批4。
+        const _isLast = _i === recentTurns.length - 1;
+        const _willTruncate = !_isLast && _c.length > HISTORY_TURN_MAX_CHARS;
+        if (_willTruncate) {
+          _truncatedTurns++;
+          _truncatedChars += _c.length - HISTORY_TURN_MAX_CHARS;
+        }
+        messages.push({
+          role: turn.role,
+          content: _willTruncate ? _c.substring(0, HISTORY_TURN_MAX_CHARS) + '…' : _c,
+        });
+      }
+      // 🔴 P-13: 截断必须记录并告警（静默丢弃视为违规）—— 与 chat.ts 的 [PromptAssembler⚠P-13] 对齐
+      if (_truncatedTurns > 0) {
+        console.warn('[P-13] 历史注入截断: ' + _truncatedTurns + ' 条超 ' + HISTORY_TURN_MAX_CHARS
+          + ' 字符被剪共 ' + _truncatedChars + ' 字符（mode=normal, 末条守卫已保留）');
       }
     }
 

@@ -175,16 +175,14 @@ export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowle
     prompt = prompt.replace('{five_protocols}', level >= 1 ? FIVE_PROTOCOLS : '');
   }
 
-  // 追加知识库（优先使用，自然地融入回答）
-  if (knowledge) {
-    // 🛡️ V4.0: 检测实体上下文（会晤模式）— 用 includes 代替 startsWith，因为 PFC 可能在前面加了内容
-    if (knowledge.startsWith('## 你是') || knowledge.includes('\n## 你的身份') || knowledge.startsWith('## 你的身份') || knowledge.startsWith('## 🚪 会晤开场协议')) {
-      // 🆕 V10.0 P0-5: 实体上下文前置，但保留 role prompt 中的行为约束
-      // 不再丢弃整个 role prompt——安全护栏需要保留
-      return knowledge + '\n\n' + prompt + '\n';
-    }
-    prompt += `\n\n${knowledge}\n`;
-  }
+  // 🔴 P-10（PAS v1 / V27批3）: **不再在 role prompt 内拼接 knowledge**。
+  //   原实现把 kb 前置（`return knowledge + '\n\n' + prompt`），使 L0 核心铁律
+  //   被 4000~12000 字符的 kb 推到 prompt 中后段 —— 实测 [PromptBudget] 里 L0
+  //   被挤出前部、注意力被稀释。
+  //   现由 buildSystemPrompt 把 knowledge 统一放到 systemPrompt **最后**
+  //   （L0 最前 → 行为约束 → L2 参考背景最后，符合规范 §3 层级顺序）。
+  //   knowledge 参数保留：调用方与实体上下文判定仍依赖它。
+  void knowledge;
 
   return prompt;
 }

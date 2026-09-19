@@ -77,7 +77,7 @@ ${lengthRule}
 - 防误判：深/浅/大/小/长/短/硬/软 除非明显亲密场景，否则按字面理解。`;
 }
 
-export function buildSystemPrompt(timeStr: string, rolePrompt: string, isEntityMeeting: boolean = false): string {
+export function buildSystemPrompt(timeStr: string, rolePrompt: string, isEntityMeeting: boolean = false, knowledge: string = ''): string {
   const identityBlock = isEntityMeeting
     ? `🔴【身份确认 — 会晤模式·最高优先级】
 你正在以另一个人的身份与鸿艺对话。
@@ -108,5 +108,5 @@ ${rolePrompt}${buildReplyInstruction(isEntityMeeting)}
 
 【禁止内心独白】直接以"我"的口吻回答鸿艺。不要说"让我想想/我心里想/我想到/我记得/我感觉/我脑子里"这类思维过程。不要描述自己的情绪状态。直接说话，像面对面聊天一样自然。
 
-${identityBlock}`;
+${identityBlock}${knowledge ? '\n\n' + knowledge : ''}`;
 }

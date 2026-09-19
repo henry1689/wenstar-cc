@@ -139,9 +139,9 @@
 | inj-03 | L0 | 核心铁律 | systemPrompt | 恒定 | ✅ **已收口**（V27批2，单一真源=core-rules.ts） |
 | inj-04 | L1 | 用户消息 | userMessage | 恒定 | ✅ |
 | inj-05 | L1 | 事实守卫 | assembler | 意图命中 | ✅ |
-| inj-06 | L2 | 实体档案 | kb 前置 | 会晤/提及 | ⚠️ **位置倒置**（P-10） |
+| inj-06 | L2 | 实体档案 | systemPrompt 末 | 会晤/提及 | ✅ **已收口**（V27批3，L0 前置）|
 | inj-07 | L2 | 长期记忆 | assembler memory_context | memoryText 非空 | ⚠️ **5 路径重复**（P-02） |
-| inj-08 | L2 | 对话历史 | messages + kb 摘要 | 恒定 | ⚠️ **3 路径重复**（P-02） |
+| inj-08 | L2 | 对话历史 | messages + kb 摘要 | 恒定 | ⚠️ **部分收口**（V27批3：注入上限 200→20 条 + 单条 400 字符截断，末条守卫不截；3 路径去重待批4）|
 | inj-09 | L2 | 知识库条目 | kb | 检索命中 | ⚠️ **含元数据风险**（P-07） |
 | inj-10 | L2 | PFC 上下文 | assembler | 按模式 | ✅ 已修（V27批1） |
 | inj-11 | L2 | 主人大脑镜像 | assembler | 普通模式 | ⚠️ 待核 |
@@ -240,6 +240,29 @@
 - `personality.ts` 世界感知/身份铁律 与 L0 次级重复
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
+
+### 批3 收口记录（2026-09-19）
+
+| 条款 | 收口内容 | 证据 |
+|---|---|---|
+| P-01 精神 | **移除 vitest 的 dist alias** → 测试与生产（`tsx src/...`）同源；原注释理由（"src 被 Sentinel 保护"、"dist 有 pre-fetch guards"）经复核均不成立 | `vitest.config.ts` |
+| P-02 | 对话历史注入上限 200→**20 条**（≈10 轮）+ 单条 **400 字符**截断（**末条不截**——它是运行时守卫伪轮）| `DeepSeekLLMProvider` |
+| P-02（修正）| 独立评审发现：最初截断未排除末条守卫块（`allGuardMsgs`，最多 11 条 join、单条 700+ 字符）→ 会导致 memoryGuard/hallucinationGuard 等 **7~10 条守卫静默消失**。已修为末条不截 + 截断告警 | `DeepSeekLLMProvider` `_isLast` |
+| P-10 | L0 前置：`buildRoleSystemPrompt` 不再拼接 kb（`void knowledge`），改由 `buildSystemPrompt` 将 kb 放**最末** | `RoleProfiles.ts` / `core-rules.ts` |
+| P-13 | 历史截断新增告警（原为静默）| `[P-13] 历史注入截断` |
+| P-17/P-18 | 合规测试 18 → **22 项**（新增 P-10 组、P-02 组）；`deepseek-no-key.test.ts` 从读 dist 改为读 src | `prompt-assembly-spec.test.ts` |
+
+**批3 实测**（重启服务）：
+- 普通模式：hist **23702 → 11805 字符**（cap=40 时）→ → 改为 20 条后进一步下降；total 31504 → **18140**（-42%），est_tokens 15752 → 9070
+- systemPrompt 开头从 kb（`【关于你】我知道的你…`）变为 **角色定义**（L0 前置生效 ✅）
+- `assemble_ms`：首轮 114 秒（冷启动），后续 **7~10 秒**
+
+**批3 遗留**：
+- **114 秒冷启动**归因待定（评审推测：tsx 首次转译 / Cross-Encoder ONNX 首次下载 ~280MB / 天气网络调用）。需专项排查 → 批4 性能项
+- 守卫块仍走 history 通道（本次仅保证末条不截）→ 应迁往 assembler（P-18 收口）
+- `lover-persona.ts:142` 存在**同一实体判定谓词的副本 + kb 前置**（va persona 通道未被调用，属死路径，但一旦启用 P-10 立刻复发）
+- 角色扮演路径（kb 含 `## 你是`）绕开 L0 且无埋点
+- L0 实测 2722 字符（规范 §3 要求 ≤1200）→ 需精简
 
 ### 历史证据索引
 
