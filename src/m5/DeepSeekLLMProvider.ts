@@ -11,7 +11,7 @@
 import type { LLMProvider, StrategyConfig, CognitionObject, ConversationTurn, LLMTokenDelta } from './types/index.js';
 import { buildSystemPrompt, STYLE_ANCHORS } from './persona/lover-persona.js';
 import { selectLLMConfig, getScenarioConfig, getProviderConfig } from '../common/const/llm-config.js';
-import { buildSystemPrompt as buildCoreSystemPrompt } from './prompts/core-rules.js';
+import { buildSystemPrompt as buildCoreSystemPrompt, buildReplyInstruction } from './prompts/core-rules.js';
 import { isDeepIntimate, isAcademic, isMoan } from '../common/utils/is-intimate.js';
 import { calcLevel } from './expression/TierVocabMap.js';
 import { calcExpressionSpec } from './expression/ExpressionSpecController.js';
@@ -1297,10 +1297,24 @@ export class DeepSeekLLMProvider implements LLMProvider {
       const roleDetail = roleDetailMatch ? roleDetailMatch[1].trim() : '';
       const instruction = roleDetailMatch ? rpContent.substring(0, rpContent.indexOf('【角色设定详细说明')).trim() : rpContent;
       // 角色设定作为核心指令（设定在先，扮演在后）
-      const systemContent = roleDetail
+      // 🔴 P-05（PAS v1 / V27批4）: 角色扮演路径此前**完全绕开 L0** ——
+      //   既无说话纪律（长度/口语化/禁止内心独白），也无“不得自称玉瑶”的身份边界。
+      //   规范 §3/P-05 要求「全部模式必须注入 L0 硬规则」，此处补上。
+      const _rpBase = roleDetail
         ? '你现在的身份和设定如下。你必须严格遵循这些设定来扮演，不要跳出角色。\n\n========== 角色设定 ==========\n' + roleDetail + '\n\n========== 扮演指令 ==========\n' + instruction
         : rpContent;
+      // ⚠️ V27批4 撤回：先前尝试在此追加 buildReplyInstruction(true) 以补 L0，但独立评审指出两点：
+      //   ① **本路径当前无生产者** —— 全仓无构造 '【角色扮演】' 前缀的代码，且
+      //      server-chat-routes.ts 明确「V4.0 角色扮演已彻底废除，不再注入【角色扮演】标记」
+      //      → 死路径，改动运行时不可验证；
+      //   ② **语义不匹配** —— buildReplyInstruction(true) 是**会晤态**文本（"你就是你档案里那个人"、
+      //      自称铁律 + FG 真名示例、"鸿艺不是你的爸爸或爷爷"），而本路径只有角色设定/扮演指令、
+      //      且刻意 sanitize 剧中人名（炒玉→玉儿）→ 强加会晤态纪律会引入新冲突（P-09）。
+      //   ✅ 若将来复活，应先抽一个只含「说话纪律（长度/口语化/禁止内心独白）」的 L0 子集。
+      const systemContent = _rpBase; // DEAD-PATH: 待启用时按上述方案补 L0 子集
       const messages: DeepSeekMessage[] = [{ role: 'system', content: systemContent }];
+      // 🔴 P-15: 角色扮演路径此前无任何预算埋点（评审指出），此处补上
+      console.log('[PromptBudget] rp_path=1 rp_system=' + systemContent.length + ' mode=roleplay');
       const memoryMsg = history.find(t => t.content?.startsWith('📕 【记忆】'));
       if (memoryMsg) messages.push({ role: 'user', content: memoryMsg.content });
       const sanitize = (t: string) => t.replaceAll('妙玉', '玉儿').replaceAll('宝玉', '宝二爷').replaceAll('红楼逸事', '桃花源记');

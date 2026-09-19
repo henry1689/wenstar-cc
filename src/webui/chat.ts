@@ -387,8 +387,22 @@ const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; vi
 ];
 
 export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
-  // 🔴 P-15（PAS v1 / V27批2）: 拼装阶段耗时计时起点（响应时间必须可测量）
+  // 🔴 P-15（PAS v1 / V27批3）: 拼装阶段耗时计时起点（响应时间必须可测量）
   const _tAssembleStart = Date.now();
+  // 🔴 P-15（V27批4）: **分段计时** —— assemble_ms 是整个前置流水线（入口→调LLM前），
+  //   单看总数无法回答“慢在哪个阶段”。以下打点用于定位（输出见 [PromptBudget] stage_ms）。
+  const _stageMs: Record<string, number> = {};
+  // ⚠️ 口径（独立评审 P2-3）：`_stageMs` 存的是**距入口累计 ms**，字段名 stage_ms 容易被
+  //   误读成“该阶段耗时”。故同时输出增量：`name[t=累计,d=增量]`，并补 entry 打点，
+  //   避免把“入口→检索”的全部等待记成 retrieval 的锅。
+  const _stageT: string[] = [];
+  let _lastMark = _tAssembleStart;
+  const _markStage = (name: string): void => {
+    const _now = Date.now();
+    _stageMs[name] = _now - _tAssembleStart;
+    _stageT.push(name + '[t=' + (_now - _tAssembleStart) + ',d=' + (_now - _lastMark) + ']');
+    _lastMark = _now;
+  };
 
   try {
     // 🔥 天权海马体节律调度: 进入 θ 节律（活跃对话），暂停离线巩固
@@ -396,7 +410,11 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
 
     // ChatEntry — entry guard pipeline (extracted)
     const entryResult = await runChatEntry(message, ctx, { _currentRole });
+    // 🔴 P-15（V27批4）: entry 打点 —— 独立评审 P1-3 指出：114s 首轮的真实归属不明
+    //   （日志顺序已排除 Cross-Encoder 下载），需 entry→retrieval 的增量才能定位
+    //   （嫌疑：启动后 90s 的同步首轮衰减会阻塞事件循环）。
     const dna = entryResult.dna;
+    _markStage('entry');
     // 🔴 转场彻底隔离(2026-08-23): 每轮进入清除转场归属标记（退出轮由 exit 分支重新设置）
     (ctx as any)._exitEntityUuid = null;
     let _ruleEngineBlocked = entryResult.ruleEngineBlocked;
@@ -799,6 +817,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
       _meetingEntityName: _activeMeetingName,
       p40: decision.enhanced.perceptionV40,  // V3: M3 产出的 40D 感知向量
     });
+    _markStage('retrieval');
 	    // P0-1: 仿生智脑 + 知识库 + VAD 并行执行（三者均为异步网络调用，互不依赖）
     const _bionicPromise = fetchBionicMemories(message, isTopicShift, hasContinuationMarkers, memoryFragments, enrichedHistory, { pleasure: p.pleasure, arousal: p.arousal, intimacy: p.intimacy }, dna.scene_tags);
 
@@ -1235,6 +1254,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     // P0-4: 非会晤（默认玉瑶私聊）也传玉瑶 UUID，不再传 undefined 触发全库扫描
     const _yuyaoM4 = _meetingEntityUuid ?? ctx.m4.getFamilyGraph()?.getUUIDByName?.('玉瑶') ?? undefined;
     const ctx_m4 = await ctx.m4.orchestrate(decision, biosGatedMemories, _yuyaoM4 ? [_yuyaoM4] : undefined);
+    _markStage('m4');
 
     // FIX-1: M4 完成后写入尚未建立家庭关系的 person 实体
     if (true) { // V4.0: 非角色扮演守卫已移除
@@ -2403,9 +2423,12 @@ if (_meetingExited) {
       }
     }
 
-    // 🔴 P-15（PAS v1 / V27批2）: 拼装阶段耗时埋点 —— 从 processChat 入口到调用 LLM 前。
+    // 🔴 P-15（PAS v1 / V27批3）: 拼装阶段耗时埋点 —— 从 processChat 入口到调用 LLM 前。
     //   与 DeepSeekLLMProvider 的 [PromptBudget] 分层字符数配合，回答「慢在哪里」。
+    _markStage('pre_llm');
+    const _stageDetail = _stageT.length > 0 ? _stageT.join(' ') : Object.entries(_stageMs).map(([k, v]) => k + '=' + v).join(' ');
     console.log('[PromptBudget] assemble_ms=' + (Date.now() - _tAssembleStart)
+      + ' | stage_ms: ' + _stageDetail
       + ' final_kb_chars=' + (finalKnowledgeText || '').length
       + ' mode=' + (_meetingEntityName ? 'meeting' : 'normal'));
     if (_meetingDeny) {

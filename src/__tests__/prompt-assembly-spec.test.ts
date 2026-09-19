@@ -207,6 +207,55 @@ describe('[PAS v1] P-02 对话历史注入上限与截断', () => {
   });
 });
 
+describe('[PAS v1] P-05 全模式保底：角色扮演路径（DEAD 标记）', () => {
+  it('🟢 角色扮演分支必须显式标记为 DEAD 且注明待补 L0 方案', () => {
+    const src = read('src/m5/DeepSeekLLMProvider.ts');
+    const rpIdx = src.indexOf("kb.startsWith('【角色扮演】')");
+    expect(rpIdx).toBeGreaterThan(-1);
+    const after = src.substring(rpIdx, rpIdx + 2500);
+    // 批4 独立评审：该路径无生产者（死路径）+ buildReplyInstruction(true) 语义不匹配
+    //   → 不强加会晤态 L0，但必须留下 DEAD 标记与启用方案，避免 P-05 被遗忘
+    expect(after).toContain('DEAD-PATH');
+  });
+
+  it('🟡 角色扮演路径必须有预算埋点（P-15）', () => {
+    const src = read('src/m5/DeepSeekLLMProvider.ts');
+    expect(src).toContain("rp_path=1");
+  });
+});
+
+describe('[PAS v1] P-15 分段耗时埋点', () => {
+  it('🟡 chat.ts 必须在关键阶段打点（回答"慢在哪"）', () => {
+    const src = read('src/webui/chat.ts');
+    expect(src).toContain('_markStage');
+    expect(src).toContain("markStage('retrieval')");
+    expect(src).toContain("markStage('m4')");
+    expect(src).toContain('stage_ms:');
+  });
+});
+
+describe('[PAS v1] P-10 L0 预算（规范 §3）', () => {
+  // 📌 口径修正（V27批4，独立评审 P1-2）：L0 上限必须**分项**——
+  //   `[PromptBudget]` 的 L0 = systemPrompt.length - kbLen，**含 role prompt**。
+  //   只测 secretary（302 字符）会得到“假绿”：lover level=1/2 的 role prompt
+  //   为 1831/2335 字符（CORE_PERSONA + FIVE_PROTOCOLS + buildLevelInstruction），
+  //   实测 L0 总可达 4269，远超单一 2200 阈值。
+  it('🟡 L0 核心（铁律+身份+时间，不含 role）≤ 2000 字符', async () => {
+    const { buildSystemPrompt } = await import('../m5/prompts/core-rules.js');
+    const core = buildSystemPrompt('2026-09-19 14:00', '', false, '');
+    console.log(`[L0 预算看板] L0核心 = ${core.length}（上限 2000）`);
+    expect(core.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('🟡 role prompt ≤ 2500 字符（含最重的 lover level=2）', async () => {
+    const { buildRoleSystemPrompt } = await import('../app/role/RoleProfiles.js');
+    for (const [r, lv] of [['secretary', 0], ['lover', 2], ['recaller', 0]] as Array<[any, any]>) {
+      const rp = buildRoleSystemPrompt(r, lv);
+      expect(rp.length, `role=${r} level=${lv}`).toBeLessThanOrEqual(2500);
+    }
+  });
+});
+
 describe('[PAS v1] P-17 注入点清单必须登记且与代码一致', () => {
   it('🟢 规范 §6 登记的注入点，其关键标识在代码中确实存在', () => {
     const spec = read('docs/prompt-assembly-spec-v1.md');

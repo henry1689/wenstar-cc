@@ -35,12 +35,18 @@
 ## §3 分层架构（强制）
 
 ```
-┌─ L0 硬规则层（每轮必注入 · 固定 · 单一真源 · ≤1200 字符）
+┌─ L0 硬规则层（每轮必注入 · 固定 · 单一真源 · **分项预算**）
 │    · 身份（当前模式下的"我是谁"）
 │    · 时间现实（当前时空）
 │    · 安全边界
 │    · 说话纪律（长度/口语化/禁止内心独白）
 │    ⟶ 位置：必须处于 prompt 最前部
+│    📌 预算分项（2026-09-19 批4 实测修正）：L0 = systemPrompt 中除 kb 以外的部分，
+│       其中含 role prompt。单一 2200 阈值会制造“假绿”（只测 secretary 302 字符）：
+│         - **L0 核心**（铁律+身份+时间）≤ **2000**（实测 1934）
+│         - **role prompt** ≤ **2500**（实测 secretary 302 / lover L2 2335 / recaller 313）
+│       最重组合（lover level=2）L0 总 ≈ 4269。
+│       ⚠️ 铁律内容是安全底线，不得为了卡数字而删。
 │
 ├─ L1 本轮任务层（按意图动态 · ≤2000 字符）
 │    · 用户本轮消息（原文）
@@ -240,6 +246,32 @@
 - `personality.ts` 世界感知/身份铁律 与 L0 次级重复
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
+
+### 批4 收口记录（2026-09-19）
+
+| 条款 | 内容 | 证据 |
+|---|---|---|
+| P-15 | **分段耗时埋点**：chat.ts 入口/entry/retrieval/m4/pre_llm 四点，输出 `name[t=累计,d=增量]`（避免把累计值误读为阶段耗时）| `_markStage` |
+| P-15 | 角色扮演路径补埋点（`rp_path=1`）| `DeepSeekLLMProvider` |
+| P-10 | **L0 精简**：身份铁律 9 条→5 条（合并/压缩，名单类防混淆完整保留）+ 禁止内心独白去重；L0 核心 2266 → **1934** | `core-rules.ts` |
+| P-10 | **预算口径改为分项**（原单一 2200 是“假绿”）：L0 核心 ≤2000、role prompt ≤2500（lover L2 实测 2335，L0 总可达 4269）| 规范 §3 |
+| P-05 | 角色扮演路径经核实为**死路径**（无生产者），且 `buildReplyInstruction(true)` 语义不匹配 → **撤回强加**，仅留 `DEAD-PATH` 标记与启用方案 | `DeepSeekLLMProvider` |
+
+**批4 实测**：
+- `[L0 预算看板] L0核心 = 1934（上限 2000）` ✅；测试 27 项全绿 → 测试总数 **22 → 27**
+
+**⚠️ 修正归因（独立评审 P1-3，推翻了我先前的结论）**：
+114 秒首轮耗时**不是** Cross-Encoder 模型下载 —— 日志顺序直接排除（`assemble_ms=114379` 在
+:`274`，而 `[CrossEncoder] 加载模型` 在 `:551`，**该轮期间 ONNX 还没开始加载**）。
+更符合证据的嫌疑：**启动后 90s 的 setTimeout 同步首轮衰减**（`maintenance.ts:220-223` 无 await 调用
+`SQLiteAdapter.runDecayMaintenance()`，对 6025 行逐行同步写主线程；服务启动→首轮请求间隔 ≈80s，与 90s 定时器吻合）。
+→ 待新 `stage_ms` 的 `entry` 增量复核。
+
+**批4 新发现（待处理，P2-5 优先级最高）**：
+- 🔴 **Cross-Encoder 每轮空转 1.5~2.6 秒**：`.env` `WS_CROSS_ENCODER_ENABLED=true` + `SearchConfig.crossEncoderTimeoutMs=1500`，
+  日志实测**每次都** `推理失败, 降级 pass-through: timeout`（`L5_CrossEncoder` 1525~2621ms）→ **每轮、每次检索的固定损耗，收益为零**。
+  这比一次性冷启动对“快响应”影响更大。可选：关闭开关 / 提高超时 / 减候选数 / 修推理性能。
+- 批3 已承诺的 inj-08「3 路径去重」与「守卫块入 assembler」在批4 未做 → 转入批5。
 
 ### 批3 收口记录（2026-09-19）
 
