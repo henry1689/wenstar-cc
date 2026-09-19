@@ -23,6 +23,32 @@ describe('L3EntityAnnotator — 实体提取', () => {
     expect(momEntity?.knowledge_type).toBe('family');
   });
 
+  // 🔴 V27批11: 3 字滑窗「后两字常见词」补强 —— 对称补齐原「仅查前两字」的缺口
+  //   实测 FG 残留过这些碎片：「家死心」(死心)、「米人死」(人死)、「公室白」(室白)
+  // ⚠️ V27批11 诚实标注：本判据只对「后两字恰在 COMMON_WORDS_PERSON 表内」的碎片生效。
+  //   实测现存 FG 垃圾（谢想法/家死心/米人死/公室白）的后两字（想法/死心/人死/室白）
+  //   **都不在词表** → 对存量实际收益≈0。它是**对称补全 + 预防性**改动，
+  //   真正的根治需要词频/分词资源（另立项）。此处只锁定"表内词确实生效"这一事实。
+  it('后两字命中常见词表时，3 字滑窗碎片必须被拦（V27批11，表内词有效性）', () => {
+    const annotator = new L3EntityAnnotator();
+    // 用表内词（应该/时候/但是）构造"X+词"形态，验证后两字检查确实生效
+    for (const bad of ['他应该', '是时候', '我但是']) {
+      const r = annotator.annotate('他说' + bad + '这件事', '', DEFAULT_SELF);
+      const hit = r.entity_genes.find((e) => e.name === bad);
+      expect(hit, '碎片「' + bad + '」的后两字在词表内，不应被识别人名').toBeUndefined();
+    }
+  });
+
+  it('真人名不得因「后两字」判据被误伤（V27批11 零误伤）', () => {
+    const annotator = new L3EntityAnnotator();
+    const real = ['熊梓铭', '王全芬', '林土锋', '徐诗雨', '宁清华', '陈雪花', '张小龙', '罗权斌'];
+    for (const n of real) {
+      const r = annotator.annotate('今天' + n + '来找我', '', DEFAULT_SELF);
+      const hit = r.entity_genes.find((e) => e.name === n);
+      expect(hit, '真人名「' + n + '」必须被识别').toBeDefined();
+    }
+  });
+
   it('应提取出自我实体', () => {
     const annotator = new L3EntityAnnotator();
     const result = annotator.annotate('我觉得很难过', '', DEFAULT_SELF);

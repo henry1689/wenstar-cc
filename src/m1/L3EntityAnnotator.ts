@@ -103,6 +103,11 @@ function isPersonName(token: string): boolean {
   }
   // 3字：检查前两字是否为常见词（如"家里吃"→前两字"家里"在常见词表）
   if (token.length === 3 && COMMON_WORDS_PERSON.has(token.substring(0, 2))) return false;
+  // 🔴 V27批11: **对称补全「后两字」检查** —— 原实现只查前两字，
+  //   导致以常见词**结尾**的滑窗碎片漏过（实测 FG 残留："家死心"(死心)、"米人死"(人死)、
+  //   "公室白"(室白)、"后找男"(找男)）。旧实现只覆盖"前两字是词"的方向。
+  //   ⚠️ 与既有的前两字检查同口径（同一词表），不扩大判定标准，仅补齐方向。
+  if (token.length === 3 && COMMON_WORDS_PERSON.has(token.substring(1))) return false;
   return true;
 }
 

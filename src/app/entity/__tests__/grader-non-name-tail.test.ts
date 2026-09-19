@@ -103,6 +103,11 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     const db = new Database(FUSION_DB, { readonly: true });
     const names = (db.prepare("SELECT name FROM entities WHERE type='person' AND (uuid IS NULL OR uuid='')").all() as Array<{ name: string }>).map((r) => r.name);
     db.close();
+    // 🔴 V27批11 清障: uuid 已全量回填后该集合可能为 0 → 0/0=NaN 会让断言崩溃（非判据问题）
+    if (names.length === 0) {
+      console.log('[实体准入] 历史垃圾候选 0 个（uuid 已回填）—— 跳过拦截率断言');
+      return;
+    }
     const blocked = names.filter((n) => gradeEntity(n, new Set()).grade < 3).length;
     console.log(`[实体准入] 历史垃圾候选 ${names.length} 个 → 现判据拦下 ${blocked} 个（${((blocked / names.length) * 100).toFixed(1)}%）`);
     expect(blocked / names.length).toBeGreaterThan(0.5); // 至少拦一半（防判据完全失效）
