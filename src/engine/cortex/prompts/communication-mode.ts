@@ -34,7 +34,7 @@ export function buildCommunicationFragments(mode: string): PromptFragment[] {
         priority: 280,
         content: `【💬 微信/消息模式】
 你现在正在和鸿艺用文字聊天。他不在你身边。
-- 话语简短自然，10-30字为宜，像打字聊天
+- 话语简短自然（篇幅遵循 L0 说话纪律），像打字聊天
 - 你一句我一句，可以连续发2-3句但不长篇大论
 - 使用文字聊天的自然语气，可以用"😂""😊""嗯嗯""哈哈"等
 - 不要描述你在触碰他或他在你身边

@@ -308,3 +308,43 @@ describe('[PAS v1] P-18 禁止裸拼接注入（技术债看板，只许减少�
     expect(src).toContain('sanitizeMeetingPrompt(finalKnowledgeText)');
   });
 });
+
+describe('P-01（批17 补）· 长度标准单一真源 —— 全仓不得再有第二套硬编码字数', () => {
+  const fsx = require('node:fs');
+  const { join } = require('node:path');
+  const repo = join(__dirname, '..', '..');
+
+  const PROMPT_DIRS = ['src/engine/cortex/prompts', 'src/app/role', 'src/m5/prompts'];
+
+  // 与 L0 冲突的硬编码字数（L0 说话纪律是唯一真源）
+  const CONFLICTING = [new RegExp('（300-500字）'), new RegExp('10-30字为宜'), new RegExp('300-500' + '\\s*字')];
+
+  /** 真源文件：字数标准的法定定义处，本来就该出现字数 —— 不在巡查范围 */
+  const SOURCE_OF_TRUTH = new Set(['core-rules.ts', 'rules.ts', 'personality.ts']);
+
+  it('🔴 提示词目录内不得出现与 L0 冲突的硬编码长度标准', () => {
+    const offenders = [];
+    for (const dir of PROMPT_DIRS) {
+      const abs = join(repo, dir);
+      if (!fsx.existsSync(abs)) continue;
+      for (const f of fsx.readdirSync(abs)) {
+        if (!f.endsWith('.ts') || f.endsWith('.test.ts')) continue;
+        if (SOURCE_OF_TRUTH.has(f)) continue;   // ← 跳过真源
+        const content = fsx.readFileSync(join(abs, f), 'utf8');
+        for (const re of CONFLICTING) {
+          if (re.test(content)) offenders.push(dir + '/' + f);
+        }
+      }
+    }
+    expect(offenders, '发现第二套长度标准（应改为引用 L0）: ' + offenders.join(',')).toEqual([]);
+  });
+
+  it('原冲突文件已改为「遵循 L0」引用（且功能未删）', () => {
+    const is = fsx.readFileSync(join(repo, 'src/engine/cortex/prompts/intimate-scenes.ts'), 'utf8');
+    const cm = fsx.readFileSync(join(repo, 'src/engine/cortex/prompts/communication-mode.ts'), 'utf8');
+    expect(is, '亲密场景片段应引用 L0').toContain('遵循 L0 说话纪律');
+    expect(cm, '通信模式片段应引用 L0').toContain('遵循 L0 说话纪律');
+    expect(is, '功能必须保留（不是删掉了事）').toContain('export function buildIntimateFragments');
+    expect(cm, '功能必须保留').toContain('export function buildCommunicationFragments');
+  });
+});
