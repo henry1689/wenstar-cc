@@ -278,6 +278,7 @@ parts.push('## 你的身份');
   // 🆕 V10.13 修复: 注入【过去的对话记忆】— 此前 recentConversations 传入但被丢弃，
   // 导致实体会晤时对话记忆恢复却不进 LLM 上下文（"像没有记忆一样"）。
   // 现在把真实的对话记忆拼进 systemText，让实体能"回忆"与鸿艺的真实互动。
+  // 🆕 V26 修复: 加【历史记录·当前时间以系统提示为准】强约束，防止 LLM 被历史对话里的时间词（如"四点""睡吧"）带偏，在当前时段重复错误语境。
   if (recentConversations && recentConversations.length > 0) {
     const memParts = ['### 过去的对话记忆'];
     for (const t of recentConversations.slice(0, 10)) {
@@ -286,6 +287,7 @@ parts.push('## 你的身份');
       memParts.push(`- ${speaker}：${content}`);
     }
     memParts.push('（以上是你和鸿艺之间真实发生过的对话。有人提到这些事，你要自然回应——这些是你亲身经历的，不是编造。）');
+    memParts.push('⚠️ 【时间约束铁律】以上对话是历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。历史对话里说的"四点""睡吧""大半夜"是当时的情境，不代表现在。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。');
     memParts.push('');
     parts.push(memParts.join('\n'));
   }
