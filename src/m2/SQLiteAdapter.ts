@@ -8,7 +8,7 @@
  */
 // @ts-ignore - sql.js ships its own types
 import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
@@ -2533,7 +2533,26 @@ export class SQLiteAdapter {
           return false;
         }
       }
-      writeFileSync(this.dbPath, Buffer.from(buf));
+      // 🔴 2026-09-20 **原子写**（“数据丢失”这类的另一半风险）：`writeFileSync` 直接写目标文件
+      //   **不是原子操作** —— 若写入过程中进程被杀 / 磁盘满 / 内存分配失败，磁盘上的库会被留在
+      //   **截断/损坏**状态；后果与“空库覆盖”同源：加载守卫抛错（=停机），数据只能回到最近一次备份。
+      //   改为 tmp → fsync → rename：同盘 rename 在 NTFS 上是**原子替换**；任何一步失败都只影响
+      //   临时文件，**原文件保持完好**。
+      const _tmp = `${this.dbPath}.tmp-${process.pid}`;
+      let _fd: number | null = null;
+      try {
+        _fd = openSync(_tmp, 'w');
+        writeSync(_fd, Buffer.from(buf));
+        fsyncSync(_fd); // 强制刷盘：避免 rename 后数据仍在页缓存，掉电/崩溃丢内容
+      } finally {
+        if (_fd !== null) { try { closeSync(_fd); } catch { /* ignore */ } }
+      }
+      try {
+        renameSync(_tmp, this.dbPath); // 原子替换（覆盖已存在文件）
+      } catch (e) {
+        try { unlinkSync(_tmp); } catch { /* ignore */ }
+        throw e; // 交给外层 catch：记日志 + 返回 false，原文件未受影响
+      }
       return true;
     } catch (e) {
       console.error('[SQLiteAdapter] 落盘失败:', (e as Error)?.message);

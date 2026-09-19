@@ -13,7 +13,7 @@
  * 为什么这两条都要：① 防“带空库跑起来”；② 即使 ① 被绕过，也防“拿空库覆盖真实文件”。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import initSqlJs from 'sql.js';
 import { SQLiteAdapter } from '../SQLiteAdapter.js';
@@ -84,5 +84,11 @@ describe('[数据安全守卫] 空库不得覆盖真实数据（229MB→3.9MB �
 
     const ok = a._safeWriteDbFile(new TextEncoder().encode('x'), 'unit-test-normal');
     expect(ok, '正常库必须允许写入').toBe(true);
+  });
+
+  it('④ 原子写：成功路径与拒绝路径都不得留下 .tmp-* 残留（原文件不被半写破坏）', () => {
+    // 上两例分别走“拒绝”与“成功”路径；原子写要求两条路径都不留临时文件。
+    const residue = readdirSync(TMP).filter((f) => f.includes('.tmp-'));
+    expect(residue, `临时残留: ${residue.join(', ')}`).toEqual([]);
   });
 });

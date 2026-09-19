@@ -438,7 +438,21 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 | **② 落盘期** | `SQLiteAdapter._safeWriteDbFile()` | 将原 **4 处** `writeFileSync(dbPath, ...)` 收成**单一咽喉**；写入前若“内存库两表空 + 磁盘文件大”⇒ **拒绝覆盖** + CRITICAL 告警 |
 
 阈值常量：`DB_EMPTY_GUARD_MIN_BYTES = 5MB`（生产库常态 ≥ 200MB；≤5MB 的新建/测试库不受影响）。
-回归防线：`src/m2/__tests__/empty-db-guard.test.ts`（3 例：加载期拒绝、落盘期拒绝且文件字节数不变、正常库不误伤）。
+回归防线：`src/m2/__tests__/empty-db-guard.test.ts`（4 例：加载期拒绝、落盘期拒绝且文件字节数不变、正常库不误伤、原子写无 `.tmp-*` 残留）。
+
+### **③ 原子写**（2026-09-20 补上“数据丢失”的另一半风险）
+
+上表两条防的是“**空库**覆盖”；还有同类而更隐蔽的一种：`writeFileSync(dbPath, ...)` **直接写目标文件、不是原子操作** ——
+若写入过程中进程被杀 / 磁盘满 / 分配失败，磁盘上的库会被留在**截断/损坏**状态；后果与空库事故同源
+（加载守卫抛错 ⇒ 停机，数据只能回到最近一次备份）。
+
+**修法**（`_safeWriteDbFile` 内）：`openSync(tmp) → writeSync → fsyncSync → renameSync(tmp, dbPath)`：
+- 同盘 `rename` 在 NTFS 上是**原子替换**，因此磁盘上永远只有“旧完整库”或“新完整库”两种状态；
+- `fsyncSync` 强制刷盘，避免 rename 后内容仍在页缓存、掉电丢失；
+- 失败时删除 tmp 并返回 false（**原文件保持完好**）。
+
+验证：真实对话写入后 `PRAGMA integrity_check = ok`、行数正确、`data/webui/` **无 `.tmp-*` 残留**；
+服务响应回到 0.03–0.06s（无性能回归）。
 
 ### 同批修复：`write()` 的 seq_pos 冲突
 
