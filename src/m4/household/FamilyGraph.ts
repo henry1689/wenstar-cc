@@ -556,6 +556,34 @@ function _isValidPendingValue(value: string): boolean {
   return value.trim().length >= 2 && value.trim().length <= 100;
 }
 
+/**
+ * 批12: 观察区晋升阈值 —— 弱证据实体被提及达到此次数即晋升 active。
+ * 依据：真人会反复出现；滑窗片段通常只出现一两次。
+ */
+const CANDIDATE_PROMOTE_COUNT = 3;
+
+/**
+ * 批12(P2-6 二轮): 观察区晋升的证据分阈值。
+ * 分制替代单一维度硬阈值，避免「首次提及 + 仅弱上下文 + 不再出现」被不可逆 void：
+ *   强上下文（介绍句/关系词）×3  弱上下文（紧邻称谓动词）×1  每次提及 ×1
+ *   3 次提及=3 ✓ 1 次强上下文=4 ✓ 1 次弱+1 次再提及=3 ✓ 纯噪声单次=1 ✗
+ */
+const CANDIDATE_PROMOTE_SCORE = 3;
+
+ /**
+ * 批12(P2-6): 称谓动词（弱上下文）—— 需累积 2 次才晋升。
+ * 已剔除高频歧义字（和/看/给/让/带/跟/来/走/笑）：候选片段是 rawInput 的连续子串，
+ * 其前后邻字本可能就是任意高频字，单次命中不能证明是真人。
+ */
+const NAME_TITLE_BEFORE = ['找', '叫', '问'];
+const NAME_TITLE_AFTER = ['说', '道', '答', '告诉', '喊', '讲'];
+/** 批12: 关系词 —— 名字前出现（"我朋友张小龙"）⇒ 介绍性上下文 */
+const NAME_RELATION_BEFORE = ['朋友', '同事', '同学', '老板', '老师', '领导', '亲戚', '家人', '老乡', '对象', '男朋友', '女朋友'];
+/** 批12: 介绍句式 —— 名字前紧邻（"这是张小龙"/"我叫张小龙"）*/
+const NAME_INTRO_BEFORE = ['这是', '叫做', '名叫', '我叫', '他叫', '她叫', '叫', '是'];
+/** 批12: 介绍句式 —— 名字后紧邻（"张小龙是我同事"）*/
+const NAME_INTRO_AFTER = ['是我', '叫'];
+
 export class FamilyGraph implements FamilyGraphInterface {
   private db: any | null = null;
   private dbPath: string;
@@ -1476,7 +1504,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (currentStatus === 'deceased') return { success: false, error: '已注销实体不可恢复' };
     if (currentStatus === 'void' && newStatus !== 'active') return { success: false, error: '回收(void)实体仅可手动恢复为 active' };
     if (currentStatus === 'archived' && newStatus !== 'active') return { success: false, error: '封存实体仅可手动恢复为 active' };
-    if (!['active', 'dormant', 'archived', 'deceased', 'void'].includes(newStatus)) return { success: false, error: `非法状态: ${newStatus}` };
+    if (!['active', 'dormant', 'candidate', 'archived', 'deceased', 'void'].includes(newStatus)) return { success: false, error: `非法状态: ${newStatus}` };
 
     const props = JSON.parse(node.properties || '{}');
     this.run('UPDATE nodes SET status = ? WHERE id = ?', [newStatus, node.id]);
@@ -1649,17 +1677,30 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   async addNode(node: GraphNode): Promise<void> {
+    // 批12: 初始状态由证据强度决定（默认 active，弱证据改 candidate）
+    let initialStatus = 'active';
     const aliases = [...new Set((node.aliases ?? []).map((alias) => alias.trim()).filter(Boolean))];
 
     // P1-7: 垃圾实体守卫 — person 节点写入前做最后一道垃圾过滤
     if (node.type === 'person') {
       try {
         const { checkEntity } = await import('./GarbageEntityGuard.js');
-        const allNames = new Set((this.query("SELECT name FROM nodes WHERE type='person'") as Array<{name: string}>).map(r => r.name));
+        // 🔵 批12(P1-4): 必须排除 void —— 否则已 void 的噪声名再次出现时会命中
+        // existingNames → grade 4 → 直接 active，既绕过观察区又产生同名重复节点。
+        // 注意 getUUIDByName/findPersonNodeByNameOrAlias 本就排除 void（语义一致）。
+        const allNames = new Set((this.query("SELECT name FROM nodes WHERE type='person' AND (status IS NULL OR status != 'void')") as Array<{name: string}>).map(r => r.name));
         const result = checkEntity(node.name, allNames);
         if (!result.allowed) {
           console.warn('[FG Guard] 垃圾实体已拦截: "' + node.name + '" — ' + result.reason + ' (L' + result.grade + ')');
           return;
+        }
+        // 🔵 批12修正: 全部 L3（grade 3）进观察区，靠行为证据晋升。
+        // 原方案「有姓氏=强证据」实测失效：13/15 个 3 字噪声（明伶俐/后找男/谢想法…）首字
+        // 恰为罕见姓氏字（明/后/谢/国/家/米/盖/麻/方/计/水/安）→ 全被判 strong。
+        // 根因：中文人名与滑窗片段在字面特征上不可分 → 唯有用行为/上下文判定。
+        if (result.grade === 3) {
+          initialStatus = 'candidate';
+          console.log('[FG Candidate] L3 进观察区: "' + node.name + '" (累积证据后晋升)');
         }
       } catch { /* guard不可用不阻塞——防御式降级 */ }
     }
@@ -1720,7 +1761,7 @@ export class FamilyGraph implements FamilyGraphInterface {
         category,
         1,  // V3.2: security_level 默认 1（公开级）
         (node.properties as any)?.entity_source || 'real',  // V3.3
-        'active',   // V3.3: 新节点默认活跃
+        initialStatus,   // 批12: 由证据强度决定（active / candidate）
         '[]',       // V3.3: 新节点无历史 ID
         null,       // V3.3: family_gene 由 BFS 分配
         'WW',       // V3.3: 新节点默认自由人
@@ -2375,6 +2416,122 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.markDirty(true);
   }
 
+  /**
+   * 批12: 观察区(candidate)证据累积与晋升。
+   *
+   * 背景：L3 弱证据实体（无姓氏、仅长度达标的 3 字以上）先入观察区，
+   * 避免 3 字滑窗噪声直接建档。本方法在每次提及后累积证据：
+   *   - count: 累计被提及次数（真人会反复出现）
+   *   - titleHits: 出现在称谓上下文中的次数（"张小龙说"/"找张小龙"）
+   * 晋升条件（任一满足，零 LLM）：
+   *   - count >= CANDIDATE_PROMOTE_COUNT
+   *   - titleHits >= 1（有称谓上下文 = 强证据，不等累积）
+   *
+   * 安全边界：**只处理 status='candidate' 的节点**，绝不触碰 active/dormant/
+   * archived/void —— 因此对现有真人档案零影响。
+   *
+   * @param names    本轮识别出的 person 名
+   * @param rawInput 本轮原文（用于称谓上下文检测）
+   */
+  private async _accumulateCandidateEvidence(names: string[], rawInput: string): Promise<void> {
+    if (names.length === 0) return;
+    const now = new Date().toISOString();
+    for (const name of names) {
+      try {
+        const rows = this.query(
+          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
+          [name],
+        ) as Array<{ id: string; properties: string }>;
+        if (rows.length === 0) continue;
+
+        const row = rows[0];
+        let props: Record<string, any> = {};
+        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+
+        const ev = (props.evidence && typeof props.evidence === 'object') ? props.evidence : {};
+        ev.count = (typeof ev.count === 'number' ? ev.count : 0) + 1;
+        ev.firstSeen = ev.firstSeen || now;
+        ev.lastSeen = now;
+
+        // 🔵 批12(P2-6): 上下文分两级 —— 强上下文(介绍句/关系词) 1 次即晋升；
+        // 弱上下文(紧邻称谓动词) 需 2 次，避免片段单次误命中被"洗白"成 active。
+        const hasStrong = this._hasNameStrongContext(rawInput, name);
+        if (hasStrong) ev.strongHits = (typeof ev.strongHits === 'number' ? ev.strongHits : 0) + 1;
+        const hasTitle = this._hasNameTitleContext(rawInput, name);
+        if (hasTitle) ev.titleHits = (typeof ev.titleHits === 'number' ? ev.titleHits : 0) + 1;
+        props.evidence = ev;
+
+        // 🔵 批12(P2-6 二轮): 累计证据分制 —— strong(介绍句/关系词)=3, 弱上下文=1, 每次提及=1。
+        // 消除"弱上下文硬阈值 2 次"造成的不可逆遗漏：1 次弱上下文 + 1 次再提及即可晋升。
+        const evidenceScore = (ev.strongHits || 0) * 3 + (ev.titleHits || 0) * 1 + ev.count * 1;
+        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE;
+        if (promoted) {
+          this.run(
+            "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",
+            [JSON.stringify(props), now, row.id],
+          );
+          console.log(
+            '[FG Candidate] 晋升 active: "' + name + '" (证据分' + evidenceScore + ', 提及' + ev.count + '次' +
+            ((ev.strongHits || 0) >= 1 ? ' + 强上下文×' + ev.strongHits : '') +
+            ((ev.titleHits || 0) >= 1 ? ' + 称谓动词×' + ev.titleHits : '') + ')',
+          );
+        } else {
+          this.run(
+            'UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
+            [JSON.stringify(props), now, row.id],
+          );
+        }
+      } catch (e: any) {
+        // 观察区故障不得影响主链路
+        console.warn('[FG Candidate] 证据累积失败(非阻塞): "' + name + '" — ' + (e?.message || e));
+      }
+    }
+    // 🔵 批12(P2-8): 循环结束后统一落盘一次，避免每个候选名一次整库写
+    this.markDirty(true);
+  }
+
+  /**
+   * 批12: 判定名字是否出现在「称谓上下文」中 —— 名字前后紧邻出现称谓动词。
+   * 例："张小龙说" → after='说' 命中；"找张小龙" → before='找' 命中。
+   * 这是真人出现在对话语法结构中的证据（滑窗片段不会如此出现）。
+   */
+  /**
+   * 批12(P2-6): 弱上下文 —— 仅名字紧邻称谓动词（"张小龙说" / "找张小龙"）。
+   * 单次命中不足以判定真人（片段前后邻字可能是任意高频字），需累积 2 次。
+   */
+  private _hasNameTitleContext(text: string, name: string): boolean {
+    if (!text || !name) return false;
+    let idx = text.indexOf(name);
+    while (idx >= 0) {
+      const before = idx > 0 ? text[idx - 1] : '';
+      const after = text[idx + name.length] || '';
+      if (NAME_TITLE_BEFORE.includes(before) || NAME_TITLE_AFTER.includes(after)) return true;
+      idx = text.indexOf(name, idx + 1);
+    }
+    return false;
+  }
+
+  /**
+   * 批12(P2-6): 强上下文 —— 关系词或介绍句式。命中 1 次即晋升。
+   * 这些句式几乎只出现在「介绍某人」的真实语境中，误报率极低。
+   *   ② 关系词（前 6 字窗口："我朋友张小龙" / "我同事张小龙"）
+   *   ③ 介绍句式（前窗口紧邻尾部："这是张小龙" / "我叫张小龙"）
+   *   ④ 介绍句式（后窗口开头："张小龙是我同事"）
+   */
+  private _hasNameStrongContext(text: string, name: string): boolean {
+    if (!text || !name) return false;
+    let idx = text.indexOf(name);
+    while (idx >= 0) {
+      const beforeWin = text.slice(Math.max(0, idx - 6), idx);
+      if (NAME_RELATION_BEFORE.some((w) => beforeWin.includes(w))) return true;
+      if (NAME_INTRO_BEFORE.some((w) => beforeWin.endsWith(w))) return true;
+      const afterWin = text.slice(idx + name.length, idx + name.length + 6);
+      if (NAME_INTRO_AFTER.some((w) => afterWin.startsWith(w))) return true;
+      idx = text.indexOf(name, idx + 1);
+    }
+    return false;
+  }
+
   async integrateFromEntity(entities: EntityGene[], rawInput: string, selfName?: string): Promise<InferenceResult> {
     const details: string[] = [];
     let nodesCreated = 0;
@@ -2495,7 +2652,9 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
       } else {
         // 非亲属人名 → 社交关系记录（所有人名都入库，不丢弃）
-        const _ex = this.query('SELECT id FROM nodes WHERE name = ?', [person.name]);
+        // 🔵 批12(P1-1): 必须排除 void —— 否则命中 void 行会复用其 id 建边，
+        // 导致 health-check 的「void 关联边」fatal，且该名字无法复活（void 不参与流转）。
+        const _ex = this.query("SELECT id FROM nodes WHERE name = ? AND type='person' AND (status IS NULL OR status != 'void')", [person.name]);
         let _pid: string;
         if (_ex.length === 0) {
           _pid = uid();
@@ -2516,6 +2675,14 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
       }
     }
+
+    // 🔵 批12(P0-1修复): 观察区证据累积必须在 persons 循环【之后】调用。
+    // 原因：本轮新人名的节点是在循环内 addNode 创建的；若在循环【前】累积，
+    // 该名字首次出现时 SELECT status='candidate' 必然查不到行 → 首次证据
+    // （尤其是介绍句"我姐姐叫XX"/"这是我朋友XX"）永久丢失 → 真人只能等
+    // 30 天后被误 void（不可逆），或永不被记录。
+    // 移至循环后，本轮新建的 candidate 也能在本轮获得首次证据。
+    await this._accumulateCandidateEvidence(persons.map((p) => p.name), rawInput);
 
     // 地点关联：如果提到家庭成员 + 地点 → 自动创建 lives_in
     if (persons.length > 0 && places.length > 0) {
@@ -2900,7 +3067,9 @@ export class FamilyGraph implements FamilyGraphInterface {
     //   使 287 个已回收实体仍进入摘要 → M4Orchestrator 的 allProfileNames 达 339
     //   （而 active 实际仅 168），造成档案加载/门阀过滤的无效开销（独立评审指出）。
     //   ⚠️ 纯查询过滤，不改任何数据；与 findPersonNodeByNameOrAlias 的 status!=void 口径对齐。
-    const nodes = this.query("SELECT * FROM nodes WHERE status IS NULL OR status != 'void'");
+    // 🔵 批12(P2-10): candidate(观察区) 不参与摘要 —— 落实「可检索但不自动注入」，
+    // 避免 L3 滑窗噪声经摘要进入 M4Orchestrator 每轮上下文。
+    const nodes = this.query("SELECT * FROM nodes WHERE (status IS NULL OR status NOT IN ('void','candidate'))");
     const socialTypes = new Set([...Object.values(SOCIAL_MAP), 'acquaintance_of']);
 
     for (const node of nodes) {
@@ -2951,6 +3120,10 @@ export class FamilyGraph implements FamilyGraphInterface {
     //   使 287 个已回收实体仍进入摘要 → M4Orchestrator 的 allProfileNames 达 339
     //   （而 active 实际仅 168），造成档案加载/门阀过滤的无效开销（独立评审指出）。
     //   ⚠️ 纯查询过滤，不改任何数据；与 findPersonNodeByNameOrAlias 的 status!=void 口径对齐。
+    // 🔵 批12(P2-10 修正): 家人摘要【必须保留 candidate】。
+    // 家人经 kinship 分支（"我姐姐叫张雨"）创建，首提即 candidate；若在此排除，
+    // 家人会立刻从摘要消失 → 违反「不遗漏」（实测使 FamilyGraph.test.ts 的
+    // 「家庭摘要应包含成员」失败）。降噪只针对社交摘要 + 档案预加载。
     const nodes = this.query("SELECT * FROM nodes WHERE status IS NULL OR status != 'void'");
     for (const node of nodes) {
       if (node.type === 'person' && node.name !== '我') {
@@ -3309,6 +3482,15 @@ export class FamilyGraph implements FamilyGraphInterface {
 
       if (result.changed) {
         this.run('UPDATE nodes SET status = ? WHERE id = ?', [result.to, node.id]);
+        // 🔵 批12(P1-2): candidate→void 属"回收"，必须同时清理关联边。
+        // 否则 health-check 的 "void 参与边" 会 fatal（cli/health-check.ts），
+        // 且 UUIDSupervisor 的 void 回收隔离会 fail。
+        // 与 cleanDirtyNames 的既有做法一致。
+        if (result.to === 'void') {
+          const delEdges = this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [node.id, node.id]);
+          const deleted = typeof (delEdges as any)?.changes === 'number' ? (delEdges as any).changes : '?';
+          console.log('[FG Candidate] void 回收: "' + ((node as any).name || node.id) + '" (清理关联边 ' + deleted + ' 条)');
+        }
       }
     } catch { /* 状态更新失败不影响读取 */ }
   }
@@ -3887,7 +4069,9 @@ export class FamilyGraph implements FamilyGraphInterface {
 
   /** 🏛️ 为所有人批量建立档案 */
   ensureAllPersonProfiles(): { total: number; enriched: number; details: string[] } {
-    const all = this.query("SELECT name FROM nodes WHERE type = 'person' AND status != 'void'");
+    // 🔵 批12(P2-10): 档案预加载排除 candidate —— 观察区实体无档案可载，
+    // 排除后既降噪也减少批量加载量（批7 优化的进一步收益）。
+    const all = this.query("SELECT name FROM nodes WHERE type = 'person' AND (status IS NULL OR status NOT IN ('void','candidate'))");
     let enriched = 0;
     const details: string[] = [];
     for (const row of all) {
@@ -5589,7 +5773,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     // ⑧ V3.3: 全部 person 节点有合法 status
     const badStatus = this.query(
-      "SELECT COUNT(*) as cnt FROM nodes WHERE type = 'person' AND (status IS NULL OR status NOT IN ('active','dormant','archived','deceased','void'))"
+      "SELECT COUNT(*) as cnt FROM nodes WHERE type = 'person' AND (status IS NULL OR status NOT IN ('active','dormant','candidate','archived','deceased','void'))"
     )[0]?.cnt || 0;
     checks.push({
       name: '全部节点status合法', passed: badStatus === 0,

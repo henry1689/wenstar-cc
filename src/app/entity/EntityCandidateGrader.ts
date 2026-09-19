@@ -23,6 +23,13 @@ export interface GradedEntity {
   reason: string;
   /** 如果是 L1/L2，此字段指定应绑定到的已知实体 */
   bindToName?: string;
+  /**
+   * 批12: L3 候选的证据强度
+   * - strong: 有姓氏（真人证据强，如"张小龙"）
+   * - weak:   仅长度达标（3 字滑窗噪声高发，如"明伶俐"）
+   * 用途：weak 进 FG 观察区(candidate)，累积证据后再晋升 active。
+   */
+  evidenceLevel?: 'strong' | 'weak';
 }
 
 // ── L0: 禁止词扩展 ──
@@ -173,8 +180,13 @@ export function gradeEntity(
   }
 
   // L3: 候选姓名 — 含百家姓或3字以上的姓名结构
-  if (hasSurname(name) || name.length >= 3) {
-    return { name, grade: 3, reason: '候选姓名' };
+  // 批12: 细分证据强度。有姓氏=强证据(真人)；仅长度达标=弱证据(3字滑窗噪声高发)。
+  // 二者原判同级同路 → 噪声与真人一起直接 active（现存 112 个 3 字噪声即此来源）。
+  if (hasSurname(name)) {
+    return { name, grade: 3, reason: '候选姓名(有姓氏)', evidenceLevel: 'strong' };
+  }
+  if (name.length >= 3) {
+    return { name, grade: 3, reason: '候选姓名(仅长度)', evidenceLevel: 'weak' };
   }
 
   // 默认 L2

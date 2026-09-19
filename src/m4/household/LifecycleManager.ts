@@ -76,6 +76,13 @@ export class LifecycleManager {
           if (result.changed) {
             fg.run('UPDATE nodes SET status = ? WHERE id = ?', [result.to, p.id]);
             this._appendChangeLog(fg, p.id, props, result.from, result.to, result.reason);
+            // 🔵 批12(P1-2): void 属"回收" —— 必须同时清理关联边，否则
+            // cli/health-check.ts 的 "void 参与边" 会 fatal（退出码 1），
+            // UUIDSupervisor 的 void 隔离也会 fail。与 FamilyGraph.cleanDirtyNames 一致。
+            if (result.to === 'void') {
+              fg.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
+              console.log('[Lifecycle] ' + p.name + ': ' + result.from + ' → void (' + daysSince + '天无提及，判定非真人实体)');
+            }
             if (result.to === 'dormant' && result.from === 'active') {
               report.activeToDormant++;
               if (report.activeToDormant <= 5) console.log(`[Lifecycle] ${p.name}: active → dormant (${daysSince}天)`);

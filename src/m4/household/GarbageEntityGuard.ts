@@ -31,7 +31,7 @@ const MIN_GRADE = 3; // L3 候选姓名及以上
 export function checkEntity(
   name: string,
   existingNames: Set<string> = new Set(),
-): { allowed: boolean; reason: string; grade: number } {
+): { allowed: boolean; reason: string; grade: number; evidenceLevel?: 'strong' | 'weak' } {
   // 快速路径：已知实体直接放行
   if (existingNames.has(name)) {
     return { allowed: true, reason: '已登记的已知实体', grade: 4 };
@@ -49,7 +49,8 @@ export function checkEntity(
     return { allowed: false, reason: `${graded.reason} (L${graded.grade})`, grade: graded.grade };
   }
 
-  return { allowed: true, reason: graded.reason, grade: graded.grade };
+  // 批12: 透传证据强度 —— weak(L3仅长度达标) 由调用方放入观察区(candidate)
+  return { allowed: true, reason: graded.reason, grade: graded.grade, evidenceLevel: graded.evidenceLevel };
 }
 
 /**
