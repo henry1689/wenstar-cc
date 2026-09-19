@@ -1345,7 +1345,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
     const _kb = params.knowledgeBase || '';
     // 🆕 V4.0: 从上游显式接收实体会晤标志（不再依赖文本前缀检测——PFC会改变前缀）
     const _isEntityMeeting = params.isEntityMeeting === true;
-    const systemPrompt = buildCoreSystemPrompt(timeStr, buildRoleSystemPrompt(_effectiveRole, level as -2|-1|0|1|2, params.knowledgeBase), _isEntityMeeting);
+    // 🔴 V27(批1): 传入 isEntityMeeting —— recaller 模板的身份从句据此生成，
+    //   避免会晤实体经 role prompt 通道被注入「你的名字是玉瑶」。
+    const systemPrompt = buildCoreSystemPrompt(timeStr, buildRoleSystemPrompt(_effectiveRole, level as -2|-1|0|1|2, params.knowledgeBase, _isEntityMeeting), _isEntityMeeting);
     console.log("==SPLIT=="); console.log(systemPrompt.substring(0,500)); console.log("==SPLIT_END==");
     console.log('[DIAG] role=' + _effectiveRole + ' level=' + level + ' entityMeeting=' + _isEntityMeeting + ' kb_start=' + _kb.substring(0,200).replace(/\n/g,' '));
     // 构建上下文提示词

@@ -65,6 +65,8 @@ import { decideMode, buildGuard, type MemoryGateOutput } from '../app/conversati
 import { generateCandidates, type CandidateSet } from '../m5/CandidateSelector.js';
 import { getTopicRepeatCount, isValidPersonName, isSelfNameQuestion, isIntimateContext, collectFactSnapshot, buildDirectFactReply, buildFactStatementAck, collectFactLookupTerms, isNonEmptyString, isDirectedEmotion, FALLBACK_REPLIES, LEVEL_NAMES, PERC_LABELS } from './chat-utils.js';
 import type { FactSnapshot } from './chat-utils.js';
+// 🔴 V27(批1): 会晤 prompt 身份泄漏出口清洗器（纯函数，可单测）
+import { sanitizeMeetingPrompt } from './chat/prompt-sanitizer.js';
 
 // 仿生智脑适配器（可选依赖 — 不可用时降级）
 
@@ -1785,6 +1787,9 @@ let finalKnowledgeText = _entityContextText || '';
       (globalThis as any).__pfcExp = null;
       (globalThis as any).__pfcReg = null;
       (globalThis as any).__pfcForget = null;
+      // 🔴 V27(批1): __pfcOutput 此前未清空 —— PFC 抛错时下方的 catch 会保留上一轮陈旧值，
+      //   被无守卫的 pfc_violations 消费（独立评审发现）。每轮显式清空。
+      (globalThis as any).__pfcOutput = null;
       if (_pfcEnabled) try {
         const _pfc = (globalThis as any).__prefrontalCortex;
         if (_pfc && typeof _pfc.process === 'function') {
@@ -1844,14 +1849,21 @@ let finalKnowledgeText = _entityContextText || '';
           // 旧拼接链保留为降级 fallback
           (globalThis as any).__pfcOutput = _pfcResult || null;
 
-          // 使用 PFC 统一输出（旧拼接链 — assembler 就绪后逐步迁移）
-          if (_pfcResult?.assembledSystemPrompt || _pfcResult?.assembledContext || _pfcResult?.guardMessage) {
-            const _parts = [_pfcResult.assembledSystemPrompt, _pfcResult.guardMessage, _pfcResult.assembledContext].filter(Boolean);
-            finalKnowledgeText = [..._parts, finalKnowledgeText].filter(Boolean).join('\n\n');
-          } else if (_pfcResult?.directive?.payload?.['assembledContext'] || _pfcResult?.directive?.payload?.['guardMessages']) {
-            finalKnowledgeText = [_pfcResult.directive.payload['guardMessages'], _pfcResult.directive.payload['assembledContext'], finalKnowledgeText].filter(Boolean).join('\n\n');
-          } else if (_pfcResult?.directive?.constraints?.violations?.length > 0) {
-            finalKnowledgeText = _pfcResult.directive.constraints.violations.join('\n') + '\n\n' + (finalKnowledgeText || '');
+          // 🔴 V27(批1) 修复: PFC 旧拼接链必须加模式守卫 —— 原实现**无任何守卫**,导致两个后果:
+          //   ① 普通模式 PFC 内容被注入两次(此处 + 下方 assembler 的 pfc_* 块);
+          //   ② 会晤模式被注入 composeSystemPrompt() 产物(开头即「你是玉瑶 · 灵魂伴侣」),
+          //      造成会晤实体身份冲突。2026-09-19 实测: 会晤样本 234/234 (100%) 命中。
+          //   守卫语义与 assembler 路径的 policy.canUsePFCKnowledgeRefine() 保持一致(会晤/角色扮演 → false)。
+          //   降级保护: assembler 路径已完整承载 pfc_system_prompt / pfc_guard / pfc_context 三块。
+          if (!PROMPT_ASSEMBLER_STRICT && !_meetingEntityName) {
+            if (_pfcResult?.assembledSystemPrompt || _pfcResult?.assembledContext || _pfcResult?.guardMessage) {
+              const _parts = [_pfcResult.assembledSystemPrompt, _pfcResult.guardMessage, _pfcResult.assembledContext].filter(Boolean);
+              finalKnowledgeText = [..._parts, finalKnowledgeText].filter(Boolean).join('\n\n');
+            } else if (_pfcResult?.directive?.payload?.['assembledContext'] || _pfcResult?.directive?.payload?.['guardMessages']) {
+              finalKnowledgeText = [_pfcResult.directive.payload['guardMessages'], _pfcResult.directive.payload['assembledContext'], finalKnowledgeText].filter(Boolean).join('\n\n');
+            } else if (_pfcResult?.directive?.constraints?.violations?.length > 0) {
+              finalKnowledgeText = _pfcResult.directive.constraints.violations.join('\n') + '\n\n' + (finalKnowledgeText || '');
+            }
           }
         }
       } catch (_pfcErr) { /* PFC 不可用不阻塞，fallback 到空上下文 */ }
@@ -2165,7 +2177,11 @@ try {
       assembler.add(hardRule('pfc_system_prompt', _pfcOut.assembledSystemPrompt));
     }
     // PFC guardMessage → safety
-    if (_pfcOut.guardMessage) {
+    // 🔴 V27(批1): 与 pfc_system_prompt 守卫保持一致 —— 会晤/角色扮演不注入 PFC 守卫
+    //   guardMessage = constraints.violations.join('\n')（PrefrontalCortex 直接取校验告警），
+    //   与下方 pfc_violations 同源（DirectiveGenerator 的 constraints 对象引用）——
+    //   故两处必须使用同一守卫，否则只换 block id 等于没修（独立评审发现）。
+    if (_pfcOut.guardMessage && policy.canUsePFCKnowledgeRefine()) {
       assembler.add(safetyBlock('pfc_guard', _pfcOut.guardMessage));
     }
     // PFC assembledContext → emotion/knowledge（根据内容判断）
@@ -2173,7 +2189,8 @@ try {
       assembler.add({ id: 'pfc_context', type: 'emotion', priority: 550, source: 'PrefrontalCortex', modeScope: policy.canUsePFCKnowledgeRefine() ? ['normal', 'secretary'] : [], content: _pfcOut.assembledContext, conflictPolicy: 'override' });
     }
     // PFC directive violations → safety
-    if (_pfcOut.directive?.constraints?.violations?.length > 0) {
+    // 🔴 V27(批1): 与 pfc_guard 同一守卫（同源文本，会晤实体不适用）
+    if (_pfcOut.directive?.constraints?.violations?.length > 0 && policy.canUsePFCKnowledgeRefine()) {
       assembler.add(safetyBlock('pfc_violations', _pfcOut.directive.constraints.violations.join('\n')));
     }
   }
@@ -2192,7 +2209,18 @@ try {
       : _assembled.text + '\n\n' + (finalKnowledgeText || '');
     console.log('[PromptAssembler] ' + _assembled.blocks.length + ' blocks, ' + _assembled.charCount + ' chars' + (_assembled.dropped.length > 0 ? ', ' + _assembled.dropped.length + ' dropped' : ''));
   }
-} catch { /* 降级到旧拼接链 */ }
+} catch (_asmErr) {
+  // 🔴 V27(批1) P1 补偿: strict 模式下 assembler 是 PFC 内容的**唯一载体** ——
+  //   一旦组装抛错，原实现只留空 catch，PFC 内容会静默丢失（评审发现的 P1）。
+  //   会晤模式**不补偿**（避免重新引入玉瑶人设泄漏）。
+  console.warn('[PromptAssembler] 组装失败，尝试旧链路补偿:', _asmErr);
+  const _pfcFallback = (globalThis as any).__pfcOutput;
+  if (!_meetingEntityName && _pfcFallback?.assembledSystemPrompt) {
+    finalKnowledgeText = [_pfcFallback.assembledSystemPrompt, _pfcFallback.guardMessage, _pfcFallback.assembledContext, finalKnowledgeText]
+      .filter(Boolean).join('\n\n');
+    console.warn('[PromptAssembler] 已用 PFC 旧链路补偿 PFC 上下文');
+  }
+}
 
 // 🔴 2026-08-24 物理规律跨轮场景缓存（模块级）：触发过浴室/床上裸身场景后跨轮延续，直到显式退出/换实体。
 let _lawSceneCache: { entity: string; location: string; action: string; at: number } | null = null;
@@ -2344,6 +2372,21 @@ if (_meetingExited) {
 // 🔴 D2 修复: userMessage 移除 knowledgeBaseText — KB 由 finalKnowledgeText（memoryText）唯一承载，
 // 避免同一份知识重复注入 LLM 浪费 token（此前 userMessage + memoryText 两处注入）。
 // 🔴 P1-1: 门卫拒绝（会晤中唤醒/换人）时跳过 LLM 调用，直接返回拒绝提示
+    // 🔴 V27(批1) 出口断言: 会晤模式下 prompt 不得出现玉瑶人设。
+    //   2026-09-19 实测: 会晤 prompt 234/234 (100%) 含「你是玉瑶 · 灵魂伴侣」→ 实体身份混淆。
+    //   即便上游存在未知泄漏路径，此处兜底清洗，保证最终出口干净。
+    //   清洗器带安全回退（不得洗空 / 不得丢失会晤实体锚点），且只作用于头部窗口，
+    //   避免误删正文合法提及（独立评审要求）。
+    if (_meetingEntityName && finalKnowledgeText) {
+      const _clean = sanitizeMeetingPrompt(finalKnowledgeText);
+      if (_clean.reverted) {
+        console.error('[V27 Guard] 会晤 prompt 清洗被安全检查拦下，已保留原文: ' + _clean.revertReason);
+      } else if (_clean.stripped) {
+        finalKnowledgeText = _clean.text;
+        console.warn('[V27 Guard] 会晤 prompt 检出玉瑶人设 → 已剥离 ' + _clean.strippedChars + ' 字符；样本: ' + _clean.strippedSample);
+      }
+    }
+
     if (_meetingDeny) {
       reply = _meetingDeny;
     } else {

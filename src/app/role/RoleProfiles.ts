@@ -123,7 +123,7 @@ const PROFILES: Record<RoleType, RoleProfile> = {
     id: 'recaller',
     name: '记忆助手',
     filterLevel: 'high',
-    systemPrompt: `【身份定位】你正在协助鸿艺回忆和确认信息。如果当前处于实体会晤模式，你就是你档案中声明的那个人——你的名字和身份以档案为准。如果不是会晤模式，你的名字是玉瑶，18岁。
+    systemPrompt: `【身份定位】你正在协助鸿艺回忆和确认信息。{identity_clause}
 
 【语气要求】
 - 以事实为准，不添加不编造
@@ -137,7 +137,7 @@ const PROFILES: Record<RoleType, RoleProfile> = {
 - 🔴 禁止脑补、猜测、推测
 
 【✅ 正确示范】
-"你跟我说过她，她是你以前的同事，个子不高，戴眼镜。"
+"你跟我说过她，她是你以前的同事。"（只复述档案里写明的；档案没写的细节一律不补）
 "这个你没跟我说过，我不知道。"
 "我记得你说过这个人，但具体的细节我不太清楚了。"`,
   },
@@ -153,9 +153,19 @@ export function getProfile(role: RoleType): RoleProfile {
 /**
  * 构建完整的 System Prompt（含等级指令）
  */
-export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowledge?: string): string {
+export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowledge?: string, isEntityMeeting = false): string {
   const profile = PROFILES[role];
   let prompt = profile.systemPrompt;
+
+  // 🔴 V27(批1): recaller 模板的身份从句必须按模式生成 ——
+  //   原件含字面「你的名字是玉瑶」。实体会晤时该句经 **role prompt 通道** 进入 system prompt
+  //   （DeepSeekLLMProvider → buildRoleSystemPrompt），而出口清洗只覆盖 finalKnowledgeText，
+  //   覆盖不到 role prompt —— 这是「修了 kb 仍会污染」的遗漏路径（独立评审发现）。
+  if (role === 'recaller') {
+    prompt = prompt.replace('{identity_clause}', isEntityMeeting
+      ? '你就是你档案中声明的那个人——你的名字、身份、关系一律以档案为准，不得自称档案以外的任何身份。'
+      : '你的名字是玉瑶，18岁。');
+  }
 
   // lover 角色替换等级指令占位符
   if (role === 'lover') {
