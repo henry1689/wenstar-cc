@@ -318,7 +318,8 @@ export class FusionStorageAdapter {
     return this.sqlite.findKnowledgeByEntityOverlap(entityNames, limit);
   }
 
-  runDecayMaintenance(): { total: number; archived: number } {
+  // 🔴 V27批6: 跟随 SQLiteAdapter 改为 async（分片让出主线程）
+  async runDecayMaintenance(): Promise<{ total: number; archived: number }> {
     this.ensureReady();
     return this.sqlite.runDecayMaintenance();
   }

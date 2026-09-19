@@ -247,6 +247,33 @@
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
 
+### 批6 收口记录（2026-09-19）
+
+| 项 | 内容 | 证据 |
+|---|---|---|
+| **修首轮 entry 102s** | `SQLiteAdapter.runDecayMaintenance()`：① **跳过无实质变化行的整行 REPLACE**（`deltaAbs<1e-4 && 未晋升`）；② async 化 + 每页 `setImmediate` 让出主线程；③ 重入守卫 `_decayRunning`（评审 P2-2）；④ 结束时显式 `save()`（P2-3）；⑤ 注释口径统一（P2-5）| 见下表 |
+| async 链 | `maintenance.ts`（类型 + 2 处 await + 显式 catch，评审 P2-1）、`server.ts`（注入处 + API）、`FusionStorageAdapter.ts` | 全仓调用点已全部 await |
+
+**实测（干净环境 + 确认撞上衰减窗口）**：
+
+| 版本 | 衰减执行 | entry | assemble_ms | 端到端 |
+|---|---|---|---|---|
+| 批5（修复前） | ✅ | **102184ms** | 115021 | ≥115s |
+| 批6 仅分片让出（中间态） | ✅ | 63658ms | 82708 | 99.0s |
+| **批6 跳过写入+分片** | ✅ | **1593ms** | **9783** | **17.6s** |
+
+`entry` **-98.4%**；衰减日志 `[Maintenance] 首轮衰减: 6092条, 136条归档` 证明衰减确实在执行。
+
+**独立评审结论：批准**（数据安全核查全通过）——
+- 跳过条件完备（`updateDynamics` 只改 4 个字段，已全部覆盖）
+- 「decay_log 有记录但 memories 未更新」状态**不可达**（deltaAbs 阈值互斥）
+- 自适应累积有**硬上界**：`d_max ≈ 1e-4/(S·rate) ≈ 1.6 天`，二阶误差 ≤1e-7 量级
+- 评审 P2 全部已在批6 内收口
+
+**评审提出的后续优化建议（非阻塞）**：把「整行 `write()`」改为**定点 UPDATE 4 个动力学列**
+（`effective_strength/strength_updated_at/is_landmark/landmarked_at`）—— 可同时消灭
+「读-改-写抹掉派生基因/UUID」这一既存风险（`SQLiteAdapter.ts:802/2554-2563` 已记录）。→ 批7
+
 ### 批5 收口记录（2026-09-19）
 
 | 项 | 内容 | 证据 |

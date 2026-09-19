@@ -114,7 +114,7 @@ export class MaintenanceService {
   private setConversationHistory: (h: ConversationTurn[]) => void = () => {};
   private saveConversationHistory: () => void = () => {};
   private storage: AnyStorage | null = null;
-  private runDecay: () => { total: number; archived: number } = () => ({ total: 0, archived: 0 });
+  private runDecay: () => Promise<{ total: number; archived: number }> = async () => ({ total: 0, archived: 0 });
   private _sqliteGetter: (() => any | null) | null = null;
   private familyGraph: any | null = null;
   private _fgGetter: (() => any) | null = null;
@@ -134,7 +134,7 @@ export class MaintenanceService {
     saveConversationHistory: () => void;
     storage: AnyStorage | (() => AnyStorage);
     /** 记忆衰减维护函数 */
-    runDecay?: () => { total: number; archived: number };
+    runDecay?: () => Promise<{ total: number; archived: number }>;
     /** 知识库过期无分类条目清理（铁律：3个月无分类视为垃圾） */
     runKnowledgeGc?: () => number;
     /** 记事记忆过期清理 */
@@ -207,8 +207,12 @@ export class MaintenanceService {
     }, 24 * 60 * 60 * 1000);
 
     // 记忆衰减定时器（15 分钟）
-    this.decayTimer = setInterval(() => {
-      const result = this.runDecay();
+    this.decayTimer = setInterval(async () => {
+      // 🔴 V27批6（评审 P2-1）: 显式 catch —— 否则衰减失败只落 unhandledRejection，静默不执行
+      const result = await this.runDecay().catch((e: any) => {
+        console.error("[Maintenance] 衰减维护失败:", e?.message || e);
+        return { total: 0, archived: 0 };
+      });
       if (result.total > 0) {
         console.log(`[Maintenance] 衰减维护: ${result.total}条, ${result.archived}条归档`);
       }
@@ -217,8 +221,12 @@ export class MaintenanceService {
     // 首轮尽快执行
     setTimeout(() => this.runCompaction().catch(() => {}), 30_000);
     setTimeout(() => this.runGC().catch(() => {}), 60_000);
-    setTimeout(() => {
-      const result = this.runDecay();
+    setTimeout(async () => {
+      // 🔴 V27批6（评审 P2-1）: 显式 catch —— 否则衰减失败只落 unhandledRejection，静默不执行
+      const result = await this.runDecay().catch((e: any) => {
+        console.error("[Maintenance] 衰减维护失败:", e?.message || e);
+        return { total: 0, archived: 0 };
+      });
       console.log(`[Maintenance] 首轮衰减: ${result.total}条, ${result.archived}条归档`);
     }, 90_000);
   }

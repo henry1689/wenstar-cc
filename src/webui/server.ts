@@ -350,7 +350,8 @@ maintenance.injectDeps({
   // 惰性 getter — storage 在 initPipeline() 中才赋值
   storage: () => storage,
   // 衰减维护（惰性）
-  runDecay: () => storage?.runDecayMaintenance() ?? { total: 0, archived: 0 },
+  // 🔴 V27批6: runDecayMaintenance 已改 async（分片让出主线程，修首轮 entry 102s 阻塞）
+  runDecay: async () => (await storage?.runDecayMaintenance()) ?? { total: 0, archived: 0 },
   // 知识库过期未分类条目清理（90天—铁律，惰性）
   runKnowledgeGc: () => (knowledgeBase as any)?.deleteExpiredUnclassified?.(90) ?? 0,
   // 砂金库→金库关联：压缩时查 M2
@@ -2191,7 +2192,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // ── 触发衰减维护（含 M6 自我模型维护） ──
     if (req.method === 'POST' && url.pathname === '/api/maintenance/decay') {
-      const result = storage.runDecayMaintenance();
+      const result = await storage.runDecayMaintenance();
       m6?.maintenance();
       // persistence handled in server-observability-routes.ts
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

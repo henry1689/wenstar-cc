@@ -1416,7 +1416,18 @@ export class SQLiteAdapter {
   }
 
   /** 批量衰减维护 */
-  runDecayMaintenance(): { total: number; archived: number } {
+  /** 🔴 V27批6（评审 P2-2）: 衰减重入守卫 —— 分片让出主线程后，
+   *   定时器(15min/90s) 与 HTTP /api/maintenance/decay 可能并发进入；
+   *   原「全程同步」实现隐式提供了互斥，async 化后必须显式加锁。 */
+  private _decayRunning = false;
+
+  async runDecayMaintenance(): Promise<{ total: number; archived: number }> {
+    if (this._decayRunning) {
+      console.warn("[Decay] 已有衰减任务在执行，跳过本次重叠调用");
+      return { total: 0, archived: 0 };
+    }
+    this._decayRunning = true;
+    try {
     this.ensureReady();
     const now = new Date();
     let archived = 0;
@@ -1433,6 +1444,7 @@ export class SQLiteAdapter {
 
       for (const record of pageRecords) {
       const before = record.effective_strength;
+      const _beforeLandmark = (record as any).is_landmark;
       updateDynamics(record, now);
 
       // 记录衰减日志（M2: 只记录有实质变化的行，抑制噪声）
@@ -1450,11 +1462,33 @@ export class SQLiteAdapter {
         );
       }
 
+      // 🔴 V27批6（PAS v1）: **跳过无实质变化行的整行 REPLACE**。
+      //   原实现无条件 `this.write(record)`，而 write() 是整行 REPLACE 且内部还会触发
+      //   `_preserveIdentityCriticalValues()` 的 SELECT。实测 6084 行中 >99% 的 strength
+      //   变化 < 0.0001（纯机械刷新） —— 这些写入是**纯浪费**，且是首轮 entry 被阻塞
+      //   63.6s（分片让出仅部分缓解）的根因。
+      //   安全性：仅在「strength 无实质变化 **且** 未发生 landmark 自动晋升」时跳过 ——
+      //     `strength_updated_at` 因此不推进，下次衰减 daysElapsed 累积更大，
+      //     直至产生真实变化时再写入（自适应，非丢数据）。
+      const _promoted = !_beforeLandmark && (record as any).is_landmark;
+      total++;
+      if (deltaAbs < 0.0001 && !_promoted) {
+        if (record.effective_strength < 0.05) archived++;
+        continue; // 跳过整行 REPLACE
+      }
+
       this.write(record);
       if (record.effective_strength < 0.05) archived++;
-      total++;
     }
       offset += PAGE_SIZE;
+      // 🔴 V27批6（PAS v1）: **分片让出主线程**。
+      //   原实现整个衰减全程同步，逐条 `write()` 阻塞事件循环。
+      //   每页（PAGE_SIZE=500 行）让出一次；配合上面的“跳过无实质变化写入”，
+      //   单页实际写入已极少，让出粒度足够。
+      //   注：不改 SQL 语义，仅改变调度时机 → 无正确性风险。
+      if (pageRecords.length >= PAGE_SIZE) {
+        await new Promise<void>((r) => setImmediate(r));
+      }
     } while (pageRecords.length >= PAGE_SIZE);
 
     // M2: 裁剪 decay_log — 每个 memory_id 只保留最近 5 条检查记录，防止无界膨胀撑大 96MB 库（拖慢 C4 落盘）。
@@ -1491,7 +1525,14 @@ export class SQLiteAdapter {
       (this.db as any).run("DELETE FROM aqc_records WHERE created_at < ?", [d30]);
     } catch (e: any) { /* 非致命 — 表可能不存在 */ }
 
+    // 🔴 V27批6（评审 P2-3）: 本轮若写入极少（低强度行长期停留跳过态），
+    //   decay_log INSERT / vault_log / aqc_records DELETE 只留在内存 —— 显式落盘一次。
+    try { this.save(); } catch (se: any) { console.warn("[Decay] 落盘失败:", se?.message); }
+
     return { total, archived };
+    } finally {
+      this._decayRunning = false;
+    }
   }
 
   /** 情感相似事件增强 */
