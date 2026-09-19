@@ -9,6 +9,8 @@
 // @ts-ignore - sql.js ships its own types
 import initSqlJs from 'sql.js';
 import { readFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
@@ -230,8 +232,27 @@ export class SQLiteAdapter {
    */
   private _dirtyCount = 0;
   private _flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly _FLUSH_BATCH = 50;  // 硬上限：突发积压超过 50 次才强制同步落盘
-  private readonly _FLUSH_INTERVAL = 150; // 防抖窗口：150ms 内的写入合并为一次落盘
+  /** 🔴 C1-a（2026-09-20）异步落盘互斥 + 写入代次（防止在途的旧写入 rename 覆盖更新的内容） */
+  private _flushing = false;
+  private _flushPending = false;
+  private _writeSeq = 0;
+  private readonly _FLUSH_BATCH = 50;  // 硬上限：突发积压超过 50 次才强制落盘（兜底，避免内存无界）
+  /**
+   * 防抖窗口：窗口内的写入合并为一次落盘。
+   *
+   * 🔴 2026-09-20 C1-b：**150ms → 10s**（可用 `TIANQUAN_FLUSH_INTERVAL_MS` 覆盖）。
+   * 实测依据：一轮真实对话触发 **19 次整库重写（224MB × 19 ≈ 4.16GB）**，因为该轮的写入在时间上
+   * 分散（收尾阶段约每 2 秒一次），150ms 窗口合并不上；窗口放大后可合并到 ~4 次。
+   * 代价：断电/强杀最多丢一个窗口（10s），而 M9 缓冲层本来就有 60s 窗口；
+   * **正常关闭/重启不丢** —— `shutdownFlush()` 仍会同步全量落盘。
+   */
+  /**
+   * 默认防抖窗口（毫秒）—— **刻意保持纯数字字面量**：`src/cli/health-check.ts` 用静态正则
+   * （`_FLUSH_INTERVAL\s*=\s*(\d+)`）提取本值并校验安全区间（并由 structure-guard 测试守护）。
+   * 若写成表达式（如 `Number(process.env.X ?? 10_000)`），运维检查会“提取不到 → 误报致命”。
+   * 运行期覆盖请用 `TIANQUAN_FLUSH_INTERVAL_MS`（见 `_flushIntervalMs()`）。
+   */
+  private readonly _FLUSH_INTERVAL = 10000;
   /** P1: ServerLock 写入准入检查的 TTL 缓存到期时间戳（0 = 待检查） */
   private _writeAllowedUntil = 0;
 
@@ -2477,21 +2498,30 @@ export class SQLiteAdapter {
   }
 
   /** 将内存数据库持久化到磁盘（批量 flush，非每次写入都落盘） */
+  /** 实际生效的防抖窗口：默认 `_FLUSH_INTERVAL`（纯字面量，供 health-check 静态提取），
+   *  可用 `TIANQUAN_FLUSH_INTERVAL_MS` 运行期覆盖（>0 才生效）。 */
+  private _flushIntervalMs(): number {
+    const o = Number(process.env.TIANQUAN_FLUSH_INTERVAL_MS);
+    return Number.isFinite(o) && o > 0 ? o : this._FLUSH_INTERVAL;
+  }
+
   private save(): void {
     if (!this.db) return;
     this._dirtyCount++;
 
-    // 每 _FLUSH_BATCH 次直接落盘
+    // 每 _FLUSH_BATCH 次直接落盘（硬上限兜底）
     if (this._dirtyCount >= this._FLUSH_BATCH) {
-      this.flushNow();
+      // 🔴 C1-a：走异步落盘，不再阻塞事件循环
+      void this.flushNowAsync();
       return;
     }
 
     // 否则设定时器兜底（_FLUSH_INTERVAL 内没有再触发 save 则落盘）
     if (!this._flushTimer) {
       this._flushTimer = setTimeout(() => {
-        this.flushNow();
-      }, this._FLUSH_INTERVAL);
+        this._flushTimer = null; // 先清：否则后续 save() 看到非空计时器就不再排程
+        void this.flushNowAsync();
+      }, this._flushIntervalMs());
     }
   }
 
@@ -2514,7 +2544,12 @@ export class SQLiteAdapter {
    * （与 `initialize()` 的加载期守卫构成纵深防御：一个是“不许带空库跑”，一个是“不许拿空库覆”。）
    * @returns 是否真的写入
    */
-  private _safeWriteDbFile(buf: Uint8Array | Buffer, why: string): boolean {
+  /**
+   * 🔴 2026-09-20：空库守卫抽为**同步/异步落盘共用**的单一事实源
+   * （新增异步落盘点后若各写一份判据，就会出现"一个口子守、一个口子不守"的分裂）。
+   * 判定异常时**保守拒绝写入**（fail-closed，与原实现行为一致）。
+   */
+  private _passesEmptyDbGuard(buf: Uint8Array | Buffer, why: string): boolean {
     try {
       const _c = (t: string): number => {
         try { return Number((this.db as any)?.exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
@@ -2533,6 +2568,17 @@ export class SQLiteAdapter {
           return false;
         }
       }
+      return true;
+    } catch (e) {
+      console.error('[SQLiteAdapter] 空库守卫判定异常 ⇒ 保守起见拒绝本次落盘（fail-closed）:', (e as Error)?.message);
+      return false;
+    }
+  }
+
+  private _safeWriteDbFile(buf: Uint8Array | Buffer, why: string): boolean {
+    try {
+      if (!this._passesEmptyDbGuard(buf, why)) return false;
+      this._writeSeq++; // 2026-09-20：登记代次 —— 让在途的异步旧写入放弃 rename（不覆盖更新的内容）
       // 🔴 2026-09-20 **原子写**（“数据丢失”这类的另一半风险）：`writeFileSync` 直接写目标文件
       //   **不是原子操作** —— 若写入过程中进程被杀 / 磁盘满 / 内存分配失败，磁盘上的库会被留在
       //   **截断/损坏**状态；后果与“空库覆盖”同源：加载守卫抛错（=停机），数据只能回到最近一次备份。
@@ -2557,6 +2603,71 @@ export class SQLiteAdapter {
     } catch (e) {
       console.error('[SQLiteAdapter] 落盘失败:', (e as Error)?.message);
       return false;
+    }
+  }
+
+  /**
+   * 🔴 2026-09-20 C1-a：**异步**落盘（不阻塞事件循环）。
+   *
+   * 背景（实测）：同步落盘（writeSync+fsyncSync）会在每次落盘期间**冻结整个服务 1–2 秒**
+   * （正常响应 30ms → 落盘当秒均值 807ms、峰值 2033ms）。周期 flush 是本仓最高频的落盘点，
+   * 因此改异步（fsp.open/write/sync/rename）。**数据安全语义与同步版完全一致**：
+   * 共用 `_passesEmptyDbGuard` + tmp → fdatasync → 原子 rename + 失败删 tmp 保原文件。
+   */
+  private async _safeWriteDbFileAsync(buf: Uint8Array | Buffer, why: string): Promise<boolean> {
+    if (!this._passesEmptyDbGuard(buf, why)) return false;
+    const _mySeq = ++this._writeSeq;
+    const _tmp = `${this.dbPath}.tmp-${process.pid}`;
+    let _fh: FileHandle | null = null;
+    try {
+      _fh = await fsp.open(_tmp, 'w');
+      await _fh.write(Buffer.from(buf));
+      await _fh.sync(); // 强制刷盘（异步，不阻塞事件循环）
+    } finally {
+      if (_fh) { try { await _fh.close(); } catch { /* ignore */ } }
+    }
+    try {
+      if (_mySeq !== this._writeSeq) {
+        // 期间开始了更新的一次落盘（如 shutdownFlush 的同步写）⇒ 放弃本次 rename，防止旧内容覆盖新内容
+        try { await fsp.unlink(_tmp); } catch { /* ignore */ }
+        return false;
+      }
+      await fsp.rename(_tmp, this.dbPath); // 原子替换
+    } catch (e) {
+      try { await fsp.unlink(_tmp); } catch { /* ignore */ }
+      throw e;
+    }
+    return true;
+  }
+
+  /**
+   * 🔴 C1-a：周期性路径的**异步**落盘入口（配合 10s 防抖窗口）。
+   * 语义：并发防重入（`_flushing`）；在途期间又有新改动则再排一次（`_flushPending`），
+   * 保证"最后一次写入之后一定还会落盘"。失败**不丢数据**（内存仍在，下一轮重试）。
+   */
+  async flushNowAsync(): Promise<void> {
+    if (!this.db || this._dirtyCount === 0) return;
+    if (this._flushing) { this._flushPending = true; return; }
+    this._flushing = true;
+    const t0 = Date.now();
+    try {
+      const data = (this.db as any).export();
+      const ok = await this._safeWriteDbFileAsync(data, 'flushNowAsync');
+      if (ok) {
+        this._dirtyCount = 0;
+        const ms = Date.now() - t0;
+        if (ms > 300) {
+          console.log(`[SQLiteAdapter] 异步落盘 ${(data.length / 1048576).toFixed(1)}MB 用时 ${ms}ms（期间服务未被阻塞）`);
+        }
+      }
+    } catch (err) {
+      console.error('[SQLiteAdapter] 异步落盘失败（数据仍在内存，等下一轮重试）:', (err as Error)?.message);
+    } finally {
+      this._flushing = false;
+      if (this._flushPending) {
+        this._flushPending = false;
+        void this.flushNowAsync();
+      }
     }
   }
 

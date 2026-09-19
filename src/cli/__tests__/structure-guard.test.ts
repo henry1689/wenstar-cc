@@ -41,7 +41,10 @@ describe('[cli] health-check flush 检查防回归（批16）', () => {
     expect(batch, 'batch 下限').toBeGreaterThanOrEqual(1);
     expect(batch, 'batch 上限').toBeLessThanOrEqual(500);
     expect(interval, 'interval 下限(过密拖慢写入)').toBeGreaterThanOrEqual(50);
-    expect(interval, 'interval 上限(崩溃丢失窗口)').toBeLessThanOrEqual(2000);
+    // 2026-09-20 校准：上限 2000 → 60000，与 health-check 的 INTERVAL_MAX 保持一致。
+    // 依据见 health-check 内注释：落盘层窗口须 ≤ 上层 M9 缓冲窗口（60s），且放大窗口是用户批准的
+    // “降写放大”取舍（实测 19→6 次重写/轮、807ms→99ms）。
+    expect(interval, 'interval 上限(崩溃丢失窗口)').toBeLessThanOrEqual(60000);
   });
 
   it('安全区间常量必须在 health-check 中声明（防静默移除）', () => {

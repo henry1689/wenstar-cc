@@ -243,7 +243,13 @@ async function run() {
   //   interval = 崩溃时最多丢失的时间窗 → 上限取旧值 2000ms；下限 50ms（过密会拖慢写入）
   //   batch    = 内存积压硬上限（防无界）→ 上限 500；下限 1
   const BATCH_MIN = 1, BATCH_MAX = 500;
-  const INTERVAL_MIN = 50, INTERVAL_MAX = 2000;
+  // 2026-09-20 校准：INTERVAL 上限 2000 → 60000。依据：
+  //   ① 本窗口是「落盘层」的崩溃丢失上限，而 M9 缓冲层本来就有 60s 窗口
+  //      ⇒ 落盘层只要 ≤ 60s，就不会成为更差的那一层；
+  //   ② 实测一轮对话触发 19 次整库重写（224MB×19≈4.16GB）、落盘当秒响应 807ms，
+  //      用户批准把窗口放大到 10s 换取写放大下降（实测 19→6 次、807ms→99ms）。
+  // 护栏仍有效：窗口 > 60s（超出上层窗口）或在文件里被改成异常大值 ⇒ 依旧报警。
+  const INTERVAL_MIN = 50, INTERVAL_MAX = 60000;
   const batchOk = Number.isFinite(flushBatch) && flushBatch >= BATCH_MIN && flushBatch <= BATCH_MAX;
   const intervalOk = Number.isFinite(flushInterval) && flushInterval >= INTERVAL_MIN && flushInterval <= INTERVAL_MAX;
 

@@ -454,6 +454,45 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 验证：真实对话写入后 `PRAGMA integrity_check = ok`、行数正确、`data/webui/` **无 `.tmp-*` 残留**；
 服务响应回到 0.03–0.06s（无性能回归）。
 
+### **④ 批处理失败可见性**（2026-09-20，批次 B）
+
+事故链的一环：`M9 WorkingMemory.consolidate()` 抛错时**没有 catch**，异常会一路冒到
+`setInterval(async () => …)` 的回调 → 变成 `unhandledRejection`；而 `push()` 里的
+`.catch(() => {})` 又把失败**静默吞掉** ⇒ 既不可见也不可控。
+
+**修法**（`src/m9/WorkingMemory.ts`）：
+- `consolidateSafe()` 补上 `catch`：**计数（累计/连续）+ 告警（含原因与滞留条数）**，且 **不 rethrow**
+  （定时器不再产生未捕获拒绝）；
+- `startFlushTimer` 回调由 `async` 改为普通回调 + 显式 `.catch()`；`push()` 的静默 catch 改为告警；
+- `getStatus()` 新增 `consolidateFailures` / `consecutiveConsolidateFailures`（健康检查可据此告警）。
+
+**不变量**：失败时 **buffer 保持不动**（失败条目留在缓冲待下一轮重试，不静默丢弃）。
+回归防线：`src/m9/__tests__/working-memory-failure-visibility.test.ts`（3 例：
+①手动路径不 reject + 打印 + 计数 + 条目不丢；②定时器路径不产生 unhandledRejection；③换可用存储后计数清零且条目毕业）。
+
+> 注：`m7/M7Orchestrator.ts` 的同类定时器已在 try/catch 内（本次核查确认，无需改）；
+> `webui/maintenance.ts` 的两个 `setInterval(async)` 属高危目录（`src/webui/`），已登记待授权后处理。
+
+### **⑤ 异步落盘 + 防抖窗口 10 秒**（2026-09-20，C1-a / C1-b）
+
+**问题（实测）**：sql.js 每次落盘都是**全库重写**（当前 224MB），而 `writeSync`/`fsyncSync` 是同步 API
+⇒ 落盘期间**整个服务被冻结**。实测：一轮真实对话触发 **19 次整库重写（≈4.16GB）**；
+正常响应 30ms，而**落盘当秒平均 807ms、峰值 2033ms**；空闲时 120 秒 0 次（由活动驱动，非空转）。
+根因：150ms 防抖窗口合并不上一轮对话里**时间上分散**（约每 2 秒一次）的写入。
+
+**修法**
+- `_safeWriteDbFileAsync`（新增）：`fsp.open → write → FileHandle.sync → rename`，**异步**；
+  语义与同步版**完全一致**（共用空库守卫 + tmp→fsync→原子 rename + 失败删 tmp 保原文件）；
+- `flushNowAsync()`：周期路径入口，`_flushing` 防重入 + `_flushPending` 保证"最后一次写入仍会落盘"；
+- `_writeSeq` **写入代次**：在途的旧写入在 rename 前重新校验代次，若期间已有更新的落盘则**放弃本次 rename**
+  （防"旧内容覆盖新内容"，含 `shutdownFlush()` 同步写的场景）；
+- `_passesEmptyDbGuard`：空库守卫抽为同步/异步**共用**的单一事实源（避免"一个口子守、一个不守"）；
+- `_FLUSH_INTERVAL` 150ms → **10s**（可 `TIANQUAN_FLUSH_INTERVAL_MS` 覆盖）；`_FLUSH_BATCH=50` 仍为硬上限兜底；
+- `shutdownFlush()` 保留**同步**全量落盘 ⇒ **正常关闭/重启不丢**；仅断电/强杀最多丢一个窗口。
+
+回归防线：`src/m2/__tests__/flush-async-window.test.ts`（4 例：异步落盘期间事件循环持续推进 /
+同步落盘必然阻塞的对照 / 窗口默认 10s 与 env 可配 / 窗口内不落盘·超窗落盘·落盘后仍能再排程）。
+
 ### 同批修复：`write()` 的 seq_pos 冲突
 
 批 4/5 引入的副作用已收尾：`write()` 在写入前**预检** `seq_pos` 是否已被别的 id 占用，占用则重分配 `MAX(seq_pos)+1` 并写日志 —— 不再把异常抛入**无 catch 的批处理链路**（M9 工作记忆巩固）。
