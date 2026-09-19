@@ -79,6 +79,13 @@ export class M4Orchestrator {
    * 对 M3 决策执行完整的 M4 知识融合流程
    */
   async orchestrate(decision: M3Decision, emotionalSummaries?: ScoredMemory[], extraPersonUuids?: string[]): Promise<M4Context> {
+    // 🔴 V27批7（PAS v1）: 分段计时 —— m4 常态耗时 4.7~7.7s（占 assemble 的 60~80%），
+    //   但 retrieval_log 显示 retrieveMemories 仅 457~802ms → 大头在 orchestrate 其他阶段。
+    //   仅在总耗时 >800ms 时输出，避免高频噪音。
+    const _t0 = Date.now();
+    let _tPrev = _t0;
+    const _stageLog: string[] = [];
+    const _mark = (name: string): void => { const _t = Date.now(); _stageLog.push(name + "=" + (_t - _tPrev)); _tPrev = _t; };
     const entities = decision.enhanced.entity_genes.map((g) => ({
       name: g.name,
       type: g.type,
@@ -106,6 +113,7 @@ export class M4Orchestrator {
       .filter(Boolean) as string[];
     const personUuids = [...new Set([...basePersonUuids, ...(extraPersonUuids ?? [])])];
 
+    _mark("decompose+uuid");
     let memories = await this.memoryRetriever.retrieveMemories(locusPath, enhancedEntities, {
       perception: decision.enhanced.perception,
       entityUuids: personUuids.length > 0 ? personUuids : undefined,
@@ -117,6 +125,7 @@ export class M4Orchestrator {
       //   旧实现查询词只取「实体名 + locus 末段」，消息正文里的词（如"中秋"）根本不进集合。
       rawQuery: rawInput,
     });
+    _mark("retrieve");
 
     // ── V3.2 门阀过滤: 必须先过滤，再进入任何压缩、缓存、回调或快照链路 ──
     if (this._gatekeeper?.isActive?.()) {
@@ -273,6 +282,7 @@ export class M4Orchestrator {
       decision.enhanced.entity_genes,
       decision.enhanced.raw_input
     );
+    _mark("integrateFG");
     _lastEntitySet = currentEntitySet;
 
     // P0-4b: FG 摘要 30s 缓存
@@ -286,23 +296,63 @@ export class M4Orchestrator {
       familySummary = await activeFG.getFamilySummary();
       socialSummary = await activeFG.getSocialSummary();
       _fgCache = { familySummary, socialSummary, timestamp: now };
+    _mark("fgSummary");
     }
 
     // ── 3. 批量加载人物档案（替代 N+1） ──
     const batchProfile = (names: string[]) => {
       const result: Record<string, any> = {};
       if (names.length === 0) return result;
+      const _slow: string[] = [];
       for (const name of names) {
-        const profile = activeFG.getPersonProfile(name);
-        if (profile) result[name] = profile;
+        const _tP = Date.now();
+        // 🔴 V27批7: 一次节点查询同时产出 profile + bio ——
+        //   原实现此处调 getPersonProfile，enrichProfile 内又调 getPersonBio，
+        //   两者各走一次 findPersonNodeByNameOrAlias（含 aliases LIKE 全表扫描），
+        //   使档案加载变成 2N 次查询。
+    //   ⚠️ 归因修正（独立评审 P2-2）：实测每档案均耗时不变（13~20ms），
+    //   本批的真实增益来自**限量加载**（339→60），合并读取的贡献未获数据证实。
+        const r = (activeFG as any).getPersonProfileWithBio?.(name);
+        if (r?.profile) {
+          result[name] = { ...r.profile, __bio: r.bio };
+        } else {
+          const profile = activeFG.getPersonProfile(name);
+          if (profile) result[name] = profile;
+        }
+        const _dtP = Date.now() - _tP;
+        if (_dtP > 30) _slow.push(name + ":" + _dtP + "ms");
       }
+      if (_slow.length > 0) console.log("[M4·profile] " + names.length + "个档案，慢项: " + _slow.slice(0, 8).join(" "));
       return result;
     };
 
     const familyProfileNames = (familySummary.members || []).map((m: any) => m.name);
     const socialProfileNames = (socialSummary.connections || []).map((c: any) => c.name);
     const allProfileNames = [...new Set([...familyProfileNames, ...socialProfileNames])];
-    const profiles = batchProfile(allProfileNames);
+    // 🔴 V27批7: **限量加载档案** —— 实测 allProfileNames 达 **339 个**，且含大量
+    //   实体识别噪音碎片（"马上/干净/后我/段时间/家子"等），逐个节点查询使
+    //   batchProfile 耗时 4551~6660ms（占 m4 的 50~85%，是常态最大头）。
+    //   同时 339 份档案全量注入 prompt 本身也超出任何 token 预算。
+    //   策略：保序截断（家人先于熟人），被截断者的档案细节省略但不影响实体/关系字段。
+    const MAX_PROFILE_LOAD = 60;
+    // 🔴 V27批7（评审 P1-1）: **家人块永不截断** ——
+    //   家人块内混有被误挂家族边的噪音碎片（实测「马上」「秋节快」确有家族边），
+    //   单纯「保序截断」会让噪音占名额、把真家人挤到 60 之后 →
+    //   chat.ts 只渲染 family_context 的档案字段，缺字段时 LLM 被要求答「不知道」
+    //   = 不残缺回归。故：家人全量加载，只截断熟人块；家人超限时告警（P-13）。
+    const _familyNames = [...new Set(familyProfileNames)];
+    const _socialOnly = socialProfileNames.filter((n: string) => !_familyNames.includes(n));
+    const _socialCap = Math.max(0, MAX_PROFILE_LOAD - _familyNames.length);
+    const _namesToLoad = [..._familyNames, ..._socialOnly.slice(0, _socialCap)];
+    if (_familyNames.length > MAX_PROFILE_LOAD) {
+      console.warn("[M4·profile] 🔴 家人数(" + _familyNames.length + ") 超加载上限 " + MAX_PROFILE_LOAD
+        + "，已全量加载家人（需人工核查 FG 噪音实体）");
+    } else if (_socialOnly.length > _socialCap) {
+      console.log("[M4·profile] 档案加载限量: 家人 " + _familyNames.length + " 全量 + 熟人 "
+        + _socialCap + "/" + _socialOnly.length);
+    }
+    const profiles = batchProfile(_namesToLoad);
+    _mark("batchProfile");
 
     const enrichProfile = (name: string) => {
       const profile = profiles[name];
@@ -310,7 +360,8 @@ export class M4Orchestrator {
       // 🔴 补 birthYear/age：此前 enrichProfile 拿到完整 profile 却不含出生年，
       //     导致普通模式 familyConstraint / cognition.family 全链路无年龄。
       //     用归一化读取器 getPersonBio（dossier 优先+顶层兜底），occupation 也从 bio 取。
-      const bio = activeFG.getPersonBio?.(name);
+      // 🔴 V27批7: 复用 batchProfile 已取到的 bio（不再重复查库）
+      const bio = (profile as any).__bio ?? activeFG.getPersonBio?.(name);
       return {
         appearance: profile.appearance,
         body_features: profile.body_features,
@@ -350,6 +401,7 @@ export class M4Orchestrator {
         console.warn('[M4] FG 门阀异常，已阻断本轮人物上下文注入');
       }
     }
+    _mark("filterFG");
 
     // ── 4. 情感检索结果注入 ──
     if (emotionalSummaries && emotionalSummaries.length > 0) {
@@ -370,6 +422,10 @@ export class M4Orchestrator {
       : 0;
 
     // ── 6. 输出 ──
+    _mark("rest");
+    const _m4Total = Date.now() - _t0;
+    if (_m4Total > 800) console.log("[M4·timing] total=" + _m4Total + "ms | " + _stageLog.join(" "));
+
     return {
       decision,
       memory_summary: memorySummary,

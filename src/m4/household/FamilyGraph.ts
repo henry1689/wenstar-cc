@@ -3117,6 +3117,32 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /**
+   * 🔴 V27批7: 合并读取「档案 + 生物信息」—— 原 M4Orchestrator 对每个名字**分别**调用
+   *   getPersonProfile() 与 getPersonBio()，二者都走 findPersonNodeByNameOrAlias()
+   *   （1~2 次查询，且别名回退是 `aliases LIKE` 全表扫描），使档案加载退化为 **2N 次查询**。
+   *   实测 m4 的 rest 阶段 6031ms（占 m4 总耗时的 88%）。
+   *   本方法一次节点查询同时产出二者；**不改动**现有方法与数据语义（纯只读新增）。
+   */
+  getPersonProfileWithBio(personName: string): {
+    profile: PersonProfile | null;
+    bio: { name: string; birthYear: number | null; age: number | null; gender: '男' | '女' | null; occupation: string | null } | null;
+  } {
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    if (!node) return { profile: null, bio: null };
+    let props: any = {};
+    try { props = node.properties ? JSON.parse(node.properties) : {}; } catch { /* 解析失败按空档案处理 */ }
+    const profile = {
+      name: node.name,
+      relation_to_user: '',
+      last_mentioned: '',
+      mention_count: 0,
+      ...props,
+    } as PersonProfile;
+    this._checkStatusDowngrade(node, profile);
+    return { profile, bio: { name: node.name, ...this._normalizeBio(props) } };
+  }
+
+  /**
    * 🏛️ §十三: 根据出生年份计算当前年龄
    * 年龄永远不硬编码——从 birthYear 实时计算。
    * 首次调用时如果只有硬编码 age，自动回填 birthYear。
