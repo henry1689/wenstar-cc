@@ -14,7 +14,8 @@ let serverAvailable = false;
 
 // ── Helpers ──
 
-async function apiGet(path: string, timeoutMs = 5000): Promise<{ status: number; text: string; json?: any }> {
+// 🔴 2026-09-19：默认请求超时 5s → 20s（根因：并行全量下 5s 会假超时，隔离运行同一批 smoke 68/69 通过）
+async function apiGet(path: string, timeoutMs = 20000): Promise<{ status: number; text: string; json?: any }> {
   const url = `${BASE}${path}`;
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -31,7 +32,7 @@ async function apiGet(path: string, timeoutMs = 5000): Promise<{ status: number;
   }
 }
 
-async function apiPost(path: string, body: Record<string, any>, timeoutMs = 5000): Promise<{ status: number; text: string; json?: any }> {
+async function apiPost(path: string, body: Record<string, any>, timeoutMs = 20000): Promise<{ status: number; text: string; json?: any }> {
   const url = `${BASE}${path}`;
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);

@@ -13,7 +13,8 @@ let serverAvailable = false;
 async function api(path: string, opts?: { method?: string; body?: Record<string, any> }): Promise<{ status: number; text: string; json?: any }> {
   const url = `${BASE}${path}`;
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 5000);
+  // 🔴 2026-09-19：5s → 20s（根因同 core-flow：并行全量下 5s 假超时；断言不变）
+  const t = setTimeout(() => controller.abort(), 20000);
   try {
     const r = await fetch(url, {
       method: opts?.method || 'GET',

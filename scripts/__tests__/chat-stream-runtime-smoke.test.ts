@@ -11,7 +11,9 @@ let serverAvailable = false;
 
 async function get(path: string): Promise<{ status: number; contentType: string; bodyPreview: string }> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 5000);
+  // 🔴 2026-09-19：5s → 20s。根因已实验证明：本测试请求 live 服务，在**并行全量**（2500+ 用例）下
+  //   5s 会假超时（隔离运行同一批 smoke：68/69 通过）。只动超时值，断言不变。
+  const t = setTimeout(() => ctrl.abort(), 20000);
   try {
     const r = await fetch(`${BASE}${path}`, { signal: ctrl.signal });
     clearTimeout(t);

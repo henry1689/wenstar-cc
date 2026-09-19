@@ -9,7 +9,8 @@ let serverAvailable = false;
 
 async function get(path: string): Promise<{ status: number; json?: any }> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 5000);
+  // 🔴 2026-09-19：5s → 20s（根因同 core-flow：并行全量下 5s 假超时；断言不变）
+  const t = setTimeout(() => ctrl.abort(), 20000);
   try {
     const r = await fetch(`${BASE}${path}`, { signal: ctrl.signal });
     clearTimeout(t);

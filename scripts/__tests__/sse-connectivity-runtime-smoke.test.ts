@@ -35,7 +35,8 @@ describe('[SSE-CONN] Basic Connectivity', () => {
     if (!serverAvailable) return;
 
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000);
+    // 🔴 2026-09-19：5s → 20s（根因同 core-flow：并行全量下 5s 假超时；断言不变）
+    const t = setTimeout(() => controller.abort(), 20000);
 
     let status = 0;
     let contentType = '';
@@ -84,7 +85,8 @@ describe('[SSE-CONN] Basic Connectivity', () => {
     if (!serverAvailable) return;
 
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000);
+    // 🔴 2026-09-19：5s → 20s（根因同 core-flow：并行全量下 5s 假超时；断言不变）
+    const t = setTimeout(() => controller.abort(), 20000);
 
     let fullText = '';
 

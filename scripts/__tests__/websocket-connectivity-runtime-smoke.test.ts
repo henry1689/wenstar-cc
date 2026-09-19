@@ -26,7 +26,9 @@ beforeAll(async () => {
 
 // ── Helper: create WebSocket with timeout ──
 
-function connectWS(url: string, timeoutMs = 5000): Promise<{
+// 🔴 2026-09-19：默认连接超时 5s → 20s（根因同 core-flow：并行全量下 5s 假超时）
+//   注：调用方显式传入的 5000 与 `elapsed < 5000` 断言本次不动（它们测的是真实耗时）。
+function connectWS(url: string, timeoutMs = 20000): Promise<{
   status: 'open' | 'error' | 'timeout' | 'closed';
   messages: string[];
   error?: string;
