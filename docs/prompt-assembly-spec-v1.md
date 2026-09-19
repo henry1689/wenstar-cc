@@ -247,6 +247,32 @@
 - **死注入**（不进 prompt，但未登记）：`engine/cortex/prompts/intimate-scenes.ts`（含 300-500 字标准）与 `communication-mode.ts`（含「10-30字为宜」）—— PFC `_composeSystemPrompt` 从不传 `level`/`communicationMode`，属无效代码。应删除或接入后纳入 L0。
 - 三级防线未接入提交闸门（`.husky/pre-commit` 无 tsc/vitest）
 
+### 批5 收口记录（2026-09-19）
+
+| 项 | 内容 | 证据 |
+|---|---|---|
+| 配置 | **关闭 Cross-Encoder**：`.env` `WS_CROSS_ENCODER_ENABLED=true → false`（用户批准方案 A）。回退：`cp D:/work/env-backup-20260919-crossencoder.bak .env` | 日志：超时降级从每轮 1~2 次 → **0 次**；`L5_CrossEncoder` 从 1708ms → 6 |
+| 依据 | 日志实测**每次检索**都是 `推理失败, 降级 pass-through: timeout`（timeout=1500ms）→ 收益为零、每轮白烧 1.5~2.6s | `logs/v27b5-verify.log` |
+
+### ✅ 分段埋点的直接回报（批4 投入，批5 回收）
+
+`_markStage` 一举定位了两个真大头：
+
+```
+首轮: assemble_ms=115021 | entry[t=102184,d=102184] retrieval[d=615] m4[d=9710] pre_llm[d=2512]
+常态: assemble_ms=7596~9647 | entry[d=53~1111] retrieval[d=1048~1307] m4[d=4752~7663] pre_llm[d=624~685]
+```
+
+| 发现 | 数据 | 结论 |
+|---|---|---|
+| **首轮 entry 阶段** | **102184ms（占总 89%）** | 证实评审推断：**不是** CE 下载，而是 `runChatEntry` 首轮初始化（含启动后 90s 定时器的同步首轮衰减）|
+| **常态 m4（记忆检索）** | **4752~7663ms（占常态 7.6~9.6s 的 60~80%）** | 🔴 **这才是常态最大优化目标**（比 CE 的 1.5~2.6s 更大）|
+
+**下一批（批6）优先级**：
+1. 🔴 **m4 检索耗时**（4.7~7.7s，常态最大头）—— 需再分段（向量/关键词/RRF/DAG/MMR）定位
+2. 🔴 **首轮 entry 102s** —— 待定：`runChatEntry` 内部细分 + 确认 90s 同步衰减是否在关键路径
+3. 批3/批4 遗留：inj-08 三路径去重 + 守卫块入 assembler
+
 ### 批4 收口记录（2026-09-19）
 
 | 条款 | 内容 | 证据 |
