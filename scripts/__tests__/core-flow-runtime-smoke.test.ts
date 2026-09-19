@@ -8,6 +8,8 @@
 //   - Chat endpoint (POST /api/chat): 30s — full M1→M5 pipeline (SQLite+M2+M3+M4+M5)
 //   - Search endpoint (POST /api/search): 5s — DB-lite
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const BASE = 'http://localhost:3000';
 let serverAvailable = false;
@@ -59,10 +61,7 @@ async function apiPost(path: string, body: Record<string, any>, timeoutMs = 2000
 beforeAll(async () => {
   const r = await apiGet('/api/health');
   serverAvailable = r.status === 200 && r.json?.status === 'ok';
-  if (!serverAvailable) {
-    console.warn('[CORE-FLOW-SMOKE] Server not running on localhost:3000 — all tests will skip.');
-    console.warn('[CORE-FLOW-SMOKE] Start server with: node start.cjs');
-  }
+  guardLiveServerOrSkip('CORE-FLOW-SMOKE', serverAvailable, 'localhost:3000');
 });
 
 // ── Cleanup: remove test memories if any were written ──

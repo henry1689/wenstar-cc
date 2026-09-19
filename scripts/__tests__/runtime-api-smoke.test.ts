@@ -3,6 +3,8 @@
 // Does NOT start server. Skips gracefully if server is not running.
 // Zero LLM API calls. Zero credential inspection.
 import { describe, it, expect, beforeAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const BASE = 'http://localhost:3000';
 let serverAvailable = false;
@@ -25,6 +27,7 @@ async function apiGet(path: string) {
 beforeAll(async () => {
   const r = await apiGet('/api/health');
   serverAvailable = r.status === 200;
+  guardLiveServerOrSkip('API-SMOKE', serverAvailable, 'localhost:3000');
 });
 
 describe('[API-SMOKE] Core endpoints', () => {

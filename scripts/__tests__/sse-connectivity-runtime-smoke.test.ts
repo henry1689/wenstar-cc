@@ -4,6 +4,8 @@
 // Does NOT require long-lived connection — reads initial event then disconnects.
 // Zero LLM API calls. Zero credential inspection.
 import { describe, it, expect, beforeAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const BASE = 'http://localhost:3000';
 const SSE_PATH = '/events';
@@ -20,10 +22,7 @@ beforeAll(async () => {
   } catch {
     serverAvailable = false;
   }
-  if (!serverAvailable) {
-    console.warn('[SSE-CONN] Server not running on localhost:3000 — all tests will skip.');
-    console.warn('[SSE-CONN] Start server with: node start.cjs');
-  }
+  guardLiveServerOrSkip('SSE-CONN', serverAvailable, 'localhost:3000');
 });
 
 // ═══════════════════════════════════════════════════════════

@@ -3,6 +3,8 @@
 // Does NOT start server. Skips gracefully if server not running.
 // Read-only. Zero side effects. Zero network. Timeout: 5s per request.
 import { describe, it, expect, beforeAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const BASE = 'http://localhost:3000';
 let serverAvailable = false;
@@ -39,7 +41,7 @@ beforeAll(async () => {
   } catch {
     serverAvailable = false;
   }
-  if (!serverAvailable) console.warn('[WEBUI-STATIC] Server not running — all tests skip.');
+  guardLiveServerOrSkip('WEBUI-STATIC', serverAvailable, 'localhost:3000');
 });
 
 // ═══════════════════════════════════════════════════════════

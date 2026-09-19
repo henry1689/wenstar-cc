@@ -4,6 +4,8 @@
 // Zero side effects. Zero LLM/network calls.
 // Timeout: 5s per request (read-only, fast).
 import { describe, it, expect, beforeAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const BASE = 'http://localhost:3000';
 let serverAvailable = false;
@@ -28,7 +30,7 @@ async function get(path: string): Promise<{ status: number; json?: any; text?: s
 beforeAll(async () => {
   const r = await get('/api/health');
   serverAvailable = r.status === 200 && r.json?.status === 'ok';
-  if (!serverAvailable) console.warn('[M6-M8-SMOKE] Server not running — all tests skip.');
+  guardLiveServerOrSkip('M6-M8-SMOKE', serverAvailable, 'localhost:3000');
 });
 
 // ═══════════════════════════════════════════════════════════

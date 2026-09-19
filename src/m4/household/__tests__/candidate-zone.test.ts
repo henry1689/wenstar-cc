@@ -9,8 +9,9 @@
  *  1. 纯函数层：StatusRules 的 candidate→void 流转、分级器的 L3 证据强度
  *  2. 集成层（DB 副本）：L3 进观察区 / 已知真人保持 active / 证据累积晋升 / 上下文立即晋升
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdtempSync, copyFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { existsSync, rmSync } from 'node:fs';
+import { copyRealDbForTest } from '../../../__tests__/helpers/safe-db-copy.js';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -99,13 +100,27 @@ describe('批12 · FamilyGraph 观察区集成', () => {
     if (!existsSync(FG_SRC)) {
       throw new Error('[批12测试] 缺少真实 FG 库，无法验证观察区集成：' + FG_SRC);
     }
-    tmpDir = mkdtempSync(join(tmpdir(), 'v27b12-candidate-'));
-    const copy = join(tmpDir, 'family_graph.db');
-    copyFileSync(FG_SRC, copy);
+    // 🔴 2026-09-20：改用受控复制（校验 + 重试）。服务可能正在全量导出该库，
+    // 裸 copyFileSync 会复制到**半写文件**（torn read）⇒ 夹具坏、红绿不定（实测过）。
+    const copied = await copyRealDbForTest(FG_SRC, { prefix: 'v27b12-candidate-' });
+    tmpDir = copied.dir;
+    const copy = copied.path;
     const { FamilyGraph } = await import(FG_PATH_MOD);
     fg = new FamilyGraph(copy);
     await fg.initialize();
+    // 🔴 夹具必须**真的可用**：否则判定失败（不允许"打开成功但内容不可读"的假夹具）
+    const rows = fg.query('SELECT COUNT(*) AS c FROM nodes') as Array<{ c: number }>;
+    if (!rows.length || Number(rows[0].c) <= 0) {
+      throw new Error('[批12测试] 夹具库 nodes 为空 —— 判定失败（不允许静默通过）');
+    }
   }, 90_000);
+
+  // 🔴 2026-09-20：不变式 —— 每个用例开跑前夹具必须就绪。
+  // 原先散在各用例的 `if (!fg) return;` 是"静默通过"形态（夹具缺失时零断言变绿）；
+  // 此处把它变成**硬失败**，使那条静默路径在运行时不可达。
+  beforeEach(() => {
+    if (!fg) throw new Error('[批12测试] FamilyGraph 夹具未就绪 —— 判定失败（不允许静默通过）');
+  });
 
   afterAll(() => {
     try { fg?.close?.(); } catch { /* ignore */ }

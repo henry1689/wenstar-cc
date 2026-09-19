@@ -4,6 +4,8 @@
 // Uses Node 22 native WebSocket (no `ws` dependency).
 // Timeout: 5s for connect. Must close/terminate after test.
 import { describe, it, expect, beforeAll } from 'vitest';
+// 🔴 2026-09-20：服务不可达不再"静默通过"（见 helper 注释与 docs/testing-conventions.md）
+import { guardLiveServerOrSkip } from '../../src/__tests__/helpers/live-server-guard.js';
 
 const WS_URL = 'ws://localhost:3000/api/ws/events';
 let serverAvailable = false;
@@ -19,9 +21,7 @@ beforeAll(async () => {
   } catch {
     serverAvailable = false;
   }
-  if (!serverAvailable) {
-    console.warn('[WS-SMOKE] Server not running on localhost:3000 — all tests skip.');
-  }
+  guardLiveServerOrSkip('WS-SMOKE', serverAvailable, 'localhost:3000');
 });
 
 // ── Helper: create WebSocket with timeout ──
