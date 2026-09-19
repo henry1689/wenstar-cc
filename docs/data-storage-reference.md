@@ -413,6 +413,46 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 
 ---
 
+## 九·二、数据安全守卫（2026-09-19 数据丢失事故后加固）
+
+### 事故实录
+
+**现象**：生产库 `data/webui/fusion_memory.db` 由 **229MB / 4068 对话** 被覆盖为 **3.9MB / 84 对话**（数据一度只剰空库）。
+
+**机理（三环相扣）**：
+1. `sql.js` 内存库落盘 = `export()` + `writeFileSync(dbPath)` —— **直接覆盖整个磁盘文件**；
+2. 全仓该写法共 **4 处**（repair / startup-verify / flushNow / shutdownFlush），**全部无任何空库保护**；
+3. 一旦某实例以「空库 / 加载异常」状态跑起来，它的一次 flush 就抹掉全部生产数据。
+
+**触发（含人为因素）**：
+- 批 4/5 把 `write()` 从 `INSERT OR REPLACE` 改为 `ON CONFLICT(id) DO UPDATE` 后，`seq_pos` 冲突由“静默替换”变成**抛错**（这是有意的“失败可见”）；而 M9 `WorkingMemory.consolidate()` 这类**批处理**路径无 catch ⇒ 出现 `[Server] 未捕获Promise拒绝: UNIQUE constraint failed: memories.seq_pos`。
+- 为摄入 PM2 托管而反复 start/kill（37 → 324 → 1075 次重启 + 孤儿子进程）⇒ **多实例并存**，放大了“空库实例 flush”的窗口。
+
+**处置**：停服阻断 → 备份完整性先行校验（220.7MB / conversations=4068 / memories=5970）→ 回滚 → 被清空的库留证（`data/backups/fusion_memory.EMPTIED-*.db`）→ 起服并核验历史数据在位（最早对话 2026-08-27）。
+
+### 两层守卫（已落地并有回归测试）
+
+| 层 | 位置 | 行为 |
+|:--|:--|:--|
+| **① 加载期** | `SQLiteAdapter.initialize()` | 磁盘库 ≥5MB 但载入后 `memories`/`conversations` **均 0 行** ⇒ **抛错拒绝启动**（宁停不毁数据） |
+| **② 落盘期** | `SQLiteAdapter._safeWriteDbFile()` | 将原 **4 处** `writeFileSync(dbPath, ...)` 收成**单一咽喉**；写入前若“内存库两表空 + 磁盘文件大”⇒ **拒绝覆盖** + CRITICAL 告警 |
+
+阈值常量：`DB_EMPTY_GUARD_MIN_BYTES = 5MB`（生产库常态 ≥ 200MB；≤5MB 的新建/测试库不受影响）。
+回归防线：`src/m2/__tests__/empty-db-guard.test.ts`（3 例：加载期拒绝、落盘期拒绝且文件字节数不变、正常库不误伤）。
+
+### 同批修复：`write()` 的 seq_pos 冲突
+
+批 4/5 引入的副作用已收尾：`write()` 在写入前**预检** `seq_pos` 是否已被别的 id 占用，占用则重分配 `MAX(seq_pos)+1` 并写日志 —— 不再把异常抛入**无 catch 的批处理链路**（M9 工作记忆巩固）。
+
+### 操作纪律（必须遵守）
+
+1. **单实例**：服务由 PM2 托管（`pm2 start start.cjs --name wenstar-webui --max-memory-restart 1536M` + 日志重定向 + `pm2 save`）。**禁止再手动起第二个实例**；`start.cjs` 的 `server.lock` 会拒绝，但“杀父不杀子”会留下**孤儿子进程**（它占着端口+锁 ⇒ 新实例永远启不来 ⇒ PM2 无限重启）。
+2. **启停用 PM2**：`pm2 restart wenstar-webui` / `pm2 stop wenstar-webui`；需要彻底清场时，先按**端口占用的 PID** 精确杀（`netstat -ano | grep :3000`），确认无监听后再删 `data/webui/server.lock`。
+3. **改库前先停服**（经验 #19），并**先备份**；事后起服**再验一次**（防内存态覆盖）。
+4. **可观测性优先**：启动服务必须带日志重定向（PM2 `--output/--error`）。本仓曾因“启动时丢弃 stdout/stderr”而在同一个根因周围排查数小时。
+
+---
+
 ## 十、快速查找
 
 ```

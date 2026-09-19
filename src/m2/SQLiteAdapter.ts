@@ -63,6 +63,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..');
 const DEFAULT_DB_PATH = join(PROJECT_ROOT, 'data', 'webui', 'fusion_memory.db');
+
+/**
+ * 🔴🔴 2026-09-19 数据安全守卫阈值（事故后加固）
+ * ======================================================    */
+const DB_EMPTY_GUARD_MIN_BYTES = 5 * 1024 * 1024;
 const SCHEMA_PATH = join(__dirname, 'schema.sql');
 
 interface SqlJsDatabase {
@@ -268,6 +273,25 @@ export class SQLiteAdapter {
     if (existsSync(this.dbPath)) {
       const buffer = readFileSync(this.dbPath);
       this.db = new SQL.Database(buffer) as unknown as SqlJsDatabase;
+      // 🔴🔴 2026-09-19 数据安全守卫（事故后加固，最高优先）——
+      //   事故：229MB 生产库被覆盖为 3.9MB 空库（磁盘文件曾存在的行被清空）。
+      //   机理：sql.js 内存库 → flushNow() 直接 export 覆盖磁盘文件，且**无空库保护**；
+      //   一旦某个实例以「空库/加载异常」状态运行，它的 flush 就会抹掉真实数据。
+      //   本守卫：磁盘文件存在且 ≥ 阈值，但载入后 memories/conversations 两表**均 0 行**
+      //   ⇒ 判定加载异常/半读，**抛错拒绝启动**（宁停不毁数据；PM2 会重启并在日志里反复大声报错）。
+      const _guardCnt = (t: string): number => {
+        try { return Number((this.db as any).exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
+        catch { return -1; } // 表不存在（全新库）
+      };
+      const _memCnt = _guardCnt('memories');
+      const _convCnt = _guardCnt('conversations');
+      if (buffer.length >= DB_EMPTY_GUARD_MIN_BYTES && _memCnt === 0 && _convCnt === 0) {
+        throw new Error(
+          `[SQLiteAdapter] 🔴 拒绝启动：磁盘库 ${this.dbPath} 有 ${buffer.length} 字节，` +
+            `但载入后 memories=0 / conversations=0 —— 加载异常或半读。` +
+            `若以空库继续，后续 flush 会把空库 export 覆盖真实文件（本仓已发生过 229MB→3.9MB 数据丢失事故）。`,
+        );
+      }
     } else {
       this.db = new SQL.Database() as unknown as SqlJsDatabase;
     }
@@ -371,8 +395,9 @@ export class SQLiteAdapter {
       if (repairResult.entityUuid > 0 || repairResult.globalUid > 0 || repairResult.entityGenes > 0) {
         try {
           const data = (this.db as any).export();
-          writeFileSync(this.dbPath, Buffer.from(data));
-          console.error('[SQLiteAdapter] 修复数据已直接 export 落盘 (' + (repairResult.entityUuid + repairResult.globalUid + repairResult.entityGenes) + ' 条变更)');
+          if (this._safeWriteDbFile(data, 'repairDataIntegrity')) {
+            console.error('[SQLiteAdapter] 修复数据已直接 export 落盘 (' + (repairResult.entityUuid + repairResult.globalUid + repairResult.entityGenes) + ' 条变更)');
+          }
         } catch (e) { console.error('[SQLiteAdapter] 修复落盘失败:', e); }
       }
     } catch (err) {
@@ -647,7 +672,7 @@ export class SQLiteAdapter {
       // 磁盘验证：sql.js 重读磁盘文件确认持久化成功
       {
         const data2 = (this.db as any).export();
-        writeFileSync(this.dbPath, Buffer.from(data2));
+        this._safeWriteDbFile(data2, 'startup-verify-flush');
         const initSqlJs2 = (await import('sql.js')).default;
         const SQL2 = await initSqlJs2();
         const verifyBuf = readFileSync(this.dbPath);
@@ -849,6 +874,22 @@ export class SQLiteAdapter {
     const cl = record.calcium_level;
     // P1: l2_norm 预计算（40维感知向量）
     const l2 = computeL2Norm40D(p40);
+
+    // 🔴 2026-09-19 修复（我引入的副作用）：批 4/5 把本写入从 `INSERT OR REPLACE` 改为
+    //   `ON CONFLICT(id) DO UPDATE` 后，**seq_pos 冲突从“静默替换”变成了抛错**（这是有意的
+    //   “失败可见”）；但 M9 `WorkingMemory.consolidate()` 这类**批处理**路径没有 catch ⇒
+    //   曾变成 `[Server] 未捕获Promise拒绝: UNIQUE constraint failed: memories.seq_pos`。
+    //   此处做**写入前预检**：seq_pos 已被别的 id 占用 → 重新分配一个空闲值（MAX+1），
+    //   不丢写入、也不让异常逃逸到无 catch 的批处理链路。
+    try {
+      const _clash = this.queryAll('SELECT id FROM memories WHERE seq_pos = ? AND id <> ? LIMIT 1', [record.seq_pos, record.id]);
+      if (_clash.length) {
+        const _mx = this.db!.exec('SELECT COALESCE(MAX(seq_pos),0)+1 FROM memories');
+        const _next = Number(_mx?.[0]?.values?.[0]?.[0] ?? Date.now());
+        console.warn(`[SQLiteAdapter] write() seq_pos=${record.seq_pos} 已被占用 → 重新分配 ${_next}（避免 UNIQUE 冲突抛入无 catch 的批处理路径）`);
+        record.seq_pos = _next;
+      }
+    } catch { /* 预检失败不阻塞写入 */ }
 
     this.runSql(
       // 🔴 2026-09-19 批 5（P0 残留根治）：`write()` 是**主存储路径**（10 个调用点），但它一直用
@@ -2463,14 +2504,49 @@ export class SQLiteAdapter {
     this.save();
   }
 
+  /**
+   * 🔴🔴 2026-09-19 数据安全**单一咽喉点**（事故后加固）：所有落盘必须经此。
+   * ================================================================
+   * 事故：sql.js 内存库 flush 时直接 `export()` 覆盖磁盘文件，且**无空库保护** ⇒ 某实例以空库
+   *   运行一次，就把 229MB 生产库覆盖成 3.9MB 空库（实测事故，已用备份回滚）。
+   * 本方法把原先散在 4 处的 `writeFileSync(this.dbPath, ...)` 收成一个带守卫的入口：
+   *   磁盘既存文件 ≥ 阈值，而内存库 memories/conversations 均为 0 ⇒ **拒绝覆盖** + CRITICAL 告警。
+   * （与 `initialize()` 的加载期守卫构成纵深防御：一个是“不许带空库跑”，一个是“不许拿空库覆”。）
+   * @returns 是否真的写入
+   */
+  private _safeWriteDbFile(buf: Uint8Array | Buffer, why: string): boolean {
+    try {
+      const _c = (t: string): number => {
+        try { return Number((this.db as any)?.exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
+        catch { return -1; }
+      };
+      const _mem = _c('memories');
+      const _conv = _c('conversations');
+      if (_mem === 0 && _conv === 0 && existsSync(this.dbPath)) {
+        const _onDisk = readFileSync(this.dbPath).length;
+        if (_onDisk >= DB_EMPTY_GUARD_MIN_BYTES && buf.length < _onDisk / 2) {
+          console.error(
+            `[SQLiteAdapter] 🔴🔴 拒绝落盘（空库守卫）：内存库 memories=0/conversations=0，` +
+              `待写 ${buf.length} 字节，而磁盘现有 ${_onDisk} 字节（${this.dbPath}）—— ` +
+              `这会覆盖真实数据，已阻断。来源: ${why}`,
+          );
+          return false;
+        }
+      }
+      writeFileSync(this.dbPath, Buffer.from(buf));
+      return true;
+    } catch (e) {
+      console.error('[SQLiteAdapter] 落盘失败:', (e as Error)?.message);
+      return false;
+    }
+  }
+
   /** P0-3: 强制立即落盘（公开方法，供 handleShutdown 和关键路径调用） */
   flushNow(): void {
     if (!this.db || this._dirtyCount === 0) return;
     try {
       const data = (this.db as any).export();
-      const buffer = Buffer.from(data);
-      writeFileSync(this.dbPath, buffer);
-      this._dirtyCount = 0;
+      if (this._safeWriteDbFile(data, 'flushNow')) this._dirtyCount = 0;
     } catch (err) {
       console.error('[SQLiteAdapter] flushNow failed:', err);
     }
@@ -2483,9 +2559,10 @@ export class SQLiteAdapter {
     if (this.db && this._dirtyCount > 0) {
       try {
         const data = (this.db as any).export();
-        writeFileSync(this.dbPath, Buffer.from(data));
-        this._dirtyCount = 0;
-        console.log('[SQLiteAdapter] shutdownFlush: 关闭前落盘完成');
+        if (this._safeWriteDbFile(data, 'shutdownFlush')) {
+          this._dirtyCount = 0;
+          console.log('[SQLiteAdapter] shutdownFlush: 关闭前落盘完成');
+        }
       } catch (err) {
         console.error('[SQLiteAdapter] shutdownFlush failed:', err);
       }
