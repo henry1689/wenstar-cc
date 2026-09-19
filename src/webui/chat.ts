@@ -1146,8 +1146,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
               continuityParts.push(`${speaker}：${snippet}`);
             }
             if (continuityParts.length > 0) {
-              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。）
-⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';
+              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。）';
             }
           }
         }
