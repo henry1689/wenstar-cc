@@ -83,7 +83,9 @@ export class LifecycleManager {
             // cli/health-check.ts 的 "void 参与边" 会 fatal（退出码 1），
             // UUIDSupervisor 的 void 隔离也会 fail。与 FamilyGraph.cleanDirtyNames 一致。
             if (result.to === 'void') {
-              fg.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
+              // 批17: 优先走 FamilyGraph 的单节点咽喉（保持删边实现唯一）
+              if (typeof fg.deleteEdgesOfNode === 'function') fg.deleteEdgesOfNode(p.id);
+              else fg.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
               console.log('[Lifecycle] ' + p.name + ': ' + result.from + ' → void (' + daysSince + '天无提及，判定非真人实体)');
             }
             if (result.to === 'dormant' && result.from === 'active') {

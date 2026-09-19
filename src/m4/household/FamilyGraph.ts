@@ -1054,7 +1054,8 @@ export class FamilyGraph implements FamilyGraphInterface {
 
           if (edgeCnt === 0) {
             // Isolated dirty node — delete (with edge cleanup to prevent orphans)
-            this.run("DELETE FROM edges WHERE source_id = ? OR target_id = ?", [p.id, p.id]);
+            // 批17: 走单节点咽喉
+            this.deleteEdgesOfNode(p.id);
             this.run("DELETE FROM nodes WHERE id = ?", [p.id]);
             result.cleaned++;
             result.details.push(p.name + ': 删除(孤立脏节点)');
@@ -1105,7 +1106,8 @@ export class FamilyGraph implements FamilyGraphInterface {
           // 观察区超期回收属"回收"语义 → 必须同步清理关联边，
           // 否则 cli/health-check 的「void 参与边」会 fatal（与批12 P1-2 同口径）。
           if (t.to === 'void') {
-            this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [p.id, p.id]);
+            // 批17: 走单节点咽喉（原先内联 DELETE，是多份实现之一）
+            this.deleteEdgesOfNode(p.id);
             console.log('[FG Lifecycle] 观察区超期回收: "' + p.name + '" (' + Math.floor(daysSince) + '天无提及)');
             // 注：此处内联删边为"单节点立即清理"（循环内不便整库 prune）；
             // 同语义的整库版本见 pruneVoidEdges()（批15 唯一咽喉，每日自愈调用）。
@@ -1514,6 +1516,28 @@ export class FamilyGraph implements FamilyGraphInterface {
    *
    * @returns 实际删除的边数
    */
+  /**
+   * 批17: 删除【单个节点】的全部关联边 —— 单节点场景的唯一咽喉。
+   *
+   * 与 pruneVoidEdges() 分工：
+   *   · 本方法：已知某节点的场景（循环内、删节点前），O(该节点的边)
+   *   · pruneVoidEdges：全库批量对账（每日/启动自愈），O(全表)
+   * 两者共同保证「删边的 SQL」全仓只有一处实现，避免第 N 份副本漂移
+   * （批14 的 179 条遗留 void 边正是多份实现互不同步的产物）。
+   *
+   * @returns 删除的边数（取不到精确值时返回 -1）
+   */
+  private deleteEdgesOfNode(nodeId: string): number {
+    try {
+      const before = (this.query('SELECT COUNT(*) as c FROM edges WHERE source_id = ? OR target_id = ?', [nodeId, nodeId]) as Array<{ c: number }>)[0]?.c ?? 0;
+      this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [nodeId, nodeId]);
+      return before;
+    } catch (e: any) {
+      console.warn('[FG] 清理节点关联边失败(非阻塞): ' + nodeId + ' — ' + (e?.message || e));
+      return -1;
+    }
+  }
+
   pruneVoidEdges(): number {
     try {
       const before = (this.query('SELECT COUNT(*) as c FROM edges') as Array<{ c: number }>)[0]?.c ?? 0;
@@ -3721,8 +3745,9 @@ export class FamilyGraph implements FamilyGraphInterface {
         // 且 UUIDSupervisor 的 void 回收隔离会 fail。
         // 与 cleanDirtyNames 的既有做法一致。
         if (result.to === 'void') {
-          const delEdges = this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [node.id, node.id]);
-          const deleted = typeof (delEdges as any)?.changes === 'number' ? (delEdges as any).changes : '?';
+          // 批17: 走单节点咽喉
+          const deletedCount = this.deleteEdgesOfNode(node.id);
+          const deleted = deletedCount >= 0 ? deletedCount : '?';
           console.log('[FG Candidate] void 回收: "' + ((node as any).name || node.id) + '" (清理关联边 ' + deleted + ' 条)');
         }
       }
@@ -5626,7 +5651,8 @@ export class FamilyGraph implements FamilyGraphInterface {
         if (profile && !profile.appearance && !profile.body_features && !profile.occupation
             && !profile.traits?.length && !profile.description && !profile.interests?.length) {
           // 删除关联边
-          this.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [node.id, node.id]);
+          // 批17: 走单节点咽喉
+          this.deleteEdgesOfNode(node.id);
           this.run('DELETE FROM nodes WHERE id = ?', [node.id]);
           cleaned++;
         }
@@ -6042,7 +6068,8 @@ export class FamilyGraph implements FamilyGraphInterface {
     for (const g of GARBAGE) {
       const n = this.query("SELECT id FROM nodes WHERE name = ?", [g]);
       if (n.length > 0) {
-        this.run("DELETE FROM edges WHERE source_id = ? OR target_id = ?", [n[0].id, n[0].id]);
+        // 批17: 走单节点咽喉
+        this.deleteEdgesOfNode(n[0].id);
         this.run("DELETE FROM nodes WHERE id = ?", [n[0].id]);
         garbageCleaned++;
       }
