@@ -107,9 +107,15 @@ function extractLogicalStrings(src: string): Array<{ text: string; line: number 
       let merged = first.buf;
       let cursor = first.next;
       for (;;) {
+        // 🔴 行号漂移修复(2026-09-19)：下面的空白探测会自增 line，但若最终**没有推进 cursor**
+        //   就 break 出去，主循环会从 cursor 重扫同一段空白 ⇒ 换行被重复计数，行号越滚越偏。
+        //   实测：28,014 条逻辑串中 7,633 条漂移（27%）；FamilyGraph.ts 报违规在 5995 行而文件
+        //   仅 5965 行（越界 30），真语句在 5940；SQLiteAdapter.ts 报 1026 实为注释行、真语句 1022-1025。
+        //   故探测前存快照，凡未推进游标的分支一律回滚。
+        const lineMark = line;
         let j = cursor;
         while (j < src.length && isWs(src[j])) { if (src[j] === '\n') line++; j++; }
-        if (src[j] !== '+') break;
+        if (src[j] !== '+') { line = lineMark; break; }
         j++;
         while (j < src.length && isWs(src[j])) { if (src[j] === '\n') line++; j++; }
         if (src[j] === '/' && src[j + 1] === '/') {
@@ -117,7 +123,7 @@ function extractLogicalStrings(src: string): Array<{ text: string; line: number 
           while (j < src.length && isWs(src[j])) { if (src[j] === '\n') line++; j++; }
         }
         const q2 = src[j];
-        if (q2 !== '"' && q2 !== "'" && q2 !== '`') break;
+        if (q2 !== '"' && q2 !== "'" && q2 !== '`') { line = lineMark; break; }
         const nxt = readLiteral(j, q2);
         merged += nxt.buf;
         cursor = nxt.next;
@@ -506,13 +512,28 @@ describe('[SQL-schema 守卫] 词法扫描器夹具（防引号失同步 → 静
  * INSERT OR IGNORE 三者后果等价（目标列为 NULL），且普通 INSERT **更隐蔽** —— 它从不
  * 重写已有行，字段只是「从来没被写进去过」，因此永远不会被观察到「被抹掉」。
  *
- * ⚠️ 本轮为**报告模式**（REPORT_ONLY = true）：只产出存量违规清单，不 fail-closed。
- *    存量规模摸清、逐条判定「真缺失」或「合理豁免」后，将 REPORT_ONLY 置 false
- *    即转为 fail-closed 回归防线。
+ * 🔴 2026-09-19 批 3：**已转 fail-closed**（REPORT_ONLY = false）。存量违规经批 1/2/3
+ *    由 28 处 → **0 处**（真缺陷全部收口到单一写入口；余下 3 类非缺陷已按显式路径豁免）。
+ *    自此本用例从「只报不管」转为回归防线：新增违规即测试失败。
+ *
+ * 🔴 2026-09-19 v2 判据修订（存量复核结论）
+ * ---------------------------------------
+ * v1 的 28 处清单里，**17 处是判据误报**，只有 11 处是真实缺陷。误报集中三类：
+ *   ① 跨库同名表（MemoryVault 的 memories 打向 vault.db，登记的 6 个 fusion 列在该库不存在）
+ *   ② 两阶段写入器（entities / nodes 的身份列由户籍回填链路补齐，写入点只能建占位行）
+ *   ③ 派生索引回填（MigrationManager 的 n-gram 重建，归属由源表承载 + 权威写入方补齐）
+ * 误报的代价不是「多报几条」——它会**诱导对两阶段写入器做破坏性补列**（在无户籍信息时
+ * 编造 uuid / 给索引行硬塞归属），因此判据必须按写入路径形态拆分豁免（见 SITE_EXEMPTIONS
+ * 与 DEFERRED_COLUMNS），且豁免登记必须有**反向断言**兜底。
  */
 
-/** 报告模式开关：true = 只报告不失败（存量摸底期）；false = fail-closed（存量清零后切换） */
-const REPORT_ONLY = true;
+/** 报告模式开关：true = 只报告不失败（存量摸底期）；false = fail-closed（存量清零后切换）
+ *  🔴 2026-09-19 批 3：已置 **false** —— 存量违规经批 1/2/3 后由 28 处 → 0 处，
+ *  且每类豁免均有反向断言兜底（见下方《[D8v2-判据] 豁免登记表必须有真实依据》）。
+ *  自此本用例从「只报不管」转为回归防线：**新增违规即测试失败**。
+ *  剩余 3 类非缺陷均已按显式路径豁免登记（schema-fingerprint / 延迟分配列 / derived-index），
+ *  不在 offenders 之内。 */
+const REPORT_ONLY = false;
 
 /**
  * 表 → 该表**所有写入形态**都必须携带的关键列（未列出 ⇒ 静默为 NULL）。
@@ -543,20 +564,28 @@ const TABLE_CRITICAL_COLUMNS: Record<string, readonly string[]> = {
 };
 
 /**
- * 按**写入路径**豁免（粒度必须细到路径级 —— 同一张表的不同写入路径豁免条件不同）。
+ * 按**写入路径**豁免（v2：粒度细到路径形态，三类形态各用各的判据）。
  *
- * 判据：列清单中出现 `marker` 特征列 ⇒ 该写入点豁免对 `column` 的检查。
- * 用**列指纹**而非文件级豁免，可精确区分同一文件/同一表的不同写入路径。
+ * 判据（kind 互斥，命中即豁免 `columns`）：
+ *   column-present      列清单中出现 `marker` 特征列 ⇒ 该写入路径豁免
+ *   schema-fingerprint  列清单中出现 `marker` 列 ⇒ 证实本写入打向**另一套 schema 的同名表**
+ *                       ⇒ 整表豁免（用列指纹自证库身份，不靠文件路径猜）
+ *   derived-index       语句文本（空白归一化后）含 `marker` ⇒ 派生/索引回填路径 ⇒ 豁免
+ *
+ * `columns: '*'` = 豁免该表全部登记列；否则只豁免列举的列。
+ * 一律用**指纹**而非文件级豁免，以免同文件里的其它写入路径被顺带放行。
  */
-const PATH_EXEMPTIONS: ReadonlyArray<{
+const SITE_EXEMPTIONS: ReadonlyArray<{
+  kind: 'column-present' | 'schema-fingerprint' | 'derived-index';
   table: string;
-  column: string;
+  columns: readonly string[] | '*';
   marker: string;
   reason: string;
 }> = [
   {
+    kind: 'column-present',
     table: 'black_diamond',
-    column: 'dna_root_id',
+    columns: ['dna_root_id'],
     marker: 'entry_channel',
     reason:
       'FG 同步路径（FamilyGraph.syncToBlackDiamond）的 source_id 恒为 null，dna_root_id ' +
@@ -564,12 +593,92 @@ const PATH_EXEMPTIONS: ReadonlyArray<{
       "VaultManager.addBlackDiamond 走 DEFAULT 'auto'、列清单不含该列 ⇒ 指纹天然区分，" +
       '不会被误豁免（它才是真正丢了值的路径）。',
   },
+  {
+    kind: 'schema-fingerprint',
+    table: 'memories',
+    columns: '*',
+    marker: 'perception_json',
+    reason:
+      'MemoryVault 写的是**独立库** data/memory-vault/vault.db，该表由 MemoryVault.ts 自建，' +
+      'schema 为 11 列（id,type,created_at,perception_json,calcium_score,calcium_level,raw_input,' +
+      'locus_path,strength,recall_count,last_recalled_at），本守卫登记的 6 个 fusion 列在该库' +
+      '**不存在**，结构上不可能携带。指纹 perception_json：fusion.memories 已在 V12.4 迁移中 ' +
+      'DROP COLUMN，只有 vault 库的 memories 保留它（全仓已 grep 确认唯一命中）。' +
+      '同仓 [D8-全表] 守卫已用 REPLACE_GUARD_EXEMPT_FILE 豁免同一行 —— 此前两个守卫对同一点判定相反，本条即对齐。',
+  },
+  {
+    kind: 'derived-index',
+    table: 'search_index',
+    columns: '*',
+    marker: 'INSERT OR IGNORE INTO search_index(term, source_type, source_id)',
+    reason:
+      'MigrationManager v10 的 n-gram 存量回填（term 粒度，一行一个三元组，INSERT OR IGNORE ' +
+      '不覆盖已有行）。索引行的归属由**源表**承载，并由权威写入方 SearchIndexBuilder.indexDocument ' +
+      '（INSERT OR REPLACE ... belong_entity_uuid, position）补齐；实测 search_index 中 ' +
+      "source_type='memory' 的 337,021 行归属缺失数为 0。注意本指纹**不含**权威写入方" +
+      '（它是 REPLACE + 带空格写法），故 Statement 侧仍受守卫约束。',
+  },
+];
+
+/**
+ * 延迟分配列（两阶段写入）—— 列值由独立的分配/回填链路补齐，不是写入点的职责。
+ * ================================================================================
+ * 登记判据（三条必须同时成立，缺一不得登记）：
+ *   ① 列语义是「身份编号」，值域由分配器决定（TXS-xxxx），写入点无法就地产生合法值；
+ *   ② 全仓存在真实的 UPDATE 回填写入点 —— 由文件末尾《延迟分配列回填方存在性》用例
+ *      **反向断言**，回填写入点一旦消失该用例立即失败（防登记表腐化，与
+ *      ENTITY_NAME_COLUMN_REGISTRY 的「登记但已消失 → 失败」同源防线）；
+ *   ③ 该列的不为空率由回填链路负责，而非各写入点。
+ *
+ * ⚠️ 这不是「放行」：它把校验点从「每个 INSERT 的列清单」迁移到「回填链路是否存活」。
+ * ⚠️ 已知残余风险（不隐藏）：person 类实体若始终未进入户籍回填链路，其 entities.uuid 会
+ *    长期为 NULL（实测 919 个 person 中 378 个为 NULL）。该问题属**回填链路覆盖率**，
+ *    不由写入点列清单解决，需另行专项跟踪，不得以此豁免掩盖。
+ */
+const DEFERRED_COLUMNS: ReadonlyArray<{
+  table: string;
+  column: string;
+  /** 格式 `<相对路径>|<SQL 片段>`；片段必须能在源码中直接 grep 到（反向断言用） */
+  backfillWriters: readonly string[];
+  reason: string;
+}> = [
+  {
+    table: 'entities',
+    column: 'uuid',
+    backfillWriters: [
+      'src/m2/SQLiteAdapter.ts|UPDATE entities SET uuid = ?',
+      'src/m2/FusionStorageAdapter.ts|UPDATE entities SET uuid = ?',
+    ],
+    reason:
+      'TXS-ID 由户籍链路分配，写入点只能先建占位行（INSERT (name,type)）再由 UPDATE 回填。' +
+      '实测 entities 1314 行中 uuid 非空 541 条**全为 person**，object 370 / emotion 12 / ' +
+      'event 10 / place 2 / self 1 全部为 NULL —— 非 person 类型本就不分配 uuid，' +
+      '把 uuid 当所有实体 INSERT 的必填列是判据错误。回填方：SQLiteAdapter.ensureEntity ' +
+      "（同函数内 UPDATE ... AND uuid IS NULL）与 FusionStorageAdapter.setFamilyGraph " +
+      "（启动期全量回填 WHERE type='person'）。2026-09-11 豁免文档已横向核验" +
+      '「全仓 INSERT INTO entities (name,type) 是既定惯例」。',
+  },
+  {
+    table: 'nodes',
+    column: 'uuid',
+    backfillWriters: [
+      'src/m4/household/FamilyGraph.ts|UPDATE nodes SET uuid = ?',
+      'src/m4/household/FamilyGraph.ts|UPDATE nodes SET uuid = ?, legacy_ids = ?',
+    ],
+    reason:
+      'FG 户籍编号同为两阶段：migrateToV3() 为存量 person 节点补号、V5 迁移重编号，均为 UPDATE ' +
+      '回填；带 uuid 的 INSERT 路径（addNode / ensureMe 等 14-15 列写法）不受影响。' +
+      '实测 family_graph.nodes 中 447 个 person 节点 uuid 100% 非空 ⇒ 回填链路存活。',
+  },
 ];
 
 describe('[D8v2-表级全覆盖] 所有写入形态的列清单必须携带该表登记的关键列', () => {
   it('扫描 INSERT / OR REPLACE / OR IGNORE 全部写入形态', () => {
     const offenders: string[] = [];
     const exempted: string[] = [];
+    const deferred: string[] = [];
+    /** 实际被扫到的「已登记关键列」表名 —— 用于检出**零命中的死登记项**（见末尾断言） */
+    const hitTables = new Set<string>();
     let scanned = 0;
     let skipped = 0;
 
@@ -596,15 +705,26 @@ describe('[D8v2-表级全覆盖] 所有写入形态的列清单必须携带该�
           .map((c) => c.replace(/["'`+]/g, '').trim())
           .filter(Boolean);
         scanned++;
+        hitTables.add(table);
+        /** 语句文本（空白归一化）—— derived-index 指纹在此上匹配 */
+        const norm = lit.text.replace(/\s+/g, ' ');
 
         const missing: string[] = [];
         for (const col of critical) {
           if (cols.includes(col)) continue;
-          const ex = PATH_EXEMPTIONS.find(
-            (e) => e.table === table && e.column === col && cols.includes(e.marker),
+          // 延迟分配列：值由回填链路负责，写入点不承担（回填方存在性由反向断言兜底）
+          if (DEFERRED_COLUMNS.some((d) => d.table === table && d.column === col)) {
+            deferred.push(`${rel}:${lit.line}  ${table}.${col}`);
+            continue;
+          }
+          const ex = SITE_EXEMPTIONS.find(
+            (e) =>
+              e.table === table &&
+              (e.columns === '*' || e.columns.includes(col)) &&
+              (e.kind === 'derived-index' ? norm.includes(e.marker) : cols.includes(e.marker)),
           );
           if (ex) {
-            exempted.push(`${rel}:${lit.line}  ${table} 缺 [${col}]（路径豁免：命中特征列 ${ex.marker}）`);
+            exempted.push(`${rel}:${lit.line}  ${table} 缺 [${col}]（${ex.kind} 豁免：${ex.marker}）`);
             continue;
           }
           missing.push(col);
@@ -621,6 +741,12 @@ describe('[D8v2-表级全覆盖] 所有写入形态的列清单必须携带该�
     if (exempted.length) {
       console.log(`[D8v2] 路径豁免 ${exempted.length} 处:\n  ` + exempted.join('\n  '));
     }
+    if (deferred.length) {
+      console.log(
+        `[D8v2] 延迟分配列（由回填链路负责，非写入点职责）${deferred.length} 处:\n  ` +
+          [...new Set(deferred.map((d) => d.replace(/:\d+/, '')))].join('\n  '),
+      );
+    }
     console.log(
       `[D8v2] 存量违规 ${offenders.length} 处${REPORT_ONLY ? '（⚠️ 报告模式，本轮不失败）' : ''}:\n  ` +
         (offenders.join('\n  ') || '(无)'),
@@ -629,11 +755,110 @@ describe('[D8v2-表级全覆盖] 所有写入形态的列清单必须携带该�
     // 防「扫描器失效 → 空转通过」：与既有守卫同源的防线
     expect(scanned, '未扫描到任何受登记表的写入点，守卫可能失效').toBeGreaterThan(0);
 
+    // 🔴 2026-09-19 批 4：**单表零命中**检测。
+    //   动机（实测事故）：把 conversations 的列清单收口成 `cols.join(', ')` 运行时拼接后，
+    //   本扫描器（文本扫描，且显式跳过含 ${} 的语句）就再也看不到它 —— 登记项静默失效，
+    //   而全局的 scanned>0 断言拦不住“只剩其它表有命中”的情况。
+    //   现要求：每个登记表要么被本扫描器命中，要么在 RUNTIME_JOINED_TABLES 里显式登记
+    //   并注明由哪个语义测试覆盖（登记 ≠ 有效防线，必须写清楚）。
+    const RUNTIME_JOINED_TABLES = new Set(['conversations']);
+    const deadRegistrations = Object.keys(TABLE_CRITICAL_COLUMNS).filter(
+      (t) => !hitTables.has(t) && !RUNTIME_JOINED_TABLES.has(t),
+    );
+    expect(
+      deadRegistrations,
+      '以下登记表在本次扫描中**零命中** ⇒ 其列清单已不受本守卫保护（很可能被改成了模板/拼接 SQL）。' +
+        '若属于“运行时拼接”的合法情形，请加入 RUNTIME_JOINED_TABLES 并注明由哪个语义测试覆盖：\n  ' +
+        deadRegistrations.join('\n  '),
+    ).toEqual([]);
+
     if (!REPORT_ONLY) {
       expect(
         offenders,
         `以下写入点缺少登记的关键列（该列将恒为 NULL）:\n  ${offenders.join('\n  ')}`,
       ).toEqual([]);
     }
+  });
+});
+
+/**
+ * [D8v2-判据] 豁免登记表必须有真实依据
+ * =========================================
+ * 豁免是守卫的**放行口**，一旦登记腐化就会变成静默漏洞（这正是 v1 判据误报与「登记表无人校验」
+ * 的教训）。本组用例对三类豁免做**反向断言**：登记的每一个依据都必须能在源码/真实 schema 里被证实。
+ */
+describe('[D8v2-判据] 豁免登记表必须有真实依据（防登记腐化 → 静默放行）', () => {
+  it('延迟分配列的每一处回填写入点都真实存在于源码', () => {
+    const bad: string[] = [];
+    for (const d of DEFERRED_COLUMNS) {
+      if (!d.backfillWriters.length) {
+        bad.push(`${d.table}.${d.column}: 未登记任何回填写入点 ⇒ 该列无人回填，豁免不成立`);
+        continue;
+      }
+      for (const w of d.backfillWriters) {
+        const ci = w.indexOf('|');
+        const relPath = w.slice(0, ci);
+        const frag = w.slice(ci + 1);
+        const abs = join(REPO, relPath);
+        if (!existsSync(abs)) {
+          bad.push(`${d.table}.${d.column}: 回填文件不存在 ${relPath}`);
+          continue;
+        }
+        if (!readFileSync(abs, 'utf-8').includes(frag)) {
+          bad.push(`${d.table}.${d.column}: ${relPath} 中已找不到回填片段 \`${frag}\``);
+        }
+      }
+    }
+    expect(
+      bad,
+      '延迟分配列的登记已腐化（回填写入点消失 ⇒ 该列从此无人回填，豁免退化为放行口）:\n  ' + bad.join('\n  '),
+    ).toEqual([]);
+  });
+
+  it('schema-fingerprint 豁免的指纹列确实只在「另一套 schema」的库里出现', () => {
+    const dbs = DB_PATHS.filter(([, p]) => existsSync(p)).map(
+      ([n, p]) => [n, new Database(p, { readonly: true })] as const,
+    );
+    const bad: string[] = [];
+    for (const e of SITE_EXEMPTIONS) {
+      if (e.kind !== 'schema-fingerprint') continue;
+      const critical = TABLE_CRITICAL_COLUMNS[e.table] ?? [];
+      const hits = dbs.filter(([, db]) => {
+        const cols = (db.prepare(`PRAGMA table_info(${e.table})`).all() as Array<{ name: string }>).map(
+          (c) => c.name,
+        );
+        // 佐证成立的条件：该库的这张表【有指纹列】且【缺至少一个登记列】⇒ 确属另一套 schema
+        return cols.includes(e.marker) && critical.some((c) => !cols.includes(c));
+      });
+      if (!hits.length) {
+        bad.push(
+          `${e.table} 的 schema-fingerprint 豁免（指纹 ${e.marker}）在现有库中已无佐证：` +
+            '没有任何库同时满足「含指纹列」且「缺登记列」。' +
+            '若另一套 schema 已被合并/移除，请删除本条豁免而非留作放行口。',
+        );
+      }
+    }
+    for (const [, db] of dbs) db.close();
+    expect(bad, bad.join('\n  ')).toEqual([]);
+  });
+
+  it('derived-index 豁免的语句指纹必须真能命中（否则是空豁免）', () => {
+    const hits: string[] = [];
+    for (const e of SITE_EXEMPTIONS) {
+      if (e.kind !== 'derived-index') continue;
+      let n = 0;
+      for (const file of walkTs(SRC)) {
+        for (const lit of extractLogicalStrings(readFileSync(file, 'utf-8'))) {
+          if (lit.text.replace(/\s+/g, ' ').includes(e.marker)) n++;
+        }
+      }
+      hits.push(`${e.table}: 指纹命中 ${n} 处`);
+      if (n === 0) hits.push(`  ✗ ${e.table} 的 derived-index 指纹 \`${e.marker}\` 已无命中 → 请删除该豁免`);
+    }
+    console.log('[D8v2-判据] derived-index 指纹命中核验:\n  ' + hits.join('\n  '));
+    expect(
+      hits.filter((h) => h.trim().startsWith('✗')).length,
+      '存在空豁免（指纹已无命中）—— 空豁免会掩盖未来的真实缺陷，必须删除:\n  ' + hits.join('\n  '),
+    ).toBe(0);
   });
 });

@@ -263,6 +263,156 @@ data/webui/knowledge/family_graph.db → nodes (39) + edges (105)
 
 ---
 
+## 九·一、核心表写入通道（列清单单一事实源）
+
+> 2026-09-19 批 2 立规（arch_structural_defect 收口）。本节**取代**任何“某个写入点该写哪几列”的口头约定。
+
+### 规则
+
+三张核心表的列清单**只允许一个事实源**，任何写入点不得自行手写列清单：
+
+| 表 | 唯一事实源 | 强制入口 |
+|:--|:--|:--|
+| `conversations` | `ConversationDB.CONVERSATION_INSERT_COLUMNS` + `buildConversationInsert()` | 任何写入必须经 `buildConversationInsert()` |
+| `memories` | `SQLiteAdapter.writeMemory()` 内置列清单 | 任何写入必须经 `writeMemory()` |
+| `black_diamond` | 归属/溯源由**源记忆同源继承**（`VaultManager.addBlackDiamond` 一次回查取两列） | — |
+
+`buildConversationInsert()` 的 bind 顺序**由列清单本身派生** ⇒ “占位符数 ≠ bind 数”与“列/值错位”在结构上不可能发生。
+回归防线：`src/m2/__tests__/write-channel-single-source.test.ts`（含 SQL 逐字比对）。
+
+### 为什么立这条规（已发生的事故）
+
+同表多写入点各自维护列清单，导致同类漂移反复爆发：
+
+1. **`conversations` 双通道**：`ConversationDB`（22 列）vs `SQLiteAdapter.insertConversation`（13 列）
+   → `belong_entity_uuid` 恒 NULL、`message_id` 仅 4/3949、`entity_names` 被写成 JSON 数组
+   （实库既定形态为逗号分隔）、`is_summary` 被绑成 `is_compacted`（V23.1 修复未同步）。
+2. **`memories`**：`fg_entity_names` 全库 2012 条归零；锚点基因被抹（log 写 735 / 落库 348）；
+   `writeMemory` 自身**也**缺 `source_type` 列、`effective_strength` 被硬编码 1.0。
+3. **`black_diamond.dna_root_id`** 全库 0/390（251 行有 `source_id`，其中 247 行可从源记忆回填）。
+
+### 归属语义（《UUID 户管管理法》第七条）
+
+| 情形 | 取值 |
+|:--|:--|
+| 派生自单条源记录（记忆→黑钻、记忆→知识库） | **继承源记录**的 `belong_entity_uuid` / `dna_root_id` |
+| 跨实体聚合 / 缓存派生（梦境洞察、月度主题、前瞻模拟、第二大脑文档） | **unowned（NULL）**，必须在列清单里显式写出并注明依据 |
+| 会晤对话 | 会晤实体 UUID（由 `persistence-stage` 的 `resolveOwnership` 决定） |
+
+⚠️ `OWNER_UUID = 'TXS-000000001'` 是**玉瑶（系统默认本体）**，不是用户本人 —— 系统生成的聚合件不得以“像户主的”为由写成它。
+
+### 收口进度与数据回填（2026-09-19 批 0–4）
+
+**收口的准确口径（修正批 2/3 当时过宽的说法）：**
+
+- ✅ **适配器之外的写入点已全部归一** —— `VaultManager` / `SleepTimeConsolidator` / `YuyaoMemoryService` /
+  `ConflictDetector` / `DailyMaintenanceScheduler` / `ProspectiveSimulator` / `AutoLearnPlugin`
+  共 7 个写入点均已收口到 `SQLiteAdapter.writeMemory()`，全仓再无外部手写列清单。
+- ⚠️ **适配器内部仍有 3 份 `memories` 列清单**：`write(record)`（:854，50 列，**主存储路径**，10 个调用点）、
+  `writeMemory(opts)`（:1016，47 列）、锚点重建器（:2309，32 列）。它们**不是**由同一事实源派生，
+  但均被守卫 D8v2 的文本扫描覆盖（改动任一份的登记列都会被报错）。
+- ⚠️ **`conversations` 的列清单是运行时拼接**（`buildConversationInsert` 用 `cols.join(', ')`）
+  ⇒ **文本扫描器看不到它**。它的守卫登记项仅为文档意图；真正的防线是语义测试
+  `src/m2/__tests__/write-channel-single-source.test.ts`（断言列清单含 8 个关键列 + SQL 逐字比对 + 真实 schema prepare）。
+
+守卫 D8v2 存量违规 **28 处（含判据误报）→ 0 处**，`REPORT_ONLY` 已置 **false**
+⇒ 从「只报不管」转为 **fail-closed 回归防线**（新增违规即测试失败）；
+并新增「**登记表零命中检测**」（防止某表被改成拼接 SQL 后登记项静默失效 —— 这正是 `conversations` 踩过的坑）。
+
+`writeMemory` 列清单补齐了记事（note）子系统的五列：`note_key` / `is_valid` /
+`remind_at` / `reminded` / `repeat_rule`（缺省值与 DDL 默认值完全一致，对现有调用方零行为变化）。
+
+### 批 4：`memories` 写入语句的 P0 修复（2026-09-19）
+
+**事故**：`writeMemory` 原先用 `INSERT OR REPLACE`，而 `memories` 除 `PRIMARY KEY(id)` 外还有
+**`UNIQUE(seq_pos)`** ⇒ `OR REPLACE` 对**任一**唯一冲突都先 `DELETE` 再 `INSERT`，即用不同 id 撞上同
+`seq_pos` 时会**静默删掉另一条记忆行**（已在库副本上复现：受害原行消失、表总行数不变）。
+旧语句下的 DELETE 还会触发外键副作用（`memory_entities ON DELETE CASCADE` /
+`black_diamond.source_id ON DELETE SET NULL`）。
+
+**已发生的删除痕迹**：4 条 `black_diamond.source_id` + 21 条 `memory_entities` 指向不存在的记忆。
+> ✅ **已于 2026-09-19 停服窗口清理并验证**：
+> - 4 条黑钻悬空 `source_id` → `SET NULL`（**修复指针，未删任何黑钻行**），清理后悬空数 = 0（起服后再验仍为 0）；
+> - `memory_entities` 孤儿（清理时已涨到 39 条 —— 正是修复前旧代码持续删行的证据）**未删除**（惰性数据，删它触犯「只增不删」）：**起服后降至 2 条** —— 启动时的锚点重建把曾被 REPLACE 删掉的锚点行（确定性 id `<dna>_DG`）重新写入，孤儿因此被重新关联；
+> - 同窗口把 `data/webui/` 下 11 个 `fusion_memory.db.bak*`（2026-08-05~09-02 历史备份，共 ≈1.5GB）**移走至 `D:/work/wenstar-backup-archive/`**（移动，非删除，可回退）。
+
+**验证证据（停服窗口后）**：改动过的测试文件 66/66 通过；之前因 `.bak` 残留而红的 3 个 CLI 测试 60/60 转绿；全量 `vitest run` 由 **23 → 10** 失败（2516 通过），剩余 10 个已用**隔离实验**逐个归因：2 个 runtime-smoke 单独跑 22/22 全绿（并行争抢超时假象），其余 8 个均为显式 `Test timed out in 30000/60000/160000ms`（LLM 延迟），**0 个可归因于代码**。
+
+**修复（两层）**：
+
+1. `writeMemory` 改为 **`INSERT ... ON CONFLICT(id) DO UPDATE SET <全列 = excluded.…>`**：
+   - 同 id 重写的语义与 `REPLACE` 等价（全列覆盖），但**不再 DELETE** ⇒ 无级联副作用；
+   - `seq_pos` 冲突从「静默删行」变为**抛错**（被方法 catch → `return false` + 日志）⇒ 失败可见。
+   - 验收：库副本上同参数对比可复现 —— 旧语句删行，新语句报 `UNIQUE constraint failed: memories.seq_pos` 且受害行完好。
+2. 砂金→金库晋升不再复用 `conversations.seq_pos`，改为**批量预分配 `MAX(seq_pos)+1, +2, …`**
+   （与 `MemoryAssessor.ts:211` 同范式）；否则它与 `persistence-stage` 以同一个 `seq_pos` 写同一张表，
+   是**构造性**相撞而非概率事件。
+
+**同批其它修正**：`VaultManager` 的 `dna_root_id` 调用方分支补脏值净化（`'null'`/空串不落库）；
+守卫新增登记表零命中检测；语义测试补 `dna_root_id` 断言并修正只匹配 `INSERT INTO` 的正则（曾漏
+`INSERT OR IGNORE/REPLACE INTO`）。
+
+### 批 5：同一 P0 机理的彻底收尾 + 守卫自愈（2026-09-19）
+
+批 4 只改了 `writeMemory`，`SQLiteAdapter.write()`（**主存储路径**，10 个调用点）仍是 `INSERT OR REPLACE`
+⇒ 同一机理（撞 `UNIQUE(seq_pos)` 就静默删行）仍在。本批收尾：
+
+1. **`write()` 也改为 `ON CONFLICT(id) DO UPDATE`** —— 不再依赖“每个调用方自觉预分配 seq_pos”。
+2. **另两处 `-(Date.now() % 1000000)`**（`_syncSecondBrainToGold` / `addGoldEntryFromKnowledgeVault`，
+   值域每 ≈16.7 分钟循环一次 ⇒ 可重复）改为从**负值带单调向下分配 `MIN(seq_pos)-1`**，
+   既保持“派生记忆排在最近序之后”的原语义，又结构上不可能重复。
+3. **守卫自愈（修掉“收口反而让防线失明”的三例）**：
+   - `src/m2/__tests__/memory-write-columns.test.ts`：匹配式从 `INSERT OR REPLACE INTO memories`
+     扩到全形态（含新的 `ON CONFLICT`）—— 否则**主写入路径对旧守卫不可见**；
+   - `src/__tests__/memory-insert-notnull-columns.test.ts`：`>= 6 个写入点` 的**计数断言 →
+     能力断言**（“适配器自身 3 个写入点必须全被扫到”）—— 计数前提被收口工程自然打破；
+   - `src/app/vault/__tests__/belong-uuid-propagation.test.ts`：**位置断言 `params[len-1]` →
+     按列名取值**（新增 `colValue()` 助手，含固定字面量列处理）。
+
+> 🔴 **操作教训（已写入全局 AGENTS.md 经验 21）**：“收口/重构”会**静默使依赖“字面形态、列清单顺序、写入点数量”的旧守卫失明**。
+> 因此改动前必须 grep“谁会因我的改动而失明”；宣布完成前必须跑**全量** `vitest run` 并以「修前失败集 vs 修后失败集」的差集为证据，无法归因的失败必须标注“未归因”。
+> 另注：流水线 `S5_Compile_Test`（声称“单元测试全量运行”）**未能报出**上述 3 个失败，不可当“测试全绿”的证据 —— 建议 Harness 侧排查。
+> 全量跑中的 11 个 runtime-smoke 失败经实验证实是**并行争抢导致的 5s 超时假象**（串行跑：68/69 通过），不是代码缺陷。
+
+---
+
+### 数据回填（仅有确定来源的 274 行）
+
+| 目标 | 回填行数 | 来源 |
+|:--|:--|:--|
+| `black_diamond.dna_root_id` | 247 | 回查源记忆 `memories.dna_root_id`（与写入端同一口径） |
+| `memories.dna_root_id` | 27 | id 形如 `<dnaRootId>_DG` 的对话组锚点，前缀即 dna |
+
+**不可回填（已实测确认，属历史缺口，不是漏做）**
+
+| 项 | 行数 | 为何不可回填 |
+|:--|:--|:--|
+| `memories.fg_entity_names` | 3220 | 这些行的 `entity_genes` **全为 `'[]'`**，且 `memory_entities` 映射数为 **0** ⇒ 源头从未记录，无任何可推导来源（D3 修复 2026-09-11 之前的遗留行） |
+| `conversations.message_id` | 3955 | 该列契约明写「原值写入，不 trim/coerce/**生成**/复用」⇒ 生成即违约；历史行无源 |
+| `knowledge_base.belong_entity_uuid` | 95 | 94 行 `dream_behavior`（跳实体会话聚合）+ 1 行 `monthly_topic` ⇒ 按第七条为 **unowned**，保留 NULL 才是正确答案 |
+
+**回填执行纪律（经验 #19）**：SQLiteAdapter 用 sql.js 内存库 + 定时 export 落盘 ⇒ **任何绕过它的直接文件修改都会被下一次 flush 用旧内存快照覆盖**。因此顺序固定为：
+**停服 → 备份 → 改库 → 验证磁盘 → 起服 → 再验证一次**。
+
+---
+
+### 回滚方案
+
+改动互相独立，可按需回退：
+
+```bash
+git checkout -- src/m2/ConversationDB.ts src/m2/SQLiteAdapter.ts \
+  src/app/vault/VaultManager.ts src/engine/tianquan/temporal/SleepTimeConsolidator.ts
+rm src/m2/__tests__/write-channel-single-source.test.ts
+```
+
+- **无表结构变更、无数据迁移** —— 回退不需动库，也不需停服。
+- 回退后新数据回到“部分列不写”的旧行为；**已写入的正确归属不会被破坏**（改动只在写入端，不修改历史行）。
+- 数据面唯一残留：本批之前已产生的无归属历史行（黑钻 `dna_root_id` 0/390 等）需另行回填
+  （批 3，顺序：停服 → 改库 → 验证磁盘 → 起服 → 再验）。
+
+---
+
 ## 十、快速查找
 
 ```

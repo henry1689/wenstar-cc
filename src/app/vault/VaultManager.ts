@@ -144,6 +144,18 @@ export function getBlackDiamond(sqlite: SQLiteAdapter, id: string): BlackDiamond
   return rows.length > 0 ? rowToBlackDiamond(rows[0]) : null;
 }
 
+/**
+ * dna_root_id 脏值净化（与 belong 同一口径）。
+ * 🔴 2026-09-19 批 4：原先只净化了「回查分支」，**调用方显式传入的 params.dna_root_id 没过净化**
+ *   → 源记忆带字符串 'null'/'undefined'/空串时仍会落库（与同文件 :215-217 记录的 belong 脏值事故同源）。
+ *   现两个分支共用本函数。
+ */
+function sanitizeDnaRootId(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  return s === '' || s === 'null' || s === 'undefined' ? null : s;
+}
+
 /** 新增黑钻条目 */
 export function addBlackDiamond(
   sqlite: SQLiteAdapter,
@@ -216,15 +228,25 @@ export function addBlackDiamond(
   //   源记忆带脏值时黑钻继承 'null'（取证：4 条脏黑钻的 source_id 全部回查为 typeof=text 的 'null'；
   //   清库后重启即重现，正是此处再次回查所致）。
   let _bdeuuid: string | null = null;
+  // 🔴 2026-09-19 批 2：回查**一次取两列** —— 归属与溯源锚点同源继承。
+  //   dna_root_id 原不在列清单里 → 实测全库 0/390（其中 251 行有 source_id、247 行可从源记忆回填）。
+  //   注意区分：fg_sync 路径（FamilyGraph 同步）的 source_id 恒 null，dna 本就无从获取，
+  //   那是**合法 unowned**，由 D8v2 的 column-present 豁免（entry_channel 指纹）识别，不是本条。
+  let _bdDnaRootId: string | null = null;
   if (params.source_id) {
     try {
-      const memRow = sqlite.queryAll('SELECT belong_entity_uuid FROM memories WHERE id = ?', [params.source_id]) as any[];
+      const memRow = sqlite.queryAll('SELECT belong_entity_uuid, dna_root_id FROM memories WHERE id = ?', [params.source_id]) as any[];
       _bdeuuid = sanitizeBelongUuid(memRow?.[0]?.belong_entity_uuid) ?? null;
+      // 与 belong 同一脏值净化口径：源记忆带字符串 'null'/空串时不继承
+      const _rawDna = memRow?.[0]?.dna_root_id;
+      _bdDnaRootId = (_rawDna === null || _rawDna === undefined || String(_rawDna).trim() === '' || String(_rawDna).trim() === 'null')
+        ? null
+        : String(_rawDna);
     } catch { /* 回查不阻塞 */ }
   }
   sqlite.writeRaw(
-    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, l2_norm, namespace, belong_entity_uuid)
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, l2_norm, namespace, belong_entity_uuid, dna_root_id)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     params.summary,
     params.emotion_tag || null,
@@ -238,6 +260,11 @@ export function addBlackDiamond(
     _l2norm,
     params.namespace || 'default',
     _bdeuuid,
+    // 用户裁决 A′（2026-09-19）：补真实写入 + 保留 D8v2 登记。
+    //   索引 idx_black_diamond_dna_root_id 已由 MigrationManager 显式创建（schema 作者已定此列可查），
+    //   当前仅「消费方待落地」—— 不得因此放任 0/390 永存。
+    //   🔴 批 4：调用方分支补上净化（原先只有回查分支净化 ⇒ 显式传入的脏值会直接落库）。
+    sanitizeDnaRootId(params.dna_root_id) ?? _bdDnaRootId,
   );
   return getBlackDiamond(sqlite, id)!;
 }
@@ -332,20 +359,47 @@ export function addGoldEntryFromKnowledgeVault(
 
     // 🔴 memories 表有很多 NOT NULL 约束，必须全部提供
     // seq_pos: 使用负数避免与正常对话的 seq_pos 冲突
-    const seqPos = -(Date.now() % 1000000);
+    // 🔴 2026-09-19 批 5：不再用 `-(Date.now() % 1000000)`（值域周期 ≈16.7 min ⇒ 可撞 UNIQUE(seq_pos)，
+    //   在 INSERT OR REPLACE 下会静默删行）。改为从**负值带单调向下**分配（保持原排序语义）。
+    const seqPos = Number(
+      (sqlite.queryAll('SELECT COALESCE(MIN(seq_pos), 0) - 1 AS mn FROM memories') as any[])?.[0]?.mn ?? -1,
+    );
     const locusPath = 'knowledge_vault';
     const leafZone = 'language_semantic_zone';
     // V12.4 阶段B 根除24D: perception_json 列已删，知识卷宗写默认 40D v2（全零，语义等价旧 '{}'）
     const perception40D = encodeEmptyPerceptionV40();
 
-    sqlite.writeRaw(
-      `INSERT OR IGNORE INTO memories (id, seq_pos, raw_input, perception_40d, calcium_score, calcium_level,
-       locus_path, leaf_zone, effective_strength, created_at, lifecycle_state, memory_kind, recall_count,
-       last_recalled_at, source_type, strength_updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'knowledge_vault', 0, NULL, 'knowledge_vault', ?)`,
-      [entryId, seqPos, params.summary.substring(0, 500), perception40D, 0.5, 1,
-       locusPath, leafZone, 0.5, now, now]
-    );
+    // 🔴 2026-09-19 批 2：收口到唯一公共写入口 SQLiteAdapter.writeMemory()。
+    //   原实现手写 16 列 INSERT（缺 dna_root_id / entity_genes / fg_entity_names / global_uid /
+    //   belong_entity_uuid / location_fingerprint 六列）—— 本函数是 memories 的**第二套列清单**。
+    //   注：本函数为导出但**零调用方**的死代码；不删除（DS-20 禁止删公共函数），而是收口以消除分叉。
+    //   id 含时间戳 → 每次落库都是新行，故 writeMemory 的 INSERT OR REPLACE 与原 INSERT OR IGNORE 实际等价。
+    const _kvWritten = sqlite.writeMemory({
+      id: entryId,
+      seqPos,
+      createdAt: now,
+      perceptionV40: perception40D,
+      calciumScore: 0.5,
+      calciumLevel: 1,
+      locusPath,
+      leafZone,
+      rawInput: params.summary.substring(0, 500),
+      primaryEmotion: '中性',
+      memoryType: 'dialog',
+      memoryKind: 'knowledge_vault',
+      lifecycleState: 'active',
+      // 原手写 SQL 写死 source_type='knowledge_vault'；writeMemory 此前**根本没有该列**（走 DEFAULT
+      // 'conversation'）→ 先补齐此参才能收口，否则是静默语义退化。
+      sourceType: 'knowledge_vault',
+      // 原手写 0.5；writeMemory 此前硬编码 1.0 → 同样必须先补参。
+      effectiveStrength: 0.5,
+      // 知识卷宗源自 MD 文档（非会晤对话），无户籍主体 → unowned（《UUID 户籍管理法》第七条）
+      belongEntityUuid: null,
+    });
+    if (!_kvWritten) {
+      console.warn(`[Vault] 金库入库失败(knowledge_vault): ${entryId.substring(0, 20)}... ← ${params.sourcePath}`);
+      return entryId;
+    }
 
     console.log(`[Vault] 金库入库(knowledge_vault): ${entryId.substring(0, 20)}... ← ${params.sourcePath}`);
     return entryId;

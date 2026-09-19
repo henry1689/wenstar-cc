@@ -24,6 +24,10 @@ import { decodePerceptionV40, encodeEmptyPerceptionV40 } from '../../../m2/Perce
 // C3(2026-09-11): 实体名解析已收口到 m2/EntityNameCodec（唯一事实源）——
 //   删除本文件原先的本地 parseEntityNames 副本，与其余 4+ 处实现合并。
 import { parseNames } from '../../../m2/EntityNameCodec.js';
+// 2026-09-18(砂金→金库修复): 归属 UUID 推导收口到零依赖唯一事实源。
+//   deriveBelongUuid 净化历史脏值(字符串 'null')并对无归属返回 undefined；
+//   与 MemoryAssessor 权威晋升路径共用同一实现（不变量7：禁止同一规则多处实现）。
+import { deriveBelongUuid } from '../../../app/vault/belong-uuid.js';
 
 /** 各阶段执行窗口（小时） */
 const STAGE_WINDOWS = {
@@ -212,14 +216,29 @@ export class SleepTimeConsolidator {
       // 阈值从 1.0 放宽至 0.7，捕获"当下普通、长期高价值"的滞后型记忆（由 MEMORY_CONFIG 统一管理）
       const _cfg = MEMORY_CONFIG.sleepConsolidation;
       const rows = sqlite.queryAll(
-        `SELECT id, content, calcium_score, entity_names, dna_root_id, timestamp,
+        `SELECT id, role, content, calcium_score, entity_names, dna_root_id, timestamp,
                 perception_summary, seq_pos FROM conversations
          WHERE is_promoted = 0 AND calcium_score >= ${_cfg.sandToGoldMinCalcium} ORDER BY calcium_score DESC LIMIT ${_cfg.sandToGoldBatchSize}`
       );
+      // 🔴 2026-09-19 批 4（P0）：**不得再复用 `conversations.seq_pos`**。
+      //   记忆表除 id 外还有 UNIQUE(seq_pos)，而每轮对话的记忆行已由 persistence-stage 以
+      //   `seqPos=input.seqPos`（= 同一条对话的 seq_pos）写入 ⇒ 若此处再用同一个值，两条不同 id
+      //   就会在 UNIQUE(seq_pos) 上**构造性相撞**，在旧语句（INSERT OR REPLACE）下会删除对话记忆行。
+      //   现改为**批量预分配**（与同仓已有范式 MemoryAssessor.ts:211 完全一致）：
+      //   `SELECT COALESCE(MAX(seq_pos),0)+1` 后逐条 +1 —— 结构上不可能与任何已有行相撞，
+      //   且因走 seq_pos 递增，派生记忆仍排在 `ORDER BY seq_pos DESC` 的“最近”一侧。
+      let _nextSeq = Number(
+        (sqlite.queryAll('SELECT COALESCE(MAX(seq_pos), 0) AS mx FROM memories') as any[])?.[0]?.mx ?? 0,
+      ) + 1;
       let count = 0;
       for (const row of rows) {
         const _content = (row as any).content || '';
         if (!_content) continue;
+        // 🔴 2026-09-18 数据卫生(对齐 MemoryAssessor 权威路径):
+        //   assistant 回复已由 persistence-stage 每回合直写金库，再经此处晋升只会产生重复行。
+        if ((row as any).role !== 'user') continue;
+        // 🔴 2026-09-18: 过短对话无巩固价值，对齐 MemoryAssessor 的长度门槛（配置化，零硬编码）。
+        if (_content.length < MEMORY_CONFIG.sandToGold.minContentLength) continue;
 
         // 时间衰减因子（30天线性衰减到0）
         const createdAt = new Date((row as any).timestamp || Date.now()).getTime();
@@ -247,12 +266,28 @@ export class SleepTimeConsolidator {
         // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不参与睡眠期巩固（不进金库）
         if (isMetaDiscourse(_content)) continue;
 
-        sqlite.writeRaw(
-          `INSERT OR IGNORE INTO memories (id, raw_input, calcium_score, seq_pos, created_at, memory_kind, belong_entity_uuid)
-           VALUES (?, ?, ?, ?, ?, 'episodic', NULL)`,
-          [String((row as any).id), _content, (row as any).calcium_score,
-           (row as any).seq_pos || 0, (row as any).timestamp || new Date().toISOString()]
-        );
+        // 🔴 2026-09-18 P0修复——原手写 INSERT OR IGNORE 仅列出 7 列，缺 memories 的 4 个
+        //   NOT NULL 无默认列（calcium_level / locus_path / leaf_zone / strength_updated_at）。
+        //   OR IGNORE 把 NOT NULL 违约静默吞掉 → 记忆从未落库，但紧随其后的 UPDATE 仍把
+        //   会话标记 is_promoted=1 → 砂金被「吃掉」（不可恢复的静默丢数据）。
+        //   收口到唯一公共写入口 SQLiteAdapter.writeMemory()：列清单由适配器统一维护，
+        //   结构上不可遗漏；且其返回 boolean —— 仅在真正写入成功后才标记 is_promoted。
+        const _dnaRootId = String((row as any).dna_root_id || `sand_fallback_${(row as any).id}`).replace(/[^\w-]/g, '_');
+        const written = sqlite.writeMemory({
+          id: `mem_${_dnaRootId}_${(row as any).id}`,
+          seqPos: _nextSeq++, // 🔴 批 4：预分配，不再用 (row as any).seq_pos（会与对话记忆撞 UNIQUE）
+          createdAt: (row as any).timestamp || new Date().toISOString(),
+          calciumScore: calcium,
+          calciumLevel: calcium >= 0.65 ? 3 : calcium >= 0.45 ? 2 : calcium >= 0.25 ? 1 : 0,
+          locusPath: 'chat.promoted',
+          leafZone: 'spatiotemporal_episode_zone',
+          rawInput: _content.substring(0, 500),
+          primaryEmotion: '中性',
+          memoryType: 'dialog',
+          dnaRootId: (row as any).dna_root_id ?? null,
+          belongEntityUuid: deriveBelongUuid(row) ?? null,
+        });
+        if (!written) continue;
         sqlite.writeRaw('UPDATE conversations SET is_promoted = 1 WHERE id = ?', [(row as any).id]);
         count++;
       }
@@ -302,7 +337,7 @@ export class SleepTimeConsolidator {
   private async _promoteGoldToDiamond(sqlite: any): Promise<number> {
     try {
       const rows = sqlite.queryAll(
-        `SELECT id, raw_input, calcium_score, recall_count FROM memories
+        `SELECT id, raw_input, calcium_score, recall_count, belong_entity_uuid, dna_root_id FROM memories
          WHERE promoted_to_diamond = 0 AND (calcium_score >= ${MEMORY_CONFIG.goldToDiamond.minCalciumScore} OR recall_count >= ${MEMORY_CONFIG.goldToDiamond.minRecallCount})
          LIMIT ${MEMORY_CONFIG.goldToDiamond.batchSize}`
       );
@@ -310,14 +345,21 @@ export class SleepTimeConsolidator {
       for (const row of rows) {
         // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不晋升黑钻
         if (isMetaDiscourse((row as any).raw_input)) continue;
-        // black_diamond 表结构: id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, ...
+        // 🔴 2026-09-19 户管管理法（写入端修复）：晋升 = **派生自源记忆**，因此归属与溯源锚点
+        //   必须**继承**，不得留在列清单之外。原列清单只有 4 列，INSERT OR IGNORE 虽不覆盖已有行，
+        //   但本路径是这些黑钻行的**首个**写入方 → belong/dna 恒为 NULL。
+        //   实测后果：black_diamond.dna_root_id 全库 0/390（守卫 D8v2 事故主角）。
+        //   取值来源复用既有规范出函数 deriveBelongUuid（与同文件 L278 同一单一事实源，
+        //   它同时净化历史脏值：字符串 'null' → undefined）。
         sqlite.writeRaw(
-          `INSERT OR IGNORE INTO black_diamond (id, summary, tags, created_at)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO black_diamond (id, summary, tags, created_at, belong_entity_uuid, dna_root_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
           [(row as any).id,
            ((row as any).raw_input || '').substring(0, 200),
            JSON.stringify(['auto_promoted', '珍藏']),
-           new Date().toISOString()]
+           new Date().toISOString(),
+           deriveBelongUuid(row) ?? null,
+           (row as any).dna_root_id ?? null]
         );
         sqlite.writeRaw('UPDATE memories SET promoted_to_diamond = 1 WHERE id = ?', [(row as any).id]);
         count++;
@@ -405,6 +447,11 @@ export class SleepTimeConsolidator {
 
         const knId = `sem_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
 
+        // 🔴 2026-09-19 归属显式化（《UUID 户管管理法》第七条）：本条目由**跨会话/跨实体的梦境行为聚合**而来，
+        //   解析不出唯一户口 → 写 unowned（NULL）。第七条明文：无户口写入仅户主钥匙场景可写并打 unowned 标记。
+        //   ⚠️ 不得凭「感觉它是户主的」改成 OWNER_UUID —— OWNER_UUID='TXS-000000001' 是**玉瑶（系统默认本体）**，
+        //   不是用户本人；那样会把混了多实体会晤内容的聚合件记成玉瑶的知识，使监督台账登记率失真。
+        //   为何之前隐形：裸 `NULL` 与「漏列导致的值缺失」在文本上无法区分，故此处写明判定依据。
         sqlite.writeRaw(
           `INSERT INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type, belong_entity_uuid)
            VALUES (?, ?, ?, 'dream_behavior', ?, ?, ?, 1, '梦境洞察', 0, 'other', NULL)`,
@@ -434,6 +481,8 @@ export class SleepTimeConsolidator {
         const fusedSummary = this._fuseMultiSource(word, '话题归纳', wordData, sqlite);
         const finalContent = fusedSummary || content;
 
+        // 🔴 2026-09-19 归属显式化（《UUID 户管管理法》第七条）：与上方实体归纳同理，
+        //   该条目为跨实体的高频词组聚合，无唯一户口 → unowned（NULL）。判定依据同上，不重复展开。
         sqlite.writeRaw(
           `INSERT INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type, belong_entity_uuid)
            VALUES (?, ?, ?, 'dream_behavior', ?, ?, ?, 1, '梦境洞察', 0, 'other', NULL)`,
@@ -600,6 +649,13 @@ export class SleepTimeConsolidator {
       const sourceTracker = (globalThis as any).__sourceTracker;
       if (!gateway) return 0;
 
+      // 🔴 2026-09-19 批 5：seq_pos 预分配。
+      //   原式 `-(Date.now() % 1000000)` 的值域每 ≈16.7 分钟循环一次 ⇒ 相隔恰好 1_000_000 ms 的
+      //   两次写入会撞 UNIQUE(seq_pos)，在 INSERT OR REPLACE 下会静默删行。
+      //   现从**负值带单调向下**分配（保持“派生记忆排在最近序之后”的原语义），结构上不可能重复。
+      let _seqFloor = Number(
+        (sqlite.queryAll('SELECT COALESCE(MIN(seq_pos), 0) - 1 AS mn FROM memories') as any[])?.[0]?.mn ?? -1,
+      );
       let count = 0;
       for (const change of changes) {
         try {
@@ -617,19 +673,35 @@ export class SleepTimeConsolidator {
           // 写入 memories 表（标记 source_type='knowledge_vault'）
           const entryId = `kv_${manifest.uuid}_${Date.now().toString(36)}`.substring(0, 64);
           const now = new Date().toISOString();
-          // 🔴 memories 表有很多 NOT NULL 列，必须全部提供
-          const seqPos = -(Date.now() % 1000000);
+          // 🔴 2026-09-19 批 5：不再用 `-(Date.now() % 1000000)`（值域周期 ≈16.7 min，可重复）
+          const seqPos = _seqFloor--;
 
-          sqlite.writeRaw(
-            `INSERT OR IGNORE INTO memories (id, seq_pos, raw_input, perception_40d, calcium_score, calcium_level,
-             locus_path, leaf_zone, effective_strength, created_at, lifecycle_state, memory_kind, recall_count,
-             last_recalled_at, source_type, strength_updated_at, belong_entity_uuid)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'knowledge_vault', 0, NULL, 'knowledge_vault', ?, NULL)`,
-            [entryId, seqPos, summary.substring(0, MEMORY_CONFIG.sleepConsolidation.secondBrainSummaryMaxLen), encodeEmptyPerceptionV40(),
-             MEMORY_CONFIG.sleepConsolidation.secondBrainInitCalcium, 1,
-             'knowledge_vault', 'language_semantic_zone',
-             MEMORY_CONFIG.sleepConsolidation.secondBrainInitStrength, now, now]
-          );
+          // 🔴 2026-09-19 批 2：收口到唯一公共写入口（与同文件 L266 砂金→金库同一口径）。
+          //   本文件 L263 的注释早已写明「收口到唯一公共写入口 SQLiteAdapter.writeMemory()：
+          //   列清单由适配器统一维护，结构上不可遗漏」—— 本处是该原则未落完的尾巴
+          //   （手写 17 列、缺 5 列，且 belong_entity_uuid 写死 NULL）。
+          //   归属：本条源自第二大脑 MD 文档（非会晤对话），manifest 无户籍主体 → unowned（第七条）；
+          //   与批 1 对梦境洞察/月报/前瞻缓存的处置同源。
+          const _kvWritten = sqlite.writeMemory({
+            id: entryId,
+            seqPos,
+            createdAt: now,
+            perceptionV40: encodeEmptyPerceptionV40(),
+            calciumScore: MEMORY_CONFIG.sleepConsolidation.secondBrainInitCalcium,
+            calciumLevel: 1,
+            locusPath: 'knowledge_vault',
+            leafZone: 'language_semantic_zone',
+            rawInput: summary.substring(0, MEMORY_CONFIG.sleepConsolidation.secondBrainSummaryMaxLen),
+            primaryEmotion: '中性',
+            memoryType: 'dialog',
+            memoryKind: 'knowledge_vault',
+            lifecycleState: 'active',
+            sourceType: 'knowledge_vault',
+            effectiveStrength: MEMORY_CONFIG.sleepConsolidation.secondBrainInitStrength,
+            belongEntityUuid: null,
+          });
+          // 写入失败不得继续计数与溯源（否则源追踪会记下一条并不存在的记忆）
+          if (!_kvWritten) { console.warn(`[SleepTime] 第二大脑入库失败(未计数): ${entryId}`); continue; }
 
           // 溯源记录：MD源文件→memories 条目
           if (sourceTracker && typeof sourceTracker.track === 'function') {
@@ -726,7 +798,7 @@ export class SleepTimeConsolidator {
     try {
       // 1. 回放 top-20 高钙化记忆，强化 hippocampal_index 映射
       const topMemories = sqlite.queryAll(
-        `SELECT id, raw_input, calcium_score, locus_path, fg_entity_names, perception_40d
+        `SELECT id, raw_input, calcium_score, locus_path, fg_entity_names, perception_40d, belong_entity_uuid, dna_root_id
          FROM memories WHERE calcium_score >= ${MEMORY_CONFIG.sleepConsolidation.systemsConsolidationCalcium} AND lifecycle_state != 'suppressed'
          ORDER BY calcium_score DESC LIMIT ${MEMORY_CONFIG.sleepConsolidation.systemsConsolidationBatchSize}`
       );
@@ -768,12 +840,17 @@ export class SleepTimeConsolidator {
         if (existing?.length) continue;
 
         const knId = `sysc_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+        // 🔴 2026-09-19 户管管理法（写入端修复）：皮层学习条目是**单条源记忆**的派生（非跨实体聚合），
+        //   归属可精确继承 → 复用 deriveBelongUuid（同一单一事实源）。
+        //   原实现列清单列了 belong_entity_uuid 却 bind 字面 NULL —— 列在、值恒空，
+        //   守卫（只查「列是否列出」）看不见，是本次事故的隐蔽形态。
         sqlite.writeRaw(
           `INSERT INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type, belong_entity_uuid)
-           VALUES (?, ?, ?, 'systems_consolidation', ?, ?, ?, 1, '系统巩固', 0, 'other', NULL)`,
+           VALUES (?, ?, ?, 'systems_consolidation', ?, ?, ?, 1, '系统巩固', 0, 'other', ?)`,
           [knId, `巩固记忆: ${raw}`, `钙化 ${(mem as any).calcium_score?.toFixed(2)} 的持久记忆:\n${raw}`,
            JSON.stringify(['systems_consolidation', 'hippocampal_replay']),
-           new Date().toISOString(), new Date().toISOString()]
+           new Date().toISOString(), new Date().toISOString(),
+           deriveBelongUuid(mem) ?? null]
         );
       }
 

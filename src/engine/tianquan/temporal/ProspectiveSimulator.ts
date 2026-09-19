@@ -174,9 +174,15 @@ export class ProspectiveSimulator {
           );
           if (result.confidence > 0.3) {
             // 预计算结果存入知识库
+            // 🔴 2026-09-19 归属显式化（《UUID 户管管理法》第七条）：
+            //   本条是**缓存型派生件**，且源表 hippocampal_index **无任何归属列**（已读 DDL 确认），
+            //   一次模拟可跨多个实体的记忆 → 不存在唯一户口 → 写 unowned（NULL）。
+            //   ⚠️ 不得改成 OWNER_UUID（'TXS-000000001' = 玉瑶本体，非用户本人）。
+            //   本行是 INSERT OR REPLACE + 确定性 id（ps_<sig12>）→ 列清单缺席会把归属静默抹除；
+            //   显式绑定后语义可审。
             this.sqlite.writeRaw(
-              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type)
-               VALUES (?, ?, ?, 'prospective_simulation', ?, ?, ?, 1, '前瞻模拟', 0, 'other')`,
+              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type, belong_entity_uuid)
+               VALUES (?, ?, ?, 'prospective_simulation', ?, ?, ?, 1, '前瞻模拟', 0, 'other', NULL)`,
               [`ps_${sig.substring(0, 12)}`, `模拟: ${topics[0] || sig}`, result.predictedOutcome,
                JSON.stringify(['prospective_simulation', 'precompute']),
                new Date().toISOString(), new Date().toISOString()]

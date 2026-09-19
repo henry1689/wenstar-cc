@@ -14,6 +14,12 @@ import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
 // 2026-09-11: 启动期 fg_entity_names 派生回填需与写入侧共用同一序列化格式
 import { formatNames } from './EntityNameCodec.js';
+// 🔴 2026-09-19 批 2：conversations 列清单**单一事实源**（与 ConversationDB 共用同一构造器）。
+//   本文件原 insertConversation 自己手写 13 列 SQL —— 与 ConversationDB 的 22 列形成双通道漂移：
+//   缺 belong_entity_uuid/message_id、entity_names 写成 JSON 数组（实库为逗号分隔）、
+//   is_summary 被绑成 is_compacted。此处收口后，列清单与绑定顺序在结构上不可能再分叉。
+//   依赖方向已核：ConversationDB 不 import 本文件（仅 node 内置 + EntityNameCodec），无循环依赖。
+import { buildConversationInsert } from './ConversationDB.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — ensureEntity object 通道过滤垃圾(句子片段/外貌特征词不建独立实体)
 // 内联实现（避免 m2→m4 反向依赖，CK-01 九层管线检查拦截）
 const OBJECT_MAX_LEN = 6;
@@ -686,19 +692,42 @@ export class SQLiteAdapter {
     calciumScore?: number;
     dnaRootId?: string;
     isCompacted?: number;
+    /** 🔴 V23.1 同步：摘要条目必须能落 is_summary=1（与 is_compacted **独立**取值）。
+     *  此前本参数不存在，maintenance.ts 传的 { isSummary: 1 } as any 被静默丢弃。 */
+    isSummary?: number;
     namespace?: string;
+    /** V10.4 户管标注：与 ConversationDB 写入口径对齐（此前本路径不写此列 → 行恒无归属） */
+    belongEntityUuid?: string;
+    globalUid?: string;
+    locationFingerprint?: string;
+    dialogGroupId?: string;
+    /** G1-A3c1 逻辑消息 ID（此前本路径不写此列） */
+    messageId?: string;
   }): number {
     this.ensureReady();
     const now = new Date().toISOString();
-    const compacted = options?.isCompacted ?? 0;
-    this.runSql(
-      'INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, is_compacted, is_summary, is_promoted, namespace) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
-      [role, content, now, options?.seqPos ?? null, options?.topic ?? null,
-       options?.entityNames ? JSON.stringify(options.entityNames) : null,
-       options?.perception ? JSON.stringify(options.perception) : null,
-       options?.calciumScore ?? null, options?.dnaRootId ?? null,
-       compacted, compacted, options?.namespace ?? 'default']
-    );
+    // 🔴 2026-09-19 批 2：不再手写列清单 —— 收口到与 ConversationDB 共用的 buildConversationInsert()。
+    //   原 13 列清单的后果（实测）：belong_entity_uuid 恒 NULL；message_id 仅 4/3949；
+    //   entity_names 被写成 JSON 数组（实库 2786 行均为逗号分隔，JSON 形态 0 行 = 未爆的雷）；
+    //   is_summary 与 is_compacted 两个占位符同绑 compacted 值 → 【对话摘要】条目 is_summary 恒 0。
+    const { sql, bind } = buildConversationInsert({
+      role, content, timestamp: now,
+      seqPos: options?.seqPos ?? null,
+      topic: options?.topic,
+      entityNames: options?.entityNames,
+      perception: options?.perception,
+      calciumScore: options?.calciumScore,
+      dnaRootId: options?.dnaRootId,
+      globalUid: options?.globalUid,
+      locationFingerprint: options?.locationFingerprint,
+      dialogGroupId: options?.dialogGroupId,
+      isCompacted: options?.isCompacted,
+      isSummary: options?.isSummary,
+      namespace: options?.namespace,
+      belongEntityUuid: options?.belongEntityUuid,
+      messageId: options?.messageId,
+    });
+    this.runSql(sql, bind);
     // ⚠️ P1(S4 独立评审): rowid 必须在 save() **之前**读取——与 ConversationDB.insertConversation 同一陷阱。
     // save() 达到 _FLUSH_BATCH 时会同步 flushNow() → db.export()，而 sql.js 的 export()
     // 会关闭并重开连接，last_insert_rowid() 作为连接级状态将归 0（已实测证实）→ 原实现会返回 0。
@@ -822,7 +851,13 @@ export class SQLiteAdapter {
     const l2 = computeL2Norm40D(p40);
 
     this.runSql(
-      `INSERT OR REPLACE INTO memories
+      // 🔴 2026-09-19 批 5（P0 残留根治）：`write()` 是**主存储路径**（10 个调用点），但它一直用
+      //   `INSERT OR REPLACE` —— 与 `writeMemory` 修掉的是**同一机理**：memories 除 PK(id) 外还有
+      //   UNIQUE(seq_pos)，而 OR REPLACE 对任唯一冲突都先 DELETE 再 INSERT（静默删行 + 触发外键级联）。
+      //   当前调用方（FusionStorageAdapter 有 seq_pos guard + 预分配 / MemoryAssessor 用 MAX+1 /
+      //   server-vault-routes 传原行）恰好都不会构造冲突 ⇒ 风险低但机理在；
+      //   不能让“防线”依赖于每个调用方自觉——现改为与 writeMemory 同构的 ON CONFLICT(id) DO UPDATE。
+      `INSERT INTO memories
       (id, seq_pos, created_at, perception_40d,
        calcium_score, calcium_level,
        locus_path, leaf_zone, raw_input,
@@ -857,7 +892,26 @@ export class SQLiteAdapter {
               ?,
               ?, ?, ?, ?, ?,
               ?, ?, ?,
-              ?, ?, ?, ?)`,
+              ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+          seq_pos = excluded.seq_pos, created_at = excluded.created_at, perception_40d = excluded.perception_40d,
+          calcium_score = excluded.calcium_score, calcium_level = excluded.calcium_level, locus_path = excluded.locus_path,
+          leaf_zone = excluded.leaf_zone, raw_input = excluded.raw_input, memory_kind = excluded.memory_kind,
+          lifecycle_state = excluded.lifecycle_state, confidence_score = excluded.confidence_score, stability_score = excluded.stability_score,
+          last_verified_at = excluded.last_verified_at, promotion_reason = excluded.promotion_reason, suppression_reason = excluded.suppression_reason,
+          archived_at = excluded.archived_at, healed_at = excluded.healed_at, thread_id = excluded.thread_id,
+          session_id = excluded.session_id, dialog_group_id = excluded.dialog_group_id, source_conversation_ids = excluded.source_conversation_ids,
+          recall_count = excluded.recall_count, last_recalled_at = excluded.last_recalled_at, reinforcement_accumulator = excluded.reinforcement_accumulator,
+          effective_strength = excluded.effective_strength, strength_updated_at = excluded.strength_updated_at, is_landmark = excluded.is_landmark,
+          landmarked_at = excluded.landmarked_at, narrative_tag = excluded.narrative_tag, sensory_anchor = excluded.sensory_anchor,
+          scar_type = excluded.scar_type, scar_healed = excluded.scar_healed, vad_spectrum = excluded.vad_spectrum,
+          primary_emotion = excluded.primary_emotion, secondary_emotions = excluded.secondary_emotions, dna_root_id = excluded.dna_root_id,
+          entity_genes = excluded.entity_genes, fg_entity_names = excluded.fg_entity_names, time_period = excluded.time_period,
+          season = excluded.season, lunar_term = excluded.lunar_term, namespace = excluded.namespace,
+          global_uid = excluded.global_uid, belong_entity_uuid = excluded.belong_entity_uuid, location_fingerprint = excluded.location_fingerprint,
+          is_foresight = excluded.is_foresight, valid_until_ms = excluded.valid_until_ms, foresight_status = excluded.foresight_status,
+          l2_norm = excluded.l2_norm
+      `,
       [
         record.id, record.seq_pos, record.created_at, p40Json,
         cs, cl,
@@ -948,6 +1002,23 @@ export class SQLiteAdapter {
     anchorScore?: number | null;      // 批次3: 锚点重要性分（dialog-group 核心锚点用）
     scarType?: string | null;         // 批次3: 疤痕标记（地标/创伤等）
     subType?: string | null;          // 批次3: 记忆子类型（fact/object_location/reminder 等）
+    /** 🔴 2026-09-19 批 2：source_type 列此前**缺席**于本写入器的列清单，
+     *  经本入口落库的行一律走 DEFAULT 'conversation'（无法表达 knowledge_vault 等来源）。
+     *  这是「唯一公共写入口自己也是列清单不完整」的实例 —— 收口前必须先补齐。 */
+    sourceType?: string | null;
+    /** 🔴 2026-09-19 批 2：effective_strength 原被**硬编码 1.0**，
+     *  无法表达调用方所需的 0.5（MEMORY_CONFIG.sleepConsolidation.secondBrainInitStrength）。
+     *  不补此参就收口 = 静默行为变化。 */
+    effectiveStrength?: number;
+    /** 🔴 2026-09-19 批 3：记事（note）子系统的五列。补齐后 YuyaoMemoryService 的 3 个写入点
+     *  才能收口到本入口（否则 note_key / remind_at / repeat_rule 会丢，记事查询与提醒彻底失效）。
+     *  缺省值与 memories DDL 默认值**完全一致**（note_key NULL / is_valid 1 / remind_at NULL /
+     *  reminded 0 / repeat_rule NULL）⇒ 对现有 4 个调用方零行为变化。 */
+    noteKey?: string | null;
+    isValid?: number;
+    remindAt?: string | null;
+    reminded?: number;
+    repeatRule?: string | null;
   }): boolean {
     this.ensureReady();
     try {
@@ -967,7 +1038,14 @@ export class SQLiteAdapter {
               .join(',') || null)
           : null);
       this.runSql(
-        `INSERT OR REPLACE INTO memories
+        // 🔴 2026-09-19 批 4（P0）：`INSERT OR REPLACE` → `INSERT ... ON CONFLICT(id) DO UPDATE`。
+      //   原因（已在库副本上复现）：memories 除 PRIMARY KEY(id) 外还有 UNIQUE(seq_pos)，
+      //   而 OR REPLACE 对**任一**唯一冲突都先 DELETE 再 INSERT ⇒ 用不同 id 撞上同 seq_pos 时
+      //   **静默删掉另一条记忆行**（副本实测：受害原行消失、表总行数不变）；且那个 DELETE 会触发
+      //   外键副作用（memory_entities ON DELETE CASCADE / black_diamond.source_id ON DELETE SET NULL）。
+      //   ON CONFLICT(id) 只处理「同 id 重写」这一预期冲突（全列覆盖，语义与 REPLACE 等价），
+      //   seq_pos 冲突则**抛错** → 被本方法 catch → return false + console.error ⇒ 失败可见而非静默丢数据。
+      `INSERT INTO memories
         (id, fg_entity_names, seq_pos, created_at, perception_40d, calcium_score, calcium_level,
          locus_path, leaf_zone, raw_input, memory_kind, lifecycle_state,
          confidence_score, stability_score, thread_id, session_id, source_conversation_ids,
@@ -976,8 +1054,27 @@ export class SQLiteAdapter {
 	         dna_root_id, entity_genes,
 	         global_uid, location_fingerprint, belong_entity_uuid,
 		         is_foresight, valid_until_ms, foresight_status, namespace,
-         time_period, season, lunar_term, anchor_score, scar_type, sub_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         time_period, season, lunar_term, anchor_score, scar_type, sub_type, source_type,
+         note_key, is_valid, remind_at, reminded, repeat_rule)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          fg_entity_names = excluded.fg_entity_names, seq_pos = excluded.seq_pos, created_at = excluded.created_at,
+          perception_40d = excluded.perception_40d, calcium_score = excluded.calcium_score, calcium_level = excluded.calcium_level,
+          locus_path = excluded.locus_path, leaf_zone = excluded.leaf_zone, raw_input = excluded.raw_input,
+          memory_kind = excluded.memory_kind, lifecycle_state = excluded.lifecycle_state, confidence_score = excluded.confidence_score,
+          stability_score = excluded.stability_score, thread_id = excluded.thread_id, session_id = excluded.session_id,
+          source_conversation_ids = excluded.source_conversation_ids, recall_count = excluded.recall_count, promoted_to_diamond = excluded.promoted_to_diamond,
+          strength_updated_at = excluded.strength_updated_at, effective_strength = excluded.effective_strength, is_landmark = excluded.is_landmark,
+          primary_emotion = excluded.primary_emotion, memory_type = excluded.memory_type, dialog_group_id = excluded.dialog_group_id,
+          topic_label = excluded.topic_label, dna_root_id = excluded.dna_root_id, entity_genes = excluded.entity_genes,
+          global_uid = excluded.global_uid, location_fingerprint = excluded.location_fingerprint, belong_entity_uuid = excluded.belong_entity_uuid,
+          is_foresight = excluded.is_foresight, valid_until_ms = excluded.valid_until_ms, foresight_status = excluded.foresight_status,
+          namespace = excluded.namespace, time_period = excluded.time_period, season = excluded.season,
+          lunar_term = excluded.lunar_term, anchor_score = excluded.anchor_score, scar_type = excluded.scar_type,
+          sub_type = excluded.sub_type, source_type = excluded.source_type, note_key = excluded.note_key,
+          is_valid = excluded.is_valid, remind_at = excluded.remind_at, reminded = excluded.reminded,
+          repeat_rule = excluded.repeat_rule
+        `,
         [
           opts.id, fgEntityNames, opts.seqPos, opts.createdAt, p40Json,
           opts.calciumScore, opts.calciumLevel,
@@ -990,6 +1087,7 @@ export class SQLiteAdapter {
           opts.sessionId ?? null,
           opts.sourceConversationIds ? JSON.stringify(opts.sourceConversationIds) : null,
           opts.createdAt,
+          opts.effectiveStrength ?? 1.0, // 🔴 2026-09-19 批2：原为 VALUES 里硬编码的 1.0
           opts.primaryEmotion, opts.memoryType || 'dialog',
           opts.dialogGroupId ?? null, opts.topicLabel ?? null,
           opts.dnaRootId ?? null, opts.entityGenes ? JSON.stringify(opts.entityGenes) : null,
@@ -999,6 +1097,14 @@ export class SQLiteAdapter {
           opts.namespace || 'default',
           opts.timePeriod ?? null, opts.season ?? null, opts.lunarTerm ?? null,
           opts.anchorScore ?? null, opts.scarType ?? null, opts.subType ?? null,
+          // 🔴 2026-09-19 批2：source_type 追加在列清单尾部（不动既有列序，杜绝错位风险）
+          opts.sourceType || 'conversation',
+          // 🔴 2026-09-19 批3：note 五列同样追加在尾部；缺省值与 DDL 默认值一致
+          opts.noteKey ?? null,
+          opts.isValid ?? 1,
+          opts.remindAt ?? null,
+          opts.reminded ?? 0,
+          opts.repeatRule ?? null,
         ],
       );
       this.save();

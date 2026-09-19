@@ -62,6 +62,28 @@ function expectRealNull(v: any) {
   expect(v ?? null).toBeNull();
 }
 
+/**
+ * 按**列名**取该写入语句中某列的绑定值（位置无关）。
+ * 🔴 2026-09-19 批 5：原先用 `params[params.length - 1]` 断言“最后一个是 belong”——
+ *   那是**位置断言**，而列清单尾部会因为加列而变（批 2 在 belong 后追加了 dna_root_id）⇒ 测试凭空变红。
+ *   本函数从 SQL 的列清单 + VALUES token 反推列在哪一个 bind 上（并跳过固定字面量列，如 recall_count 的 0）。
+ */
+function colValue(sql: string, params: any[], col: string): any {
+  const cols = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')')).split(',').map((c) => c.trim());
+  const vSec = sql.slice(sql.indexOf('VALUES'));
+  const vals = vSec.slice(vSec.indexOf('(') + 1, vSec.lastIndexOf(')')).split(',').map((s) => s.trim());
+  const i = cols.indexOf(col);
+  if (i < 0) throw new Error(`列清单里没有 ${col}`);
+  if (vals[i] !== '?') return vals[i];
+  return params[vals.slice(0, i).filter((v) => v === '?').length];
+}
+
+/** 取最近一次匹配写入的 {sql, params}（列名断言需要 SQL） */
+function lastWriteEntry(fake: any, sqlRe: RegExp) {
+  const hit = fake.writes.filter((w: any) => sqlRe.test(w.sql));
+  return hit.length > 0 ? hit[hit.length - 1] : null;
+}
+
 describe('[②-1补漏] 归属脏值不得向下游透传', () => {
   // ── ① memories → vault_log ──
   it('① logVaultOperation：源记忆归属为字符串 "null" → vault_log 落 NULL', () => {
@@ -96,8 +118,22 @@ describe('[②-1补漏] 归属脏值不得向下游透传', () => {
     addBlackDiamond(fake, { summary: 's', source_id: 'mem_x' });
     const params = lastWrite(fake, /INSERT INTO black_diamond/i);
     expect(params).not.toBeNull();
-    // INSERT 列序：…, namespace, belong_entity_uuid → 末位
-    expectRealNull(params![params!.length - 1]);
+    // 🔴 批 5：改为**按列名**断言（原为“末位是 belong”的位置断言，列清单加列即碎）
+    const entry = lastWriteEntry(fake, /INSERT INTO black_diamond/i);
+    expectRealNull(colValue(entry!.sql, entry!.params, 'belong_entity_uuid'));
+  });
+
+  it('② addBlackDiamond：源记忆 dna_root_id 为字符串 "null" → 不得落库（与 belong 同口径）', () => {
+    // 🔴 2026-09-19 批 4/5：调用方分支原先没过净化（只有回查分支净化）—— 本用例钉住它。
+    const fake = makeFake([
+      [/FROM black_diamond WHERE id = \?/i, []],
+      [/SELECT COUNT\(\*\) as cnt FROM black_diamond/i, [{ cnt: 0 }]],
+      [/FROM memories WHERE id = \?/i, [{ belong_entity_uuid: 'TXS-000000001', dna_root_id: 'null' }]],
+    ]);
+    addBlackDiamond(fake, { summary: 's', source_id: 'mem_x' });
+    const entry = lastWriteEntry(fake, /INSERT INTO black_diamond/i);
+    expect(entry).not.toBeNull();
+    expectRealNull(colValue(entry!.sql, entry!.params, 'dna_root_id'));
   });
 
   it('② addBlackDiamond：源记忆归属合法 → 原样保留', () => {
@@ -107,8 +143,9 @@ describe('[②-1补漏] 归属脏值不得向下游透传', () => {
       [/FROM memories WHERE id = \?/i, [{ belong_entity_uuid: 'TXS-000000001' }]],
     ]);
     addBlackDiamond(fake, { summary: 's', source_id: 'mem_x' });
-    const params = lastWrite(fake, /INSERT INTO black_diamond/i);
-    expect(params![params!.length - 1]).toBe('TXS-000000001');
+    const entry = lastWriteEntry(fake, /INSERT INTO black_diamond/i);
+    expect(entry, '未捕获到 black_diamond 写入').not.toBeNull();
+    expect(colValue(entry!.sql, entry!.params, 'belong_entity_uuid')).toBe('TXS-000000001');
   });
 
   // ── ③ conversations → works ──

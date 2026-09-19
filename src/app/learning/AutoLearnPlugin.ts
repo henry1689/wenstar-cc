@@ -87,11 +87,17 @@ export class AutoLearnPlugin {
       // ── ④ 冲突检测 ──
       for (const entity of entities) {
         if (entity.type !== 'person' && entity.type !== 'emotion') continue;
+        // 🔴 2026-09-19 户管管理法（写入端修复）：把 EntityGene.uuid 传给冲突检测器。
+        //   EntityGene.uuid 是 L3 标注时从 FamilyGraph 解析的**权威户籍值**（见 m1/types/dna.ts:123），
+        //   与 SQLiteAdapter 使用 gene.uuid 的既定惯例一致；本处是 ConflictDetector.check 的**唯一调用方**
+        //   （全仓 grep 确认），uuid 只能在此传入。pass-through 而不是在检测器内重查 FG，
+        //   避免二次解析引入不一致。
         await this.conflictDetector.check(
           entity.name,
           message,
           entity.type,
           perception,
+          entity.uuid ?? null,
         );
       }
 

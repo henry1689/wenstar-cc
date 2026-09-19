@@ -233,9 +233,15 @@ export class DailyMaintenanceScheduler {
             const summary = `本月对话主题 Top10:\n${top10.map(([w, c], i) => `${i + 1}. ${w} (${c}次)`).join('\n')}`;
             const monthStr = new Date().toISOString().substring(0, 7);
             const knId = `topic_${monthStr.replace('-', '')}`;
+            // 🔴 2026-09-19 归属显式化（《UUID 户管管理法》第七条）：
+            //   本条是**跨实体的月度聚合**（上方 SELECT 取全库 role='user' 对话，未按户口分组），
+            //   不存在唯一户口 → 写 unowned（NULL）。第七条：无户口写入仅户主钥匙场景可写并打 unowned 标记。
+            //   ⚠️ 不得改成 OWNER_UUID：'TXS-000000001' 是**玉瑶（系统默认本体）**，不是用户本人。
+            //   另：本行是 INSERT OR REPLACE + 确定性 id（topic_YYYYMM）→ 列清单若缺席，
+            //   归属会被每次月报重写隐式抹成 NULL；显式绑定后该行为变为可审计的既定语义。
             sqlite.writeRaw(
-              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, classification, classification_pending)
-               VALUES (?, ?, ?, 'monthly_topic', ?, datetime('now'), datetime('now'), '对话主题月报', 0)`,
+              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, classification, classification_pending, belong_entity_uuid)
+               VALUES (?, ?, ?, 'monthly_topic', ?, datetime('now'), datetime('now'), '对话主题月报', 0, NULL)`,
               [knId, `对话主题月报 ${monthStr}`, summary,
                JSON.stringify(['monthly_topic', monthStr, ...top10.slice(0, 5).map(([w]) => w)])]
             );

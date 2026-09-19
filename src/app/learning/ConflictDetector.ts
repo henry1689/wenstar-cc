@@ -18,6 +18,11 @@ interface ConflictRecord {
   firstMessage: string;
   secondMessage: string;
   detectedAt: string;
+  /** 🔴 2026-09-19 户管管理法：冲突条目的实体归属 UUID。
+   *  来源 = 当前消息 entity_genes 里该实体的 `uuid`（EntityGene.uuid，由 L3 标注时从 FamilyGraph 解析，
+   *  与 SQLiteAdapter 使用 gene.uuid 的既定惯例一致）—— 这是**权威值**，不得在此重新按名字猜。
+   *  非 person 类实体（emotion 等）无户籍 → 为 null（合法 unowned）。 */
+  entityUuid?: string | null;
 }
 
 export class ConflictDetector {
@@ -46,12 +51,14 @@ export class ConflictDetector {
    * @param message 当前消息
    * @param entityType 实体类型
    * @param perception 当前感知
+   * @param entityUuid 该实体的户籍 UUID（来自 EntityGene.uuid；缺省 null = unowned）
    */
   async check(
     entityName: string,
     message: string,
     entityType: string,
     perception: Perception24D,
+    entityUuid?: string | null,
   ): Promise<ConflictRecord | null> {
     try {
       // 只检测含情感评价的消息
@@ -82,6 +89,7 @@ export class ConflictDetector {
             firstMessage: historyContent.substring(0, 200),
             secondMessage: message.substring(0, 200),
             detectedAt: new Date().toISOString(),
+            entityUuid: entityUuid ?? null,
           };
 
           // 写入冲突标记到知识库
@@ -122,12 +130,18 @@ export class ConflictDetector {
       const now = new Date().toISOString();
       const id = `kn_conf_${Date.now().toString(36)}`;
 
+      // 🔴 2026-09-19 户管管理法（写入端修复）：冲突条目是**关于某个具体人物/情感实体**的陈述，
+      //   归属可精确解析（上游 EntityGene.uuid），不得留在列清单之外。
+      //   原列清单缺席 → INSERT OR IGNORE 只惠及「从未有过归属」，
+      //   但实测 kb 98 行仅 1 行有 belong：该条在会晤场景会被 deny-by-default 闸门滤掉。
+      //   unowned（NULL）在此是**合法且可预期**的结果（emotion 类实体无户籍），故仍用参数绑定而非裸 NULL，
+      //   以便与「漏列导致的值缺失」在文本上可区分。
       sqlite.writeRaw(
         `INSERT OR IGNORE INTO knowledge_base
          (id, title, content, source_type, tags, created_at, updated_at, locked,
-          classification, classification_pending, interaction_type, scene_tags)
+          classification, classification_pending, interaction_type, scene_tags, belong_entity_uuid)
          VALUES (?, ?, ?, 'conflict', ?, ?, ?, 1,
-                 '冲突检测', 1, 'conversation', ?)`,
+                 '冲突检测', 1, 'conversation', ?, ?)`,
         [
           id,
           `冲突: ${conflict.entity}`,
@@ -138,6 +152,7 @@ export class ConflictDetector {
           JSON.stringify(['auto-detected', 'conflict', `entity:${conflict.entity}`]),
           now, now,
           'conflict',
+          conflict.entityUuid ?? null,
         ],
       );
 

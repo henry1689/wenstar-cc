@@ -47,10 +47,17 @@ function isDocumentedAnchor(site: { columns: string[]; window: string }): boolea
   return site.columns.includes('source_type') && site.window.includes("'user.misc.default'");
 }
 
-/** 扫描源码中所有 `INSERT OR REPLACE INTO memories` 的列清单（解析失败者 columns=[]） */
+/**
+ * 扫描源码中 memories 的写入点列清单。
+ * 🔴 2026-09-19 批 5：原匹配式只认 `INSERT OR REPLACE INTO memories`，而
+ *   `writeMemory` 为了修 P0（OR REPLACE 撞 UNIQUE(seq_pos) 会静默删行）已改成
+ *   `INSERT INTO memories ... ON CONFLICT(id) DO UPDATE` ⇒ 旧式匹配**看不到主写入路径**，
+ *   本守护的 sites 数跌到 3 以下（自带的有效性捎兵报红才发现）。现放宽到全形态：
+ *   INSERT / INSERT OR REPLACE / INSERT OR IGNORE（三者都有“未列出列被忽略”的风险）。
+ */
 function collectMemoryInsertColumnLists(src: string): Array<{ columns: string[]; snippet: string; window: string }> {
   const out: Array<{ columns: string[]; snippet: string; window: string }> = [];
-  const marker = /INSERT\s+OR\s+REPLACE\s+INTO\s+memories/gi;
+  const marker = /INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+memories/gi;
   let m: RegExpExecArray | null;
   while ((m = marker.exec(src)) !== null) {
     // 解析必须用**完整剩余源码**——截断片段会丢掉列清单的收尾括号，导致误判为「无列清单」

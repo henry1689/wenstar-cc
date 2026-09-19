@@ -16,6 +16,104 @@ const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..');
 const DEFAULT_DB_PATH = join(PROJECT_ROOT, 'data', 'webui', 'conversations.db');
 
+// ════════════════════════════════════════════════════════════════════
+// 🔴 conversations 列清单的【单一事实源】（2026-09-19 批 2 · arch_structural_defect）
+// ════════════════════════════════════════════════════════════════════
+// 背景（架构级缺陷，非单点 bug）：conversations 一度有**两个写入点各自手写列清单** ——
+//   本文件 insertConversation（22 列 ✅）与 SQLiteAdapter.insertConversation（13 列 ❌）。
+// 漂移后果（实测）：
+//   ① message_id 仅 4/3949；② belong_entity_uuid 在该路径恒 NULL；
+//   ③ entity_names 形态分裂：实库 2786 行为逗号分隔（本文件走 formatNames），
+//      而 SQLiteAdapter 侧用 JSON.stringify 写 → 潜在格式污染（实库 JSON 形态 0 行，属未爆雷）；
+//   ④ is_compacted 与 is_summary 两个占位符被绑到同一个 compacted 值 →
+//      maintenance.ts 的【对话摘要】条目 is_summary 恒 0（13 条摘要实测 2 条为 0）★ V23.1 修复未同步。
+//
+// 现规定：**任何写入 conversations 的代码必须经 buildConversationInsert()**，
+// 禁止再手写列清单（也不得复制本文件里的 SQL 字符串）。
+// 同仓先例：EntityNameCodec.ENTITY_NAME_COLUMNS（列名单一事实源）。
+// 关键性质：bind 顺序**由列清单本身派生**，故「SQL 占位符数 ≠ bind 数」与「列/值错位」
+// 在结构上不可能发生（历史事故 D5/P1 均源于两处各写一份）。
+// ════════════════════════════════════════════════════════════════════
+
+export interface ConversationRowInput {
+  role: string;
+  content: string;
+  timestamp: string;
+  seqPos?: number | null;
+  topic?: string | null;
+  /** 实体名数组；序列化统一走 EntityNameCodec.formatNames（逗号分隔，实库既定形态） */
+  entityNames?: readonly string[] | null;
+  /** 感知快照，以 JSON 文本落 perception_summary 列。
+   *  类型放宽为 Record<string, number>：两个调用方的声明本就不同
+   *  （ConversationDB 用 Record<string, number>，SQLiteAdapter 用具名三元组 pleasure/arousal/intimacy），
+   *  收口到同一构造器后必须能同时接受；列内容语义不变。 */
+  perception?: Record<string, number> | null;
+  calciumScore?: number | null;
+  dnaRootId?: string | null;
+  globalUid?: string | null;
+  locationFingerprint?: string | null;
+  dialogGroupId?: string | null;
+  dialogRound?: number | null;
+  isTest?: number | null;
+  isCompacted?: number | null;
+  /** 🔴 V23.1：必须与 is_compacted **独立取值**。摘要是压缩的产物，不应再被归档流程压掉 */
+  isSummary?: number | null;
+  roleplayChar?: string | null;
+  namespace?: string | null;
+  belongEntityUuid?: string | null;
+  mentionedEntityUuids?: readonly string[] | null;
+  /** G1-A3c1: 逻辑消息 canonical atom record ID（原值写入，不 trim/coerce/生成/复用） */
+  messageId?: string | null;
+}
+
+/** 列清单（写入顺序 = 本数组顺序；新增列必须同步此处） */
+export const CONVERSATION_INSERT_COLUMNS = [
+  'role', 'content', 'timestamp', 'seq_pos', 'topic', 'entity_names', 'perception_summary',
+  'calcium_score', 'dna_root_id', 'global_uid', 'location_fingerprint', 'dialog_group_id',
+  'dialog_round', 'is_test', 'is_compacted', 'is_summary', 'roleplay_char', 'is_promoted',
+  'namespace', 'belong_entity_uuid', 'mentioned_entity_uuids', 'message_id',
+] as const;
+
+/** 无绑定值的固定字面量列（is_promoted 由后续流程置位，写入时恒 0；恪守「只增不删」） */
+export const CONVERSATION_FIXED_LITERALS: Readonly<Record<string, string>> = { is_promoted: '0' };
+
+/** 需要绑定的列（= 列清单去掉固定字面量列）；**bind 顺序即此顺序**，供调用方/测试核对而不必自行推导 */
+export const CONVERSATION_BOUND_COLUMNS: readonly string[] = CONVERSATION_INSERT_COLUMNS.filter(
+  (c) => !(c in CONVERSATION_FIXED_LITERALS),
+);
+
+/** 唯一写构造器：同时产出 SQL 与 bind，二者顺序同源 */
+export function buildConversationInsert(input: ConversationRowInput): { sql: string; bind: unknown[] } {
+  const values: Record<string, unknown> = {
+    role: input.role,
+    content: input.content,
+    timestamp: input.timestamp,
+    seq_pos: input.seqPos ?? 0,
+    topic: input.topic || '',
+    entity_names: formatNames(input.entityNames),
+    perception_summary: input.perception ? JSON.stringify(input.perception) : '',
+    calcium_score: input.calciumScore || 0,
+    dna_root_id: input.dnaRootId || null,
+    global_uid: input.globalUid || null,
+    location_fingerprint: input.locationFingerprint || null,
+    dialog_group_id: input.dialogGroupId || null,
+    dialog_round: input.dialogRound ?? null,
+    is_test: input.isTest ?? 0,
+    is_compacted: input.isCompacted ?? 0,
+    is_summary: input.isSummary ?? 0,
+    roleplay_char: input.roleplayChar || null,
+    namespace: input.namespace || 'default',
+    belong_entity_uuid: input.belongEntityUuid || null,
+    mentioned_entity_uuids: input.mentionedEntityUuids ? JSON.stringify(input.mentionedEntityUuids) : null,
+    message_id: input.messageId ?? null,
+  };
+  const cols: readonly string[] = CONVERSATION_INSERT_COLUMNS;
+  const slot = (c: string): string => (c in CONVERSATION_FIXED_LITERALS ? CONVERSATION_FIXED_LITERALS[c] : '?');
+  const sql = `INSERT INTO conversations (${cols.join(', ')}) VALUES (${cols.map(slot).join(', ')})`;
+  const bind = cols.filter((c) => !(c in CONVERSATION_FIXED_LITERALS)).map((c) => values[c]);
+  return { sql, bind };
+}
+
 interface ConversationRow {
   id: number;
   role: string;
@@ -173,24 +271,30 @@ export class ConversationDB {
     this.ensureReady();
     const seqPos = options?.seqPos ?? 0;
     const timestamp = new Date().toISOString();
-    // C3(2026-09-11): 逗号分隔的写入格式定义收口到 EntityNameCodec.formatNames（唯一事实源）
-    const entityNames = formatNames(options?.entityNames);
-    const perceptionSummary = options?.perception ? JSON.stringify(options.perception) : '';
-    // V23.1(2026-09-13): is_summary 与 is_compacted **独立取值**。
-    //   原实现是 `compactVal, compactVal`（联动），使摘要条目永远落不了 is_summary=1 ——
-    //   实测 11 条【对话摘要】全部 is_summary=0，摘要通道失效。
-    const compactVal = options?.isCompacted ?? 0;
-    const summaryVal = options?.isSummary ?? 0;
-    this.db.run(
-      `INSERT INTO conversations (role, content, timestamp, seq_pos, topic, entity_names, perception_summary, calcium_score, dna_root_id, global_uid, location_fingerprint, dialog_group_id, dialog_round, is_test, is_compacted, is_summary, roleplay_char, is_promoted, namespace, belong_entity_uuid, mentioned_entity_uuids, message_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-      [role, content, timestamp, seqPos, options?.topic || '', entityNames, perceptionSummary,
-       options?.calciumScore || 0, options?.dnaRootId || null, options?.globalUid || null, options?.locationFingerprint || null,
-       options?.dialogGroupId || null, options?.dialogRound ?? null, options?.isTest ?? 0, compactVal, summaryVal,
-       options?.roleplayChar || null, options?.namespace || 'default', options?.belongEntityUuid || null,
-       options?.mentionedEntityUuids ? JSON.stringify(options.mentionedEntityUuids) : null,
-       options?.messageId ?? null],
-    );
+    // 🔴 2026-09-19 批 2：列清单 + 绑定顺序 + 序列化格式全部收口到 buildConversationInsert（单一事实源）。
+    //   原实现在此处内联 22 列 SQL 与 bind 数组 —— 与 SQLiteAdapter 那份 13 列 SQL 形成双通道漂移。
+    //   V23.1 的 is_summary/is_compacted 独立性说明已随实现移入构造器（那里是 is_summary 的真身）。
+    const { sql, bind } = buildConversationInsert({
+      role, content, timestamp, seqPos,
+      topic: options?.topic,
+      entityNames: options?.entityNames,
+      perception: options?.perception,
+      calciumScore: options?.calciumScore,
+      dnaRootId: options?.dnaRootId,
+      globalUid: options?.globalUid,
+      locationFingerprint: options?.locationFingerprint,
+      dialogGroupId: options?.dialogGroupId,
+      dialogRound: options?.dialogRound,
+      isTest: options?.isTest,
+      isCompacted: options?.isCompacted,
+      isSummary: options?.isSummary,
+      roleplayChar: options?.roleplayChar,
+      namespace: options?.namespace,
+      belongEntityUuid: options?.belongEntityUuid,
+      mentionedEntityUuids: options?.mentionedEntityUuids,
+      messageId: options?.messageId,
+    });
+    this.db.run(sql, bind);
     // 🔴 D5 修复(2026-09-11): 返回真实 conversations.id（原实现返回 seqPos）。
     // 调用方 persistence-stage 把返回值当作主键用于增量索引 source_id
     // （注释原文即「P1-C 修复: source_id 用真实 conversations.id（与 rebuildAllIndexes 一致）」），

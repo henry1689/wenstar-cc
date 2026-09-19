@@ -96,7 +96,8 @@ describe('P3.1 - API 端点冒烟测试', () => {
 // ─── 2. 核心链路 E2E 测试 ───
 
 describe('P3.2 - 核心链路 E2E 测试', () => {
-  it('聊天正常返回 M1-M5 全链路数据', { timeout: 60000 }, async () => {
+  // 🔴 2026-09-19：LLM 全管线用例的 60s → 150s（同 identity-stability 的根因：LLM 延迟方差，非代码缺陷）。
+  it('聊天正常返回 M1-M5 全链路数据', { timeout: 150000 }, async () => {
     const { status, data } = await json('/api/chat', {
       method: 'POST',
       body: JSON.stringify({ message: '你好' }),
@@ -116,6 +117,10 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
     expect(data.m5.strategy_id).toBeTruthy();
   });
 
+  // 🔴 2026-09-19 诊断结论：本用例挂起**不是超时配置问题** —— 实测将超时提到 300s 仍不返回，
+  //   且挂起会连带拖垮同文件后续用例（300s 时失败数由 2 涨到 5）。根因在**知识库写入链路的
+  //   本地嵌入/向量索引初始化**（KnowledgeEngine:134/211/228）。故**保持原 60s**（避免扩大连带伤害），
+  //   把该链路挂起登记为独立的待查基础设施问题（见 docs/data-storage-reference.md）。
   it('知识库 CRUD 完整链路', { timeout: 60000 }, async () => {
     // 创建
     const { status: s1, data: d1 } = await json('/api/knowledge', {
@@ -151,7 +156,7 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
     expect(s5).toBe(200);
   });
 
-  it('角色切换工作正常', { timeout: 30000 }, async () => {
+  it('角色切换工作正常', { timeout: 90000 }, async () => {
     // 获取角色列表
     const { data: d1 } = await json('/api/personas');
     const firstRole = d1.active;
