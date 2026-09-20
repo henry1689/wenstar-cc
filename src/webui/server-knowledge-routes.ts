@@ -100,7 +100,7 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
         const code = isDedup ? 409 : isClientError ? 400 : 500;
         console.error('[server-knowledge] POST /api/knowledge 失败(' + code + '):', msg);
         res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(isDedup ? { error: msg, dedup: true } : { error: msg }));
+        res.end(JSON.stringify(isDedup ? { error: msg, dedup: true, existing: (e as any)?.dedup ?? null } : { error: msg }));
       }
       return true;
     }

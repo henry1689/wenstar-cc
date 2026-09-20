@@ -305,7 +305,17 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
         if (dupResults.length > 0 && dupResults[0].score > 2.5) {
           const dup = dupResults[0];
           console.log('[KE-Dedup] FTS命中重复: "' + fixedTitle.substring(0, 20) + '" ≈ "' + dup.title.substring(0, 20) + '" (score=' + dup.score.toFixed(2) + '), 跳过新增');
-          throw new Error('DEDUP_SKIP');
+          // 🔴 2026-09-20：不再只抛裸字符串 —— 把"命中的既有条目"带回调用方。
+          //   原先 409 只说"被拒"，调用方不知道"和谁重复"，无法自查/复用（只能靠人猜）。
+          //   语义不变（仍然是拒给新增），仅把既有条目 id/title/score 一并给出（可发现性）。
+          const _dedupErr: any = new Error('DEDUP_SKIP');
+          _dedupErr.dedup = {
+            existing_id: (dup as any).id ?? null,
+            existing_title: dup.title,
+            score: Number(dup.score.toFixed(2)),
+            matched_by: 'fts_bm25',
+          };
+          throw _dedupErr;
         }
       } catch (err: any) {
         if (err.message === 'DEDUP_SKIP') throw err;
@@ -500,7 +510,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   const _retrieverBreaker = new RetrieverCircuitBreaker('knowledge_fts', { timeoutMs: 3000 });
   let _ftsInitialized = false;
   let _emotionSearchCount = 0;  // 🔥 情感检索计数，每20次持久化一次权重
-  _ftsSearch.init().then(() => { _ftsInitialized = true; }).catch(() => {});
+  _ftsSearch.init().then(() => { _ftsInitialized = true; }).catch((e: any) => {
+    // 🔴 2026-09-20：原先 `.catch(() => {})` 静默吞错 ⇒ 索引初始化失败无人知晓（只表现为"去重一直不生效"）。
+    //   失败可见 + 降级不阻塞：_ftsInitialized 保持 false ⇒ 去重跳过（入库照常）；检索走 FTS5 → LIKE 回退。
+    console.warn('[KE] FTS 索引初始化失败（降级：去重跳过 + 检索回退 LIKE）:', e?.message || e);
+  });
 
   /** 🛡️ V4.0: 去除 markdown frontmatter（供评分阶段使用） */
   function _stripFrontmatter(content: string): string {

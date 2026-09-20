@@ -470,8 +470,16 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 回归防线：`src/m9/__tests__/working-memory-failure-visibility.test.ts`（3 例：
 ①手动路径不 reject + 打印 + 计数 + 条目不丢；②定时器路径不产生 unhandledRejection；③换可用存储后计数清零且条目毕业）。
 
-> 注：`m7/M7Orchestrator.ts` 的同类定时器已在 try/catch 内（本次核查确认，无需改）；
-> `webui/maintenance.ts` 的两个 `setInterval(async)` 属高危目录（`src/webui/`），已登记待授权后处理。
+> 注：`m7/M7Orchestrator.ts` 的同类定时器已在 try/catch 内（本次核查确认，无需改）。
+>
+> **2026-09-20 收尾（`src/webui/maintenance.ts`）**：实体离线终审的 `setInterval(async)` 原先**无 catch**、
+> 首轮 `void this.runEntityTriage()` 是**浮空 promise**、首轮 compaction/GC 两处 `.catch(() => {})` 静默吞错
+> —— 4 处一并补齐（失败告警 + 非阻塞），与本节不变量一致（失败可见、不静默）。
+>
+> **同批：`DEDUP_SKIP` 的可发现性**（`src/app/knowledge/KnowledgeEngine.ts` + `src/webui/server-knowledge-routes.ts`）：
+> 知识重复被拒（409）原先只说"被拒"，调用方不知"和谁重复"；现错误对象携带命中的既有条目
+> （`existing_id` / `existing_title` / `score` / `matched_by`），409 响应体一并给出。
+> **接受/拒绝语义不变**，仅提高可发现性（是否改为"重复即更新"仍属产品决策，未动）。
 
 ### **⑤ 异步落盘 + 防抖窗口 10 秒**（2026-09-20，C1-a / C1-b）
 

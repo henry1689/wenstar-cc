@@ -264,14 +264,24 @@ export class MaintenanceService {
     // 低频（每日）即可：建档不频繁、不特急，但很重要（用户 2026-09-20）。
     // 保守策略：只提升真人，噪声仅标注（永不自动回收）。
     this.entityTriageTimer = setInterval(async () => {
-      await this.runEntityTriage();
+      // 🔴 2026-09-20：补齐 catch —— 否则实体离线终审失败只会落 unhandledRejection（静默不执行），
+      //   与 M9 巩固链路同类问题（见 docs/data-storage-reference.md「④ 批处理失败可见性」）。
+      try {
+        await this.runEntityTriage();
+      } catch (e: any) {
+        console.error('[Maintenance] 实体离线终审失败(非阻塞，下轮重试):', e?.message || e);
+      }
     }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
 
     // 首轮尽快执行
-    setTimeout(() => this.runCompaction().catch(() => {}), 30_000);
-    setTimeout(() => this.runGC().catch(() => {}), 60_000);
+    // 🔴 2026-09-20：原先两处 `.catch(() => {})` 静默吞错 ⇒ 改为告警（失败可见）
+    setTimeout(() => this.runCompaction().catch((e: any) => console.warn('[Maintenance] 首轮压缩失败(非阻塞):', e?.message || e)), 30_000);
+    setTimeout(() => this.runGC().catch((e: any) => console.warn('[Maintenance] 首轮 GC 失败(非阻塞):', e?.message || e)), 60_000);
     // 🔵 批13: 首轮实体终审延迟 5 分钟（等检索/FG 稳定后再跑，避免和启动期任务抢资源）
-    setTimeout(() => { void this.runEntityTriage(); }, 5 * 60_000);
+    // 🔴 2026-09-20：`void` 浮空 promise 必须挂 catch —— 否则失败落 unhandledRejection（静默不执行）
+    setTimeout(() => {
+      this.runEntityTriage().catch((e: any) => console.error('[Maintenance] 首轮实体终审失败(非阻塞):', e?.message || e));
+    }, 5 * 60_000);
     // 🔵 批15(P1-2): void 边自愈【首轮】—— 原实现只在 24h interval 内，
     // 进程存活不足 24h（或被 /api/reset 重置计时）时永不执行。
     // 与其它首轮任务并列（30s/60s/5min），启动后 10 分钟跑一次。
