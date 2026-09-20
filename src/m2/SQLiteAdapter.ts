@@ -238,21 +238,21 @@ export class SQLiteAdapter {
   private _writeSeq = 0;
   private readonly _FLUSH_BATCH = 50;  // 硬上限：突发积压超过 50 次才强制落盘（兜底，避免内存无界）
   /**
-   * 防抖窗口：窗口内的写入合并为一次落盘。
+   * 防抖窗口（毫秒）：窗口内的写入合并为一次落盘。
    *
-   * 🔴 2026-09-20 C1-b：**150ms → 10s**（可用 `TIANQUAN_FLUSH_INTERVAL_MS` 覆盖）。
-   * 实测依据：一轮真实对话触发 **19 次整库重写（224MB × 19 ≈ 4.16GB）**，因为该轮的写入在时间上
-   * 分散（收尾阶段约每 2 秒一次），150ms 窗口合并不上；窗口放大后可合并到 ~4 次。
-   * 代价：断电/强杀最多丢一个窗口（10s），而 M9 缓冲层本来就有 60s 窗口；
-   * **正常关闭/重启不丢** —— `shutdownFlush()` 仍会同步全量落盘。
-   */
-  /**
-   * 默认防抖窗口（毫秒）—— **刻意保持纯数字字面量**：`src/cli/health-check.ts` 用静态正则
-   * （`_FLUSH_INTERVAL\s*=\s*(\d+)`）提取本值并校验安全区间（并由 structure-guard 测试守护）。
-   * 若写成表达式（如 `Number(process.env.X ?? 10_000)`），运维检查会“提取不到 → 误报致命”。
+   * 演进：`2000`（原始）→ `150`（批 C4，缩小崩溃丢失窗口）→ `10000`（C1-b）→ **`60000`**（C1-d/A，2026-09-20）。
+   *
+   * 依据（实测）：一轮真实对话曾触发 **19 次整库重写（224MB × 19 ≈ 4.16GB）**，因为该轮写入在时间上分散
+   * （收尾阶段约每 2 秒一次）⇒ 150ms 窗口合并不上；10s 后降到 ~6 次；60s 与上层 M9 缓冲窗口（60s）对齐。
+   * 代价：断电/强杀最多丢一个窗口（60s）；**正常关闭/重启不丢**（`shutdownFlush()` 仍同步全量落盘）。
+   * 上限：`_FLUSH_BATCH = 50` 仍为硬上限兜底（突发积压即落盘）。
+   *
+   * ⚠️ **必须保持纯数字字面量**：`src/cli/health-check.ts` 用静态正则（`_FLUSH_INTERVAL\s*=\s*(\d+)`）
+   * 提取本值并校验安全区间（其 `INTERVAL_MAX = 60000`），由 `src/cli/__tests__/structure-guard.test.ts` 守护。
+   * 写成表达式（如 `Number(process.env.X ?? 10_000)`）会让运维检查“提取不到 → 误报致命”（已踩过）。
    * 运行期覆盖请用 `TIANQUAN_FLUSH_INTERVAL_MS`（见 `_flushIntervalMs()`）。
    */
-  private readonly _FLUSH_INTERVAL = 10000;
+  private readonly _FLUSH_INTERVAL = 60000;
   /** P1: ServerLock 写入准入检查的 TTL 缓存到期时间戳（0 = 待检查） */
   private _writeAllowedUntil = 0;
 
@@ -2650,9 +2650,14 @@ export class SQLiteAdapter {
     if (this._flushing) { this._flushPending = true; return; }
     this._flushing = true;
     const t0 = Date.now();
+    // 🔴 2026-09-20 M 层节点埋点（module_entry / module_exit + 耗时）：落盘是本仓最高频的 M 层操作，
+    //   有 entry/exit + 耗时才能在运维侧区分"是落盘慢还是别的慢"（原先仅 >300ms 才有一行日志）。
+    console.log(`[Hook] module_entry module=m2.SQLiteAdapter.flushNowAsync dirty=${this._dirtyCount}`);
+    let _hookOk = false;
     try {
       const data = (this.db as any).export();
       const ok = await this._safeWriteDbFileAsync(data, 'flushNowAsync');
+      _hookOk = ok;
       if (ok) {
         this._dirtyCount = 0;
         const ms = Date.now() - t0;
@@ -2663,6 +2668,7 @@ export class SQLiteAdapter {
     } catch (err) {
       console.error('[SQLiteAdapter] 异步落盘失败（数据仍在内存，等下一轮重试）:', (err as Error)?.message);
     } finally {
+      console.log(`[Hook] module_exit module=m2.SQLiteAdapter.flushNowAsync ok=${_hookOk} 耗时=${Date.now() - t0}ms`);
       this._flushing = false;
       if (this._flushPending) {
         this._flushPending = false;

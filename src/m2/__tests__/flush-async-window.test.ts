@@ -39,7 +39,7 @@ function fakeAdapter(dbPath: string, payloadMB = 48): any {
   a._writeSeq = 0;
   a._flushTimer = null;
   a._FLUSH_BATCH = 50;
-  a._FLUSH_INTERVAL = 10000; // 纯字面量默认值（与源码一致）
+  a._FLUSH_INTERVAL = 60000; // 纯字面量默认值（与源码一致）
   return a;
 }
 
@@ -74,10 +74,10 @@ describe('落盘不阻塞事件循环（C1-a）', () => {
 });
 
 describe('防抖窗口（C1-b）', () => {
-  it('默认 10 秒（纯字面量）；可用 TIANQUAN_FLUSH_INTERVAL_MS 运行期覆盖', () => {
+  it('默认 60 秒（纯字面量）；可用 TIANQUAN_FLUSH_INTERVAL_MS 运行期覆盖', () => {
     const a = fakeAdapter(join(WORK, 'default.db'));
-    expect(a._FLUSH_INTERVAL, '默认窗口应为 10 秒').toBe(10000);
-    expect(a._flushIntervalMs(), '未设 env 时应回落默认').toBe(10000);
+    expect(a._FLUSH_INTERVAL, '默认窗口应为 60 秒').toBe(60000);
+    expect(a._flushIntervalMs(), '未设 env 时应回落默认').toBe(60000);
 
     const prev = process.env.TIANQUAN_FLUSH_INTERVAL_MS;
     try {
@@ -98,7 +98,7 @@ describe('防抖窗口（C1-b）', () => {
     const m = src.match(/_FLUSH_INTERVAL\s*=\s*(\d+)/);
     expect(m, '必须能从 SQLiteAdapter 静态提取 _FLUSH_INTERVAL（纯数字字面量）').not.toBeNull();
     const v = Number(m![1]);
-    expect(v, '提取值应为 10 秒级（与源码一致）').toBe(10000);
+    expect(v, '提取值应为 60 秒级（与源码一致）').toBe(60000);
     // 与 health-check 的安全区间保持一致（上限 60000）
     expect(v).toBeGreaterThanOrEqual(50);
     expect(v).toBeLessThanOrEqual(60000);

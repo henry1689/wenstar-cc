@@ -495,7 +495,9 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 - `_writeSeq` **写入代次**：在途的旧写入在 rename 前重新校验代次，若期间已有更新的落盘则**放弃本次 rename**
   （防"旧内容覆盖新内容"，含 `shutdownFlush()` 同步写的场景）；
 - `_passesEmptyDbGuard`：空库守卫抽为同步/异步**共用**的单一事实源（避免"一个口子守、一个不守"）；
-- `_FLUSH_INTERVAL` 150ms → **10s**（可 `TIANQUAN_FLUSH_INTERVAL_MS` 覆盖）；`_FLUSH_BATCH=50` 仍为硬上限兜底；
+- `_FLUSH_INTERVAL` 150ms → **10s**（C1-b）→ **60s**（C1-d/A，2026-09-20，用户决定；可 `TIANQUAN_FLUSH_INTERVAL_MS` 覆盖）；
+  `_FLUSH_BATCH=50` 仍为硬上限兜底。60s 与上层 M9 缓冲窗口对齐；实测写盘频率由 ~3.0 次/分钟 降到 ~1.3 次/分钟。
+  ⚠️ 该值**必须保持纯数字字面量**（`src/cli/health-check.ts` 静态提取 + `INTERVAL_MAX=60000`），详见 `SQLiteAdapter` 内注释；
 - `shutdownFlush()` 保留**同步**全量落盘 ⇒ **正常关闭/重启不丢**；仅断电/强杀最多丢一个窗口。
 
 回归防线：`src/m2/__tests__/flush-async-window.test.ts`（4 例：异步落盘期间事件循环持续推进 /
