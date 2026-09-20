@@ -372,7 +372,7 @@ export interface ChatResponse {
 const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; via: string }> = [
   { line: 651, stage: 'L0-路由', desc: '活跃会议名传入 processChat', via: '_activeMeetingName' },
   { line: 764, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()' },
-  { line: 798, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）', via: 'buildEntityContext()' },
+  { line: 798, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
   { line: 861, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
   { line: 876, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
   { line: 963, stage: 'L5-记忆门控', desc: '会晤模式跳过主人记忆检索', via: '!meetingEntityName guard' },
@@ -997,6 +997,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
 
     // ── V4.0 实体会晤：注入实体人物上下文（含档案+对话历史+开场协议） ──
     let _entityContextText = '';
+    // V27 结构修复: 会晤铁律结构化承载（EntityContextBuilder.rules → PromptAssembler）
+    let _entityRules: Array<{ id: string; content: string }> = [];
     let _meetingEntityName: string | null = null;
     // V12.7(批3): 提升会晤实体 UUID 到顶层 — 供 knowledgeBase.search 补 UUID 门
     const _meetingEntityUuid: string | null = ctx._entityMeeting?.getEntityUUID?.() ?? null;
@@ -1096,6 +1098,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             recentConversations: recentConversations.length > 0 ? recentConversations : undefined,
           });
           _entityContextText = ecResult.systemText;
+          // V27 结构修复: 会晤铁律的结构化输出（由 PromptAssembler 统一承载与去重，见下方 assembler 段）
+          _entityRules = ecResult.rules || [];
 
           // 🆕 编码健康修复: 警幻仙姑（太虚境之主/系统维护者）会晤时注入户口本
           //   户口/UUID 权限归属警幻仙姑：仅她会晤时可查全部成员户口号；玉瑶不掌户口（见 lover-persona 边界）
@@ -1619,7 +1623,9 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
       : '';
     // 🛡️ 调试开关: WS_NO_CONTENT_FILTER=true 时跳过所有内容限制
     const _noFilter = ConfigService.getBool('WS_NO_CONTENT_FILTER', false);
-    const allGuardMsgs = _noFilter ? '' : [_privacyLaw, hallucinationGuard, repeatHint, factualRecallGuard, feelingGuard, dailyGuard, timeGuard, classificationGuard, intimacyFilter, _appearanceGuard, memoryGuard].filter(Boolean).join('\n');
+    // V27 结构修复: memoryGuard 不再走 allGuardMsgs（history 通道）——
+    // 改由 PromptAssembler 的 hard_rule 'entity_past_boundary' 承载（与会晤路径同 id 自动去重，此处为权威版本）。
+    const allGuardMsgs = _noFilter ? '' : [_privacyLaw, hallucinationGuard, repeatHint, factualRecallGuard, feelingGuard, dailyGuard, timeGuard, classificationGuard, intimacyFilter, _appearanceGuard].filter(Boolean).join('\n');
 
     let reply = '';
 
@@ -1785,6 +1791,29 @@ try {
 // 🔴 P0-2 修复: 知识库去重——移除 base 层重复的 knowledgeBaseText，
 // 知识库由 memoryText（injectMemories 截断过滤后）唯一承载，避免 LLM 看两遍浪费 token。
 let finalKnowledgeText = _entityContextText || '';
+
+// 🔬 批20(诊断): kb 分段占比 —— 用【...】标记切分，定位 L2 大头的真实构成。
+//    保留作长期观测（仅在 >50 字符的段输出，避免噪音）。
+try {
+  if (finalKnowledgeText && finalKnowledgeText.length > 200) {
+    const _segRe = /【([^】]{1,24})】/g;
+    const _segs: Array<{ name: string; len: number }> = [];
+    let _m: RegExpExecArray | null;
+    let _lastIdx = 0;
+    let _lastName = "(开头)";
+    while ((_m = _segRe.exec(finalKnowledgeText)) !== null) {
+      _segs.push({ name: _lastName, len: _m.index - _lastIdx });
+      _lastName = _m[1];
+      _lastIdx = _m.index;
+    }
+    _segs.push({ name: _lastName, len: finalKnowledgeText.length - _lastIdx });
+    const _big = _segs.filter((x) => x.len > 50).sort((a, b) => b.len - a.len);
+    console.log(
+      "[KB·分段] total=" + finalKnowledgeText.length +
+      " | " + _big.slice(0, 8).map((x) => x.name + ":" + x.len).join(" "),
+    );
+  }
+} catch { /* 诊断失败不影响主链路 */ }
       // 🆕 V4.0 P1: 正常模式下注入 FG 已知人物的简要参考档案（参考信息，非身份切换）
       if (!_entityContextText && ctx.m4) {
         try {
@@ -2146,6 +2175,20 @@ try {
     // 🔴 S4-B1 修复: 含 entity_meeting —— 会晤模式 strict 下 memoryText 由 assembler 唯一承载
     assembler.add(memoryBlock('memory_context', _memBlock, ['normal', 'entity_meeting']));
   }
+  // 🔴 V27 结构修复: 会晤/普通共用的铁律统一注册到 assembler ——
+  // 「过去的法定分界线」权威版本来自 chat.ts memoryGuard（含 S2-R4 档案优先复述）；
+  // EntityContextBuilder.rules 中同 id 的条目会被 conflictPolicy:'override' 覆盖（即自动去重）。
+  // ⚠️ 铁律不设 WS_NO_CONTENT_FILTER 开关 —— 那是「跳过内容限制」的调试开关，
+  //    而铁律（防编造/记忆即事实/自称/过去分界线）是安全底线。
+  //    改前它们由 EntityContextBuilder 承载时本就不受该开关影响，故此处保持一致。
+  // ⚠️ 顺序敏感：PromptAssembler.add 的 override 语义是「后注册者覆盖先注册者」——
+  //    因此必须先注册 EntityContextBuilder 的结构化 rules，再注册 chat.ts 的权威版本，
+  //    这样 'entity_past_boundary' 最终以 memoryGuard（含 S2-R4 档案优先复述）为准。
+  for (const _r of _entityRules) {
+    if (_r && _r.id && _r.content) assembler.add(hardRule(_r.id, _r.content));
+  }
+  if (memoryGuard) assembler.add(hardRule('entity_past_boundary', memoryGuard));
+
   // 🟢 persona: M6 自我模型（会晤模式禁用）
   try {
     if (ctx.m6 && !_isMeeting) {
@@ -2244,6 +2287,16 @@ try {
       ? (finalKnowledgeText ? finalKnowledgeText + '\n\n' : '') + _assembled.text
       : _assembled.text + '\n\n' + (finalKnowledgeText || '');
     console.log('[PromptAssembler] ' + _assembled.blocks.length + ' blocks, ' + _assembled.charCount + ' chars' + (_assembled.dropped.length > 0 ? ', ' + _assembled.dropped.length + ' dropped' : ''));
+    // 🔬 V27 结构修复验证: 铁律在最终 prompt 中各出现几次（应各为 1 = 结构性去重生效）
+    try {
+      const _ruleNames = ["自称铁律", "记忆优先于标签", "回忆 ≠ 编造", "过去的法定分界线", "记忆即事实"];
+      const _cnt = _ruleNames.map((n) => {
+        const _m = finalKnowledgeText.match(new RegExp(n, "g"));
+        return n + "=" + (_m ? _m.length : 0);
+      }).join(" ");
+      console.log("[铁律·去重校验] len=" + finalKnowledgeText.length + " | " + _cnt);
+      console.log("[Assembler·块] " + _assembled.blocks.map((b: any) => b.id + ":" + (b.content || "").length).join(" "));
+    } catch { /* 诊断非阻塞 */ }
   }
 } catch (_asmErr) {
   // 🔴 V27(批1) P1 补偿: strict 模式下 assembler 是 PFC 内容的**唯一载体** ——
