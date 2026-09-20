@@ -476,10 +476,12 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 > 首轮 `void this.runEntityTriage()` 是**浮空 promise**、首轮 compaction/GC 两处 `.catch(() => {})` 静默吞错
 > —— 4 处一并补齐（失败告警 + 非阻塞），与本节不变量一致（失败可见、不静默）。
 >
-> **同批：`DEDUP_SKIP` 的可发现性**（`src/app/knowledge/KnowledgeEngine.ts` + `src/webui/server-knowledge-routes.ts`）：
-> 知识重复被拒（409）原先只说"被拒"，调用方不知"和谁重复"；现错误对象携带命中的既有条目
-> （`existing_id` / `existing_title` / `score` / `matched_by`），409 响应体一并给出。
-> **接受/拒绝语义不变**，仅提高可发现性（是否改为"重复即更新"仍属产品决策，未动）。
+> **同批：`DEDUP_SKIP` → 「重复即更新」**（2026-09-20，用户决定；`src/app/knowledge/KnowledgeEngine.ts` + `src/webui/server-knowledge-routes.ts`）：
+> 知识重复提交不再直接拒给（409），而是**更新既有条目**；合并策略采用**追加不覆盖**
+> （纯函数 `mergeDuplicateContent`：新内容为空⇒不变；旧已包含新⇒不重复追加（幂等）；否则旧+分隔线+新）
+> ⇒ **旧条目的独有信息不会因“准重复”而永久丢失**。状态码区分：新建 **201** / 命中重复并更新 **200**（响应体带 `updated:true` 与 `dedup_hit`）；
+> 既有条目被 `locked` 或读不到时，仍退回 409 + 既有条目信息（可发现、可定位）。
+> 回归防线：`src/app/knowledge/__tests__/dedup-merge.test.ts`（5 例：空新内容不追加 / 幂等 / 旧内容完整保留 / 空旧取新 / 非字符串安全）。
 
 ### **⑤ 异步落盘 + 防抖窗口 10 秒**（2026-09-20，C1-a / C1-b）
 

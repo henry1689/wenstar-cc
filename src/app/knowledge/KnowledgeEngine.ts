@@ -230,6 +230,27 @@ async function indexContent(
   }
 }
 
+/**
+ * 🔴 2026-09-20 重复合并策略（纯函数，便于单测）：**追加不覆盖**。
+ *
+ * 产品语义（用户决定）：知识重复提交不再直接拒给（409），而是**更新既有条目**。
+ * 合并策略选择“追加不覆盖”，理由：准重复 ≠ 内容相同，直接覆盖会让**旧条目的独有信息永久丢失**
+ * （与“只增不删”原则冲突）。具体：
+ * - 新内容为空 ⇒ 保持旧内容不变（不追加）
+ * - 旧内容已包含新内容 ⇒ 不重复追加（幂等）
+ * - 否则 ⇒ 旧内容 + 分隔线 + 新内容
+ */
+export function mergeDuplicateContent(
+  oldContent: string,
+  newContent: string,
+): { content: string; appended: boolean } {
+  const oldC = String(oldContent ?? '');
+  const newC = String(newContent ?? '');
+  if (!newC.trim()) return { content: oldC, appended: false };
+  if (oldC.includes(newC)) return { content: oldC, appended: false };
+  return { content: oldC ? oldC + '\n\n---\n\n' + newC : newC, appended: true };
+}
+
 export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   /**
    * 修复双重 UTF-8 编码的中文字符串
@@ -304,16 +325,35 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
         const dupResults = _ftsSearch.search(fixedTitle, 1);
         if (dupResults.length > 0 && dupResults[0].score > 2.5) {
           const dup = dupResults[0];
-          console.log('[KE-Dedup] FTS命中重复: "' + fixedTitle.substring(0, 20) + '" ≈ "' + dup.title.substring(0, 20) + '" (score=' + dup.score.toFixed(2) + '), 跳过新增');
-          // 🔴 2026-09-20：不再只抛裸字符串 —— 把"命中的既有条目"带回调用方。
-          //   原先 409 只说"被拒"，调用方不知道"和谁重复"，无法自查/复用（只能靠人猜）。
-          //   语义不变（仍然是拒给新增），仅把既有条目 id/title/score 一并给出（可发现性）。
+          console.log('[KE-Dedup] FTS命中重复: "' + fixedTitle.substring(0, 20) + '" ≈ "' + dup.title.substring(0, 20) + '" (score=' + dup.score.toFixed(2) + ')');
+          // 🔴 2026-09-20 产品语义（用户决定）：**重复即更新**（不再直接拒给新增）。
+          //   合并策略 = **追加不覆盖**（mergeDuplicateContent）：标题取新的，旧内容不丢。
+          //   既有条目被 locked / 读不到 ⇒ 退回原拒绝语义（409 + 既有条目信息，便于定位）。
+          const _existing = getById(dup.id);
+          if (_existing && !_existing.locked) {
+            const _merged = mergeDuplicateContent(_existing.content as any, fixedContent as any);
+            const _okUpd = await update(dup.id, { title: fixedTitle, content: _merged.content });
+            const _after = _okUpd ? getById(dup.id) : null;
+            if (_after) {
+              console.log('[KE-Dedup] 重复 → 已更新既有条目 ' + dup.id + (_merged.appended ? '（内容已追加，旧内容保留）' : '（内容未变）'));
+              return Object.assign(_after, {
+                updated: true,
+                merged_content: _merged.appended,
+                dedup_hit: {
+                  existing_id: dup.id,
+                  score: Number(dup.score.toFixed(2)),
+                  matched_by: 'fts_bm25',
+                },
+              }) as KnowledgeItem;
+            }
+          }
           const _dedupErr: any = new Error('DEDUP_SKIP');
           _dedupErr.dedup = {
             existing_id: (dup as any).id ?? null,
             existing_title: dup.title,
             score: Number(dup.score.toFixed(2)),
             matched_by: 'fts_bm25',
+            reason: _existing ? 'locked' : 'existing_not_readable',
           };
           throw _dedupErr;
         }
@@ -614,6 +654,26 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
         for (let j = i + 1; j < ids.length; j++) {
           _knowledgeGraph.onCoRetrieved(ids[i], ids[j]).catch(() => {});
         }
+      }
+    }
+
+    // 🔴 KB 内容必要性(1) 2026-09-20: 检索端不再把「梦境洞察」类自动归纳当作知识注入。
+    //   量化依据: knowledge_base 119 条 28,820 字符中，归纳类 111 条 25,994 字符 = 90.2%；
+    //   产出为 SleepTimeConsolidator 机械切词(机械 2~4 汉字)，实测话题词多为碎片（这个/测试/绕来绕去）。
+    //   一致性: 同一 classification 在 AutoClassifier.ts:121 已被排除 NOT IN ('冲突检测','梦境洞察')。
+    //   可回退: 配置 KB_INCLUDE_DREAM_INSIGHTS=true 即恢复原行为。
+    const _includeDreamInsights = ConfigService.getBool('KB_INCLUDE_DREAM_INSIGHTS', false);
+    const _isAutoInduction = (r: any): boolean => {
+      if (!r) return false;
+      if (r.classification === '梦境洞察') return true;
+      const t = String(r.title || '');
+      return /^(话题归纳|行为归纳)\s*[:：]/.test(t);
+    };
+    if (!_includeDreamInsights && results.length > 0) {
+      const _before = results.length;
+      results = results.filter((r: any) => !_isAutoInduction(r));
+      if (_before !== results.length) {
+        console.log('[KB] 已过滤自动归纳条目 ' + (_before - results.length) + ' 条（KB_INCLUDE_DREAM_INSIGHTS=false）');
       }
     }
 

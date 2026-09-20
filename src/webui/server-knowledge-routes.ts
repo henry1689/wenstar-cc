@@ -89,7 +89,9 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
           scene_tags: body.scene_tags,
           classification: body.classification,
         });
-        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        // 🔴 2026-09-20：重复提交不再拒给（409）而是**更新既有条目** ⇒ 用状态码区分：
+        //   新建 201 / 命中重复并更新 200（响应体带 updated:true 与 dedup_hit）。
+        res.writeHead((entry as any)?.updated ? 200 : 201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(entry));
       } catch (e: any) {
         const msg = String(e?.message || e);
