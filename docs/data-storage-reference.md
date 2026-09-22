@@ -589,6 +589,27 @@ UPDATE memories SET lifecycle_state='active', suppression_reason=NULL WHERE id=?
 
 > 根治靠**测试隔离**（测试方应用独立 namespace）——否则清完又会脏。
 
+### **⑪ 上下文历史排除测试行**（2026-09-22，连贯性修复）
+
+**现象**：用户反馈“对话上下文连贯性不强”。
+
+**诊断（数据）**：上下文由 KB（**8.4–8.6k 字符**）+ 历史（**1.1–1.4k**）构成 ⇒ **历史是连贯性主载体**；
+而近 200 轮历史中 **30.5% 是测试行**（`is_test=1` **58 条** + `namespace='test'` 2 条 + 疑似测试/极短 61 条）
+⇒ 她的对话流被「你好」「散会」「今天天气真好」「【隔离测试】…」类行打断。
+
+**根因**：历史来自 `getRecentConversations()`（`server.ts:302`）→ `SQLiteAdapter` / `ConversationDB`
+两条 SQL **只看 `is_compacted = 0`，从不读 `is_test` / `namespace`**（标记早就有，却没人读）。
+
+**修复**：两条 SQL 加 `AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0`。
+**实测**：近 200 轮历史 **145 → 111 条**；过滤后抽样全为真实对话（无「你好/散会」类）。
+
+**排除项（本次排查确认未误伤）**：
+- #C 隔离**未伤真人**：抽查 30 条 suppressed 全为测试串；
+- 写入守卫**未拦真人短回复**：近 3 天 user 消息含 1 字数 2 条、2–3 字 148 条 ⇒ 短句正常入库。
+
+**未根治**：未打标记的存量测试对话（如无 `is_test` 的「你好」）仍在历史里 —— 需把「⑩」判据应用于 `conversations` 表；
+摘要（`is_summary`）路径待核；M4 检索单次耗时达 **19s**（性能观察项）。
+
 ## 十、快速查找
 
 ```

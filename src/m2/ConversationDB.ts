@@ -326,7 +326,8 @@ export class ConversationDB {
   getRecentConversations(limit = 100): ConversationRow[] {
     this.ensureReady();
     const stmt = this.db.prepare(
-      `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE is_compacted = 0 AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT ?`,
+      // 🔴 2026-09-22 上下文连贯性：同 SQLiteAdapter —— 历史/摘要装配必须排掉测试行
+      `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE is_compacted = 0 AND (roleplay_char IS NULL OR roleplay_char = '') AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT ?`,
     );
     stmt.bind([limit]);
     const rows: ConversationRow[] = [];
