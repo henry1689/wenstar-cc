@@ -39,6 +39,11 @@ interface FGCacheEntry {
 }
 const FG_CACHE_TTL = 30_000;
 let _fgCache: FGCacheEntry | null = null;
+/** 🔴 2026-09-22：FG 摘要后台刷新的在途标记（stale-while-revalidate，最多一个在途） */
+let _fgRefreshing = false;
+/** 🔴 2026-09-22：人物档案批量加载的短 TTL 缓存（键=排序后的名字集）—— P95 1,370ms / 最大 6,660ms，档案变化很慢 */
+const PROFILE_CACHE_TTL = 60_000;
+let _profileCache: { key: string; data: Record<string, any>; timestamp: number } | null = null;
 let _lastEntitySet: Set<string> = new Set();
 
 export class M4Orchestrator {
@@ -286,23 +291,52 @@ export class M4Orchestrator {
     _lastEntitySet = currentEntitySet;
 
     // P0-4b: FG 摘要 30s 缓存
+    // 🔴 2026-09-22 M4 延迟优化（**stale-while-revalidate**）：实测 `fgSummary` P95 **1,442ms / 最大 7,490ms**
+    //   （M4 第二大卡点）。根因：`!hasNewEntities` 一有新实体就**整轮同步重建**（FamilyGraph 内还有二级缓存
+    //   ⇒ 两级都失效时最慢）。现改为：有旧缓存时**先返回陈旧摘要（不阻塞本轮）**，同时后台刷新一次
+    //   （最多一个在途）；只有**完全冷启动**才同步等待。正确性：新实体最迟下一轮可见。
     let familySummary: any, socialSummary: any;
     const now = Date.now();
-    if (_fgCache && (now - _fgCache.timestamp) < FG_CACHE_TTL && !hasNewEntities) {
+    const _fgFresh = !!_fgCache && (now - _fgCache.timestamp) < FG_CACHE_TTL && !hasNewEntities;
+    if (_fgFresh) {
+      familySummary = _fgCache!.familySummary;
+      socialSummary = _fgCache!.socialSummary;
+      console.log('[M4] FG 摘要缓存命中');
+    } else if (_fgCache) {
       familySummary = _fgCache.familySummary;
       socialSummary = _fgCache.socialSummary;
-      console.log('[M4] FG 摘要缓存命中');
+      if (!_fgRefreshing) {
+        _fgRefreshing = true;
+        console.log('[M4] FG 摘要：陈旧-后台刷新（本轮不阻塞）');
+        void (async () => {
+          try {
+            const _f = await activeFG.getFamilySummary();
+            const _s = await activeFG.getSocialSummary();
+            _fgCache = { familySummary: _f, socialSummary: _s, timestamp: Date.now() };
+          } catch (e) {
+            console.warn('[M4] FG 摘要后台刷新失败（保留旧摘要）:', (e as Error)?.message);
+          } finally { _fgRefreshing = false; }
+        })();
+      } else {
+        console.log('[M4] FG 摘要：陈旧（已有刷新在途）');
+      }
     } else {
       familySummary = await activeFG.getFamilySummary();
       socialSummary = await activeFG.getSocialSummary();
       _fgCache = { familySummary, socialSummary, timestamp: now };
-    _mark("fgSummary");
     }
+    _mark("fgSummary");
 
     // ── 3. 批量加载人物档案（替代 N+1） ──
     const batchProfile = (names: string[]) => {
       const result: Record<string, any> = {};
       if (names.length === 0) return result;
+      // 🔴 2026-09-22 M4 延迟优化：**短 TTL 缓存**（P95 1,370ms / 最大 6,660ms ⇒ M4 第三大卡点）。
+      //   键 = 排序后的名字集（同轮/相邻轮的名字集高度重合）；档案变化很慢 ⇒ 60s 陈旧可接受。
+      const _cacheKey = [...names].sort().join(',');
+      if (_profileCache && _profileCache.key === _cacheKey && (Date.now() - _profileCache.timestamp) < PROFILE_CACHE_TTL) {
+        return _profileCache.data;
+      }
       const _t0 = Date.now();
       // 🔵 批17(性能): 批量化 —— 原为逐个 getPersonProfileWithBio（每次含 name 查询 +
       //   aliases LIKE 全表扫描），实测 705~838ms。改为一次批量查询（O(1~2) 次 SQL）。
@@ -323,6 +357,7 @@ export class M4Orchestrator {
       }
       const _dtTotal = Date.now() - _t0;
       if (_dtTotal > 300) console.log("[M4·profile] 批量加载 " + names.length + " 个档案耗时 " + _dtTotal + "ms");
+      _profileCache = { key: _cacheKey, data: result, timestamp: Date.now() };
 
       return result;
     };

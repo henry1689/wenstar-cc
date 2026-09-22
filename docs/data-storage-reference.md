@@ -667,6 +667,23 @@ PAE 的 **LLM 档案提取**（超时 30s；成功时单次 10–20s）被**内�
 **实测**：修复后真实对话 `[M4·timing] total=1533ms | integrateFG=308`（由 10–20s ⇒ **0.3s** ✔）。
 **回归防线**：`src/m4/household/__tests__/pae-nonblocking-guard.test.ts`（2 例：禁止内联 await / 必须有 fire-and-forget + catch）。
 
+### **⑭ M4 三项缓存优化**（2026-09-22）
+
+背景：M4 是 assemble 的最大头（修复前 P95 10.4s / 均值 2.9s）。已先修 `integrateFG`（PAE 内联等待）
+⇒ 19s → **0.3s**（见⑬）。本次再优化两项（`retrieve` 每轮仅调用一次，缓存收益有限 ⇒ **未动**）：
+
+- **fgSummary**（P95 **1,442ms** / 最大 **7,490ms**）：改为 **stale-while-revalidate** ——
+  有旧缓存时**先返回陈旧摘要（不阻塞本轮）** + 后台刷新一次（最多一个在途）；仅**完全冷启动**才同步等待。
+  正确性：新实体最迟下一轮可见。新日志：`[M4] FG 摘要：陈旧-后台刷新（本轮不阻塞）` / `…缓存命中`。
+- **batchProfile**（P95 **1,370ms** / 最大 **6,660ms**）：加**短 TTL（60s）缓存**（键=排序后名字集）
+  ⇒ 命中时 **0ms**。
+
+**实测（连发 3 轮真实对话）**：`[M4·timing] total=1131ms | decompose+uuid=13 retrieve=322 integrateFG=454
+fgSummary=341 **batchProfile=0** …` ⇒ 两项缓存均生效；M4 总量从 1.6–2.9s 降到 **1.1s** 级。
+
+> 未动/待查：`retrieve`（303–322ms 常态、P95 1,151ms / 最大 5,887ms）、`fgSummary` 残留的 ~341ms
+> （疑为实体集比对/`_mark` 区段内的其他工作）、**启动到可用 3–4 分钟**、定时维护任务耗时未埋点。
+
 ## 十、快速查找
 
 ```
