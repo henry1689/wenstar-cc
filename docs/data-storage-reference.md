@@ -569,6 +569,26 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 防御：元对话/自我陈述仍不具资格（与钙化分无关）；回归防线
 `src/app/vault/__tests__/diamond-promotion-scale.test.ts`（6 例，含 0–1/0–5 双量纲与“不滥发”断言）。
 
+### **⑩ 存量测试垃圾隔离**（2026-09-22，用户决定 C）
+
+**背景**：写入端守卫（⑥四/批 A）只能挡**新的**；存量里混入大量测试串（如“你好”×**427**、“帮我记个事”×124、
+“徐诗雨”×103、“test-location…”×52、“<3 😊👍🎉 test”×73），且其中 **656 条处于 active/promoted（正在参与检索）**。
+
+**判据（两条取并集，均可量化、可复核）**：
+- **A 退化内容**：空白 / 长度<2 / 单字符重复 ≥6 / 不含字母数字汉字（纯表情标点）；
+- **B 完全相同的短句重复 ≥20 次**（≤30 字）—— 真人不会把同一短句说上百次。
+
+**执行结果（2026-09-22）**：共隔离 **1437 条**（A 206 + B 1231，去重后占全库 21%），
+方式为 `lifecycle_state='suppressed'` + `suppression_reason` 注明原因 ——
+**不删除任何记录**（符合「只增不删」），且可随时恢复：
+```sql
+UPDATE memories SET lifecycle_state='active', suppression_reason=NULL WHERE id=?;
+```
+**效果**：可检索记忆 6853 → **3082** 条；目标测试串残留 **0 条**；`integrity_check=ok`。
+备份：`data/backups/fusion_memory.pre-junk-isolation-*.db`。
+
+> 根治靠**测试隔离**（测试方应用独立 namespace）——否则清完又会脏。
+
 ## 十、快速查找
 
 ```
