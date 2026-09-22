@@ -528,6 +528,13 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 - 参考治理文档：`docs/fg-profile-entry-governance.md`（FG 人物档案录入治理）；
   角色扮演隔离判定在 `src/engine/tianquan/prefrontal/ConstraintValidator.ts:192`（`roleplay_forbidden`，本次未触动）。
 
+### **⑦ 基因回填的别名口径修复**（2026-09-22）
+
+`loadFgPersonEntries` 原先把姓氏过滤（防滑窗垃圾）也套在**别名**上 ⇒ 「诗雨」这类无姓氏别名被丢弃
+⇒ 只写别名的记忆永远匹配不上：实测基因回填只填 **3 条**（修正后应能填 **39 条**）。
+现改为：姓氏过滤只作用于**节点主名**（节点级判断）；别名保留最小防护（非空 / ≠主名 / 长度≥2）。
+⚠️ 姓氏过滤本身抓不到“周末（周是姓氏）”“宿舍（宿也是姓氏）”这类垃圾 —— 那由上游滑窗检测负责（测试注释已说明）。
+
 ## 十、快速查找
 
 ```

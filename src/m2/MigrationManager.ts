@@ -614,7 +614,7 @@ function computeChecksum(text: string): string {
  *    128 个已作废实体仍参与 LIKE 匹配（垃圾归属风险）。此处统一加 `status != 'void'`。
  * 🔴 别名归一: 主名与别名同优先级可匹配（“诗韵” → 徐诗韵），与运行时 L3/FG 名库口径一致。
  */
-async function loadFgPersonEntries(
+export async function loadFgPersonEntries(
   fgDbPath?: string,
 ): Promise<Array<{ key: string; uuid: string; primary: string }>> {
   const out: Array<{ key: string; uuid: string; primary: string }> = [];
@@ -641,7 +641,14 @@ async function loadFgPersonEntries(
           if (Array.isArray(aliases)) {
             for (const al of aliases) {
               const k = String(al || '').trim();
-              if (k && k !== primary && hasSurname(k)) out.push({ key: k, uuid, primary });
+              // 🔴 2026-09-22 修复：**别名不再套姓氏过滤**。
+              //   原因（实测）：姓氏过滤的用意是滤掉**滑窗垃圾节点**（“周末”/“宿舍”等）——
+              //   那是**节点级**判断，已由上面的 `hasSurname(primary)` 完成；
+              //   而别名属于已通过校验的本人（如徐诗雨的别名“诗雨”无姓氏）——
+              //   对别名再套姓氏过滤会把它们全部丢掉，导致只写“诗雨”的记忆永远匹配不上：
+              //   实测基因回填只会填 **3 条**（而按正确口径应能填 **149 条**），且跨 08-02~09-22 停滞多轮启动。
+              //   别名仍保留最小防护：非空、非 primary、长度 ≥2。
+              if (k && k !== primary && k.length >= 2) out.push({ key: k, uuid, primary });
             }
           }
         } catch { /* 别名解析失败跳过 */ }
