@@ -627,8 +627,23 @@ UPDATE memories SET lifecycle_state='active', suppression_reason=NULL WHERE id=?
 - **C（数据+守卫）**：修正 `【对话摘要】` 行中 `is_summary≠1` 的标记；新增守卫
   `src/m2/__tests__/summary-channel-guard.test.ts`（4 例：**必须有读取方** / 必须排 test / 必须前置 / 异常兵底）。
 
+**B（2026-09-22）：摘要改成 LLM 真摘要**
+
+原实现（`compressTurnsSmart`）**不是 LLM 摘要**而是机械截断：`combinedUser = userTexts.join('').substring(0,60)`
+⇒ `(已存金库) + 前 40 字` / `【历史对话】 + 前 80 字` ⇒ “摘要”实为残片（样本含测试串、原始片段）。
+
+修法（**保持 maintenance 不感知 LLM 的既有设计**）：
+- `maintenance.injectDeps` 新增可选项 `summarizeTurns`（与 `runDecay`/`entityTriageRunner` 同风格）；
+- `server.ts` 注入实现（**服务层变更**）：惰性取 `llmProvider.rawCall` + 中性 system 提示词（400 tokens / temp 0.3）；
+- maintenance 侧 `_summarizeChunk`：**LLM 优先**（`Promise.race` 20s 超时）→ 失败/未注入**回退机械压缩**（兵底放宽到 160 字）⇒ **不阻塞压缩**；
+- 导出两个纯函数（可单测）：`normalizeCompactionSummary`（去换行/去嵌套前缀/限长/空值返回空串）、`buildCompactionPrompt`（标说话人、超长**保留尾部**、第三人称+禁止编造）；
+- 摘要拼接上限 **200 → 600** 字。
+
+回归防线：`src/webui/__tests__/compaction-summary.test.ts`（7 例）。
+⚠️ 端到端：重启后调 `/api/maintenance/compact` 返回 `{before:86, after:86}`（历史未达压缩阈值）⇒ **真实路径上的 LLM 摘要输出待下次真实压缩验证**。
+
 **未根治**：摘要**生成量**极少（源头：压实前的摘要生成几乎不触发，见 `maintenance.ts:438`）
-⇒ 需扩大生成覆盖（后续 B）；另有 **M4 检索单次 12.5–21.7s**、**KB 占上下文 84%** 两个待评估项。
+⇒ 需扩大生成覆盖；另有 **M4 检索单次 12.5–21.7s**、**KB 占上下文 84%** 两个待评估项。
 
 ## 十、快速查找
 

@@ -98,6 +98,41 @@ interface ConversationTurn {
   timestamp?: string;
 }
 
+/** 🔴 B（2026-09-22）：LLM 摘要超时（毫秒）—— 压缩流程不得被摘要久等阻塞 */
+const COMPACTION_SUMMARY_TIMEOUT_MS = 20_000;
+
+/**
+ * 🔴 B：把 LLM 输出规范成“单段摘要”（纯函数，便于单测）
+ * - 去换行/多余空白；去可能的 `【对话摘要】`/`【历史对话】` 前缀（防嵌套）；
+ * - 限长 maxLen（超长截断加省略号）；空/仅空白 ⇒ 返回空串（调用方回退机械压缩）。
+ */
+export function normalizeCompactionSummary(raw: string, maxLen = 400): string {
+  let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  s = s.replace(/^【对话摘要】/, '').replace(/^【历史对话】/, '').trim();
+  if (!s) return '';
+  if (s.length > maxLen) s = s.substring(0, maxLen) + '…';
+  return s;
+}
+
+/**
+ * 🔴 B：构造摘要提示词（纯函数）—— 保留人物/事件/情感基调/未竟约定，禁止编造。
+ * 超长时**保留尾部**（最近的对话对连贯性更重要）。
+ */
+export function buildCompactionPrompt(turns: Array<{ role: string; content: string }>, maxChars = 3000): string {
+  const lines = turns
+    .map(function(t) { return (t.role === 'user' ? '鸿艺' : '她') + ': ' + String(t.content ?? '').replace(/\s+/g, ' '); })
+    .filter(function(l) { return l.length > 3; })
+    .join('\n');
+  const body = lines.length > maxChars ? lines.slice(-maxChars) : lines;
+  return (
+    '把下面这段对话压缩成一段**第三人称**摘要（80–200 字）：\n' +
+    '- 保留：人物、事件、情感基调、她说过的承诺与未完成的约定；\n' +
+    '- 只写对话中真实出现的信息，禁止推测或编造；\n' +
+    '- 只输出摘要正文，不要加前后缀、不要换行。\n\n' +
+    body
+  );
+}
+
 export class MaintenanceService {
   private config: MaintenanceConfig;
   private startTime = Date.now();
@@ -148,6 +183,8 @@ export class MaintenanceService {
   }
 
   private runDecay: () => Promise<{ total: number; archived: number }> = async () => ({ total: 0, archived: 0 });
+  /** B：注入的 LLM 摘要器（null = 未注入 ⇒ 全程机械压缩） */
+  private _summarizeTurns: ((turns: Array<{ role: string; content: string }>) => Promise<string>) | null = null;
   private _sqliteGetter: (() => any | null) | null = null;
   private familyGraph: any | null = null;
   private _fgGetter: (() => any) | null = null;
@@ -176,6 +213,12 @@ export class MaintenanceService {
     _sqliteGetter?: () => any | null;
     /** 家族图谱主库（双写人名抢救用） */
     familyGraph?: any;
+    /**
+     * 🔴 B（2026-09-22）：把一段对话压缩成**真实摘要**（由 server.ts 注入 LLM 实现）。
+     *   保持本类“不感知 LLM”的既有设计（与 runDecay / entityTriageRunner 同风格）；
+     *   未注入或抛错/超时 ⇒ 回退机械压缩（原行为），**不阻塞压缩流程**。
+     */
+    summarizeTurns?: (turns: Array<{ role: string; content: string }>) => Promise<string>;
   }): void {
     this.conversationHistory = deps.conversationHistory;
     this.getConversationHistory = deps.getConversationHistory;
@@ -186,6 +229,7 @@ export class MaintenanceService {
       this._storageGetter = deps.storage as () => AnyStorage;
     }
     if (deps.runDecay) this.runDecay = deps.runDecay;
+    if (deps.summarizeTurns) this._summarizeTurns = deps.summarizeTurns;
     if (deps.runKnowledgeGc) this._runKnowledgeGc = deps.runKnowledgeGc;
     if (deps.runNoteGc) this._runNoteGc = deps.runNoteGc;
     if (deps._sqliteGetter) this._sqliteGetter = deps._sqliteGetter;
@@ -435,7 +479,7 @@ export class MaintenanceService {
             if (summaryText) {
               // 🔴 V23.1: 传 isSummary=1 —— 摘要必须可被识别（否则 is_summary 恒 0，摘要通道失效）。
               //   is_compacted 保持 0：摘要是压缩产物，不应被归档流程压掉。
-              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 200), { seqPos: 0, isSummary: 1 } as any);
+              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 600), { seqPos: 0, isSummary: 1 } as any);
             }
           }
           const cutoff = remaining.length > 0 ? remaining[0].timestamp : null;
@@ -482,6 +526,8 @@ export class MaintenanceService {
       const userTexts = chunk.filter(function(t) { return t.role === 'user'; }).map(function(t) { return t.content; });
       const combinedUser = userTexts.join('').substring(0, 60);
       if (!combinedUser.trim()) continue;
+      // 🔴 B（2026-09-22）：本块的摘要 —— LLM 优先（带超时）、失败/未注入则机械压缩兵底。
+      const _chunkSummary = await this._summarizeChunk(chunk);
 
       // 查 M2：这条对话的关键词是否已被巩固为情感记忆
       let inGold = false;
@@ -499,21 +545,41 @@ export class MaintenanceService {
       }
 
       if (inGold) {
-        result.push({ role: 'user', content: `(已存金库) ${combinedUser.substring(0, 40)}` });
+        result.push({ role: 'user', content: `(已存金库) ${_chunkSummary}` });
       } else {
-        // 未存金库但有人类对话 → 生成摘要（LLM可用时使用LLM，否则用规则摘要）
-        const allContent = chunk.map(function(t) { return t.content; }).filter(Boolean).join(' ');
-        if (allContent.length > 10) {
-          // 规则摘要：取关键内容，控制长度
-          var summary = allContent.substring(0, 80);
-          if (allContent.length > 80) summary += '…';
-          result.push({ role: 'user', content: '【历史对话】' + summary });
+        // 未存金库但有人类对话 → 生成摘要（**B：LLM 优先，机械兵底**）
+        if (chunk.map(function(t) { return t.content; }).filter(Boolean).join(' ').length > 10) {
+          result.push({ role: 'user', content: '【历史对话】' + _chunkSummary });
         }
       }
     }
 
     console.log(`[Compaction] 智能压缩: ${turns.length} 轮 → ${result.length} 条摘要`);
     return result;
+  }
+
+  /**
+   * 🔴 B（2026-09-22）：单块摘要 —— LLM 优先，失败/未注入回退机械压缩。
+   *   机械兵底保留原语义（取正文前 160 字），**比原先的 40/80 字宽**。
+   */
+  private async _summarizeChunk(chunk: ConversationTurn[]): Promise<string> {
+    const text = chunk.map(function(t) { return String(t.content || ''); }).filter(Boolean).join(' ');
+    const mech = text.replace(/\s+/g, ' ').substring(0, 160);
+    if (!text.trim() || text.trim().length < 10 || !this._summarizeTurns) return mech;
+    try {
+      const timeout = new Promise<string>(function(_, rej) {
+        setTimeout(function() { rej(new Error('compaction summary timeout')); }, COMPACTION_SUMMARY_TIMEOUT_MS);
+      });
+      const out = await Promise.race([
+        this._summarizeTurns(chunk.map(function(t) { return { role: String(t.role), content: String(t.content || '') }; })),
+        timeout,
+      ]);
+      const normalized = normalizeCompactionSummary(out, 400);
+      return normalized || mech;
+    } catch (e) {
+      console.warn('[Compaction] LLM 摘要失败，回退机械压缩:', (e as Error)?.message);
+      return mech;
+    }
   }
 
   /** 旧版压缩方法已替换为 compressTurnsSmart（保留 `已存金库` 检测） */

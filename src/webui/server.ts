@@ -354,6 +354,21 @@ maintenance.injectDeps({
   runDecay: async () => (await storage?.runDecayMaintenance()) ?? { total: 0, archived: 0 },
   // 知识库过期未分类条目清理（90天—铁律，惰性）
   runKnowledgeGc: () => (knowledgeBase as any)?.deleteExpiredUnclassified?.(90) ?? 0,
+  // 🔴 B（2026-09-22）：对话压缩的 LLM 摘要器 —— 注入式（maintenance 本身不感知 LLM）。
+  //   惰性取 llmProvider（它在 initPipeline 中才赋值）；不可用/超时/报错 ⇒ maintenance 侧回退机械压缩。
+  summarizeTurns: async (turns) => {
+    if (!llmProvider || typeof (llmProvider as any).rawCall !== 'function') throw new Error('llm unavailable');
+    const { buildCompactionPrompt } = await import('./maintenance.js');
+    const out = await (llmProvider as any).rawCall(
+      [
+        { role: 'system', content: '你负责把对话压缩成简洁准确的第三人称摘要，不扮演任何角色、不编造信息。' },
+        { role: 'user', content: buildCompactionPrompt(turns as any) },
+      ],
+      400,
+      0.3,
+    );
+    return String(out || '');
+  },
   // 砂金库→金库关联：压缩时查 M2
   _sqliteGetter: () => storage?.getSQLite?.() ?? null,
   // 家族图谱主库（双写人名抢救用，惰性）
