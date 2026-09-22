@@ -29,6 +29,8 @@
 // @ts-ignore - sql.js ships its own types via dist/sql-wasm.js
 import initSqlJs from 'sql.js';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EntityGene } from '../../m1/types/dna.js';
@@ -1782,7 +1784,22 @@ export class FamilyGraph implements FamilyGraphInterface {
     return result;
   }
 
+  /**
+   * 🔴 2026-09-23 子阶段埋点（A 续）：对**所有变更方法**统一计时（>300ms 打印）。
+   *   经实测：FG 异步落盘修好后 `integrateFG` **仍有 4.4s 尖峰**（新实体那一轮）
+   *   ⇒：剩余成本在 `addNode`/`addEdge` 内部（此前无任何耗时可见性）。
+   *   用“重命名 + 包装器”方式：对外签名不变，对所有调用方透明。
+   */
   async addNode(node: GraphNode): Promise<void> {
+    const t0 = Date.now();
+    try { return await this._addNodeInner(node); }
+    finally {
+      const dt = Date.now() - t0;
+      if (dt > 300) console.log(`[FG·integrate] addNode(${node?.name ?? node?.id ?? '?'})=${dt}ms`);
+    }
+  }
+
+  private async _addNodeInner(node: GraphNode): Promise<void> {
     // 批12: 初始状态由证据强度决定（默认 active，弱证据改 candidate）
     let initialStatus = 'active';
     const aliases = [...new Set((node.aliases ?? []).map((alias) => alias.trim()).filter(Boolean))];
@@ -1894,6 +1911,15 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   async addEdge(edge: GraphEdge): Promise<void> {
+    const t0 = Date.now();
+    try { return await this._addEdgeInner(edge); }
+    finally {
+      const dt = Date.now() - t0;
+      if (dt > 300) console.log(`[FG·integrate] addEdge(${edge?.relation ?? edge?.id ?? '?'})=${dt}ms`);
+    }
+  }
+
+  private async _addEdgeInner(edge: GraphEdge): Promise<void> {
     // 🔴 V3.3 自指边拦截: 禁止 source = target
     if (edge.source_id === edge.target_id) return;
     // 🔵 批15(P1-1): 源头阻断 —— void(回收) 实体不得接边。
@@ -2824,7 +2850,26 @@ export class FamilyGraph implements FamilyGraphInterface {
     return false;
   }
 
+  /**
+   * 🔴 2026-09-23 子阶段耗时埋点（A）：`integrateFromEntity` 内部有多个 await 子阶段，
+   *   而 M4·timing 只能看到粗粒度的 `integrateFG`（实测偶发 10–20s；PAE 内联修复后**仍有 19s 案例**）。
+   *   本包装器只对 **>300ms** 的子阶段打日志 ⇒ 一次真实对话即可定位真正热点（不猜）。
+   */
+  private async _timed<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const t0 = Date.now();
+    try {
+      return await fn();
+    } finally {
+      const dt = Date.now() - t0;
+      if (dt > 300) { // A 定位已结束（2026-09-23），恢复 300ms 阈值降噪
+        this._stageTimes.push([name, dt]);
+        console.log(`[FG·integrate] ${name}=${dt}ms`);
+      }
+    }
+  }
+
   async integrateFromEntity(entities: EntityGene[], rawInput: string, selfName?: string): Promise<InferenceResult> {
+    this._stageTimes = []; // 🔴 A 诊断：每轮重置明细
     const details: string[] = [];
     let nodesCreated = 0;
     let edgesCreated = 0;
@@ -2851,7 +2896,14 @@ export class FamilyGraph implements FamilyGraphInterface {
     // 扫描 entity_genes，检测亲属称谓 + 人名的组合
     const persons = entities.filter((e) => e.type === 'person');
     const places = entities.filter((e) => e.type === 'place');
-    const namedKinship = new Map(this.extractNamedKinshipMentions(rawInput).map((item) => [item.kinship, item.name]));
+    // 🔴 A：名字滑窗扫描是同步全文扫描，单独计时（只包住扫描本身）
+    const _tKinship = Date.now();
+    const _kinshipRaw = this.extractNamedKinshipMentions(rawInput);
+    {
+      const _dtK = Date.now() - _tKinship;
+      if (_dtK > 300) console.log(`[FG·integrate] extractNamedKinshipMentions=${_dtK}ms`);
+    }
+    const namedKinship = new Map(_kinshipRaw.map((item) => [item.kinship, item.name]));
 
     // 🔴 长辈称谓列表（说话者是晚辈，关系方向需反转）
     const SENIOR_KINSHIP = new Set(['妈妈','妈','母亲','爸爸','爸','父亲','爷爷','奶奶','外公','外婆','祖父','祖母']);
@@ -2881,17 +2933,17 @@ export class FamilyGraph implements FamilyGraphInterface {
           details.push(`创建节点: ${canonicalName} (${kinshipWord})`);
         } else {
           personId = existing.id;
-          await this.ensurePersonAliases(personId, aliasCandidates);
+          await this._timed('ensurePersonAliases', () => this.ensurePersonAliases(personId, aliasCandidates));
           if (canonicalName !== person.name) {
-            await this.mergePersonNodes(canonicalName, person.name, [kinshipWord]);
+            await this._timed('mergePersonNodes', () => this.mergePersonNodes(canonicalName, person.name, [kinshipWord]));
             const merged = this.findPersonNodeByNameOrAlias(canonicalName);
             if (merged?.id) personId = merged.id;
           }
         }
         // 🏛️ §十四: 每次提及自动建立/丰富档案
         this.ensurePersonProfile(canonicalName);
-        await this.updatePersonProfile(canonicalName, {} as any, { countMention: true });
-        await this.updatePersonProfile(canonicalName, { relation_to_user: relationLabel } as any, { countMention: false });
+        await this._timed('updatePersonProfile(countMention)', () => this.updatePersonProfile(canonicalName, {} as any, { countMention: true }));
+        await this._timed('updatePersonProfile(relation)', () => this.updatePersonProfile(canonicalName, { relation_to_user: relationLabel } as any, { countMention: false }));
         // 🔴 2026-09-22 M4 延迟修复：PAE 的 LLM 档案提取**不再内联阻塞**。
         //   实测（M4·timing）：integrateFG 常态 0.4–0.6s，但**偶发 10.4s / 19.8s**（占该次 assemble 的 95%+），
         //   根因就是这里 await 了 PAE 的 LLM 提取（超时 30s，成功时单次 10–20s）
@@ -2972,7 +3024,7 @@ export class FamilyGraph implements FamilyGraphInterface {
           _pid = _ex[0].id;
         }
         this.ensurePersonProfile(person.name);
-        await this.updatePersonProfile(person.name, {} as any, { countMention: true });
+        await this._timed('updatePersonProfile(acquaintance)', () => this.updatePersonProfile(person.name, {} as any, { countMention: true }));
         const _paeT1 = Date.now();
         console.log(`[Hook] module_entry module=m4.PAE.extractProfileFromText person=${person.name}`);
         void this.extractProfileFromText(person.name, rawInput)
@@ -2997,7 +3049,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     // （尤其是介绍句"我姐姐叫XX"/"这是我朋友XX"）永久丢失 → 真人只能等
     // 30 天后被误 void（不可逆），或永不被记录。
     // 移至循环后，本轮新建的 candidate 也能在本轮获得首次证据。
-    await this._accumulateCandidateEvidence(persons.map((p) => p.name), rawInput);
+    await this._timed('accumulateCandidateEvidence', () => this._accumulateCandidateEvidence(persons.map((p) => p.name), rawInput));
 
     // 地点关联：如果提到家庭成员 + 地点 → 自动创建 lives_in
     if (persons.length > 0 && places.length > 0) {
@@ -3511,20 +3563,112 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /** 标记脏数据（500ms聚合落盘，平衡IO与可靠性） */
+  /**
+   * 🔴 2026-09-23 FG 落盘重构（已实测定位为 M4 剩余卡点）：
+   *   原实现 `markDirty(true)` ⇒ 每次变更都 **`db.export()` 42.4MB + 同步 `writeFileSync`** ✗
+   *   ⇒ 一轮对话多次全量导出+同步写 = 实测 `integrateFG` 6.4s（且阻塞事件循环），
+   *   且**无原子写/无空库守卫**（写中途失败会留下截断的 FG 库 ✗ = 数据安全隐患）。
+   *   修法与主库（SQLiteAdapter）同构：**异步 + 原子替换（tmp→fsync→rename）+ 合并并发 + 写入代次**。
+   */
+  private _flushing = false;
+  private _flushPending = false;
+  private _writeSeq = 0;
+  /**
+   * 🔴 2026-09-23 FG “立即落盘”的**最小间隔**。
+   *   背景：`markDirty(true)` 被 ~20 处变更调用，每次触发 `db.export()`（42MB，**同步、耗时 0.4–3.1s**）
+   *   ⇒ 一轮对话多次全量导出 = 实测 `integrateFG` 4–8s 尖峰（M4 倒数第一个卡点）。
+   *   与主库同思路（用户已批准的 60s 防抖窗口）：60s 内的“立即落盘”退化为防抖。
+   */
+  private readonly _IMMEDIATE_MIN_INTERVAL_MS = Number(process.env.FG_FLUSH_MIN_INTERVAL_MS) || 60_000;
+  private _lastFlushAt = 0;
+  /** 🔴 2026-09-23（A 诊断）：本轮 integrateFromEntity 的子阶段耗时明细（仅诊断，每轮清空） */
+  private _stageTimes: Array<[string, number]> = [];
+
   private markDirty(immediate = false): void {
     this._dirty = true;
     this._familyCache = null;
     this._socialCache = null;
-    if (immediate) { this.flush(); return; }
+    if (immediate) {
+      // 🔴 时间地板：60s 内的“立即落盘”退化为防抖（避免一轮对话多次 42MB 同步导出）
+      if (Date.now() - this._lastFlushAt >= this._IMMEDIATE_MIN_INTERVAL_MS) {
+        void this.flushAsync();
+        return;
+      }
+      if (!this._saveTimer) {
+        this._saveTimer = setTimeout(() => void this.flushAsync(), 500);
+      }
+      return;
+    }
     if (!this._saveTimer) {
-      this._saveTimer = setTimeout(() => this.flush(), 500);
+      this._saveTimer = setTimeout(() => void this.flushAsync(), 500);
     }
   }
 
-  /** P4: 强制立即落盘 */
+  /** 🔴 异步落盘（不阻塞事件循环）+ 原子替换 + 并发合并（N 次变更 ⇒ 1 次导出） */
+  private async flushAsync(): Promise<void> {
+    if (!this._dirty || !this.db) return;
+    if (this._flushing) { this._flushPending = true; return; }
+    this._flushing = true;
+    let wrote = false;
+    let deferred = false; // 🔴 地板拦截（已安排好延后重试）⇒ finally 不得清掉该定时器
+    try {
+      // 🔴 2026-09-23：**必须先让出事件循环再 export**。
+      //   `db.export()`（42MB）是**同步**的，若写在 await 之前，它仍会在**调用方的同步栈**上执行
+      //   ⇒ 每个 markDirty(true) 都真真实实阻塞一次（实测：修改后 integrateFG **仍有 7.9s 尖峰**）。
+      //   先 setImmediate 让出，使导出发生在后续 tick；且导出前重查 _dirty —— 同一轮的 N 次变更
+      //   被合并为 **1 次**导出（后续调用因 _dirty=false 直接返回）。
+      await new Promise((r) => setImmediate(r));
+      if (!this._dirty || !this.db) return;
+      // 🔴 统一地板：无论“立即”还是防抖路径，60s 内只允许一次 42MB 全量导出。
+      //   实测教训：只给 immediate 加地板时，防抖路径（500ms）仍会一轮多次导出
+      //   ⇒ 单轮 7 次导出 ≈ 4397ms 尖峰（M4·timing 实测）。
+      const _sinceLast = Date.now() - this._lastFlushAt;
+      if (_sinceLast < this._IMMEDIATE_MIN_INTERVAL_MS) {
+        deferred = true;
+        if (!this._saveTimer) {
+          this._saveTimer = setTimeout(() => {
+            this._saveTimer = null;
+            void this.flushAsync();
+          }, this._IMMEDIATE_MIN_INTERVAL_MS - _sinceLast + 50);
+        }
+        return;
+      }
+      const t0 = Date.now();
+      const data = this.db.export();
+      const _mySeq = ++this._writeSeq;
+      const tmp = `${this.dbPath}.tmp-${process.pid}`;
+      let fh: FileHandle | null = null;
+      try {
+        fh = await fsp.open(tmp, 'w');
+        await fh.write(Buffer.from(data));
+        await fh.sync(); // 强制刷盘，避免 rename 后内容仍在页缓存
+      } finally {
+        if (fh) { try { await fh.close(); } catch { /* ignore */ } }
+      }
+      if (_mySeq !== this._writeSeq) {
+        // 期间有更新的同步落盘（如 close()）⇒ 放弃本次 rename，防止旧内容覆盖新内容
+        try { await fsp.unlink(tmp); } catch { /* ignore */ }
+      } else {
+        await fsp.rename(tmp, this.dbPath);
+        wrote = true;
+      }
+      const dt = Date.now() - t0;
+      if (dt > 300) console.log(`[FamilyGraph] 异步落盘 ${(data.length / 1048576).toFixed(1)}MB 用时 ${dt}ms（原为同步阻塞）`);
+    } catch (err) {
+      console.error('[FamilyGraph] 异步落盘失败（保留脏标记待重试）:', (err as Error)?.message);
+    } finally {
+      this._flushing = false;
+      if (this._saveTimer && !deferred) { clearTimeout(this._saveTimer); this._saveTimer = null; }
+      if (this._flushPending) { this._flushPending = false; void this.flushAsync(); }
+    }
+    if (wrote) { this._dirty = false; this._lastFlushAt = Date.now(); }
+  }
+
+  /** P4: **同步**强制落盘（仅供 close/关闭前等需要“确定已落盘”的场景） */
   private flush(): void {
     if (!this._dirty || !this.db) return;
     try {
+      this._writeSeq++; // 登记代次：让在途的异步旧写入放弃 rename
       const data = this.db.export();
       const buffer = Buffer.from(data);
       writeFileSync(this.dbPath, buffer);
@@ -3543,6 +3687,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; }
     if (this._dirty && this.db) {
       try {
+        this._writeSeq++; // 代次：阻止在途异步写入回写旧内容
         const data = this.db.export();
         writeFileSync(this.dbPath, Buffer.from(data));
       } catch (err) { console.error('[FamilyGraph] 关闭前落盘失败:', err); }

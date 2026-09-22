@@ -707,3 +707,31 @@ fgSummary=341 **batchProfile=0** …` ⇒ 两项缓存均生效；M4 总量从 1
 所有MD同步文件               → data/knowledge-md/
 所有数据库备份               → data/backups/
 所有日志                     → server.log + bionic.log
+
+---
+
+## ⑮ 2026-09-23：FamilyGraph 持久化重构（异步 + 原子 + 合并 + 时间地板）
+
+**背景（已实测定位）**：`FamilyGraph.markDirty(true)` 被 ~20 处变更调用，原实现每次都执行
+`db.export()`（**42.4MB 全量导出、同步**）+ `writeFileSync`（**同步写**）⇒ 一轮对话触发多次全量导出
+⇒ 实测单轮最多 **7 次导出 ≈ 4397ms**，且**阻塞事件循环**；另：**无原子写、无失败重试**（写中途失败会留下截断的 FG 库 ✗）。
+
+**改动（`src/m4/household/FamilyGraph.ts`）**：
+1. **异步化**：`flush()`（同步）仅供 `close()`/关闭前使用；常规走 `flushAsync()`。
+2. **先让出事件循环再导出**：`await setImmediate` 后再 `db.export()`——否则 42MB 同步导出仍落在**调用方同步栈**上（实测：只做异步化而不让出，`integrateFG` 仍有 7.9s 尖峰）。
+3. **原子替换**：`tmp → fh.write + fh.sync → rename`（写中途失败不会污染正式文件）。
+4. **并发合并 + 写入代次**：`_flushing`/`_flushPending` 合并同一轮 N 次变更 ⇒ **1 次**导出；`_writeSeq` 防在途异步旧内容覆盖 `close()` 的同步新内容。
+5. **时间地板**：60s 内只允许一次全量导出（env `FG_FLUSH_MIN_INTERVAL_MS` 可调）；未到间隔则安排延后重试（`deferred` 标记防止 `finally` 误清定时器——此为修复过程中实际引入又修正的 bug）。
+6. **失败保留脏标记**：落盘失败 ⇒ 不清 `_dirty`，下次重试；打错误日志。
+7. **埋点**：`_timed()` 包装 `ensurePersonAliases`/`mergePersonNodes`/`updatePersonProfile`×3/`accumulateCandidateEvidence`；`addNode`/`addEdge` 采用「重命名 + 包装器」（对外签名不变）；名字滑窗扫描单独计时；每轮打印 >300ms 明细；落盘耗时打 `[FamilyGraph] 异步落盘 …MB 用时 …ms`。
+
+**实测证据**：`[FamilyGraph] 异步落盘 42.4MB 用时 431/575/887/2314ms`（均为后台 tick，不再出现在请求关键路径）；5 轮对话仅 3 次落盘（原为每变更一次）。
+
+**A 阶段结论（诚实标注）**：`integrateFG` 残余 4–8s **尖峰不在 FG 自身**——子阶段埋点全 < 60ms、FG 库仅 543 节点/431 边且索引齐备（100 次点查 1ms）、落盘已异步化；**反证**：静置 180s 后同类操作 `integrateFG=260ms` ⇒ 归因为**冷启动后台任务争用**（节律调度器/知识索引桥/276 个 MD/自我模型/记忆仓/统一备份引擎），后续归 H（启动期治理）。
+
+**回滚方案**：`git revert <本次提交>` 即恢复同步落盘；或将 `FG_FLUSH_MIN_INTERVAL_MS=0` 关闭时间地板（仍保留异步与原子写）。
+
+**举一反三·同类缺陷后续清单（本次未改，已登记）**：
+- `src/app/memory-vault/MemoryVault.ts`（记忆仓）：`flush()` 同步 `writeFileSync(VAULT_DB, db.export())`（行 175）+ 备份同步写（行 162）+ 条目级同步写（行 104/192）。
+- `src/m2/ConversationDB.ts`：3 处 `writeFileSync(this.dbPath, Buffer.from(this.db.export()))`（其中部分为关闭期同步兜底，需逐处判定是否在请求路径上）。
+- CLI/离线脚本（`migrate-*`/`scan-*`/`Backfill*`）：离线执行，不属请求路径，暂不改。
