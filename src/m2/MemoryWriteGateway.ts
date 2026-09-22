@@ -113,6 +113,24 @@ export interface GuardResult {
 }
 
 /**
+ * 🔴 2026-09-20：**退化内容判定**（纯函数，便于单测）。
+ *
+ * 背景（实测）：金库/黑钻里混进了测试垃圾（`AAAAA…`、`你好呀`、纯表情等），
+ * 而 roleplay 记忆**豁免五要素守护** ⇒ 垃圾可以绕过守卫直接进金库。
+ * 本判定只拦**退形内容**（不会误伤真实聊天）：
+ * - 空白 / 长度 < 2
+ * - 单字符重复（如 AAAA…，重复 ≥ 6 次占主体）
+ * - 不含任何字母/数字/中日韩字符（即纯表情/标点/符号）
+ */
+export function isDegenerateContent(text: string): boolean {
+  const s = String(text ?? '').trim();
+  if (s.length < 2) return true;
+  if (/^(.)\1{5,}$/u.test(s)) return true;                       // 单字符重复
+  if (!/[\p{L}\p{N}\u4e00-\u9fff]/u.test(s)) return true;         // 无字母/数字/汉字 ⇒ 纯表情符号
+  return false;
+}
+
+/**
  * 五要素守卫生效检查
  * @returns allowed=true 放行；allowed=false 拒绝 + reason 说明
  */
@@ -127,6 +145,10 @@ export function checkWriteGuard(opts: {
   // 🔴 元对话拦截
   if (isMetaDiscourse(opts.rawInput)) {
     return { allowed: false, reason: `元对话拦截: id=${opts.id ?? 'unknown'}` };
+  }
+  // 🔴 2026-09-20 退化内容拦截（在五要素之前 —— 否则 roleplay 豁免会放垃圾进金库）
+  if (isDegenerateContent(opts.rawInput)) {
+    return { allowed: false, reason: `退化内容拦截(空白/重复/纯表情) id=${opts.id ?? 'unknown'} zone=${opts.leafZone ?? 'unknown'}` };
   }
   // 🔴 五要素守护：entity_genes 为空时拒绝（roleplay 豁免）
   const isRoleplay = opts.memoryKind === 'roleplay';

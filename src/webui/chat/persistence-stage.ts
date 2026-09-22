@@ -466,17 +466,21 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   // ── Step 4: 写后读验证（改造③ — 彻底杜绝静默数据丢失） ──
   try {
     const verifySqlite = input.ctx.storage.getSQLite();
-    const userCheck = verifySqlite.queryAll<any>(
-      'SELECT raw_input FROM memories WHERE seq_pos = ? AND leaf_zone = ?',
-      [input.seqPos, 'user'],
-    );
-    const asstCheck = verifySqlite.queryAll<any>(
-      'SELECT raw_input FROM memories WHERE seq_pos = ? AND leaf_zone = ?',
-      [input.seqPos + 1, 'assistant'],
-    );
-    if (!userCheck.length || !asstCheck.length) {
-      console.error(`[Persist] ❌ 写后验证失败: seq=${input.seqPos} user=${!!userCheck.length} asst=${!!asstCheck.length}`);
+    // 🔴 2026-09-20（批5 副作用修正）：改用 **内容 + zone 核对**。
+    //   原先按 seq_pos 核对（`WHERE seq_pos=? AND leaf_zone=?`）—— 而 seq_pos 冲突时适配器会**重新分配**
+    //   （批4 修复：避免 UNIQUE 冲突抛入无 catch 的批处理路径），调用方持有的仍是旧值
+    //   ⇒ 写后验证必然假失败（实测 68 次 `[Persist] 写后验证失败`）。
+    //   选内容核对而非 id：内容在作用域内、且与 seq_pos 分配无关（id 变量在别的块作用域里）。
+    const byContent = (text: string, zone: string) =>
+      verifySqlite.queryAll<any>('SELECT raw_input FROM memories WHERE raw_input = ? AND leaf_zone = ? LIMIT 1', [text, zone]);
+    const userCheck = byContent(input.message, 'user');
+    const asstCheck = byContent(input.reply, 'assistant');
+    if (!userCheck.length) {
+      console.error(`[Persist] ❌ 写后验证失败: 用户轮未落库（seq=${input.seqPos}）`);
       hadError = true;
+    }
+    if (!asstCheck.length) {
+      console.warn(`[Persist] ⚠️ 写后验证：助手轮未落库（seq=${input.seqPos + 1}，不计为错误）`);
     }
   } catch (e: any) {
     console.error('[Persist] ❌ 写后验证异常:', e?.message);
