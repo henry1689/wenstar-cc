@@ -243,6 +243,8 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   try {
     const _convUserId = input.ctx.conversationDB?.insertConversation('user', input.message, {
       seqPos: input.seqPos, topic,
+      // 🔴 2026-09-22 测试隔离（#D）：测试流量写入 namespace='test' ⇒ 可辨识、可清理、且被检索侧排除
+      namespace: input.ctx.testMode ? 'test' : 'default',
       entityNames: input.dna.entity_genes.filter((g: any) => g.type !== 'self').map((g: any) => g.name),
       perception: { pleasure: input.p.pleasure, arousal: input.p.arousal, intimacy: input.p.intimacy },
       calciumScore: input.decision.enhanced.calcium_score,
@@ -256,6 +258,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     if (_convUserId) _convUserRowId = _convUserId;
     const _convAsstId = input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
       seqPos: input.seqPos + 1, topic,
+      namespace: input.ctx.testMode ? 'test' : 'default',
       // 🔴 D1 修复(2026-09-11): assistant 轮补 entityNames。
       // 实测：该字段原缺失 → 全库 assistant 轮 entity_names 100% 为空（833/833）。
       // ❗ 真实消费方（经两轮 S4 独立评审校正，勿再写错）：
@@ -315,6 +318,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       id: idUser, seqPos: input.seqPos, createdAt: now,
       perceptionJson: pJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'user', rawInput: input.message,
+      namespace: input.ctx.testMode ? 'test' : 'default',
       primaryEmotion, memoryType: 'dialog',
       memoryKind,
       lifecycleState: calciumLevel >= 2 ? 'active' : 'candidate',
@@ -376,6 +380,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       id: idAssist, seqPos: input.seqPos + 1, createdAt: now,
       perceptionJson: asstPJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'assistant', rawInput: cleanReply,
+      namespace: input.ctx.testMode ? 'test' : 'default',
       primaryEmotion, memoryType: 'dialog',
       memoryKind,
       lifecycleState: calciumLevel >= 2 ? 'active' : 'candidate',

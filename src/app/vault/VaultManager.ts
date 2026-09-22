@@ -611,6 +611,7 @@ export function autoPromoteCandidatesV2(sqlite: SQLiteAdapter, limit = 5): Black
      FROM memories
      WHERE COALESCE(promoted_to_diamond, 0) = 0
        AND lifecycle_state IN ('candidate', 'active', 'healed')
+       AND COALESCE(namespace, 'default') <> 'test'  -- 🔴 2026-09-22 测试隔离 (#D)：测试流量不参与黑钻晋升
        AND (calcium_score >= 0.9 OR calcium_score >= 4.5 OR recall_count >= 3 OR is_landmark = 1)
      -- 🔴 2026-09-22：排序改用归一后的分值（≤1 视为 0-1 量纲，按 ×5 归到 0-5）——
      --   否则混量纲下高数值行（如 2.4 的高量纲值）会把真正合格行（如 0.9 = 4.5）挤在

@@ -74,6 +74,21 @@ beforeAll(async () => {
 
 ---
 
+### 规则 4：**测试流量必须带 `test_mode: true`（否则污主库）**
+
+对 `/api/chat` 的**测试**请求必须带 **`test_mode: true`**（`server-chat-routes.ts` 已支持）。
+它会让本轮写入的 **`namespace='test'`**（memories / conversations），而：
+- **检索侧硬门**：`MemoryRetriever` 的 3 条候选查询均排 `COALESCE(namespace,'default') <> 'test'`
+  ⇒ 测试记忆**永不进入她的上下文**；
+- **不参与黑钻晋升**：`autoPromoteCandidatesV2` 预筛同样排 test；
+- **可批量清理**：`SELECT ... WHERE namespace='test'` 一网打尽。
+
+反例（已发生过）：另一会话的测试直投主库 ⇒ 产生「你好」×427、「帮我记个事」×124、「徐诗雨」×103 等，
+其中 656 条一度处于 active/promoted、**正在参与检索**，于 2026-09-22 被批量隔离（`lifecycle_state='suppressed'`，
+见 `docs/data-storage-reference.md` 「⑩」节）。
+
+> 两个筛子彼此不替代：本规则防**污主库**；规则 1（禁静默跳过）防**假绿**。
+
 ## 三、为什么这些约定值得守
 
 这套系统的核心风险不是"测试不够多"，而是**结论的可信度与实际覆盖不匹配**：

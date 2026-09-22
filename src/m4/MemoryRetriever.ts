@@ -90,11 +90,11 @@ export class MemoryRetriever {
         }
       };
       take(sqlite.queryAll(
-        `SELECT * FROM memories WHERE 1=1${police.clause} ORDER BY seq_pos DESC LIMIT ?`,
+        `SELECT * FROM memories WHERE 1=1${police.clause} AND COALESCE(namespace,'default') <> 'test' ORDER BY seq_pos DESC LIMIT ?`,
         [...police.params, half],
       ));
       take(sqlite.queryAll(
-        `SELECT * FROM memories WHERE 1=1${police.clause}
+        `SELECT * FROM memories WHERE 1=1${police.clause} AND COALESCE(namespace,'default') <> 'test'
          ORDER BY is_landmark DESC, calcium_score DESC, recall_count DESC, seq_pos DESC LIMIT ?`,
         [...police.params, window],
       ));
@@ -146,7 +146,7 @@ export class MemoryRetriever {
       const ids = hits.map(h => h.source_id).filter(Boolean);
       if (ids.length === 0) return [];
       const idPhs = ids.map(() => '?').join(',');
-      const rows = sqlite.queryAll(`SELECT * FROM memories WHERE id IN (${idPhs})`, ids) as any[];
+      const rows = sqlite.queryAll(`SELECT * FROM memories WHERE id IN (${idPhs}) AND COALESCE(namespace,'default') <> 'test'`, ids) as any[];
       const out: DNA[] = [];
       for (const r of rows || []) {
         out.push({
