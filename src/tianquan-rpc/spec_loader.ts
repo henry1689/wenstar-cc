@@ -60,6 +60,8 @@ export class SpecLoader {
         const sections = parseSections(raw, domain);
         console.log(`[SpecLoader] ${domain}: ${sections.length} 章节 (${(raw.length / 1024).toFixed(1)}KB)`);
         const ids: string[] = [];
+        let failed = 0;
+        let firstError = '';
         for (const s of sections) {
           try {
             const existing = await kb.search(s.dnaId, 1);
@@ -67,7 +69,17 @@ export class SpecLoader {
             const entry = await kb.add({ title: `[${domain.toUpperCase()}] ${s.title}`, content: s.content, source_type: 'spec', source_name: fileName, tags: [`spec:${domain}`, `spec:chapter`, `dna:${s.dnaId}`, `version:${version}`], classification: 'spec:domain', dna_id: s.dnaId, interaction_type: 'system_spec' });
             await kb.update(entry.id, { locked: true });
             ids.push(entry.id);
-          } catch { /* skip individual failures */ }
+          } catch (err) {
+            // 🔴 2026-09-23（B 阶段·失败可见化）：原为静默吞掉（无计数、无日志）
+            //   ⇒ 章节入库被拒时无人知晓：实测日志出现 59 次
+            //   `[SpecLoader] ✓ tianquan: 0/8 章节入库`（全部被拒却仍报“成功”）。
+            //   现改为：计数 + 首个失败原因告警 + 末尾汇总（不改变既有 success 字段语义）。
+            failed++;
+            if (!firstError) firstError = (err as Error)?.message || String(err);
+          }
+        }
+        if (failed > 0) {
+          console.warn(`[SpecLoader] ⚠️ ${domain}: ${failed}/${sections.length} 章节入库失败｜首个原因: ${firstError}`);
         }
         this._specs.set(domain, { sections: sections.length, ids });
         results.push({ domain, success: true, sectionsLoaded: sections.length, knowledgeIds: ids });
