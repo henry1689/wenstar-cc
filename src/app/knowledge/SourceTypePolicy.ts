@@ -15,7 +15,7 @@
 
 /** 用户上传的参考文件 */
 export const FILE_SOURCE_TYPES = new Set([
-  'md','txt','pdf','docx','xlsx','csv','json',
+  'md','txt','text','pdf','docx','xlsx','csv','json',
   'jpg','jpeg','png','gif','bmp','webp','svg',
   'mp4','avi','mov','mkv','webm',
   'architecture','protocol','research','person',
