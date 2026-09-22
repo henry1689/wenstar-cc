@@ -107,14 +107,16 @@ describe('防抖窗口（C1-b）', () => {
   it('窗口内不落盘、超窗后落盘；且落盘后仍能再次排程（不会卡死）', async () => {
     const dbPath = join(WORK, 'window.db');
     const a = fakeAdapter(dbPath);
-    a._FLUSH_INTERVAL = 300; // 测试用短窗口
+    // 🔴 2026-09-22 去 flaky：原用 300ms 窗口 + 120/700ms 等待，在并行全量负载下会抖（单独跑必过）。
+    //   加宽余量：窗口 800ms、窗口内检查 250ms、超窗等待 1800ms ⇒ 对负载不敏感，语义不变。
+    a._FLUSH_INTERVAL = 800;
 
     a.save(); // private，测试内直呼
-    await new Promise((r) => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 250));
     expect(existsSync(dbPath), '窗口内不应落盘（防抖生效）').toBe(false);
     expect(a._flushTimer, '窗口内应有待触发的计时器').not.toBeNull();
 
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, 1800));
     expect(existsSync(dbPath), '超窗后应已落盘').toBe(true);
     expect(a._flushTimer, '落盘后计时器应已清空（否则后续写入永不排程）').toBeNull();
     expect(a._dirtyCount, '成功落盘后脏计数应清零').toBe(0);
@@ -125,7 +127,7 @@ describe('防抖窗口（C1-b）', () => {
       exec: () => { throw new Error('stub'); },
     };
     a.save();
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, 1800));
     expect(statSync(dbPath).size, '第二次落盘应写出新内容（1MB）').toBe(1024 * 1024);
   });
 });

@@ -1415,8 +1415,10 @@ async function initPipeline(): Promise<void> {
       const result = runGoldQC(storage.getSQLite());
       if (result.scanned > 0) console.log(`[GoldQC] 扫描 ${result.scanned} 条, 通过 ${result.approved} 条, 拒绝 ${result.rejected} 条`);
       // 自动提炼：扫描高钙质记忆提升到黑钻（与 GoldQC 互补，门槛不同）
+      // 🔴 2026-09-22：上限 5 → **200**。原因：量纲错位（见 VaultManager 注释）使晋升通道长期等于死路，
+      //   堆积达 2927 条候选；修好量纲后需一次性/快速消化历史积压，否则 5/小时 ⇒ 3 天才能清完。
       const { autoPromoteCandidatesV2 } = await import('../app/vault/VaultManager.js');
-      const promoted = autoPromoteCandidatesV2(storage.getSQLite(), 5);
+      const promoted = autoPromoteCandidatesV2(storage.getSQLite(), 200);
       if (promoted.length > 0) console.log(`[Vault] 自动提炼: ${promoted.length} 条→黑钻`);
     } catch (err) { console.warn('[GoldQC] 失败:', err); }
   }, 60 * 60 * 1000));

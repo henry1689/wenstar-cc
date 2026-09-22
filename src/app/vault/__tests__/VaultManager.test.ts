@@ -205,7 +205,9 @@ describe('VaultManager promotion state machine', () => {
     expect(entry?.source_id).toBe('mem_1');
     expect(sqlite.memories.get('mem_1')?.promoted_to_diamond).toBe(1);
     expect(sqlite.memories.get('mem_1')?.lifecycle_state).toBe('promoted');
-    expect(sqlite.memories.get('mem_1')?.promotion_reason).toBe('native-calcium>=4.5');
+    // 2026-09-22 量纲归一：reason 文案标明两种量纲（行为不变——fixture 4.8 属 0–5 量纲，归一为 0.96 仍达线）
+    // 2026-09-22 量纲归一（0–1 ⇒ ×5 归到 0–5；>1 原值）：fixture 4.8 属 0–5 ⇒ 原值比较仍达线
+    expect(sqlite.memories.get('mem_1')?.promotion_reason).toBe('native-calcium>=4.5(归一至0–5)');
   });
 
   it('demotes source memory metadata when a black diamond is deleted', () => {

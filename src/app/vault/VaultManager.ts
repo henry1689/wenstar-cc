@@ -180,11 +180,13 @@ export function addBlackDiamond(
   const id = `bd_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
   const now = new Date().toISOString();
   const tags = params.tags || [];
-  // 黑钻上限（从配置读取）：超出时淘汰钙化分最低的
+  // 黑钻上限（从配置读取）：超出时**归档**钙化最低的一枚（非物理删除）
+  //   🔴 2026-09-22 用户决定 A：① 只统计 status='active'（归档/移除的不占额度）；
+  //   ② 淘汰改为 status='removed' + notes 记原因（保留记录，符合「只增不删」）。
   try {
-    const total = (sqlite.queryAll('SELECT COUNT(*) as cnt FROM black_diamond') as any[])?.[0]?.cnt || 0;
+    const total = (sqlite.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE COALESCE(status, 'active') = 'active'") as any[])?.[0]?.cnt || 0;
     if (total >= MEMORY_CONFIG.blackDiamond.maxCount) {
-      const lowest = sqlite.queryAll('SELECT id, calcium_level FROM black_diamond ORDER BY CAST(calcium_level AS REAL) ASC, created_at ASC LIMIT 1') as any[];
+      const lowest = sqlite.queryAll("SELECT id, calcium_level FROM black_diamond WHERE COALESCE(status, 'active') = 'active' ORDER BY CAST(calcium_level AS REAL) ASC, created_at ASC LIMIT 1") as any[];
       if (lowest.length > 0) {
         const demotedId = lowest[0].id;
         sqlite.writeRaw(
@@ -195,8 +197,14 @@ export function addBlackDiamond(
            WHERE id = (SELECT source_id FROM black_diamond WHERE id = ?)`,
           demotedId,
         );
-        sqlite.writeRaw('DELETE FROM black_diamond WHERE id = ?', demotedId);
-        console.log('[Vault] 黑钻超出上限(200)，降级: ' + demotedId);
+        // 🔴 2026-09-22：原为 `DELETE FROM black_diamond ...` —— 违反「只增不删」⇒ 改为归档
+        sqlite.writeRaw(
+          "UPDATE black_diamond SET status = 'removed', notes = ?, updated_at = ? WHERE id = ?",
+          '超出黑钻上限自动归档（源记忆已降级回金库层；记录保留，不物理删除）',
+          now,
+          demotedId,
+        );
+        console.log('[Vault] 黑钻超出上限(' + MEMORY_CONFIG.blackDiamond.maxCount + ')，归档(不删除): ' + demotedId);
       }
     }
   } catch (_) { /* 上限检测不阻塞晋升 */ }
@@ -534,7 +542,13 @@ export function evaluateDiamondPromotion(memory: Record<string, any>): DiamondPr
   if (isMetaDiscourse(memory.raw_input) || isMetaDiscourse(memory.summary)) {
     return { eligible: false, reason: 'meta-discourse', targetState: 'candidate' };
   }
-  const calciumScore = Number(memory.calcium_score ?? memory.calcium_level ?? 0);
+  // 🔴 2026-09-22 量纲归一（**自我更正版**）：历史数据量纲**混杂**——实测 `0~1` 共 6576 条（96%）、
+  //   `1~5` 243 条、`5~10` 34 条，**最大值 10**（`applyRecallIncrement` 每次 +0.2、上限 10）。
+  //   而下方阈值（4.5/4.0/3.5）是按 **0–5** 写的 ⇒ 对 0–1 的记忆**永不命中**。
+  //   修法：归一到 **0–5**（≤1 的视为 0–1 量纲 ⇒ ×5；>1 的视为已在 0–5/0–10 量纲 ⇒ 原值）。
+  //   ⚠️ 先前一试用 `>1.5 ⇒ ÷5` 是错的（会把 2.4 压成 0.48 ⇒ 反而埋掉中等值），已改正。
+  const _rawCalcium = Number(memory.calcium_score ?? memory.calcium_level ?? 0);
+  const calciumScore = _rawCalcium > 1 ? _rawCalcium : _rawCalcium * 5;
   const recallCount = Number(memory.recall_count ?? 0);
   const isLandmark = Number(memory.is_landmark ?? 0) === 1 || memory.is_landmark === true;
   const lifecycleState = String(memory.lifecycle_state ?? 'candidate');
@@ -553,7 +567,7 @@ export function evaluateDiamondPromotion(memory: Record<string, any>): DiamondPr
     return { eligible: true, reason: 'landmark+high-calcium', targetState: 'promoted' };
   }
   if (calciumScore >= 4.5) {
-    return { eligible: true, reason: 'native-calcium>=4.5', targetState: 'promoted' };
+    return { eligible: true, reason: 'native-calcium>=4.5(归一至0–5)', targetState: 'promoted' };
   }
   if (recallCount >= 5) {
     return { eligible: true, reason: 'recall>=5', targetState: 'promoted' };
@@ -585,7 +599,7 @@ export function autoPromoteCandidates(sqlite: SQLiteAdapter, limit = 5): BlackDi
  */
 export function autoPromoteCandidatesV2(sqlite: SQLiteAdapter, limit = 5): BlackDiamondEntry[] {
   const alreadyPromoted = new Set(
-    (sqlite.queryAll('SELECT source_id FROM black_diamond WHERE source_id IS NOT NULL') as any[])
+    (sqlite.queryAll("SELECT source_id FROM black_diamond WHERE source_id IS NOT NULL AND COALESCE(status, 'active') = 'active'") as any[])
       .map((r: any) => r.source_id as string)
       .filter(Boolean),
   );
@@ -597,8 +611,12 @@ export function autoPromoteCandidatesV2(sqlite: SQLiteAdapter, limit = 5): Black
      FROM memories
      WHERE COALESCE(promoted_to_diamond, 0) = 0
        AND lifecycle_state IN ('candidate', 'active', 'healed')
-       AND (calcium_score >= 3.5 OR recall_count >= 3 OR is_landmark = 1)
-     ORDER BY calcium_score DESC, recall_count DESC, is_landmark DESC
+       AND (calcium_score >= 0.9 OR calcium_score >= 4.5 OR recall_count >= 3 OR is_landmark = 1)
+     -- 🔴 2026-09-22：排序改用归一后的分值（≤1 视为 0-1 量纲，按 ×5 归到 0-5）——
+     --   否则混量纲下高数值行（如 2.4 的高量纲值）会把真正合格行（如 0.9 = 4.5）挤在
+     --   LIMIT 窗口之外，导致每次调用都是同一批不合格行、永远升不动。
+     --   （注意：SQL 注释里不得出现反引号——会提前终结 TS 模板字符串。）
+     ORDER BY (CASE WHEN calcium_score <= 1 THEN calcium_score * 5 ELSE calcium_score END) DESC, recall_count DESC, is_landmark DESC
      LIMIT ?`,
     [limit],
   ) as any[];
