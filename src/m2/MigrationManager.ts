@@ -774,11 +774,16 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
   // 4. entity_genes 幂等派生（批次1, 2026-09-11: 四要素契约 —— DNA 基因纳入守护）
   //    🔴 语义: DNA 基因 = 本条记忆“**提及**”的实体（与 belong_entity_uuid 的“归属”互补）。
   //    数据源与运行时 L3 同源（FamilyGraph person 主名+别名），保证读写口径一致。
-  //    🔴 roleplay 豁免: 扮演记忆按设计不建基因（见 persistence-stage.ts 隔离注释），显式排除。
+  //    🔴 roleplay 策略（2026-09-22 用户决定 A）：**已改为也回填**。
+  //       原先 roleplay 被排除（“扮演记忆按设计不建基因”）⇒ 实测全库 1667 条 / 徐诗雨 909 条长期无基因。
+  //       为何现在可以回填：读侧已按 `memory_kind='roleplay'` **对称隔离**
+  //       （`MemoryRetriever`: 非会晤场景 → 排除；会晤场景 → 只保留本实体会晤记忆）
+  //       ⇒ 给 roleplay 补基因**不会泄漏**到户主（玉瑶频道）检索。
+  //       注：写侧的“五要素豁免（roleplay）”**未改**：新建 roleplay 仍允许无基因，由本回填后续补齐。
   //    幂等: 仅补空（IS NULL / '' / '[]'），可重复跑；同时同源派生 fg_entity_names。
   try {
     const _missRows = db.exec(
-      "SELECT id, raw_input FROM memories WHERE (entity_genes IS NULL OR entity_genes = '' OR entity_genes = '[]') AND COALESCE(memory_kind, '') != 'roleplay' AND raw_input IS NOT NULL AND raw_input != ''",
+      "SELECT id, raw_input FROM memories WHERE (entity_genes IS NULL OR entity_genes = '' OR entity_genes = '[]') AND raw_input IS NOT NULL AND raw_input != ''",
     );
     if (_missRows.length > 0 && _missRows[0].values && _fgEntries.length > 0) {
       let filledGenes = 0;
@@ -808,7 +813,7 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
       }
       result.entityGenes = filledGenes;
       if (filledGenes > 0) {
-        console.log(`[Repair] entity_genes 幂等派生: ${filledGenes} 条（源=FamilyGraph 人名/别名，已排除 roleplay）`);
+        console.log(`[Repair] entity_genes 幂等派生: ${filledGenes} 条（源=FamilyGraph 人名/别名，含 roleplay）`);
       }
     }
   } catch (e) { console.warn('[Repair] entity_genes 派生失败:', e); }
