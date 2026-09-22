@@ -13,7 +13,7 @@
  */
 // @ts-ignore
 import initSqlJs from 'sql.js';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, appendFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -171,8 +171,20 @@ export class MemoryVault {
     }
   }
 
+  /**
+   * 🔴 2026-09-23：改为**原子写**（tmp → rename）。
+   *   原实现直接 `writeFileSync(VAULT_DB, ...)`：写中途失败（磁盘满/进程被杀）会留下
+   *   **截断的 vault 库** ✗。与主库（SQLiteAdapter）/FG（FamilyGraph）同范式：先写临时文件再原子替换，
+   *   失败保留原文件并告警（不静默吞掉）。vault.db 仅 ~20KB，不属性能热点，本次只修数据安全。
+   */
   private flush(): void {
-    writeFileSync(VAULT_DB, Buffer.from(this.db.export()));
+    try {
+      const tmp = `${VAULT_DB}.tmp-${process.pid}`;
+      writeFileSync(tmp, Buffer.from(this.db.export()));
+      renameSync(tmp, VAULT_DB);
+    } catch (err) {
+      console.error('[MemoryVault] 落盘失败（保留原库）:', (err as Error)?.message);
+    }
   }
 
   private checksum(data: string): string {
