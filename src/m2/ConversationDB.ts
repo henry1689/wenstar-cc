@@ -333,7 +333,24 @@ export class ConversationDB {
     const rows: ConversationRow[] = [];
     while (stmt.step()) rows.push(stmt.getAsObject() as any);
     stmt.free();
-    return rows.reverse();
+    const recent = rows.reverse();
+    // 🔴 2026-09-22 A（上下文连贯性）：把**最近的对话摘要**也拼进上下文。
+    //   背景：溢出被 is_compacted=1 压实 ⇒ 从历史消失；而摘要通道“写了没人读”
+    //   （实测：97% 对话被压实、【对话摘要】仅 14 条、且检索侧无任何读取方）
+    //   ⇒ 被压实的前文彻底丢失 ⇒ 语义跳跃。
+    //   摘要行是 is_compacted=1 的 assistant 行（内容以「【对话摘要】」开头），会被上面的 is_compacted=0 排除
+    //   ⇒ 单独取最近 5 条、按时间升序**前置**，作为“更早背景”，再接最近的原始轮次。
+    //   独立取数（而非放宽主查询）是为了不受主查询 LIMIT 挤占。
+    try {
+      const sm = this.db.prepare(
+        `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE COALESCE(is_summary, 0) = 1 AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT 5`,
+      );
+      const sums: ConversationRow[] = [];
+      while (sm.step()) sums.push(sm.getAsObject() as any);
+      sm.free();
+      if (sums.length > 0) return [...sums.reverse(), ...recent];
+    } catch { /* 摘要通道不可用不阻塞历史 */ }
+    return recent;
   }
 
   /** 搜索对话记录 */

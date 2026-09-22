@@ -610,6 +610,26 @@ UPDATE memories SET lifecycle_state='active', suppression_reason=NULL WHERE id=?
 **未根治**：未打标记的存量测试对话（如无 `is_test` 的「你好」）仍在历史里 —— 需把「⑩」判据应用于 `conversations` 表；
 摘要（`is_summary`）路径待核；M4 检索单次耗时达 **19s**（性能观察项）。
 
+### **⑫ 摘要通道打通**（2026-09-22，上下文连贯性 A+C）
+
+**现象**：用户反馈“上下句不连贯、相关性不强、语义跳跃”。
+
+**诊断（溢出路径三处断链，均实测）**：
+1. `is_compacted=1` 占 **97%**（4593/4742）⇒ 旧对话全部移出历史；
+2. 【对话摘要】内容行仅 **14 条**（其中 `is_summary=1` **11 条**）⇒ 摘要几乎没有生成；
+3. **`src/webui/`+`src/m4/`+`src/m5/` 里没有任何 `is_summary` 读取方** ⇒ 摘要通道全程死；
+⇒ 被压实的**前文既不在历史、也无摘要** ⇒ 上下文只剩 KB（8.4–8.7k，占 84%）+ 极少原始轮次 ⇒ **语义跳跃**。
+（代码注释早已写明：`ConversationDB.ts:28/254`、`SQLiteAdapter.ts:798`、`maintenance.ts:380` ——“is_summary 与 is_compacted 占位符被绑到同一个值”。）
+
+**修复**：
+- **A（拼装）**：`ConversationDB.getRecentConversations` 独立取**最近 5 条 `is_summary=1`**（排除 test/roleplay），
+  按时间升序**前置**作为“更早背景”，再接最近原始轮次；独立取数以免被主查询 LIMIT 挤占；异常兵底不阻塞历史。
+- **C（数据+守卫）**：修正 `【对话摘要】` 行中 `is_summary≠1` 的标记；新增守卫
+  `src/m2/__tests__/summary-channel-guard.test.ts`（4 例：**必须有读取方** / 必须排 test / 必须前置 / 异常兵底）。
+
+**未根治**：摘要**生成量**极少（源头：压实前的摘要生成几乎不触发，见 `maintenance.ts:438`）
+⇒ 需扩大生成覆盖（后续 B）；另有 **M4 检索单次 12.5–21.7s**、**KB 占上下文 84%** 两个待评估项。
+
 ## 十、快速查找
 
 ```
