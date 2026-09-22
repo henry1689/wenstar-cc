@@ -863,10 +863,34 @@ export class FamilyGraph implements FamilyGraphInterface {
    * - 新增 circle_level 列
    * - 为 edges 初始化权重默认值
    */
+  /**
+   * 🔴 2026-09-20：幂等加列 —— 先查 PRAGMA 再 ALTER。
+   * 原先各处用 `try { ALTER } catch { warn }`，列已存在时每次启动都会输出
+   * “operation failed: duplicate column name”（实测 72 次），把真正值得注意的迁移错误淹没。
+   */
+  private ensureColumn(table: string, colDef: string): void {
+    // 🔴 2026-09-20 M 层埋点（module_entry / module_exit + 耗时）——迁移低频但关键，原先无耗时可见性。
+    const _t0 = Date.now();
+    const _colName = colDef.trim().split(/\s+/)[0];
+    console.log(`[Hook] module_entry module=m4.FamilyGraph.ensureColumn table=${table} col=${_colName}`);
+    try {
+      const col = colDef.trim().split(/\s+/)[0];
+      const cols = this.query(`PRAGMA table_info(${table})`) as Array<{ name?: string }>;
+      if (cols.some((c) => String(c?.name) === col)) return;
+      this.run(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
+      console.log(`[FamilyGraph] 迁移: ${table}.${col} 已添加`);
+    } catch (e) {
+      console.warn('[FamilyGraph] ensureColumn 失败:', (e as Error)?.message || e);
+    } finally {
+      console.log(`[Hook] module_exit module=m4.FamilyGraph.ensureColumn table=${table} col=${_colName} 耗时=${Date.now() - _t0}ms`);
+    }
+  }
+
   migrateToV2(): void {
     // 节点：新增 circle_level 列（若不存在）
-    try { this.run('ALTER TABLE nodes ADD COLUMN circle_level INTEGER DEFAULT 0'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
-    try { this.run('ALTER TABLE nodes ADD COLUMN tags TEXT DEFAULT "[]"'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
+    // 🔴 2026-09-20：改为幂等加列（原先 try/catch 每次启动刷 “duplicate column name” 噪声，实测 72 次）
+    this.ensureColumn('nodes', 'circle_level INTEGER DEFAULT 0');
+    this.ensureColumn('nodes', 'tags TEXT DEFAULT "[]"');
 
     // 边：为新兼容字段准备 properties 默认值
     const rows = this.query('SELECT id, properties FROM edges WHERE properties = ? OR properties IS NULL', ['{}']);

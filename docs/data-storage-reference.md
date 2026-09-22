@@ -483,7 +483,7 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 > 既有条目被 `locked` 或读不到时，仍退回 409 + 既有条目信息（可发现、可定位）。
 > 回归防线：`src/app/knowledge/__tests__/dedup-merge.test.ts`（5 例：空新内容不追加 / 幂等 / 旧内容完整保留 / 空旧取新 / 非字符串安全）。
 
-### **⑤ 异步落盘 + 防抖窗口 10 秒**（2026-09-20，C1-a / C1-b）
+### **⑤ 异步落盘 + 防抖窗口 60 秒**（2026-09-20，C1-a / C1-b / C1-d）
 
 **问题（实测）**：sql.js 每次落盘都是**全库重写**（当前 224MB），而 `writeSync`/`fsyncSync` 是同步 API
 ⇒ 落盘期间**整个服务被冻结**。实测：一轮真实对话触发 **19 次整库重写（≈4.16GB）**；
@@ -517,6 +517,16 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 4. **可观测性优先**：启动服务必须带日志重定向（PM2 `--output/--error`）。本仓曾因“启动时丢弃 stdout/stderr”而在同一个根因周围排查数小时。
 
 ---
+
+### **⑥ FG 幂等迁移与 M 层埋点**（2026-09-20）
+
+- **FG 幂等加列**：`FamilyGraph.ensureColumn(table, colDef)` —— 先 `PRAGMA table_info` 再 `ALTER`，
+  替掉原先 `try{ALTER}catch{warn}` 的写法（列已存在时每次启动都刷 `duplicate column name`，实测 **72 次**）。
+  本方法**不改 schema**（仅在缺失时补齐既有列，DB 实际已有），异常仅告警不中断启动。
+- **M 层埋点**：`ensureColumn` 输出 `module_entry/module_exit + 耗时`；`DNAEncoder.encodeSingle` 为热路径，
+  改为**每 100 次汇总一次**（计数/失败数/平均耗时），兼顾可观测性与日志体积。
+- 参考治理文档：`docs/fg-profile-entry-governance.md`（FG 人物档案录入治理）；
+  角色扮演隔离判定在 `src/engine/tianquan/prefrontal/ConstraintValidator.ts:192`（`roleplay_forbidden`，本次未触动）。
 
 ## 十、快速查找
 

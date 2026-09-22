@@ -184,14 +184,27 @@ export class DNAEncoder {
    */
   encodeSingle(utterance: string, context?: string[]): DNA {
     this.stats.encodeCount++;
+    const _t0 = Date.now();
     if (!utterance || typeof utterance !== 'string' || utterance.trim().length === 0) {
       this.stats.failCount++;
-      console.warn('[M1] 空输入编码, 返回空DNA');
+      // 🔴 2026-09-20 降噪：原先每次空输入都打一行（实测 658 次刷屏）——现每 50 次打一次汇总。
+      //   行为不变（仍返回空 DNA，由下游五要素/退化内容守卫拦截）。
+      if (this.stats.failCount % 50 === 1) console.warn(`[M1] 空输入编码（累计 ${this.stats.failCount} 次），返回空DNA`);
       return this._makeEmptyDNA();
     }
     const contextStr = (context ?? []).join(' ');
-    return this._encodeCombined(utterance, contextStr);
+    const _dna = this._encodeCombined(utterance, contextStr);
+    // 🔴 2026-09-20 M 层埋点（轻量）：encodeSingle 是热路径，不能每次都打日志
+    //   ⇒ 每 100 次输出一次汇总（计数 / 失败数 / 平均耗时），兼顾可观测性与日志体积。
+    this._encodeMsTotal += Date.now() - _t0;
+    if (this.stats.encodeCount % 100 === 0) {
+      console.log(`[Hook] module_exit module=m1.DNAEncoder.encodeSingle count=${this.stats.encodeCount} fail=${this.stats.failCount} avg=${(this._encodeMsTotal / this.stats.encodeCount).toFixed(2)}ms`);
+    }
+    return _dna;
   }
+
+  /** M 层埋点累加器（encodeSingle 耗时总和，毫秒） */
+  private _encodeMsTotal = 0;
 
   /**
    * P1: 初始化内部 L3 annotator 的 FG 人名库（简称→家谱全名规范化 / FG 别名兜底）。
