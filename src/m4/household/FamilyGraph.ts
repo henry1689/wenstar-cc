@@ -2892,7 +2892,22 @@ export class FamilyGraph implements FamilyGraphInterface {
         this.ensurePersonProfile(canonicalName);
         await this.updatePersonProfile(canonicalName, {} as any, { countMention: true });
         await this.updatePersonProfile(canonicalName, { relation_to_user: relationLabel } as any, { countMention: false });
-        await this.extractProfileFromText(canonicalName, rawInput);
+        // 🔴 2026-09-22 M4 延迟修复：PAE 的 LLM 档案提取**不再内联阻塞**。
+        //   实测（M4·timing）：integrateFG 常态 0.4–0.6s，但**偶发 10.4s / 19.8s**（占该次 assemble 的 95%+），
+        //   根因就是这里 await 了 PAE 的 LLM 提取（超时 30s，成功时单次 10–20s）
+        //   ⇒ 整个回复棧在等一次**档案富化**。
+        //   该提取写 dossier、属背景富化，**不需在回复前完成**；
+        //   也与 `src/webui/chat/dialog-group-stage.ts:260` 的既有 fire-and-forget 写法一致。
+        //   失败不丢数据（下次提及会重试），但会留告警（失败可见）。
+        const _paeT0 = Date.now();
+        console.log(`[Hook] module_entry module=m4.PAE.extractProfileFromText person=${canonicalName}`);
+        void this.extractProfileFromText(canonicalName, rawInput)
+          .then((n: number) =>
+            console.log(`[Hook] module_exit module=m4.PAE.extractProfileFromText person=${canonicalName} fields=${n} 耗时=${Date.now() - _paeT0}ms（后台，不阻塞回复）`),
+          )
+          .catch((e: any) =>
+            console.warn('[FG] PAE 档案提取失败(非阻塞，下次提及会重试):', e?.message || e, `耗时=${Date.now() - _paeT0}ms`),
+          );
 
         // 长辈称谓反转方向：用户说"我妈妈"→ 妈妈--[mother_of]-->我 + 我--[child_of]-->妈妈
         // 而非 我--[mother_of]-->妈妈（那意味着我是妈妈的妈）
@@ -2958,7 +2973,15 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
         this.ensurePersonProfile(person.name);
         await this.updatePersonProfile(person.name, {} as any, { countMention: true });
-        await this.extractProfileFromText(person.name, rawInput);
+        const _paeT1 = Date.now();
+        console.log(`[Hook] module_entry module=m4.PAE.extractProfileFromText person=${person.name}`);
+        void this.extractProfileFromText(person.name, rawInput)
+          .then((n: number) =>
+            console.log(`[Hook] module_exit module=m4.PAE.extractProfileFromText person=${person.name} fields=${n} 耗时=${Date.now() - _paeT1}ms（后台，不阻塞回复）`),
+          )
+          .catch((e: any) =>
+            console.warn('[FG] PAE 档案提取失败(非阻塞，下次提及会重试):', e?.message || e, `耗时=${Date.now() - _paeT1}ms`),
+          );
         const _ee = this.query('SELECT id FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?', [userId, _pid, 'acquaintance_of']);
         if (_ee.length === 0) {
           await this.addEdge({ id: uid(), source_id: userId, target_id: _pid, relation: 'acquaintance_of' });

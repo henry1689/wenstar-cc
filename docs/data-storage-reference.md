@@ -645,6 +645,28 @@ UPDATE memories SET lifecycle_state='active', suppression_reason=NULL WHERE id=?
 **未根治**：摘要**生成量**极少（源头：压实前的摘要生成几乎不触发，见 `maintenance.ts:438`）
 ⇒ 需扩大生成覆盖；另有 **M4 检索单次 12.5–21.7s**、**KB 占上下文 84%** 两个待评估项。
 
+### **⑬ M4 延迟修复：PAE 提取不再内联阻塞**（2026-09-22）
+
+**现象**：用户反馈“调取不顺 / 上下文不连贯”。
+
+**实测（M4·timing 分段，prod 日志）**：
+```
+total= 1827ms | integrateFG=  569   ← 常态
+total=20874ms | integrateFG=19774   ← 慢时（10–20 秒，占该次 assemble 的 95%+）
+total=11605ms | integrateFG=10448
+```
+⇒ 慢的不是 batchProfile（稳定 ~300ms）、也不是 M4 里的 LLM 调用（M4 本体无 LLM 调用），而是 **`integrateFG`**。
+
+**根因**：`FamilyGraph.integrateFromEntity` 内 `await this.extractProfileFromText(...)` ——
+PAE 的 **LLM 档案提取**（超时 30s；成功时单次 10–20s）被**内联等待**
+⇒ 整个回复栈在等一次**档案富化**（其产物是 dossier，属背景富化，**不需在回复前完成**）。
+（配置注释写着“PAE 已异步化不再阻塞主链”，但这**两处从未改成异步** ✗；
+而 `src/webui/chat/dialog-group-stage.ts:260` 一直是 fire-and-forget `.catch(()=>{})` ✔。）
+
+**修复**：两处改为 `void …catch(告警)`（与既有写法一致；失败不丢数据，下次提及会重试）。
+**实测**：修复后真实对话 `[M4·timing] total=1533ms | integrateFG=308`（由 10–20s ⇒ **0.3s** ✔）。
+**回归防线**：`src/m4/household/__tests__/pae-nonblocking-guard.test.ts`（2 例：禁止内联 await / 必须有 fire-and-forget + catch）。
+
 ## 十、快速查找
 
 ```
