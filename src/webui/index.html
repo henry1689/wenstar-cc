@@ -677,6 +677,10 @@ async function sendStream(t){
   if(!b){busy=false;snd.disabled=false;st.textContent='在线';return;}
   let lastTxt='';let timer=null;let done=0;
   const clearBusy=()=>{if(gen===_audioGen){busy=false;snd.disabled=false;st.textContent='在线';}};
+  // 🔴 阶段A 终态契约: 拿不到内容必须说明**为什么**，并解锁 UI。
+  //   原实现三处都以 lastTxt 兜底裸省略号 —— 零内容时显示一个省略号占位，
+  //   且 error 分支不解锁（输入框持续禁用），表现即「卡死不回复」。
+  const failBubble=(txt)=>{if(gen!==_audioGen)return;if(b.textContent===txt)return;b.textContent=lastTxt||txt;scrollChat();clearBusy();};
   // 最终补齐：校准后 reply 覆盖气泡 + TTS + M1/M3/M4/M5 面板 + 轮次
   // 🔴 V16 修复语音无声: done 守卫只挡「文字重复渲染」，不再挡「音频填充」。
   // 此前第一次 done 帧(audio_urls:[])置 done=1 后，第二次 done 帧(带 audio_urls)
@@ -737,7 +741,11 @@ async function sendStream(t){
         const rr=await fetch('/api/chat/job/status?job='+encodeURIComponent(jobId));
         const dd=await rr.json();
         if(gen!==_audioGen){clearInterval(timer);return;}
-        if(dd.ok&&dd.status==='error'){clearInterval(timer);return;}   // error 立即退出，不空转 12s
+        // 🔴 阶段A: ① job 已被回收/不存在 → 原先 {ok:false} 会让所有 dd.ok&& 分支都不进，
+        //   空转到 60s；② error/deadline_exceeded → 原先只 clearInterval 不解锁不渲染。
+        //   两者都会让 UI 卡在 busy，必须显式终结 + 说明原因。
+        if(!dd.ok){clearInterval(timer);failBubble('⚠ '+(dd.reason||'任务已过期，无法继续接收回复'));return;}
+        if(dd.ok&&(dd.status==='error'||dd.status==='deadline_exceeded')){clearInterval(timer);failBubble('⚠ '+(dd.reason||dd.error||'服务端处理失败'));return;}
         if(dd.ok&&dd.status==='done'){
           // 文字/面板只在首次 done 处理（内部 done 守卫防双播）；音频定稿后收尾退出
           await finalizeStream(dd);
@@ -776,13 +784,18 @@ async function sendStream(t){
       es.addEventListener('chat-error',(ev)=>{
         es.close();if(_streamES===es)_streamES=null;
         if(gen!==_audioGen)return;
-        b.textContent=lastTxt||'…';clearBusy();toast('流式出错，已显示已有内容');
+        // 🔴 阶段A: 透出服务端分类后的原因（llm_rate_limited/llm_timeout/llm_failed/job_failed）
+        let dd={};try{dd=JSON.parse(ev.data)||{}}catch(_){}
+        const why=dd.reason||dd.error||'流式出错，未收到内容';
+        failBubble('⚠ '+why);toast('流式出错：'+why);
       });
       // S4-m12: SSE 掉线 → 主动关闭（避免浏览器无限重连风暴），改走 150ms 轮询兜底
       es.onerror=()=>{try{es.close()}catch(e){} if(_streamES===es)_streamES=null;};
     }catch(e){console.warn('[Stream] EventSource 失败，走轮询兜底');}
     // 60s 超时兜底（S4-m12: 同时关闭残留 ES，防连接泄漏）
-    setTimeout(()=>{if(gen===_audioGen&&!done){if(timer)clearInterval(timer);if(_streamES){try{_streamES.close()}catch(e){}_streamES=null;}b.textContent=lastTxt||'…';clearBusy();}},60000);
+    // 🔴 阶段A: 明示「是超时」而非静默占位；60s 是前端兜底，服务端 job 可能仍在跑
+    //   （阶段C 将把 60s 与后端 deadline 契约统一，见 S2 三阶段方案）
+    setTimeout(()=>{if(gen===_audioGen&&!done){if(timer)clearInterval(timer);if(_streamES){try{_streamES.close()}catch(e){}_streamES=null;}failBubble('⏳ 60 秒内未收到回复，服务端可能仍在处理或已失败；可稍后重试');}},60000);
   }catch(e){
     console.error(e);b.textContent='嗯…你再说一遍好不好？';toast('请求失败，已用兜底');clearBusy();
   }

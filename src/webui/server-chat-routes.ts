@@ -257,9 +257,80 @@ export function sweepTTSJobs(): number {
 
 // ── 🔴 P1-5 流式聊天 job 存储（路径 B: POST /api/chat {stream:true} → jobId → 轮询/SSE） ──
 
+// ══════════════════════════════════════════════════════════════════════
+// 🔴 终态契约（阶段 A，2026-09-24）
+//
+// 事故背景：压测下前端气泡反复只显示 `…`，三种完全不同的结局坍缩成同一占位符，
+//   且其中两种还会让 UI 卡在 busy（输入框禁用）→ 表现为「卡死不回复」：
+//     ① LLM 报错   → status='error'，但前端只 clearInterval，不 clearBusy、不渲染原因
+//     ② job 被 TTL sweep 掉 → 端点返回 {ok:false}（无原因），前端所有 dd.ok&& 分支
+//        都不进 → 空转到 60s 硬超时
+//     ③ 任务一直 running（无 deadline）→ 空转到 60s 硬超时
+//
+// 结构性修复：给 job 一个**明确的终态语义**——每个终态必带结构化 error_code +
+//   人类可读 reason；sweep 由「直接删除」改为「先置终态、再延迟回收」，
+//   使轮询永远拿到明确状态而非 ok:false 的歧义空值。
+//   前端相应禁止裸 `…` 占位：拿不到内容必须说明**为什么**。
+// ══════════════════════════════════════════════════════════════════════
+
+/** 终态结构化错误码（枚举而非自由文本，供前端与日志分别归因） */
+export type JobErrorCode =
+  | 'llm_rate_limited'      // 模型服务限流（429）
+  | 'llm_timeout'           // 模型响应超时/被中止
+  | 'llm_failed'            // 重试耗尽仍未成功
+  | 'deadline_exceeded'     // 任务超过 TTL 仍未完成
+  | 'job_failed';           // 其他会话处理失败
+
+/**
+ * 从异常里归类出结构化错误码 + 人类可读原因（纯函数，可单测）。
+ * 判定顺序有意义：429 必须最先——`API call failed after 3 attempts: 429 (...)`
+ * 同时含 429 与 attempts，根因是限流而非「重试耗尽」本身。
+ */
+export function classifyJobError(err: unknown): { error_code: JobErrorCode; reason: string } {
+  const msg = String((err as Error)?.message ?? err ?? '');
+  if (/429|rate.?limit|too many requests|限流/i.test(msg)) {
+    return { error_code: 'llm_rate_limited', reason: '模型服务限流，请稍后重试' };
+  }
+  if (/timeout|timed out|abort/i.test(msg)) {
+    return { error_code: 'llm_timeout', reason: '模型响应超时' };
+  }
+  if (/attempts|API call failed/i.test(msg)) {
+    return { error_code: 'llm_failed', reason: '模型调用失败（已重试仍不成功）' };
+  }
+  return { error_code: 'job_failed', reason: msg.slice(0, 200) || '会话处理失败' };
+}
+
+/** sweep 对单个 job 的处置（纯函数，可单测；sweepChatJobs 只负责套用结果） */
+export type SweepAction =
+  | { action: 'keep' }
+  | { action: 'mark'; patch: Partial<ChatJob> }   // 置终态但**不删**，给前端留读取窗口
+  | { action: 'delete' };
+
+export function nextJobStateForSweep(job: ChatJob, now: number, ttl: number): SweepAction {
+  const age = now - job.createdAt;
+  // ① 未终态且超龄 → 置 deadline_exceeded 而非直接删除
+  //    （直接删除会让轮询拿到 {ok:false}，前端无法区分「过期」「任务 id 错误」「从未存在」）
+  if (job.status === 'running' && age > ttl) {
+    return {
+      action: 'mark',
+      patch: {
+        status: 'deadline_exceeded',
+        error_code: 'deadline_exceeded',
+        reason: `任务超过 ${Math.round(ttl / 1000)} 秒未完成，已终止`,
+        terminalAt: now,
+      },
+    };
+  }
+  // ② 已终态 → 自进入终态起再保留 ttl，让前端有机会读到终态
+  const doneAt = job.terminalAt ?? job.createdAt;
+  if (now - doneAt > ttl) return { action: 'delete' };
+  return { action: 'keep' };
+}
+
 /** 流式聊天 job */
 export interface ChatJob {
-  status: 'running' | 'done' | 'error';
+  /** running → done | error | deadline_exceeded（四个状态，终态必带 error_code + reason） */
+  status: 'running' | 'done' | 'error' | 'deadline_exceeded';
   /** 已推送的 token 增量（前端轮询时一次性取回补齐） */
   tokens: string[];
   /** 最终 reply（done 后，M5 校准 + 幻觉校验的完整结果，覆盖气泡） */
@@ -271,6 +342,12 @@ export interface ChatJob {
   audio_done?: boolean;
   createdAt: number;
   error?: string;
+  /** 终态结构化错误码（终态必填） */
+  error_code?: JobErrorCode | null;
+  /** 终态人类可读原因（终态必填；前端据此显示，禁止退回裸占位符） */
+  reason?: string | null;
+  /** 进入终态的时刻；sweep 据此做延迟回收 */
+  terminalAt?: number;
 }
 const CHAT_JOBS = new Map<string, ChatJob>();
 /** 3 分钟自动过期（防内存泄漏；与 p1_speed.streaming.job_ttl_ms 对齐） */
@@ -283,13 +360,16 @@ export function getChatJob(jobId: string): ChatJob | null {
 }
 
 /** 流式 job 兜底清理（惰性触发 + server.ts 60s 定时器；防长驻内存）
- * S4-M3: job_ttl_ms 从配置读取（默认 180s） */
+ * S4-M3: job_ttl_ms 从配置读取（默认 180s）
+ * 🔴 阶段 A：改为「先置终态、后回收」，见 nextJobStateForSweep。 */
 export function sweepChatJobs(): number {
   const now = Date.now();
   const ttl = getRetrievalFusionConfig()?.p1_speed?.streaming?.job_ttl_ms ?? CHAT_JOB_TTL_MS;
   let removed = 0;
   for (const [k, v] of CHAT_JOBS) {
-    if (now - v.createdAt > ttl) { CHAT_JOBS.delete(k); removed++; }
+    const act = nextJobStateForSweep(v, now, ttl);
+    if (act.action === 'delete') { CHAT_JOBS.delete(k); removed++; }
+    else if (act.action === 'mark') { Object.assign(v, act.patch); }
   }
   return removed;
 }
@@ -541,6 +621,7 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
           job.reply = result.reply || '';
           // 🔴 发送卡死修复: TTS 不阻塞 done——reply 就绪立即完成（文本可展示），TTS 后台异步生成后更新 audio。
           job.status = 'done';
+          job.terminalAt = Date.now();
           deps.pushToSSEClients?.('chat-done', { job_id: jobId, reply: job.reply, audio_url: null, audio_urls: [], tts_job: null });
           console.log('[ChatStream] done: ' + jobId + ' tokens=' + job.tokens.length + ' len=' + job.reply.length);
           // V15: 增量 TTS 尾补（不阻塞 done；增量段已在流式期间推送）
@@ -559,10 +640,20 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
           }
         } catch (e) {
           incrTTS?.abort();
+          // 🔴 阶段 A: 终态必带结构化错误码 + 可读原因；SSE 同步透出，前端据此渲染
+          const classified = classifyJobError(e);
           job.status = 'error';
           job.error = (e as Error)?.message || String(e);
-          deps.pushToSSEClients?.('chat-error', { job_id: jobId, error: job.error });
-          console.warn('[ChatStream] error: ' + jobId, job.error);
+          job.error_code = classified.error_code;
+          job.reason = classified.reason;
+          job.terminalAt = Date.now();
+          deps.pushToSSEClients?.('chat-error', {
+            job_id: jobId,
+            error: job.error,
+            error_code: job.error_code,
+            reason: job.reason,
+          });
+          console.warn('[ChatStream] error: ' + jobId, job.error, 'code=' + job.error_code);
         }
       })();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -603,8 +694,15 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
     const jobId = (url.searchParams.get('job') || '').trim();
     const job = jobId ? getChatJob(jobId) : null;
     if (!job) {
+      // 🔴 阶段 A: 原先只回 {ok:false} —— 前端所有 dd.ok&& 分支都不进，空转到 60s 硬超时，
+      //   且无法区分「任务过期被回收」与「任务 id 从来不存在」。必须给出可归因的原因。
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: false }));
+      res.end(JSON.stringify({
+        ok: false,
+        status: 'expired',
+        error_code: 'deadline_exceeded' as JobErrorCode,
+        reason: '任务已过期或不存在，无法继续接收回复',
+      }));
       return true;
     }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -619,6 +717,10 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
       tts_job: job.audio?.tts_job ?? null,
       audio_done: !!job.audio_done,
       error: job.error || null,
+      // 🔴 阶段 A: 终态必带结构化码 + 可读原因（前端据此渲染，禁止退回裸 `…`）
+      error_code: job.error_code ?? null,
+      reason: job.reason ?? null,
+      age_ms: Date.now() - job.createdAt,
     }));
     return true;
   }
