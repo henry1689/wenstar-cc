@@ -4,12 +4,16 @@
  * 以 DB 为唯一真相源，提供跨会话的实体上下文重建。
  *
  * 职责：
- *   1. queryEntityContext(uuid) — 从 conversations 表按 UUID 精准查询
+ *   1. queryEntityContext(uuid) — 从 conversations 表按 UUID 精准查询（按时间近因，**含已归档原文**）
  *   2. rebuildAllContexts(uuids) — 启动时为所有 FG 实体重建上下文
  *   3. saveEmotionSnapshot(uuid) — 保存会晤结束时的情感快照
  *   4. loadEmotionSnapshot(uuid) — 恢复上次会晤的情感基调
  *
  * 不依赖 conversationHistory RAM 数组。
+ *
+ * 🔴 V34(2026-09-25) 语义变更：`is_compacted` 不再是本文件的可见性判据。
+ *   砂金库的职责是「全量活档案 + 回忆兜底层」，归档只表示"已移出内存窗口"，
+ *   不代表"不可见"。把归档标记当过滤器 = 归档即永久失忆（原设计里不存在这个状态）。
  */
 import type { ConversationTurn } from '../../m5/types/index.js';
 // V23.1(2026-09-13): 上下文窗口下限取自配置唯一事实源（MemoryConfig 为纯配置，无循环依赖）
@@ -31,10 +35,21 @@ export class EntityContextStore {
   }
 
   /** 从 conversations 表按 UUID 精准查询实体对话历史。
-   *  includeCompacted=true 时包含已压缩对话（用于兜底补充，避免老实体上下文为零）。
-   *  调用方负责去重合并，未压缩优先。
+   *
+   *  🔴 V34(2026-09-25) 归档标记与可见性解耦（架构级修复）：
+   *   原设计《三库记忆体系完整架构》§三 —— 砂金库是「回忆的兜底层」，
+   *   `is_compacted` 只表示**归档管理**（该轮已移出内存窗口），**不是可见性判据**。
+   *   实现却把它当成了检索过滤器 ⇒ 归档 = 永久失忆，砂金库变成只进不出的黑洞。
+   *   实测（徐诗雨 3457 条记忆 / 2597 轮对话，24 小时内 477 轮全在库里）：
+   *   带与不带该过滤返回**完全相同的 40 条，最旧一条只到 0.6 小时前**
+   *   —— 不是没存下，是搜不回来。本方法改为**按真实时间近因取回**，归档与否不参与筛选。
+   *
+   *  @param uuid  实体 UUID
+   *  @param limit 条数上限（经 contextWindowTurns 下限保护，见下）
+   *  @param _includeCompacted 【已废弃】保留形参只为兼容既有调用点（chat.ts 的两段式兜底会传 false/true
+   *         并按内容前缀去重）。本方法现在**恒包含已归档原文**，该参数不再产生任何过滤效果。
    */
-  queryEntityContext(uuid: string, limit: number = 200, includeCompacted: boolean = false): ConversationTurn[] {
+  queryEntityContext(uuid: string, limit: number = 200, _includeCompacted: boolean = false): ConversationTurn[] {
     try {
       // 🔴 V23.1(2026-09-13): 下限保护 —— 调用点此前硬编码 40，而"归档保留窗口"是 100（keepFullTurns）。
       //   两者脱节导致"保留了 100 条却只注入 40 条"，余下约 30 轮留而不用，
@@ -46,11 +61,12 @@ export class EntityContextStore {
       const _limit = _floor > 0 ? Math.max(limit, _floor) : limit;
       // 🔴 2026-09-12 隔离区过滤: is_test=1 的对话永不得进入实体上下文。
       //   用途: 已将洩漏污染型回复标记为 is_test=1（不删数据），此处保证它们不再被当作“聊过的事”回灌给实体。
-      const compactedFilter = (includeCompacted ? '' : 'AND is_compacted = 0') + ' AND (is_test IS NULL OR is_test = 0)';
+      //   ⚠️ 这是**唯一**保留的过滤条件 —— is_compacted 已于 V34 撤出可见性判断。
+      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0)';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp, belong_entity_uuid
          FROM conversations
-         WHERE belong_entity_uuid = ? ${compactedFilter}
+         WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, _limit],
       );
@@ -77,11 +93,13 @@ export class EntityContextStore {
   ): ConversationTurn[] {
     try {
       const { recent, early, mid, includeCompacted } = opts;
-      const compactedFlag = includeCompacted ? 1 : 0;
       // 🔴 2026-09-12 隔离区过滤（同 queryEntityContext）: is_test=1 永不进入实体上下文
-      const compactedFilter = (compactedFlag ? '' : 'AND is_compacted = 0') + ' AND (is_test IS NULL OR is_test = 0)';
+      // 🔴 V34(2026-09-25): is_compacted 已撤出可见性判断（见 queryEntityContext 注释）。
+      //   本方法的分段采样语义**因此才成立** —— 采样的是"全部历史的时间轴"，
+      //   此前 unavailable 的那段（已归档）根本不在 total 里，早期/中期槽实际采不到任何东西。
+      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0)';
       const totalRow = this._sqlite.queryAll(
-        `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? ${compactedFilter}`,
+        `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? ${visibilityFilter}`,
         [uuid],
       ) as any;
       const total = Number(totalRow?.[0]?.c ?? 0);
@@ -89,13 +107,13 @@ export class EntityContextStore {
 
       const recentRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? ${compactedFilter}
+         WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, recent],
       ) || [];
       const earlyRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? ${compactedFilter}
+         WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp ASC LIMIT ?`,
         [uuid, early],
       ) || [];
@@ -104,7 +122,7 @@ export class EntityContextStore {
       const _midOffset = early + Math.floor((_midSpan - _midTake) / 2);
       const midRows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? ${compactedFilter}
+         WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp ASC LIMIT ? OFFSET ?`,
         [uuid, _midTake, _midOffset],
       ) || [];
@@ -128,13 +146,18 @@ export class EntityContextStore {
     }
   }
 
-  /** 🔴 记忆召回彻底解决: 按内容关键词检索实体历史对话（用户问具体事时 LIKE 精准召回） */
-  searchEntityContext(uuid: string, keyword: string, limit = 3, includeCompacted: boolean = false): ConversationTurn[] {
+  /** 🔴 记忆召回彻底解决: 按内容关键词检索实体历史对话（用户问具体事时 LIKE 精准召回）。
+   *
+   *  🔴 V34(2026-09-25): 同 queryEntityContext —— is_compacted 撤出可见性判断。
+   *   本方法是"关键词精准召回"，若把已归档原文排除在外，等于**只搜内存窗口里剩下的那几小时**，
+   *   用户问三天前聊过的具体事必然落空（实测症状："几天前说的话都记不起来"）。
+   *  @param _includeCompacted 【已废弃】保留形参兼容既有调用点，不再产生过滤效果。
+   */
+  searchEntityContext(uuid: string, keyword: string, limit = 3, _includeCompacted: boolean = false): ConversationTurn[] {
     try {
-      const compactedFilter = includeCompacted ? '' : 'AND is_compacted = 0';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? ${compactedFilter} AND content LIKE ?
+         WHERE belong_entity_uuid = ? AND (is_test IS NULL OR is_test = 0) AND content LIKE ?
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, `%${keyword}%`, limit],
       );

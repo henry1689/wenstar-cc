@@ -7,6 +7,12 @@
  *   2. 压缩标记(is_compacted=1)隔离对话原文 → 新增"压缩原文取回"（原文永久留存原则，
  *      压缩仅是内存窗口标记，原始对话只增不删，召回侧永远可原文直取）。
  *
+ * 🔴 V34(2026-09-25) 兜底入口去门槛（架构级）：
+ *   `recallOriginalConversations` 原先受**两道关键词门槛**（函数内 `!keywords.length` +
+ *   调用点 `_topicKw.length > 0`）⇒ 不提触发词就压根不查砂金库，砂金库的"兜底层"职责形同虚设。
+ *   现改为：关键词**加权**（命中排前）+ **时间窗无条件兜底**（近 N 天原文总能取回）。
+ *   时间窗天数由调用方传 `MEMORY_CONFIG.compaction.sandboxRecallWindowDays`（配置单一事实源）。
+ *
  * retrieval-stage 会晤隔离墙与 MeetingWallAdapter 共用本模块，杜绝同构漂移。
  * 本模块零 import（仅依赖调用方传入的 queryAll 兼容源），不引入 M 层反向依赖。
  */
@@ -186,20 +192,57 @@ export function keywordRecallMemories(
 }
 
 /**
- * 压缩原文取回（核心修复）：从 conversations 表按关键词 LIKE 检索实体对话**原文**，
+ * 压缩原文取回（核心修复）：从 conversations 表检索实体对话**原文**，
  * 刻意**不**带 is_compacted = 0 过滤 —— 压缩仅是维护期对内存窗口的标记，原始对话
  * 遵循只增不删永久留存，召回侧必须能原文直取，否则"压缩 = 永久失忆"。
+ *
+ * 🔴 V34(2026-09-25) 结构修复：关键词从「**门槛**」降级为「**加权**」，新增**时间窗兜底**。
+ *
+ * 原实现的致命缺陷 —— `if (!keywords.length) return hits;` + 调用点 `if (_topicKw.length > 0)`：
+ *   两层门槛叠加 ⇒ **不提"记得/之前/上次"这类触发词，就压根不去砂金库找**；
+ *   即使找了也是 2/3 字滑窗的字面 LIKE（说"计划"而原文写"方案" ⇒ 捞不到）。
+ *   这与原设计「回忆时内存上下文找不到 → 到砂金库找」的**兜底层职责**背道而驰：
+ *   兜底路径不该有"先猜对关键词"这个前置条件。
+ *
+ * 现语义（两段，前者优先入列）：
+ *   ① 关键词路径 —— 命中者**排前**（加权，非门槛）；
+ *   ② 时间窗路径 —— **无条件执行**（关键词为空、或关键词全未命中，照样取回），
+ *      取 `timestamp >= now - windowDays` 的最近原文，补齐剩余名额。
+ *      这正是"近 N 天聊过的可被召回"的实现。
+ *
+ * @param keywords    话题关键词（可为空数组 —— 空则只走时间窗路径）
+ * @param limit       总条数上限（关键词命中 + 时间窗兜底合计）
+ * @param maxChars    单条截断长度
+ * @param windowDays  🔴 时间窗天数。**调用方必须显式传入**
+ *                    `MEMORY_CONFIG.compaction.sandboxRecallWindowDays`（配置单一事实源）。
+ *                    本模块声明为"零 import"（供检索侧与会晤隔离墙共用，防同构漂移），
+ *                    故不直接读配置。传 0 / 省略 / 非法值 ⇒ 时间窗路径**关闭**，退回旧行为
+ *                    （纯关键词，仅关键字面匹配）—— 仅供尚未接入配置的历史调用点使用。
  */
 export function recallOriginalConversations(
   src: RecallSource,
   entityUuid: string,
   keywords: string[],
-  limit = 3,
+  limit = 12,
   maxChars = 300,
+  windowDays = 0,
 ): RecallConversationRow[] {
   const hits: RecallConversationRow[] = [];
-  if (!keywords.length) return hits;
-  for (const kw of keywords) {
+  // 边界防护：非法 limit/maxChars 回落到安全值，避免 NaN/负数进 SQL 变成无限制全表扫描
+  const _limit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 12;
+  const _maxChars = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 300;
+  const _push = (r: RecallConversationRow): boolean => {
+    const c = String(r.content || '').substring(0, _maxChars);
+    if (c.length > 4 && !hits.some((h) => h.content === c)) {
+      hits.push({ role: r.role, content: c, timestamp: r.timestamp });
+    }
+    return hits.length >= _limit;
+  };
+
+  // ── ① 关键词路径（加权优先，非门槛）──
+  for (const kw of (keywords || [])) {
+    if (hits.length >= _limit) break;
+    if (!kw) continue;
     const rows = (
       src.queryAll(
         `SELECT role, content, timestamp FROM conversations
@@ -209,12 +252,29 @@ export function recallOriginalConversations(
       ) || []
     ) as RecallConversationRow[];
     for (const r of rows) {
-      const c = String(r.content || '').substring(0, maxChars);
-      if (c.length > 4 && !hits.some((h) => h.content === c)) {
-        hits.push({ role: r.role, content: c, timestamp: r.timestamp });
-      }
-      if (hits.length >= limit) return hits;
+      if (_push(r)) return hits;
     }
+  }
+
+  // ── ② 时间窗路径（无条件兜底；关键词为空/全未命中时靠它取回）──
+  const _days = Number(windowDays);
+  if (!Number.isFinite(_days) || _days <= 0) return hits;  // 未接入配置 ⇒ 关闭（旧行为）
+  if (hits.length >= _limit) return hits;
+  try {
+    const since = new Date(Date.now() - _days * 86400000).toISOString();
+    const rows = (
+      src.queryAll(
+        `SELECT role, content, timestamp FROM conversations
+         WHERE belong_entity_uuid = ? AND timestamp >= ? AND LENGTH(content) > 40
+         ORDER BY timestamp DESC LIMIT ?`,
+        [entityUuid, since, _limit],
+      ) || []
+    ) as RecallConversationRow[];
+    for (const r of rows) {
+      if (_push(r)) break;
+    }
+  } catch {
+    // 时间窗取回失败不阻塞 —— 关键词路径结果照常返回（兜底降级）
   }
   return hits;
 }

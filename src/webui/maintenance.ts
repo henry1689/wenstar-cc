@@ -419,17 +419,40 @@ export class MaintenanceService {
         if (rawCount > this.config.compactionThreshold) {
           // 标记最早的 half 为已压缩（只标记，不删除）
           const keep = typeof this.config.keepFullTurns === 'number' && isFinite(this.config.keepFullTurns) ? this.config.keepFullTurns : 200;
-          const toMark = Math.max(0, rawCount - keep);
+          // 🔴 V34(2026-09-25) per-entity 保底 + 全库封顶（架构级）。
+          //   原策略：`LIMIT toMark` 从**全库**最旧开始归档，保留窗口(keep)是**全库共享**的。
+          //   实测后果：单个高频实体（1 天 477 轮）把 100 条窗口 100% 占满，
+          //   其余实体的对话被瞬间归档 ⇒ 聊得越多记得越少，不聊的反而被挤掉。
+          //   现改为：归档**只作用于「超出本实体自身保底窗口」的旧轮次**（实体间互不挤占），
+          //   全库未归档总量以 keepFullTurns × 实体数 封顶（再以 maxUnarchivedRows 硬封顶防无界增长）。
+          const _capCfg = Number(MEMORY_CONFIG.compaction.maxUnarchivedRows);
+          const _cap = Number.isFinite(_capCfg) && _capCfg > 0 ? Math.floor(_capCfg) : 2000;
+          const _entRow = sqlite.queryAll(
+            "SELECT COUNT(DISTINCT COALESCE(belong_entity_uuid,'')) AS c FROM conversations WHERE is_compacted=0 AND (is_test IS NULL OR is_test=0) AND (is_summary IS NULL OR is_summary=0)",
+          );
+          const _entities = Math.max(1, Number(_entRow?.[0]?.c ?? 1) || 1);
+          // 单实体时 = keep（与旧行为一致）；多实体时按实体数放宽，但有硬顶
+          const _globalBudget = Math.max(keep, Math.min(keep * _entities, _cap));
+          const toMark = Math.max(0, rawCount - _globalBudget);
           if (toMark > 0 && !isNaN(toMark)) {
             // 🔴 V23.1(2026-09-13): 归档必须**豁免摘要条目**（`is_summary=0`）。
             //   原 SQL 不带该条件 → 摘要条目被自己所属的压缩流程压掉，
             //   随即失去"摘要"身份（实测 11 条【对话摘要】全部 is_compacted=1、is_summary=0）。
             //   摘要本就是压缩的**产物**，不是待压缩的原始对话。
+            // 🔴 V34: 内层相关子查询 = 「本实体内比我新的未归档轮次 ≥ keep 条」⇒ 我已在保底窗口之外。
+            // 注：writeRaw 返回 void，受影响行数不回传 —— 日志中的 toMark 是「计划归档数」而非实写数
             sqlite.writeRaw(
-              "UPDATE conversations SET is_compacted=1 WHERE id IN (SELECT id FROM conversations WHERE is_compacted=0 AND (is_test IS NULL OR is_test=0) AND (is_summary IS NULL OR is_summary=0) ORDER BY rowid ASC LIMIT ?)",
-              [toMark]
+              `UPDATE conversations SET is_compacted=1 WHERE id IN (
+                 SELECT c.id FROM conversations c
+                 WHERE c.is_compacted=0 AND (c.is_test IS NULL OR c.is_test=0) AND (c.is_summary IS NULL OR c.is_summary=0)
+                   AND (SELECT COUNT(*) FROM conversations p
+                        WHERE p.is_compacted=0 AND (p.is_test IS NULL OR p.is_test=0) AND (p.is_summary IS NULL OR p.is_summary=0)
+                          AND COALESCE(p.belong_entity_uuid,'') = COALESCE(c.belong_entity_uuid,'')
+                          AND p.timestamp > c.timestamp) >= ?
+                 ORDER BY c.rowid ASC LIMIT ?)`,
+              [keep, toMark]
             );
-            console.log(`[Maintenance] DB压缩: 标记 ${toMark} 条对话为已压缩 (砂金库共 ${rawCount} 条)`);
+            console.log(`[Maintenance] DB压缩: 计划标记 ${toMark} 条对话为已压缩 (砂金库共 ${rawCount} 条 / ${_entities} 个实体 / 全库预算 ${_globalBudget})`);
           }
         }
       } catch (e) {
@@ -486,11 +509,20 @@ export class MaintenanceService {
           // 🔴 铁律：砂金库永久留存原始对话，仅做压缩标记，不物理删除
           if (cutoff) {
             // V23.1: 同样豁免摘要条目（与 runCompaction 的归档 SQL 保持同一口径）
+            // 🔴 V34(2026-09-25): cutoff 来自**本会话**的 RAM 历史，而下面这条 UPDATE 是**全库**范围 ——
+            //   不加约束时它会按一个实体的时间线归档掉**其他实体**更近的轮次，把上面刚建立的
+            //   per-entity 保底整个抹掉。此处套用同一谓词：只归档"超出本实体自身保底窗口"的旧轮次。
+            const _keepFloor = typeof this.config.keepFullTurns === 'number' && isFinite(this.config.keepFullTurns) ? this.config.keepFullTurns : 200;
             sqlite.writeRaw(
-              'UPDATE conversations SET is_compacted = 1 WHERE timestamp < ? AND is_compacted = 0 AND (is_summary IS NULL OR is_summary = 0)',
-              [cutoff],
+              `UPDATE conversations SET is_compacted = 1
+               WHERE timestamp < ? AND is_compacted = 0 AND (is_summary IS NULL OR is_summary = 0)
+                 AND (SELECT COUNT(*) FROM conversations p
+                      WHERE p.is_compacted=0 AND (p.is_test IS NULL OR p.is_test=0) AND (p.is_summary IS NULL OR p.is_summary=0)
+                        AND COALESCE(p.belong_entity_uuid,'') = COALESCE(conversations.belong_entity_uuid,'')
+                        AND p.timestamp > conversations.timestamp) >= ?`,
+              [cutoff, _keepFloor],
             );
-            console.log('[Maintenance] 标记压缩完成: < ' + cutoff + ' (原始数据永久保留)');
+            console.log('[Maintenance] 标记压缩完成: < ' + cutoff + ' (原始数据永久保留, per-entity 保底 ' + _keepFloor + ' 条)');
           }
         }
       } catch (e) {

@@ -327,7 +327,15 @@ export class ConversationDB {
     this.ensureReady();
     const stmt = this.db.prepare(
       // 🔴 2026-09-22 上下文连贯性：同 SQLiteAdapter —— 历史/摘要装配必须排掉测试行
-      `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE is_compacted = 0 AND (roleplay_char IS NULL OR roleplay_char = '') AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT ?`,
+      // 🔴 V34(2026-09-25): 撤除 `is_compacted = 0`，改以 `COALESCE(is_summary,0) = 0` 排除摘要行。
+      //   归档只是内存窗口标记（砂金库原文只增不删），把它当可见性过滤器 ⇒ 被归档的轮次从
+      //   "最近对话"里消失 = 归档即永久失忆。实测：高频实体（单日 477 轮）的全库未归档窗口
+      //   只有 134 条、100% 属于同一实体，其余实体与更早轮次全部不可见。撤除后本查询恢复
+      //   "按真实时间近因取回"。
+      //   ⚠️ 摘要行（is_compacted=1 且 is_summary=1）原先**顺带**被 is_compacted=0 排除；
+      //   撤除该过滤后必须**显式**排除，否则摘要会既出现在这里、又被下方摘要块前置一次。
+      //   用 is_summary 而非下方去重，是为了保住「主查询=原文轮次 / 摘要块=前置摘要」的原有分工。
+      `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE (roleplay_char IS NULL OR roleplay_char = '') AND COALESCE(is_summary, 0) = 0 AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT ?`,
     );
     stmt.bind([limit]);
     const rows: ConversationRow[] = [];
@@ -338,9 +346,11 @@ export class ConversationDB {
     //   背景：溢出被 is_compacted=1 压实 ⇒ 从历史消失；而摘要通道“写了没人读”
     //   （实测：97% 对话被压实、【对话摘要】仅 14 条、且检索侧无任何读取方）
     //   ⇒ 被压实的前文彻底丢失 ⇒ 语义跳跃。
-    //   摘要行是 is_compacted=1 的 assistant 行（内容以「【对话摘要】」开头），会被上面的 is_compacted=0 排除
-    //   ⇒ 单独取最近 5 条、按时间升序**前置**，作为“更早背景”，再接最近的原始轮次。
-    //   独立取数（而非放宽主查询）是为了不受主查询 LIMIT 挤占。
+    //   摘要行是 is_compacted=1 的 assistant 行（内容以「【对话摘要】」开头）。**V34 之前**
+    //   它被上面的 is_compacted=0 排除，故需单独取最近 5 条、按时间升序**前置**为“更早背景”；
+    //   独立取数是为了不受主查询 LIMIT 挤占。
+    // 🔴 V34(2026-09-25): 主查询改为按 `is_summary=0` 排除摘要行（见上），
+    //   本块「摘要必定进上下文」的保证与去重前提均**不变** —— 摘要不会重复出现。
     try {
       const sm = this.db.prepare(
         `SELECT id, role, content, timestamp, topic, is_summary, belong_entity_uuid FROM conversations WHERE COALESCE(is_summary, 0) = 1 AND COALESCE(namespace,'default') <> 'test' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT 5`,
@@ -357,9 +367,11 @@ export class ConversationDB {
   searchConversations(keyword: string, limit = 10, excludeRoleplay = true): ConversationRow[] {
     this.ensureReady();
     // 🏗️ P0-4: 非角色扮演时自动过滤角色扮演对话（避免记忆污染）
+    // 🔴 V34(2026-09-25): 撤除 `is_compacted = 0` —— 关键词搜历史时若排除归档原文，
+    //   等于只在"内存窗口内剩下的几小时"里搜，用户问几天前的具体事必然落空。
     const sql = excludeRoleplay
-      ? `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND is_compacted = 0 AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT ?`
-      : `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND is_compacted = 0 ORDER BY timestamp DESC LIMIT ?`;
+      ? `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT ?`
+      : `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?`;
     const stmt = this.db.prepare(sql);
     stmt.bind([`%${keyword}%`, limit]);
     const rows: ConversationRow[] = [];

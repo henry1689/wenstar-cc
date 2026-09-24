@@ -22,6 +22,19 @@ import {
   recallOriginalConversations,
   shouldEscalateToLlmPicker,
 } from '../../m4/retrieval/meeting-recall.js';
+// 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
+
+/** 砂金库时间窗召回：天数（近 N 天聊过的可被召回） */
+const SANDBOX_RECALL_WINDOW_DAYS = (() => {
+  const v = Number(MEMORY_CONFIG.compaction.sandboxRecallWindowDays);
+  return Number.isFinite(v) && v > 0 ? v : 7;
+})();
+/** 砂金库时间窗召回：单次注入条数上限 */
+const SANDBOX_RECALL_LIMIT = (() => {
+  const v = Number(MEMORY_CONFIG.compaction.sandboxRecallLimit);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 12;
+})();
 
 /**
  * C LLM 兜底挑选（2026-09-12）
@@ -466,13 +479,20 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             //   is_compacted=0 过滤（压缩归档后对其不可见）。此处用 meeting-recall 共享取回（不过滤压缩，
             //   遵循"原始对话只增不删永久留存")直接命中被压缩归档的《蒹葭》引诗/寒假约定原文注入。
             const _kwList = [...new Set(_kwCandidates)].slice(0, 4);
-            if (_topicKw.length > 0) {
-              const _origHits = recallOriginalConversations(_sqlite, _entityUuid, _topicKw, 4, 400);
-              for (const _oh2 of _origHits) {
-                const _cb2 = (_oh2.content || '').substring(0, 400);
-                if (_cb2.length > 4 && !memoryFragments.some((f: string) => f.includes(_cb2.substring(0, 20)))) {
-                  memoryFragments.push('【对话·' + _meetingEntityName + '·原文】' + _cb2);
-                }
+            // 🔴 V34(2026-09-25): 撤除 `if (_topicKw.length > 0)` 门槛 —— 关键词从「门槛」降级为「加权」。
+            //   原门槛 + 函数内 `!keywords.length` 的**双重关键词门槛**叠加 ⇒ 用户不提"记得/之前/上次"
+            //   这类触发词就压根不去砂金库找，砂金库作为"回忆兜底层"的职责形同虚设（实测症状：
+            //   "24 小时的记忆都记不住"、"几天前说的话都记不起来"）。
+            //   现无条件按**时间窗**取回近 sandboxRecallWindowDays 天的原文；关键词命中者由
+            //   recallOriginalConversations 内部优先排前（加权），未命中/无关键词也照样兜底。
+            const _origHits = recallOriginalConversations(
+              _sqlite, _entityUuid, _topicKw,
+              SANDBOX_RECALL_LIMIT, 400, SANDBOX_RECALL_WINDOW_DAYS,
+            );
+            for (const _oh2 of _origHits) {
+              const _cb2 = (_oh2.content || '').substring(0, 400);
+              if (_cb2.length > 4 && !memoryFragments.some((f: string) => f.includes(_cb2.substring(0, 20)))) {
+                memoryFragments.push('【对话·' + _meetingEntityName + '·原文】' + _cb2);
               }
             }
             for (const _kw of _kwList) {

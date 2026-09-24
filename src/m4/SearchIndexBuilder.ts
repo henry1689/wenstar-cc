@@ -104,9 +104,13 @@ export function rebuildAllIndexes(db: any): { total: number; bySource: Record<st
   const bySource: Record<string, number> = { conversation: 0, memory: 0, black_diamond: 0, knowledge_base: 0, work: 0 };
 
   // ═══ 1. 砂金库 — conversations ═══
+  // 🔴 V34(2026-09-25): 撤除 `is_compacted = 0` 过滤。
+  //   原过滤使**被归档的对话连全文搜索索引都进不去** —— 砂金库作为「回忆兜底层」的职责
+  //   在索引侧也被切断：用户问几天前聊过的具体事，倒排索引里根本没有那些 term。
+  //   归档只是内存窗口标记，原文只增不删，索引必须覆盖全量。
   try {
     const convs = db.exec(
-      "SELECT id, content, belong_entity_uuid FROM conversations WHERE is_compacted = 0 AND content IS NOT NULL ORDER BY id"
+      "SELECT id, content, belong_entity_uuid FROM conversations WHERE content IS NOT NULL ORDER BY id"
     );
     if (convs.length && convs[0].values) {
       for (const [id, content, entityUuid] of convs[0].values) {
