@@ -320,3 +320,73 @@ describe('[V31] 乙：角色扮演推理档降级', () => {
     expect(read('src/m5/M5Orchestrator.ts')).toMatch(/reasoningEffortOverride:\s*'low'/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// V33 — 第四次复发：漏口在【流式兜底】，模型产出的是「历史对话转录」
+// ─────────────────────────────────────────────────────────────
+/**
+ * 2026-09-24 生产实测：最近 200 条 `[ChatStream] done` 中 57 条（28.5%）为
+ * `tokens=0/1`。而全仓**只有一处**会「一次性 `onToken({text:全文})`」
+ * （V31 甲-1 流结束兜底）⇒ `tokens≤1` 即「该条由 reasoningBuf 兜底捞出」的**结构性指纹**。
+ * 根因：甲-2 只判「有没有找到结构标记」，而转录文本含括号动作/引号/分段 ⇒ 被判有结构。
+ *
+ * 脱敏说明：真实样本含私密正文，此处只保留**结构**（自有哨兵串 + 多轮形态），内容为中性占位。
+ */
+const TRANSCRIPT_ECHO = [
+  '[当前说话对象: 某某 | ⚠️ 你不是玉瑶] 鸿艺对你说：今天天气不错',
+  '（她点点头）是啊，挺好的。',
+  '[当前说话对象: 某某 | ⚠️ 你不是玉瑶] 鸿艺对你说：晚上吃什么',
+  '（她想了想）随便，你定。',
+  '[当前说话对象: 某某 | ⚠️ 你不是玉瑶] 鸿艺对你说：那就吃面',
+  '（她笑了笑）行。',
+].join('\n');
+
+describe('[V33] 甲：自有哨兵串回声 ⇒ 判「无可用答案」', () => {
+  it('🔴 判据锚在**本系统自己注入**的字符串上，不是模型措辞枚举', () => {
+    expect(providerSrc).toMatch(/SELF_INJECTED_MARKERS/);
+    expect(providerSrc).toContain('鸿艺对你说：');
+    expect(providerSrc).toContain('[当前说话对象:');
+  });
+
+  it('🔴 转录回声必须被拒（判 null）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      tryExtractAnswerFromReasoning?: (t: string) => string | null;
+    };
+    expect(typeof mod.tryExtractAnswerFromReasoning).toBe('function');
+    expect(mod.tryExtractAnswerFromReasoning!(TRANSCRIPT_ECHO)).toBeNull();
+  });
+
+  it('🟢 不退化基线：合法回复仍须通过（防 V23 式误杀）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      tryExtractAnswerFromReasoning?: (t: string) => string | null;
+    };
+    for (const s of LEGIT_REPLIES) {
+      expect(mod.tryExtractAnswerFromReasoning!(s), `合法回复被误杀: ${s.slice(0, 10)}…`).not.toBeNull();
+    }
+  });
+
+  it('🟢 判的是**提取物**不是入参：思维链引用输入里的哨兵串不应误伤', () => {
+    // 若判据写成检查入参 text，会把「推理中引用用户原话」大量误杀 —— 这里锁死它判 out
+    const idx = providerSrc.indexOf('const out = extractAnswerFromReasoning(text);');
+    expect(idx, '应存在 out 提取点').toBeGreaterThan(-1);
+    const scope = providerSrc.slice(idx, idx + 700);
+    expect(scope).toMatch(/SELF_INJECTED_MARKERS\.some\(m\s*=>\s*out\.includes\(m\)\)/);
+  });
+});
+
+describe('[V33] 乙：整段抄出比例（**仅 reasoning 路径**）', () => {
+  it('🔴 判据必须落在 reasoning 兜底处，不得下放进 tryExtractAnswerFromReasoning', () => {
+    // 下放会把 content 分支 ≥600 字的合法长回复整体误杀（resolveReplyFromFields）
+    const callIdx = providerSrc.indexOf('const strict = tryExtractAnswerFromReasoning(stripper.reasoningBuf);');
+    expect(callIdx, '应存在流式兜底调用点').toBeGreaterThan(-1);
+    const scope = providerSrc.slice(callIdx, callIdx + 900);
+    expect(scope).toMatch(/_wholeChainDump/);
+    expect(scope).toMatch(/_rb\.length >= 600/);
+
+    const fnIdx = providerSrc.indexOf('export function tryExtractAnswerFromReasoning');
+    const fnEnd = providerSrc.indexOf('\n}', fnIdx);
+    expect(fnIdx).toBeGreaterThan(-1);
+    expect(fnEnd).toBeGreaterThan(fnIdx);
+    expect(providerSrc.slice(fnIdx, fnEnd)).not.toMatch(/_wholeChainDump/);
+  });
+});

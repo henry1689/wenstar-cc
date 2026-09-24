@@ -702,6 +702,8 @@ export function extractAnswerFromReasoning(text: string): string {
  *      · 判据写 `保持角色：`，      实际样本是 `保持徐诗雨身份`（擦边而过）
  *    模型措辞一漂移，枚举必然失效；结构标记与措辞无关。
  */
+const SELF_INJECTED_MARKERS = ['鸿艺对你说：', '[当前说话对象:'] as const;
+
 export function tryExtractAnswerFromReasoning(text: string): string | null {
     if (!text || !text.trim()) return null;
     const hasStructure =
@@ -729,7 +731,15 @@ export function tryExtractAnswerFromReasoning(text: string): string | null {
     const tooShortToBeReasoning = text.trim().length <= 50;
     // 全未命中 ⇒ 整段没有答案结构 ⇒ 判 null（交调用方重试），绝不原样返回
     if (!hasStructure && !tooShortToBeReasoning) return null;
-    return extractAnswerFromReasoning(text);
+    const out = extractAnswerFromReasoning(text);
+    // 🔴 V33 甲（第四次复发根治）：**提取物**里出现我们自己注入的哨兵串
+    //   ⇒ 它是「历史对话转录」，不是答案。
+    //   判的是 `out` 而非 `text`：思维链**引用**输入里这一行是正常的，
+    //   **答案里**出现才是回声（若判 text，会把大量正常推理误杀）。
+    //   判据锚在**自有字符串**上（生成点见本文件会晤分支）——模型只能靠复述输入产生它，
+    //   不随其措辞漂移 ⇒ 不同于已被证伪三次的关键词枚举路线。
+    if (SELF_INJECTED_MARKERS.some(m => out.includes(m))) return null;
+    return out;
 }
 
 /** 原提取主体（V1–V21 策略链）。尾部元推理截断由外层 truncateLatinMetaTail 统一处理。 */
@@ -1358,7 +1368,15 @@ export class DeepSeekLLMProvider implements LLMProvider {
         //   找到 → 正常取答案；全未命中 → 判 null ⇒ 抛 noUsableAnswer 交 M5 重试。
         //   **零关键词 ⇒ 零误杀**；宁可多一次重试，也绝不洩漏。
         const strict = tryExtractAnswerFromReasoning(stripper.reasoningBuf);
-        const full = strict ? gateOutgoingReply(strict) : '';
+        // 🔴 V33 乙：**只在 reasoning 路径**判「整段抄出比例」——
+        //   提取物几乎等于整段思维链 ⇒ 不是「摘出答案」，而是「把思维链端出来」。
+        //   合法提取天然只占输入一小部分（答案远短于推理）；600 字下限避免误伤短文。
+        //   ⚠️ 此判据**不能**下放进 tryExtractAnswerFromReasoning：那里分不清
+        //     「输入本身就是答案」（resolveReplyFromFields 的 content 分支）与「输入是思维链」，
+        //     放进去会把 ≥600 字的合法长回复整体误杀（V23 付过这个代价）。
+        const _rb = stripper.reasoningBuf.trim();
+        const _wholeChainDump = strict !== null && _rb.length >= 600 && strict.length >= _rb.length * 0.8;
+        const full = (strict && !_wholeChainDump) ? gateOutgoingReply(strict) : '';
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
