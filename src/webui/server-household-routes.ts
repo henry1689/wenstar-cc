@@ -174,8 +174,17 @@ export async function handleHouseholdRoutes(deps: HouseholdRouteDeps): Promise<b
       const uuid = (fg as any).getUUIDByName?.(name) || '';
       const status = (fg as any).getRegistrationStatus?.(name) || {};
       const related = fg.getRelatedPersons?.(name) || [];
-      const household = profile?.dossier?.misc?._household || null;
-      const socialGroups = profile?.dossier?.misc?._socialGroups || [];
+      // 🔵 V30 甲：名单改为**读时从图谱现算**，不再取存储的副本。
+      //   原实现把「组内全部成员名单」写进每个成员自己的 dossier.misc，
+      //   改一条边 ⇒ 整组重写（实测最大组 509 人 ⇒ 单次 addEdge 14~16 秒）。
+      //   同时注入回 `registration.profile.dossier.misc` ——
+      //   **响应的字段名、层级、类型与改动前逐字段一致**，前端与其他消费方零改动。
+      const household = fg.householdOf?.(name) ?? null;
+      const socialGroups = fg.socialGroupsOf?.(name) ?? [];
+      if (profile?.dossier?.misc) {
+        (profile.dossier.misc as any)._household = household;
+        (profile.dossier.misc as any)._socialGroups = socialGroups;
+      }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({

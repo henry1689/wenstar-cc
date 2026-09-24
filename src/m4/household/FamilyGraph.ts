@@ -1028,37 +1028,12 @@ export class FamilyGraph implements FamilyGraphInterface {
    * 在 FG 初始化完成后由 server.ts 调用。幂等——重复调用不会产生重复数据。
    */
   async syncHouseholdsToDossier(): Promise<{ families: number; socialGroups: number }> {
-    const result = { families: 0, socialGroups: 0 };
-    try {
-      const familyGenes = this.query(
-        "SELECT DISTINCT family_gene FROM nodes WHERE type = 'person' AND family_gene IS NOT NULL"
-      ) as Array<{ family_gene: string }>;
-      for (const row of familyGenes) {
-        await this._rebuildHouseholdDossier(row.family_gene);
-        result.families++;
-      }
-
-      const socialGenes = this.query(
-        "SELECT DISTINCT social_group_genes FROM nodes WHERE type = 'person' AND social_group_genes IS NOT NULL AND social_group_genes != 'WW'"
-      ) as Array<{ social_group_genes: string }>;
-      const seen = new Set<string>();
-      for (const row of socialGenes) {
-        for (const g of (row.social_group_genes || '').split('|').filter(Boolean)) {
-          if (seen.has(g)) continue;
-          seen.add(g);
-          const prefix = g.substring(0, 2);
-          await this._rebuildSocialGroupDossier(g, prefix);
-          result.socialGroups++;
-        }
-      }
-
-      if (this._verbose) {
-        console.log(`[FamilyGraph] V6 家族户/社团同步到 dossier: ${result.families}族 + ${result.socialGroups}社`);
-      }
-    } catch (e) {
-      console.warn('[FamilyGraph] syncHouseholdsToDossier 失败:', e);
-    }
-    return result;
+    // 🔵 V30 甲：**保留签名、改为空操作**（而非删除）。
+    //   原因：`src/webui/server.ts:554` 仍调用本方法，而该文件不在本次文件集内、
+    //   不可修改 —— 删掉会直接让 tsc 挂掉。读时计算落地后，本方法已无产出对象：
+    //   它原本是「同一扇出的启动期入口」，留着实作就等于留着扇出源。
+    //   返回 0 而非抛错 ⇒ 调用方行为不变，启动也因此省掉一次全组重写。
+    return { families: 0, socialGroups: 0 };
   }
 
   
@@ -1796,6 +1771,31 @@ export class FamilyGraph implements FamilyGraphInterface {
     finally {
       const dt = Date.now() - t0;
       if (dt > 300) console.log(`[FG·integrate] addNode(${node?.name ?? node?.id ?? '?'})=${dt}ms`);
+      this._v30BudgetCheck('addNode', dt);
+    }
+  }
+
+  /**
+   * 🔵 V30 乙-2：垃圾实体守卫的懒加载单例（整个进程只 import 一次）。
+   *   保留动态 import 语义以规避循环依赖，但**不在热路径上让出**。
+   */
+  private _garbageGuardP?: Promise<typeof import('./GarbageEntityGuard.js')>;
+  private _loadGarbageGuard(): Promise<typeof import('./GarbageEntityGuard.js')> {
+    return (this._garbageGuardP ??= import('./GarbageEntityGuard.js'));
+  }
+
+  /** 🔵 V30 乙-3 预算守卫：同步路径一旦被塞进 O(组)/O(表) 工作，这里当天就炸出来。 */
+  private _v30RoundStart = 0;
+  private _v30RoundMs = 0;
+  private _v30BudgetCheck(op: string, dt: number): void {
+    const now = Date.now();
+    if (now - this._v30RoundStart > 5_000) { this._v30RoundStart = now; this._v30RoundMs = 0; }
+    this._v30RoundMs += dt;
+    if (dt > 500 || this._v30RoundMs > 500) {
+      console.warn(
+        `[FG·budget] 🔴 V30 预算守卫：${op} 单次 ${dt}ms，本轮累计 ${this._v30RoundMs}ms（阈值 500ms）` +
+        ` —— 同步路径疑被 O(组)/O(表) 工作占用，回归立即可见`
+      );
     }
   }
 
@@ -1807,7 +1807,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     // P1-7: 垃圾实体守卫 — person 节点写入前做最后一道垃圾过滤
     if (node.type === 'person') {
       try {
-        const { checkEntity } = await import('./GarbageEntityGuard.js');
+        // 🔵 V30 乙-1：原为每轮 addNode 都 `await import(...)`。
+        //   `await` 一让出事件循环，排队的其他任务耗时就会被算进 addNode 的 dt ——
+        //   与「落盘 52 秒」**同一个计时污染机制**，故 addNode 的 1.4s 均值含相当比例
+        //   「别人的时间记到它头上」。改为懒加载单例：整个进程只 await 一次，热路径不再让出。
+        const { checkEntity } = await this._loadGarbageGuard();
         // 🔵 批12(P1-4): 必须排除 void —— 否则已 void 的噪声名再次出现时会命中
         // existingNames → grade 4 → 直接 active，既绕过观察区又产生同名重复节点。
         // 注意 getUUIDByName/findPersonNodeByNameOrAlias 本就排除 void（语义一致）。
@@ -1916,6 +1920,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     finally {
       const dt = Date.now() - t0;
       if (dt > 300) console.log(`[FG·integrate] addEdge(${edge?.relation ?? edge?.id ?? '?'})=${dt}ms`);
+      this._v30BudgetCheck('addEdge', dt);
     }
   }
 
@@ -1947,8 +1952,11 @@ export class FamilyGraph implements FamilyGraphInterface {
     );
     // ── V3.3 基因码自动同步 ──
     this._syncGenesOnNewEdge(edge.source_id, edge.target_id, edge.relation);
-    // ── V6 家族户/社团成员名单同步到 dossier ──
-    await this._syncDossierHousehold(edge.source_id, edge.target_id, edge.relation);
+    // 🔵 V30 甲：**名单不再写入 dossier** —— 原 `await _syncDossierHousehold(...)`
+    //   会把「组内全部成员名单」重抄进每个成员自己的档案（实测最大组 509 人 ⇒
+    //   单次 addEdge 14.4~16.1 秒，101 次合计 1180 秒，占 FG 总耗时 92%）。
+    //   名单可随时从图谱算出 ⇒ 改由读取方 `householdOf` / `socialGroupsOf` 现算。
+    //   删掉这个 await 后 `_addEdgeInner` **不再含任何 await**，建边变成纯同步微秒级。
     this.markDirty(true);
   }
 
@@ -2013,182 +2021,121 @@ export class FamilyGraph implements FamilyGraphInterface {
     return maxSeq;
   }
 
-  /** V6: 建边后增量同步家族户/社团成员名单到各成员 dossier */
-  private async _syncDossierHousehold(sourceId: string, targetId: string, relation: string): Promise<void> {
-    const familyRelations = ['mother_of','father_of','child_of','sibling_of','spouse_of',
-      'parent_of','grandparent_of','grandchild_of','elder_sister_of','younger_sister_of',
-      'elder_brother_of','younger_brother_of','aunt_of','uncle_of','niece_of','nephew_of'];
-    const socialPrefixMap: Record<string, string> = {
-      'colleague_of':'CO', 'boss_of':'CO', 'subordinate_of':'CO', 'partner_of':'CO',
-      'classmate_of':'SC',
-      'client_of':'BU', 'operated_by':'BU',
-    };
+  /**
+   * 🔵 V30 甲：读时计算 —— 家族户信息（替代原「写时把名单抄进每个成员档案」）
+   * ================================================================
+   * 返回结构与原 `dossier.misc._household` **逐字段一致**：
+   *   { gene, householder, members: [{name, relation, birthYear?}], lastSync }
+   *
+   * 比原实现更省：原实现为算出「本成员的亲属」，要让**整组每个成员**各做一次
+   * O(组) 往返并各自写盘（46 人组 = O(N²)）；读时计算只需**本人**一次 O(N)。
+   *
+   * `lastSync` 语义微调（已在变更单 §六 声明）：由「上次同步写入时刻」改为
+   *   组内 `max(nodes.updated_at)` = 组上次变动时间，字段名/类型/层级不变。
+   */
+  private _householdCache: Map<string, any> | null = null;
+  householdOf(personName: string): {
+    gene: string; householder: string;
+    members: Array<{ name: string; relation: string; birthYear?: number }>;
+    lastSync: string;
+  } | null {
+    if (this._householdCache?.has(personName)) return this._householdCache.get(personName);
 
-    try {
-      if (familyRelations.includes(relation)) {
-        // 读取两端最新的 family_gene（_syncGenesOnNewEdge 已更新）
-        const rows = this.query('SELECT family_gene FROM nodes WHERE id IN (?,?) AND family_gene IS NOT NULL',
-          [sourceId, targetId]);
-        const genes = [...new Set(rows.map((r: any) => r.family_gene))];
-        for (const gene of genes) {
-          await this._rebuildHouseholdDossier(gene);
-        }
-      }
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    const gene: string | null = node ? (node.family_gene ?? null) : null;
+    if (!node || !gene) { this._storeHousehold(personName, null); return null; }
 
-      const socialPrefix = socialPrefixMap[relation];
-      if (socialPrefix) {
-        const rows = this.query('SELECT social_group_genes FROM nodes WHERE id IN (?,?)',
-          [sourceId, targetId]);
-        const allGenes = new Set<string>();
-        for (const r of rows) {
-          (r.social_group_genes || '').split('|').filter(Boolean).forEach((g: string) => {
-            if (g.startsWith(socialPrefix)) allGenes.add(g);
-          });
-        }
-        for (const gene of allGenes) {
-          await this._rebuildSocialGroupDossier(gene, socialPrefix);
-        }
-      }
-    } catch (e) {
-      // 同步失败不影响边的创建
-      if (this._verbose) console.warn('[FamilyGraph] dossier household sync 失败:', e);
-    }
-  }
-
-  /** V6: 为指定 family_gene 组的所有成员重建 dossier.misc._household */
-  private async _rebuildHouseholdDossier(gene: string): Promise<void> {
     const members = this.query(
-      "SELECT id, name, properties, created_at FROM nodes WHERE family_gene = ? AND type = 'person'",
+      "SELECT id, name, properties, created_at, updated_at FROM nodes WHERE family_gene = ? AND type = 'person'",
       [gene]
-    ) as Array<{ id: string; name: string; properties: string; created_at: string }>;
-    if (members.length < 2) return; // 单人不成户
+    ) as Array<{ id: string; name: string; properties: string; created_at: string; updated_at: string }>;
+    if (members.length < 2) { this._storeHousehold(personName, null); return null; } // 单人不成户
 
-    // 户主 = "我"优先（如果在此户中），否则按 created_at 最早的成员
+    // 户主 = "我"优先（如果在此户中），否则按 created_at 最早的成员（与原实现一致）
     const sorted = [...members].sort((a, b) => a.created_at.localeCompare(b.created_at));
     const selfNode = members.find(m => m.name === '我');
-    const householderName = selfNode ? '我' : sorted[0].name;
+    const householder = selfNode ? '我' : sorted[0].name;
 
-    const memberIds = members.map(m => m.id);
-    const placeholders = memberIds.map(() => '?').join(',');
+    const target = members.find(m => m.name === personName) ?? node;
+    const relList: Array<{ name: string; relation: string; birthYear?: number }> = [];
+    for (const other of members) {
+      if (other.id === target.id) continue;
+      const edge = this.query(
+        'SELECT source_id, target_id, relation FROM edges WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)',
+        [target.id, other.id, other.id, target.id]
+      )[0];
+      const relation = edge
+        ? this._getEdgeDisplayLabel(edge.relation, edge.source_id === target.id)
+        : '亲属';
+      let birthYear: number | undefined;
+      try {
+        const op = JSON.parse(other.properties || '{}');
+        birthYear = op.dossier?.basicInfo?.birthYear;
+      } catch { /* ignore */ }
+      relList.push({ name: other.name, relation, ...(birthYear ? { birthYear } : {}) });
+    }
 
-    // 批量取该组内所有家族边
-    const edges = this.query(
-      `SELECT e.source_id, e.target_id, e.relation FROM edges e
-       WHERE e.source_id IN (${placeholders}) AND e.target_id IN (${placeholders})`,
-      [...memberIds, ...memberIds]
-    ) as Array<{ source_id: string; target_id: string; relation: string }>;
+    const result = {
+      gene,
+      householder,
+      members: relList,
+      lastSync: members.reduce((mx, m) => (m.updated_at > mx ? m.updated_at : mx), ''),
+    };
+    this._storeHousehold(personName, result);
+    return result;
+  }
 
-    // 为每个成员构建 household 信息并写入
-    for (const member of members) {
-      const relList: Array<{ name: string; relation: string; birthYear?: number }> = [];
+  private _storeHousehold(key: string, value: any): void {
+    this._householdCache ??= new Map();
+    this._householdCache.set(key, value);
+  }
 
-      for (const other of members) {
-        if (other.id === member.id) continue;
+  /**
+   * 🔵 V30 甲：读时计算 —— 社团名单（替代原「写时把全组名单抄进每个成员档案」）
+   * ================================================================
+   * 返回结构与原 `dossier.misc._socialGroups` 逐字段一致：
+   *   [{ gene, type: 'colleague'|'school'|'business'|'other', members: string[], lastSync }]
+   *
+   * 🔴 这是原 14 秒尖峰的**主扇出源**：实测最大组 **509 人**（person 总数才 527），
+   *   原实现对 509 人各做 2 次「查回 properties → JSON.parse(33KB) → 改 → stringify → UPDATE」
+   *   ⇒ 1000+ 次数百 KB 级 JSON 解析/序列化。读时计算 = **一次查询、零写入**。
+   *
+   * 与原实现的差异（更完整，非更少）：原实现按**触发边的前缀**只重建一类组，
+   *   且要与已存副本合并；现直接由本人 `social_group_genes` 算出**全部**所属组，
+   *   自然覆盖合并语义，且不会再残留已退出组的旧条目。
+   */
+  private _socialGroupCache: Map<string, Array<{
+    gene: string; type: string; members: string[]; lastSync: string;
+  }>> | null = null;
+  socialGroupsOf(personName: string): Array<{
+    gene: string; type: string; members: string[]; lastSync: string;
+  }> {
+    if (this._socialGroupCache?.has(personName)) return this._socialGroupCache.get(personName)!;
 
-        // 查两者之间的家族边
-        const edge = edges.find(e =>
-          (e.source_id === member.id && e.target_id === other.id) ||
-          (e.source_id === other.id && e.target_id === member.id)
-        );
-        const relationLabel = edge
-          ? this._getEdgeDisplayLabel(edge.relation, edge.source_id === member.id)
-          : '亲属';
-
-        // 提取出生年份
-        let birthYear: number | undefined;
-        try {
-          const op = JSON.parse(other.properties || '{}');
-          birthYear = op.dossier?.basicInfo?.birthYear;
-        } catch { /* ignore */ }
-
-        relList.push({
-          name: other.name,
-          relation: relationLabel,
-          ...(birthYear ? { birthYear } : {}),
+    const out: Array<{ gene: string; type: string; members: string[]; lastSync: string }> = [];
+    const node = this.findPersonNodeByNameOrAlias(personName);
+    if (node) {
+      const typeMap: Record<string, string> = { CO: 'colleague', SC: 'school', BU: 'business' };
+      const genes = (node.social_group_genes || '').split('|').filter(Boolean);
+      for (const gene of genes) {
+        if (gene === 'WW') continue; // WW = 自由人，非社团（与原实现一致）
+        const members = this.query(
+          "SELECT name, updated_at FROM nodes WHERE type = 'person' AND social_group_genes LIKE ?",
+          [`%${gene}%`]
+        ) as Array<{ name: string; updated_at: string }>;
+        if (members.length < 2) continue; // 单人不成组（与原实现一致）
+        const prefix = gene.substring(0, 2);
+        out.push({
+          gene,
+          type: typeMap[prefix] || 'other',
+          members: members.map(m => m.name),
+          lastSync: members.reduce((mx, m) => (m.updated_at > mx ? m.updated_at : mx), ''),
         });
       }
-
-      const householdInfo = {
-        gene,
-        householder: householderName,
-        members: relList,
-        lastSync: new Date().toISOString(),
-      };
-
-      await this._setDossierFieldSystem(member.name, 'misc._household', householdInfo);
     }
-  }
-
-  /** V6: 为指定 social_group 码的所有成员重建 dossier.misc._socialGroups */
-  private async _rebuildSocialGroupDossier(gene: string, prefix: string): Promise<void> {
-    const members = this.query(
-      "SELECT id, name FROM nodes WHERE type = 'person' AND social_group_genes LIKE ?",
-      [`%${gene}%`]
-    ) as Array<{ id: string; name: string }>;
-    if (members.length < 2) return;
-
-    const typeMap: Record<string, string> = { CO: 'colleague', SC: 'school', BU: 'business' };
-    const memberNames = members.map(m => m.name);
-
-    const groupInfo = {
-      gene,
-      type: typeMap[prefix] || 'other',
-      members: memberNames,
-      lastSync: new Date().toISOString(),
-    };
-
-    // 更新该组每个成员的 _socialGroups（合并已有其他社团信息）
-    for (const member of members) {
-      const existing = await this._getDossierField(member.name, 'misc._socialGroups');
-      const groups: any[] = Array.isArray(existing) ? existing : [];
-      const idx = groups.findIndex((g: any) => g.gene === gene);
-      if (idx >= 0) {
-        groups[idx] = groupInfo;
-      } else {
-        groups.push(groupInfo);
-      }
-      await this._setDossierFieldSystem(member.name, 'misc._socialGroups', groups);
-    }
-  }
-
-  /** V6: 系统级 dossier 字段写入（不增加 mention_count，不触发 PAE） */
-  private async _setDossierFieldSystem(personName: string, fieldPath: string, value: any): Promise<void> {
-    const node = this.findPersonNodeByNameOrAlias(personName);
-    if (!node) return;
-
-    const props = JSON.parse(node.properties || '{}');
-    if (!props.dossier) props.dossier = this.buildDossierFromFlat(props, props);
-
-    const { oldValue } = dossierWrite(props.dossier, fieldPath, value);
-    const oldStr = JSON.stringify(oldValue ?? null);
-    const newStr = JSON.stringify(value);
-    if (oldStr === newStr) return;
-
-    if (!props._changeHistory) props._changeHistory = [];
-    props._changeHistory.push({
-      time: new Date().toISOString(),
-      operation: '图谱同步',
-      field: `dossier.${fieldPath}`,
-      before: oldStr === 'null' ? null : JSON.parse(oldStr),
-      after: value,
-      reason: 'BFS 基因码组成员名单增量同步',
-      source: '图谱同步',
-    });
-    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
-
-    this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
-      JSON.stringify(props), new Date().toISOString(), node.id,
-    ]);
-  }
-
-  /** V6: 读取 dossier 中指定字段的值 */
-  private async _getDossierField(personName: string, fieldPath: string): Promise<any> {
-    const node = this.findPersonNodeByNameOrAlias(personName);
-    if (!node) return undefined;
-    const props = JSON.parse(node.properties || '{}');
-    if (!props.dossier) return undefined;
-    return dossierRead(props.dossier, fieldPath);
+    this._socialGroupCache ??= new Map();
+    this._socialGroupCache.set(personName, out);
+    return out;
   }
 
   /** V6: 将 edge relation 转为中文展示标签（委托 shared/RelationLabels） */
@@ -3588,6 +3535,10 @@ export class FamilyGraph implements FamilyGraphInterface {
     this._dirty = true;
     this._familyCache = null;
     this._socialCache = null;
+    // 🔵 V30 甲：读时计算结果同样挂既有失效钩子失效
+    //   （批量加载 60 份档案期间无写入 ⇒ 缓存保持温暖，不退化为 60 次全组算）
+    this._householdCache = null;
+    this._socialGroupCache = null;
     if (immediate) {
       // 🔴 时间地板：60s 内的“立即落盘”退化为防抖（避免一轮对话多次 42MB 同步导出）
       if (Date.now() - this._lastFlushAt >= this._IMMEDIATE_MIN_INTERVAL_MS) {
