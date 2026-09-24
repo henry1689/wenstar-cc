@@ -498,29 +498,54 @@ describe('[V33.2] content 分支的三处提前 return 必须同守哨兵判据�
     expect(mod.resolveReplyFromFields!(c, '')).toBe('');
   });
 
-  it('🔴 :222 拉丁元推理截断分支 —— 截完仍含哨兵 ⇒ 判空', async () => {
+  it('🟢 :219 对照组（**只对该支有鉴别力**）：同构造仅换哨兵串 ⇒ 必须存活', async () => {
     const mod = (await import('../DeepSeekLLMProvider.js')) as {
       resolveReplyFromFields?: (c?: string, r?: string) => string;
     };
-    const c = 'Final answer below.\n' + TRANSCRIPT_ECHO;
-    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
-  });
-
-  it('🔴 :238 原样返回分支 —— 前两条都没生效时也不得放行哨兵文本', async () => {
-    const mod = (await import('../DeepSeekLLMProvider.js')) as {
-      resolveReplyFromFields?: (c?: string, r?: string) => string;
-    };
-    // 剥离量 ≤10 ⇒ 前两条都不成立 ⇒ 落到 :238
-    const c = '[当前说话对象: 某某] 鸿艺对你说：行。';
-    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
-  });
-
-  it('🟢 不退化基线：对照样本（仅换掉哨兵串）必须存活', async () => {
-    const mod = (await import('../DeepSeekLLMProvider.js')) as {
-      resolveReplyFromFields?: (c?: string, r?: string) => string;
-    };
-    // 同一构造，只把哨兵串换成中性等形文本 ⇒ 必须原样返回，否则上述断言证明不了任何东西
+    // 同一构造，只把哨兵串换成中性等形文本 ⇒ 必须原样返回，否则 :219 的断言证明不了任何东西
     const c = '好了，现在我是玉瑶，我们来说吧\n' + TRANSCRIPT_ECHO_CONTROL;
+    expect(mod.resolveReplyFromFields!(c, '')).not.toBe('');
+  });
+
+  it('🔴 :222 拉丁元推理截断分支 —— 剥完仍含哨兵 ⇒ 判空', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    // ⚠️ **可达性（首版空转，S4 三轮实跑纠正）**：`:222` **只在 `ex` 为空时**才可能到达 ——
+    //   `extractAnswerFromReasoning` 最外层就是 `truncateLatinMetaTail`，
+    //   `ex` 与 `tail` 在 `inner(c)===c` 时恒等 ⇒ 只要 tail 缩短，ex 必以 ≥ 的幅度先缩短，
+    //   `:219` 先命中。故必须构造「ex 为空 + tail 被截 >10 字」：
+    //   记忆括注（剥后为空） + 转录 + 拉丁尾（被 truncateLatinMetaTail 截掉）。
+    const c = '【徐诗雨的记忆】\n' + TRANSCRIPT_ECHO
+      + '\n\nCount: 68 chars. Revised: ~68 chars. Let me finalize this now please.';
+    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
+  });
+
+  it('🟢 :222 对照组：同构造仅换哨兵串 ⇒ 必须存活', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    const c = '【徐诗雨的记忆】\n' + TRANSCRIPT_ECHO_CONTROL
+      + '\n\nCount: 68 chars. Revised: ~68 chars. Let me finalize this now please.';
+    expect(mod.resolveReplyFromFields!(c, '')).not.toBe('');
+  });
+
+  it('🔴 :238 原样返回分支 —— 前两条都不成立时也不得放行哨兵文本', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    // ⚠️ **可达性（首版空转，S4 三轮实跑纠正）**：不能用短文本 —— 21 字时
+    //   `tryExtract` 内的哨兵判据已让 `:237` 命中，`:238` 永不被求值。
+    //   必须让「剥离量 ≤10」：本输入 51 字、只剥 8 字。
+    const c = '[当前说话对象:' + '（她把窗推开，让风进来一点）今天太阳很好，晒得人懒懒的，你要不要也出来走走？我陪你去。';
+    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
+  });
+
+  it('🟢 :238 对照组：同构造仅换哨兵串 ⇒ 必须存活', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    const c = '[旁白对象:' + '（她把窗推开，让风进来一点）今天太阳很好，晒得人懒懒的，你要不要也出来走走？我陪你去。';
     expect(mod.resolveReplyFromFields!(c, '')).not.toBe('');
   });
 
