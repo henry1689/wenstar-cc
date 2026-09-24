@@ -322,13 +322,18 @@ describe('[V31] 乙：角色扮演推理档降级', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// V33 — 第四次复发：漏口在【流式兜底】，模型产出的是「历史对话转录」
+// V33 — 第四次复发：模型输出的是「历史对话转录」（续写历史格式）
 // ─────────────────────────────────────────────────────────────
 /**
- * 2026-09-24 生产实测：最近 200 条 `[ChatStream] done` 中 57 条（28.5%）为
- * `tokens=0/1`。而全仓**只有一处**会「一次性 `onToken({text:全文})`」
- * （V31 甲-1 流结束兜底）⇒ `tokens≤1` 即「该条由 reasoningBuf 兜底捞出」的**结构性指纹**。
+ * 2026-09-24 生产实测：最近 200 条 `[ChatStream] done` 中 57 条（28.5%）为 `tokens=0/1`。
+ * 全仓**只有一处**会「一次性 `onToken({text:全文})`」= V31 甲-1 流结束兜底
+ * ⇒ `tokens≤1` 即「该条由 reasoningBuf 兜底捞出」的**结构性指纹**。
  * 根因：甲-2 只判「有没有找到结构标记」，而转录文本含括号动作/引号/分段 ⇒ 被判有结构。
+ *
+ * ⚠️ S4 评审阻断项 3 的教训（第一版测试是**空转**的）：样本必须能**真实触达**判据才能锁住它。
+ *   第一版样本 `hasStructure=false`，走的是更早的分支 ⇒ 把判据整段删掉测试照样绿。
+ *   本版用「**对照组**」证明：同一文本**只把自有哨兵串换掉**，其余逐字不变 ——
+ *   有哨兵 ⇒ 拒；无哨兵 ⇒ 存活。两者之差只可能来自哨兵判据本身。
  *
  * 脱敏说明：真实样本含私密正文，此处只保留**结构**（自有哨兵串 + 多轮形态），内容为中性占位。
  */
@@ -340,53 +345,145 @@ const TRANSCRIPT_ECHO = [
   '[当前说话对象: 某某 | ⚠️ 你不是玉瑶] 鸿艺对你说：那就吃面',
   '（她笑了笑）行。',
 ].join('\n');
+/** 对照组：**只替换自有哨兵串**，其余逐字不变（这是「是甲造成的」唯一可证伪的判据） */
+const TRANSCRIPT_ECHO_CONTROL = TRANSCRIPT_ECHO
+  .split('鸿艺对你说：')
+  .join('甲对乙说：')
+  .split('[当前说话对象:')
+  .join('[旁白对象:');
 
-describe('[V33] 甲：自有哨兵串回声 ⇒ 判「无可用答案」', () => {
-  it('🔴 判据锚在**本系统自己注入**的字符串上，不是模型措辞枚举', () => {
-    expect(providerSrc).toMatch(/SELF_INJECTED_MARKERS/);
-    expect(providerSrc).toContain('鸿艺对你说：');
-    expect(providerSrc).toContain('[当前说话对象:');
-  });
-
-  it('🔴 转录回声必须被拒（判 null）', async () => {
+describe('[V33] 甲：自有哨兵串回声（**收敛进唯一出口守卫 gateOutgoingReply**）', () => {
+  it('🔴 转录回声被拒，且**同一文本去掉哨兵即存活** ⇒ 拒绝只可能来自哨兵判据', async () => {
     const mod = (await import('../DeepSeekLLMProvider.js')) as {
-      tryExtractAnswerFromReasoning?: (t: string) => string | null;
+      gateOutgoingReply?: (t: string) => string;
     };
-    expect(typeof mod.tryExtractAnswerFromReasoning).toBe('function');
-    expect(mod.tryExtractAnswerFromReasoning!(TRANSCRIPT_ECHO)).toBeNull();
+    expect(typeof mod.gateOutgoingReply).toBe('function');
+    expect(mod.gateOutgoingReply!(TRANSCRIPT_ECHO), '含自有哨兵串的转录必须判空').toBe('');
+    expect(
+      mod.gateOutgoingReply!(TRANSCRIPT_ECHO_CONTROL),
+      '对照组（仅换掉哨兵串）必须存活 —— 否则本断言证明不了任何东西'
+    ).not.toBe('');
   });
 
-  it('🟢 不退化基线：合法回复仍须通过（防 V23 式误杀）', async () => {
+  it('🔴 半角/全角冒号漂移都要拦住（源文本里两种冒号本就不一致）', async () => {
     const mod = (await import('../DeepSeekLLMProvider.js')) as {
-      tryExtractAnswerFromReasoning?: (t: string) => string | null;
+      gateOutgoingReply?: (t: string) => string;
+    };
+    const drift = TRANSCRIPT_ECHO.split('鸿艺对你说：')
+      .join('鸿艺对你说:')
+      .split('[当前说话对象:')
+      .join('[当前说话对象：');
+    expect(mod.gateOutgoingReply!(drift)).toBe('');
+  });
+
+  it('🔴 判据必须**住在 gateOutgoingReply 里**（唯一把关点），不是某个出口的专属判据', () => {
+    // V23.1 注释原文：「不再往每个出口各加一条判据…修了 2 处，还剩 3 处漏网」
+    const g = providerSrc.indexOf('export function gateOutgoingReply');
+    expect(g, '应存在 gateOutgoingReply').toBeGreaterThan(-1);
+    const body = providerSrc.slice(g, providerSrc.indexOf('\n}', g));
+    expect(body, '哨兵判据必须住在唯一把关点内').toMatch(/SELF_INJECTED_MARKERS\.some/);
+  });
+
+  it('🔴 哨兵常量与生成点**同源**：生成点不得再写字面量（防脱钩后静默失效）', () => {
+    expect(providerSrc).toMatch(/const MEETING_SPEAKER_TAG = '\[当前说话对象:'/);
+    expect(providerSrc).toMatch(/const MEETING_USER_PREFIX = '鸿艺对你说：'/);
+    // 生成点（会晤分支）必须引用常量
+    const gen = providerSrc.indexOf('| ⚠️ 你不是玉瑶]');
+    expect(gen, '应存在会晤用户消息生成点').toBeGreaterThan(-1);
+    const line = providerSrc.slice(providerSrc.lastIndexOf('\n', gen), gen + 120);
+    expect(line).toMatch(/MEETING_USER_PREFIX/);
+    expect(line, '生成点不得再写死字面量').not.toContain('鸿艺对你说：');
+  });
+
+  it('🟢 不退化基线：合法回复仍须通过出口守卫', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      gateOutgoingReply?: (t: string) => string;
     };
     for (const s of LEGIT_REPLIES) {
-      expect(mod.tryExtractAnswerFromReasoning!(s), `合法回复被误杀: ${s.slice(0, 10)}…`).not.toBeNull();
+      expect(mod.gateOutgoingReply!(s), `合法回复被误杀: ${s.slice(0, 10)}…`).not.toBe('');
     }
   });
 
-  it('🟢 判的是**提取物**不是入参：思维链引用输入里的哨兵串不应误伤', () => {
-    // 若判据写成检查入参 text，会把「推理中引用用户原话」大量误杀 —— 这里锁死它判 out
-    const idx = providerSrc.indexOf('const out = extractAnswerFromReasoning(text);');
-    expect(idx, '应存在 out 提取点').toBeGreaterThan(-1);
-    const scope = providerSrc.slice(idx, idx + 700);
-    expect(scope).toMatch(/SELF_INJECTED_MARKERS\.some\(m\s*=>\s*out\.includes\(m\)\)/);
+  it('🟢 tryExtract 侧只作**提前判死**，不是唯一防线（收口在 gateOutgoingReply）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      tryExtractAnswerFromReasoning?: (t: string) => string | null;
+    };
+    expect(mod.tryExtractAnswerFromReasoning!(TRANSCRIPT_ECHO)).toBeNull();
+    for (const s of LEGIT_REPLIES) {
+      expect(mod.tryExtractAnswerFromReasoning!(s)).not.toBeNull();
+    }
   });
 });
 
-describe('[V33] 乙：整段抄出比例（**仅 reasoning 路径**）', () => {
-  it('🔴 判据必须落在 reasoning 兜底处，不得下放进 tryExtractAnswerFromReasoning', () => {
-    // 下放会把 content 分支 ≥600 字的合法长回复整体误杀（resolveReplyFromFields）
-    const callIdx = providerSrc.indexOf('const strict = tryExtractAnswerFromReasoning(stripper.reasoningBuf);');
-    expect(callIdx, '应存在流式兜底调用点').toBeGreaterThan(-1);
-    const scope = providerSrc.slice(callIdx, callIdx + 900);
-    expect(scope).toMatch(/_wholeChainDump/);
-    expect(scope).toMatch(/_rb\.length >= 600/);
+describe('[V33.1] 非流式 reasoning 分支：ratio 不得作为前置门槛（S4 阻断项 1）', () => {
+  /** 让 `extracted.length / r.length < 0.9`：r 远长于提取物 ⇒ 旧写法在此处短路 */
+  const R_LONG =
+    '我得先想想怎么接这句话，不能太生硬。'.repeat(8) + '\n让我来写一段回应：\n' + TRANSCRIPT_ECHO;
 
-    const fnIdx = providerSrc.indexOf('export function tryExtractAnswerFromReasoning');
-    const fnEnd = providerSrc.indexOf('\n}', fnIdx);
-    expect(fnIdx).toBeGreaterThan(-1);
-    expect(fnEnd).toBeGreaterThan(fnIdx);
-    expect(providerSrc.slice(fnIdx, fnEnd)).not.toMatch(/_wholeChainDump/);
+  it('🔴 复现旧短路口：ratio 确实 < 0.9（否则本用例证明不了修复）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      extractAnswerFromReasoning?: (t: string) => string;
+    };
+    const extracted = mod.extractAnswerFromReasoning!(R_LONG).trim();
+    expect(extracted.length).toBeGreaterThan(0);
+    expect(extracted.length, 'ratio 必须 <0.9 才能复现旧的短路路径').toBeLessThan(R_LONG.length * 0.9);
+  });
+
+  it('🔴 该分支不得泄漏转录（两字段任一承载都要拦住）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    expect(mod.resolveReplyFromFields!('', R_LONG), 'reasoning 分支泄漏').toBe('');
+    expect(mod.resolveReplyFromFields!(TRANSCRIPT_ECHO, ''), 'content 分支泄漏').toBe('');
+  });
+
+  it('🔴 源码侧：结构性信号必须**独立**成立，不得再被 ratio 门槛挡住', () => {
+    // 用**剥注释后**的文本扫描，否则会误命中「引用旧写法」的注释（首次即踩）
+    const i = providerCode.indexOf('const extracted = extractAnswerFromReasoning(r).trim();');
+    expect(i, '应存在 reasoning 提取点').toBeGreaterThan(-1);
+    const scope = providerCode.slice(i, i + 2400);
+    // ① 强信号：独立 if，不与 ratio 复合
+    expect(scope, '结构信号必须独立成句').toMatch(
+      /if\s*\(\s*tryExtractAnswerFromReasoning\(r\)\s*===\s*null\s*\)\s*return '';/
+    );
+    // ② 弱信号：仍须配 ratio（删掉它会让合法用例被误杀，实测过）
+    expect(scope, '关键词信号必须仍受 ratio 约束').toMatch(/_notStripped\s*&&\s*looksLikeReasoning\(r\)/);
+    // 返回值过唯一出口守卫
+    expect(scope, '本分支返回值必须过唯一出口守卫').toMatch(/return gateOutgoingReply\(extracted\)/);
+  });
+
+  it('🟢 不退化基线：弱信号必须仍受 ratio 约束（删掉即误杀）', async () => {
+    // `让我来写回应：（她笑了笑）嗯，天亮了…` —— looksLikeReasoning 对它是 true，
+    // 但剥离确实生效（ratio 0.76）⇒ 必须放行。这条锁死「不能把 ratio 约束删掉」。
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+      looksLikeReasoning?: (t: string) => boolean;
+    };
+    const r = '让我来写回应：（她笑了笑）嗯，天亮了，你醒啦？我陪着你呢。';
+    expect(mod.looksLikeReasoning!(r), '前提：该文本确会触发弱信号').toBe(true);
+    expect(mod.resolveReplyFromFields!('', r), '剥离确实生效 ⇒ 必须放行').toContain('天亮了');
+  });
+
+  it('🟢 不退化基线：合法回复经两条分支都必须存活', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    for (const s of LEGIT_REPLIES) {
+      expect(mod.resolveReplyFromFields!(s, '')).not.toBe('');
+      expect(mod.resolveReplyFromFields!('', s)).not.toBe('');
+    }
+  });
+});
+
+describe('[V33.1] 乙（整段抄出比例）已移除 —— 其前提被实测证伪', () => {
+  it('🔴 代码中不得残留 _wholeChainDump', () => {
+    expect(providerCode, '乙 会误杀降级模式下的合法长答复（实测 ratio=1.000）').not.toMatch(/_wholeChainDump/);
+  });
+
+  it('🟢 记录证伪依据：降级模式下「提取物≈输入」是**正常**形态', () => {
+    // 该路径的合法形态就是 content 为空、整段答复落在 reasoning ⇒ ratio 天然接近 1，
+    // 因此按比例判「整段端出」必然误杀。测试此事实，防止有人再度引入同类阈值判据。
+    const long = '（她把手在围裙上擦了擦，转身从灶台边绕过来）今天的汤煨得刚刚好，你尝尝咸淡。'.repeat(20);
+    expect(long.length).toBeGreaterThan(600);
   });
 });

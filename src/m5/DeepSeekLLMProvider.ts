@@ -250,10 +250,28 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     //   → 走非流式分支 → 落到本函数 ⇒ 关键词 `looksLikeReasoning` 对样本返回 false
     //   → 原样返回 3039 字思维链（日志表现为 `tokens=0 len=3039`）。
     //   补结构判据后两侧判据一致：**只堵一侧等于没堵**。
-    if (extracted.length >= r.length * 0.9 &&
-        (looksLikeReasoning(r) || tryExtractAnswerFromReasoning(r) === null)) return '';
+    //
+    // 🔴 V33.1 修正（S4 评审阻断项 1，附实跑证据）：原条件写作
+    //     `extracted.length >= r.length * 0.9 && (looksLikeReasoning(r) || tryExtractAnswerFromReasoning(r) === null)`
+    //   —— **ratio 是前置门槛**，ratio<0.9 时整个条件**短路**，
+    //   「结构上根本找不到答案」这个信号被**直接丢弃**，落到下方 `return extracted` 泄漏。
+    //   而这里正是流式被判死后**必然的落点**（M5 重试不带 onToken ⇒ 非流式 ⇒ 本函数）
+    //   ⇒ 只堵流式一侧等于没堵。实测复现：r=355 字 / ratio=0.563 ⇒ 返回 199 字含哨兵串的转录。
+    //   现按**信号强弱分级**，不再让弱的那个去当强的那个的门槛：
+    //     ① 结构性信号（tryExtract === null，「结构上根本找不到答案」）—— **独立成立即判空**；
+    //     ② 关键词信号（looksLikeReasoning）—— 判据松（实测对
+    //        `让我来写回应：（她笑了笑）嗯，天亮了…` 这类**合法**文本也返回 true），
+    //        故**仍须配 ratio** 才有置信度：只有「剥离没生效」时才够格判空。
+    //   ⚠️ 实测教训：上一版把 ratio 前缀整个删掉 ⇒ ② 失去约束 ⇒
+    //      `reasoning-leak-guard.test.ts` 的合法用例被判空（真回归）。
+    const _notStripped = extracted.length >= r.length * 0.9;
+    if (tryExtractAnswerFromReasoning(r) === null) return '';        // ① 强信号：无条件
+    if (_notStripped && looksLikeReasoning(r)) return '';            // ② 弱信号：须配 ratio
     if (isDraftShapedReply(extracted)) return '';
-    return extracted;
+    // 🔴 V33.1：返回值**统一过出口守卫** —— 本分支此前**完全不经过** gateOutgoingReply，
+    //   StreamThinkingStripper 三处与收尾护栏都过它、唯独这里不过，
+    //   是「出口未收敛」的最后一个缺口（形态判据分散在 4 处，V23.1 注释预言过这个结果）。
+    return gateOutgoingReply(extracted);
 }
 
 /**
@@ -322,9 +340,37 @@ const CN_META_PLAN_RE = new RegExp([
  *  本常量与 chat.ts 改写表一一对应，用于输出侧剥离。 */
 const OUTGOING_MEMORY_LABEL_RE = /\[你(记得的(相关)?往事|珍视的记忆|珍惜的记忆|你的档案|和鸿艺的对话)\]/;
 
+// ─────────────────────────────────────────────────────────────────────
+// 🔴 V33 自有哨兵串（**单一真源**：生成点与出口判据共用同一常量，防脱钩）
+//
+// 会晤模式的用户消息前缀由本系统注入。模型**只能靠复述输入**才能产生它
+// ⇒ 它出现在**输出**里即为「历史对话转录」（模型在续写对话历史）的充分证据。
+//
+// 判据锚在**自有字符串**上，而不是「模型可能怎么措辞」的枚举 ——
+//   同文件已记录关键词路线的两次擦边失手（`要` vs `应该`、`保持角色：` vs `保持徐诗雨身份`），
+//   枚举必然随模型措辞漂移；自有字符串是**系统可控的闭集**，不漂移。
+//
+// 冒号半角/全角各留一份：源码里两处用的是不同字符（`[当前说话对象:` 是 ASCII 冒号，
+//   `鸿艺对你说：` 是全角），本身就是漂移温床。
+// ─────────────────────────────────────────────────────────────────────
+const MEETING_SPEAKER_TAG = '[当前说话对象:';
+const MEETING_USER_PREFIX = '鸿艺对你说：';
+const SELF_INJECTED_MARKERS: readonly string[] = [
+  MEETING_USER_PREFIX,                                  // 鸿艺对你说：
+  MEETING_USER_PREFIX.replace('：', ':'),                // 半角冒号漂移
+  MEETING_SPEAKER_TAG.slice(1),                         // 当前说话对象:  （源码原形）
+  MEETING_SPEAKER_TAG.slice(1).replace(':', '：'),       // 全角冒号漂移
+];
+
 export function gateOutgoingReply(text: string): string {
     const t = (text || '').trim();
     if (!t) return '';
+    // 🔴 V33 甲（**收敛进唯一把关点**，不是又一个出口专属判据）：
+    //   自有哨兵串出现在输出里 ⇒ 模型在复述输入（「历史对话转录」），不是回复。
+    //   放在这里而非各出口 —— V23.1 的教训原文就是「修了 2 处，还剩 3 处漏网」；
+    //   本函数是那个注释声明的唯一把关点，StreamThinkingStripper 三处 + 收尾护栏
+    //   + 流式兜底 + resolveReplyFromFields 全部经过它 ⇒ 一处收口覆盖全部出口。
+    if (SELF_INJECTED_MARKERS.some(m => t.includes(m))) return '';
     if (isDraftShapedReply(t)) return '';
     if (CN_META_PLAN_RE.test(t)) return '';
     if (/【[^】]*的记忆】/.test(t)) return '';
@@ -702,8 +748,6 @@ export function extractAnswerFromReasoning(text: string): string {
  *      · 判据写 `保持角色：`，      实际样本是 `保持徐诗雨身份`（擦边而过）
  *    模型措辞一漂移，枚举必然失效；结构标记与措辞无关。
  */
-const SELF_INJECTED_MARKERS = ['鸿艺对你说：', '[当前说话对象:'] as const;
-
 export function tryExtractAnswerFromReasoning(text: string): string | null {
     if (!text || !text.trim()) return null;
     const hasStructure =
@@ -732,12 +776,10 @@ export function tryExtractAnswerFromReasoning(text: string): string | null {
     // 全未命中 ⇒ 整段没有答案结构 ⇒ 判 null（交调用方重试），绝不原样返回
     if (!hasStructure && !tooShortToBeReasoning) return null;
     const out = extractAnswerFromReasoning(text);
-    // 🔴 V33 甲（第四次复发根治）：**提取物**里出现我们自己注入的哨兵串
-    //   ⇒ 它是「历史对话转录」，不是答案。
-    //   判的是 `out` 而非 `text`：思维链**引用**输入里这一行是正常的，
-    //   **答案里**出现才是回声（若判 text，会把大量正常推理误杀）。
-    //   判据锚在**自有字符串**上（生成点见本文件会晤分支）——模型只能靠复述输入产生它，
-    //   不随其措辞漂移 ⇒ 不同于已被证伪三次的关键词枚举路线。
+    // 🔴 V33 甲：**提取物**里出现自有哨兵串 ⇒ 转录回声，判「无可用答案」。
+    //   判 `out` 而非 `text`：思维链**引用**输入里这一行是正常的，**答案里**出现才是回声。
+    //   ⚠️ 这只是**提前判死**（让调用方尽早走 noUsableAnswer），**不是唯一防线** ——
+    //      真正的收口点在 gateOutgoingReply（所有出口都过它）。
     if (SELF_INJECTED_MARKERS.some(m => out.includes(m))) return null;
     return out;
 }
@@ -1367,16 +1409,12 @@ export class DeepSeekLLMProvider implements LLMProvider {
         //   判据改为「四条结构策略有没有找到答案结构」（tryExtractAnswerFromReasoning）：
         //   找到 → 正常取答案；全未命中 → 判 null ⇒ 抛 noUsableAnswer 交 M5 重试。
         //   **零关键词 ⇒ 零误杀**；宁可多一次重试，也绝不洩漏。
+        // 🔴 V33.1：**乙（整段抄出比例判据）已移除** —— S4 评审用探针实测证伪了它的前提：
+        //   在它专门服务的**降级模式**下（content 为空、整段合法答复落在 reasoning），
+        //   提取物天然 ≈ 输入（实测 705 字合法答复 ratio=1.000）⇒ 乙会误杀合法长回复。
+        //   真正的防线是 gateOutgoingReply（下面这行），哨兵串判据已收敛进它。
         const strict = tryExtractAnswerFromReasoning(stripper.reasoningBuf);
-        // 🔴 V33 乙：**只在 reasoning 路径**判「整段抄出比例」——
-        //   提取物几乎等于整段思维链 ⇒ 不是「摘出答案」，而是「把思维链端出来」。
-        //   合法提取天然只占输入一小部分（答案远短于推理）；600 字下限避免误伤短文。
-        //   ⚠️ 此判据**不能**下放进 tryExtractAnswerFromReasoning：那里分不清
-        //     「输入本身就是答案」（resolveReplyFromFields 的 content 分支）与「输入是思维链」，
-        //     放进去会把 ≥600 字的合法长回复整体误杀（V23 付过这个代价）。
-        const _rb = stripper.reasoningBuf.trim();
-        const _wholeChainDump = strict !== null && _rb.length >= 600 && strict.length >= _rb.length * 0.8;
-        const full = (strict && !_wholeChainDump) ? gateOutgoingReply(strict) : '';
+        const full = strict ? gateOutgoingReply(strict) : '';
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
@@ -1701,7 +1739,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
 
     // 当前用户消息
     const userMsgContent = _isEntityMeeting
-      ? `[当前说话对象: ${entities.join('、')} | ⚠️ 你不是玉瑶] 鸿艺对你说：${rawInput}`  // V9.0: 加强身份校验
+      // V33.1: 前缀抽为 **单一真源常量**（MEETING_SPEAKER_TAG / MEETING_USER_PREFIX），
+      //   与出口的哨兵判据 SELF_INJECTED_MARKERS 同源 —— 原先两处各写一份字面量，
+      //   改一处而忘另一处会让出口判据静默失效且测试发现不了（S4 评审 A3）。
+      ? `${MEETING_SPEAKER_TAG} ${entities.join('、')} | ⚠️ 你不是玉瑶] ${MEETING_USER_PREFIX}${rawInput}`  // V9.0: 加强身份校验
       : (hasSelfProfile && isSelfIntroQuery ? rawInput : `${contextBlock}\n鸿艺: ${rawInput}`);
     messages.push({ role: 'user', content: userMsgContent });
 
