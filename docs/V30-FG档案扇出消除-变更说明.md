@@ -300,9 +300,17 @@ V29 主张「换 `better-sqlite3` 消除全量导出阻塞」。本变更集的�
 3. **4 个 sql.js 全文件覆写脚本缺 `ServerLock` 守卫**（V29 §八遗留）：
    `BackfillGlobalUID.ts`、`BackfillDualHelix.ts`、`migrate-entity-relations.ts`、
    `scan-knowledge-intimate.ts`。均不在 `package.json.scripts`，服务不自动调用。
-4. **`wenstar-webui` 的 pm2 `kill_timeout` 未设置**（默认 1600ms），
-   而 276MB 落盘需 ~2.9 秒 ⇒ 重启可能在 `writeFileSync` 中途被 SIGKILL，
-   留下截断的生产库。属**独立于本次的数据安全风险**，建议单独处置。
+4. **`wenstar-webui` 的 pm2 `kill_timeout` 未设置**（默认 1600ms），而 276MB 落盘需 ~2.9 秒
+   ⇒ 关停时 SIGINT 后的 `shutdownFlush()` 可能没跑完就被 SIGKILL。
+
+   **更正（2026-09-24 落地后核实）**：此处**原写为「留下截断的生产库」，该说法错误**。
+   经读源确认，`_safeWriteDbFile` 是 **`tmp → fsync → rename` 原子写**
+   （`SQLiteAdapter.ts:2706`，NTFS 同盘 rename 为原子替换，任一步失败只影响 tmp、
+   原文件完好）。故 SIGKILL 中途**不会损坏库**，实际后果是
+   **「本次落盘未完成 ⇒ 丢最近一批未落盘写入」**，原库保持完好。
+
+   结论不变（建议单独处置 `kill_timeout`），但**风险等级由「数据损坏」下调为「末批写入丢失」**。
+   重启前仍建议先让至少一次周期落盘完成。
 5. **`addNode` 1.4 秒的真实构成**：乙-1 消除让出点后须重新测量再定论，
    **本次不盲目改动其判定逻辑**。
 6. 实验期注入的环境变量 `TIANQUAN_FLUSH_INTERVAL_MS` / `FG_FLUSH_MIN_INTERVAL_MS`
