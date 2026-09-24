@@ -214,12 +214,17 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
         //   → 说明 content 里裹着思维链（含中文复盘型，由 extractAnswerFromReasoning 内部 V2–V20 判据负责）→ 用剥离结果。
         // ❗ 无论如何**不得整体判空**——判空会让会晤模式退化成「…（抱歉，我暂时无法回应…）」
         //   （2026-09-12 生产实测回归），而不是掉回旧版的「返回原文」。
+        // 🔴 V33.2（S4 第二轮复核阻断项）：这三处提前 return **此前完全不经过** gateOutgoingReply，
+        //   实测可复现泄漏：`content = '好了，现在我是玉瑶，我们来说吧\n' + 含哨兵转录`
+        //   ⇒ `ex.length < c.length - 10` 成立 ⇒ 原样返回 139 字含哨兵文本。
+        //   采用**最小化写法**（只 OR 入哨兵判据）：整段套 gateOutgoingReply 会连带引入
+        //   记忆标签的**分段剥离**语义（返回部分段落而非原样），改变本分支既有契约。
         const ex = extractAnswerFromReasoning(c).trim();
         if (ex && ex.length < c.length - 10)
-            return isDraftShapedReply(ex) ? '' : ex;
+            return (isDraftShapedReply(ex) || hasSelfInjectedMarker(ex)) ? '' : ex;
         const tail = truncateLatinMetaTail(c).trim();
         if (tail.length < c.length - 10)
-            return isDraftShapedReply(tail) ? '' : tail;
+            return (isDraftShapedReply(tail) || hasSelfInjectedMarker(tail)) ? '' : tail;
         // 🔴 V23(2026-09-13): 两条剥离**都没生效**（≈原文）→ 与分支② 同口径 fail-closed：
         //   仅当文本**确具思维链特征**时才判空，否则原样返回。
         //   为何必须补这一步：原实现此处无条件 `return tail` —— 剥不动就把原文（整段思维链）
@@ -235,7 +240,12 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
         //      该顾虑仍成立，由 `≤50 字短答豁免` 承担；且判空的后果只是
         //      **交 M5 多重试一次**（重试降 reasoning_effort='low'），远轻于泄漏。
         if (looksLikeReasoning(c) || tryExtractAnswerFromReasoning(c) === null) return '';
-        return isDraftShapedReply(c) ? '' : c;
+        // 🔴 V33.2：同上的第三处提前 return。实测形态：
+        //   `content = '【徐诗雨的记忆】\n' + 含哨兵转录` ⇒ `ex=''` ⇒ 上一行 tryExtract 经
+        //   reflective 策略命中返回**非 null** ⇒ 原样返回 148 字含哨兵文本。
+        //   ⚠️ 「【…的记忆】原样回显」是本项目自己登记过的既有泄漏形态（V23 注释），
+        //      流式侧由 gate 拦下、非流式侧却从这里漏出 —— 两侧语义原本是矛盾的。
+        return (isDraftShapedReply(c) || hasSelfInjectedMarker(c)) ? '' : c;
     }
     // ② content 空 → reasoning 仅作最后手段（必须真正剥出答案）
     const r = (reasoning || '').trim();
@@ -268,9 +278,10 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     if (tryExtractAnswerFromReasoning(r) === null) return '';        // ① 强信号：无条件
     if (_notStripped && looksLikeReasoning(r)) return '';            // ② 弱信号：须配 ratio
     if (isDraftShapedReply(extracted)) return '';
-    // 🔴 V33.1：返回值**统一过出口守卫** —— 本分支此前**完全不经过** gateOutgoingReply，
-    //   StreamThinkingStripper 三处与收尾护栏都过它、唯独这里不过，
-    //   是「出口未收敛」的最后一个缺口（形态判据分散在 4 处，V23.1 注释预言过这个结果）。
+    // 🔴 V33.1：reasoning 分支的返回值**已收口**到唯一把关点。
+    //   ⚠️ 事实更正（S4 第二轮复核）：此处**不是**「最后一个缺口」——
+    //      同一函数 **content 分支**的 `:219` / `:222` / `:238` 三处提前 return 当时仍绕过闸门
+    //      （V33.2 已补哨兵判据）。原文写「最后一个缺口」与事实不符，会误导下一个读者。
     return gateOutgoingReply(extracted);
 }
 
@@ -361,6 +372,12 @@ const SELF_INJECTED_MARKERS: readonly string[] = [
   MEETING_SPEAKER_TAG.slice(1),                         // 当前说话对象:  （源码原形）
   MEETING_SPEAKER_TAG.slice(1).replace(':', '：'),       // 全角冒号漂移
 ];
+
+/**
+ * 输出里是否含**自有哨兵串** ⇒ 模型在复述输入（续写历史对话）。
+ * 供各出口复用 —— 避免同一判据在多处各写一遍（V23.1 的教训：判据分散 ⇒ 修 N 处漏 M 处）。
+ */
+const hasSelfInjectedMarker = (s: string): boolean => SELF_INJECTED_MARKERS.some((m) => s.includes(m));
 
 export function gateOutgoingReply(text: string): string {
     const t = (text || '').trim();

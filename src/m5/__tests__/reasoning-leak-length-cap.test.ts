@@ -487,3 +487,47 @@ describe('[V33.1] 乙（整段抄出比例）已移除 —— 其前提被实测
     expect(long.length).toBeGreaterThan(600);
   });
 });
+
+describe('[V33.2] content 分支的三处提前 return 必须同守哨兵判据（S4 二轮阻断项）', () => {
+  it('🔴 :219 剥离生效分支 —— 剥完仍含哨兵 ⇒ 判空', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    // 角色建立段可被剥掉 ⇒ `ex.length < c.length - 10` 成立 ⇒ 走 :219 那条提前 return
+    const c = '好了，现在我是玉瑶，我们来说吧\n' + TRANSCRIPT_ECHO;
+    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
+  });
+
+  it('🔴 :222 拉丁元推理截断分支 —— 截完仍含哨兵 ⇒ 判空', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    const c = 'Final answer below.\n' + TRANSCRIPT_ECHO;
+    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
+  });
+
+  it('🔴 :238 原样返回分支 —— 前两条都没生效时也不得放行哨兵文本', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    // 剥离量 ≤10 ⇒ 前两条都不成立 ⇒ 落到 :238
+    const c = '[当前说话对象: 某某] 鸿艺对你说：行。';
+    expect(mod.resolveReplyFromFields!(c, '')).toBe('');
+  });
+
+  it('🟢 不退化基线：对照样本（仅换掉哨兵串）必须存活', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    // 同一构造，只把哨兵串换成中性等形文本 ⇒ 必须原样返回，否则上述断言证明不了任何东西
+    const c = '好了，现在我是玉瑶，我们来说吧\n' + TRANSCRIPT_ECHO_CONTROL;
+    expect(mod.resolveReplyFromFields!(c, '')).not.toBe('');
+  });
+
+  it('🔴 判据助手必须存在且为单一真源（供各出口复用，防判据分散）', () => {
+    expect(providerSrc).toMatch(/const hasSelfInjectedMarker = \(s: string\): boolean => SELF_INJECTED_MARKERS\.some/);
+    // 三处提前 return 都必须 OR 入它
+    const hits = providerSrc.match(/\|\|\s*hasSelfInjectedMarker\(/g) || [];
+    expect(hits.length, '三处提前 return（ex / tail / c）都要 OR 入哨兵判据').toBeGreaterThanOrEqual(3);
+  });
+});
