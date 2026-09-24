@@ -183,6 +183,74 @@ describe('[V31] 甲-2：结构判据 fail-closed（不靠关键词）', () => {
   });
 });
 
+describe('[V31] 甲-3：非流式出口必须同守结构判据（重试路径的泄漏口）', () => {
+  /**
+   * 🔴 实测复盘（2026-09-24 16:27，重启后仍复现）：
+   *   首次调用（流式）→ 甲-2 结构判据触发 ✅ → 抛 noUsableAnswer → 返回 {text:''}
+   *   → M5 判空重试，而 M5Orchestrator:108 的重试**不传 onToken**
+   *   → _callDeepSeekApiInner 走**非流式**分支 → resolveReplyFromFields **原样返回 3039 字思维链**
+   *   → 因走非流式 onToken 从未调用 ⇒ 日志表现为 `tokens=0 len=3039`
+   *
+   *   日志铁证：泄漏 job 前出现唯一一条 `status=fail`（耗时 32910ms）= 甲-2 确实抛了错；
+   *   紧接着 `status=success`（7765ms）= 重试从更松的非流式出口漏了出去。
+   *
+   *   ⇒ 流式与非流式**两侧判据不一致**，只堵一侧等于没堵。
+   *   ⚠️ 更正：V31 文档原写「非流式早已 fail-closed、流式漏了」—— **该陈述错误**，
+   *     两侧一直用的是两套判据（结构 vs 关键词），已同步修订文档。
+   */
+  const aligned = /looksLikeReasoning\(r\)\s*\|\|\s*tryExtractAnswerFromReasoning\(r\)/.test(providerCode) ||
+    /tryExtractAnswerFromReasoning\(r\)\s*===\s*null/.test(providerCode);
+  const ai = aligned ? it : it.skip;
+
+  it('🔴 重试路径必须不带 onToken（这正是泄漏走非流式的入口，事实断言）', () => {
+    const m5 = read('src/m5/M5Orchestrator.ts');
+    expect(m5).toMatch(/reasoningEffortOverride:\s*'low'/);
+    // 重试不传 onToken 是既有设计（注释：不带 onToken，避免二次流式污染气泡）
+    expect(m5).not.toMatch(/reasoningEffortOverride: 'low'[\s\S]{0,200}?onToken:/);
+  });
+
+  it('🔴 非流式分支必须存在（两侧判据都要管，不能只堵流式）', () => {
+    expect(providerCode).toMatch(/if\s*\(\s*streamOpts\?\.\s*onToken\s*\)/);
+    expect(providerCode).toMatch(/export function resolveReplyFromFields/);
+  });
+
+  ai('🔴 resolveReplyFromFields 的放行点必须追加结构判据', () => {
+    // content 空分支（③ fail-closed）与 content 非空分支（①）都要用结构判据兜底
+    expect(providerCode).toMatch(/tryExtractAnswerFromReasoning/);
+    const idx = providerCode.indexOf('export function resolveReplyFromFields');
+    expect(idx).toBeGreaterThan(-1);
+    const scope = providerCode.slice(idx, idx + 2600);
+    expect(scope).toMatch(/tryExtractAnswerFromReasoning/);
+    // 结构判据必须与关键词判据是「或」关系——关键词认不出时结构仍须拦截
+    expect(scope).toMatch(/\|\|\s*tryExtractAnswerFromReasoning|tryExtractAnswerFromReasoning\([^)]*\)\s*===\s*null/);
+  });
+
+  it('🟢 短答豁免必须仍在（否则重试路径会误杀合法短答）', () => {
+    expect(providerCode).toMatch(/tooShortToBeReasoning/);
+    expect(providerCode).toMatch(/length\s*<=\s*50/);
+  });
+
+  /** 🔴 决定性行为断言：实测泄漏的两条样本必须被非流式出口拒掉 */
+  const beh = aligned ? it : it.skip;
+  beh('🔴 泄漏样本经 resolveReplyFromFields 必须返回空（content 分支与 reasoning 分支都要拦）', async () => {
+    const mod = (await import('../DeepSeekLLMProvider.js')) as {
+      resolveReplyFromFields?: (c?: string, r?: string) => string;
+    };
+    expect(typeof mod.resolveReplyFromFields).toBe('function');
+    for (const [i, s] of LEAK_SAMPLES.entries()) {
+      // ① 样本在 content 里
+      expect(mod.resolveReplyFromFields!(s, ''), `样本${i+1} 经 content 分支必须判空`).toBe('');
+      // ② 样本在 reasoning 里（content 空）—— 重试路径的真实形态
+      expect(mod.resolveReplyFromFields!('', s), `样本${i+1} 经 reasoning 分支必须判空`).toBe('');
+    }
+    // 合法回复两侧都必须存活（V23 曾因判据过宽退化成「抱歉我暂时无法回应」）
+    for (const s of LEGIT_REPLIES) {
+      expect(mod.resolveReplyFromFields!(s, ''), `合法回复被 content 分支误杀: ${s.slice(0, 10)}…`).not.toBe('');
+      expect(mod.resolveReplyFromFields!('', s), `合法回复被 reasoning 分支误杀: ${s.slice(0, 10)}…`).not.toBe('');
+    }
+  });
+});
+
 describe('[V31] 丙：LLM 链路熔断（ROBUST_LLM 三级保护的第三级）', () => {
   const hasBreaker = /RetrieverCircuitBreaker/.test(providerCode);
   const pi = hasBreaker ? it : it.skip;

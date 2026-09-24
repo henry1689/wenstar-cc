@@ -227,7 +227,14 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
         //   可以稍微说：…"），而当时的 looksLikeReasoning 对纯中文恒 false，闸门形同虚设。
         //   保留「无条件判空」的旧 V22 写法也不行：会误杀 V4-flash 降级模式下把正常短答放进
         //   content 的合法形态 → 会晤退化成「抱歉，我暂时无法回应」。
-        if (looksLikeReasoning(c)) return '';
+        // 🔵 V31 甲-3：**追加结构判据**，与流式出口同守一套。
+        //   原实现只有 `looksLikeReasoning(c)`（关键词），而关键词判据已三次复发失手。
+        //   现约定：关键词认不出、**但结构上根本找不到答案**（四条结构策略 + 空行分隔 +
+        //   过渡标记 + 答案起点全未命中，且非 ≤50 字短答）⇒ 同样判空。
+        //   ⚠️ 原注释「无论如何不得整体判空」是为防「抱歉我暂时无法回应」的回归 ——
+        //      该顾虑仍成立，由 `≤50 字短答豁免` 承担；且判空的后果只是
+        //      **交 M5 多重试一次**（重试降 reasoning_effort='low'），远轻于泄漏。
+        if (looksLikeReasoning(c) || tryExtractAnswerFromReasoning(c) === null) return '';
         return isDraftShapedReply(c) ? '' : c;
     }
     // ② content 空 → reasoning 仅作最后手段（必须真正剥出答案）
@@ -238,7 +245,13 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     // ③ fail-closed: 剥离未生效（≈原文）**且**文本确具思维链特征 → 判无可用答案。
     //    ❗ 必须要求「具思维链特征」：V4-flash 降级模式会把正常短答案放进 reasoning_content，
     //      若只看「未剥下东西」就判空，会误杀合法回复（实测 S4-m4 回归：“好的呀。” 被吞字）。
-    if (extracted.length >= r.length * 0.9 && looksLikeReasoning(r)) return '';
+    // 🔵 V31 甲-3：**本处是实测泄漏的出口**（2026-09-24 16:27）。
+    //   流式首次调用被甲-2 拦下抛 noUsableAnswer → M5 判空重试，而重试**不传 onToken**
+    //   → 走非流式分支 → 落到本函数 ⇒ 关键词 `looksLikeReasoning` 对样本返回 false
+    //   → 原样返回 3039 字思维链（日志表现为 `tokens=0 len=3039`）。
+    //   补结构判据后两侧判据一致：**只堵一侧等于没堵**。
+    if (extracted.length >= r.length * 0.9 &&
+        (looksLikeReasoning(r) || tryExtractAnswerFromReasoning(r) === null)) return '';
     if (isDraftShapedReply(extracted)) return '';
     return extracted;
 }
