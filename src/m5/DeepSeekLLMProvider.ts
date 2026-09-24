@@ -23,6 +23,10 @@ import { type RoleType } from '../app/role/RoleClassifier.js';
 import { buildRoleSystemPrompt } from '../app/role/RoleProfiles.js';
 import { createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
 import { validateRoleOutput, getFallbackRole } from '../app/role/RoleGuard.js';
+// 🔵 V31 丙：LLM 链路熔断（ROBUST_LLM 三级保护的第三级）。
+//   复用仓库既有组件（bionic_search / knowledge_fts 同款），不另造机制。
+//   依据 S4 评审：本仓超时(30s)与重试(3次)已具备，仅缺熔断。
+import { RetrieverCircuitBreaker } from '../app/knowledge/RetrieverCircuitBreaker.js';
 
 // 改造④：不在模块级读 process.env，构造函数中通过 ConfigService 运行时获取
 import { ConfigService } from '../config/ConfigService.js';
@@ -669,6 +673,52 @@ export function extractAnswerFromReasoning(text: string): string {
     return truncateLatinMetaTail(extractAnswerFromReasoningInner(text));
 }
 
+/**
+ * 🔵 V31 甲-2：**结构判据**版提取 —— 找不到结构就返回 null，由调用方 fail-closed。
+ *
+ * 与 `extractAnswerFromReasoning` 的唯一区别：后者在四条结构策略全不命中时会落到
+ * legacy→`stripThinkingPrefix`，**对剥不动的文本原样返回**；本函数把「四条结构策略
+ * 全未命中」当作**明确的失败信号**返回 null。
+ *
+ * 判据是「**有没有找到结构标记**」（复盘型 / 规划型 / 写转场 / 草稿评估段），
+ * **不是「这段话像不像思维链」** ⇒ 零关键词、零误杀。
+ *
+ * 📜 路线迁移理由：关键词路线已**三次复发**（2026-09-12 V22、2026-09-13 V23
+ *    `CN_META_PLAN_RE`、2026-09-24 本次）。最近一次实证失手：
+ *      · 判据写 `我要以…身份回应`，实际样本是 `我应该以…身份`（要 vs 应该）
+ *      · 判据写 `保持角色：`，      实际样本是 `保持徐诗雨身份`（擦边而过）
+ *    模型措辞一漂移，枚举必然失效；结构标记与措辞无关。
+ */
+export function tryExtractAnswerFromReasoning(text: string): string | null {
+    if (!text || !text.trim()) return null;
+    const hasStructure =
+        extractFromReflectiveChain(text) !== null ||
+        !!findAfterPlanChain(text) ||
+        !!findAfterWriteGo(text) ||
+        !!findAfterLastEval(text) ||
+        // V4-flash 降级模式的**固定格式**：「思考句…\n\n回答句…」
+        //   （见本文件 stripThinkingPrefix 头注释）。剥得出前缀 ⇒ 确实存在可分离的答案段。
+        stripThinkingPrefix(text) !== text ||
+        // 明确过渡标记（说吧/叫醒吧/回应他吧…）
+        !!findAnswerMark(text) ||
+        // 结构化的答案起点（括号动作描写 / 称呼+第二人称 / 自称+场景）
+        //   ⚠️ 实测佐证它对本泄漏是安全的：本次泄漏日志为 `tokens=0`，说明流式期间
+        //      findAnswerStart **从未匹配**（否则 crossed 会翻转、走正常路径而非兜底）。
+        //      故把它计入结构信号不会放行本次泄漏；而它正是 3 个既有降级模式用例依赖的信号。
+        //   ⚠️ 真正的兜底由甲-1（finish_reason='length' ⇒ 判死）承担，不依赖本行。
+        findAnswerStart(text) !== null;
+    //
+    // 🟢 长度豁免：极短文本**不可能是实质思维链**。
+    //   降级模式下模型把「好的呀，我在呢。」这类短答直接放进 reasoning 是已知且合理的形态，
+    //   无任何结构标记可依 —— 若无条件判 null 就会重演 V23.1 注释警告过的
+    //   「合法短答被吞 → 回复退化成『抱歉我暂时无法回应』」。
+    //   而实际泄漏样本（元推理）均远长于此，仍会被下方判 null 拦下。
+    const tooShortToBeReasoning = text.trim().length <= 50;
+    // 全未命中 ⇒ 整段没有答案结构 ⇒ 判 null（交调用方重试），绝不原样返回
+    if (!hasStructure && !tooShortToBeReasoning) return null;
+    return extractAnswerFromReasoning(text);
+}
+
 /** 原提取主体（V1–V21 策略链）。尾部元推理截断由外层 truncateLatinMetaTail 统一处理。 */
 function extractAnswerFromReasoningInner(text: string): string {
     if (!text)
@@ -983,7 +1033,61 @@ export class DeepSeekLLMProvider implements LLMProvider {
    * 🔴 P1-5: streamOpts.onToken 存在时走流式路径（streamChat），返回契约不变。
    * 返回 { text, usage } 或抛出错误
    */
+  /**
+   * 🔵 V31 丙：LLM 链路熔断器（单例，跨请求保持状态）。
+   *   与 `bionic_search` 同款配置：连续 3 次失败 → 熔断 30s。
+   *   本仓超时(30s)与重试(3次)原已具备，本次补上三级保护的最后一级 ——
+   *   缓解 429/502 风暴下的盲目重试（实测日志中反复出现 `API call failed after 3 attempts: 429`）。
+   */
+  private readonly _llmBreaker = new RetrieverCircuitBreaker('deepseek_llm', {
+    threshold: 3,
+    cooldownMs: 30_000,
+    // 🔴 必须远大于 LLM 自身的 AbortController 超时（主路径 30s / 场景 60s）。
+    //   `call()` 内部是 `Promise.race([fn(), timeout])` —— 若用组件默认的 5s，
+    //   它会**抢在** LLM 自己的超时之前把请求判死（实测会让长回复全部失败）。
+    //   熔断器的超时只作最后兜底，真正的超时归 LLM 的 AbortController 管。
+    timeoutMs: 180_000,
+  });
+
+  /**
+   * 🔵 V31 丁：M 层埋点 + 丙 熔断包裹 —— 统一入口，所有 LLM 调用都经此处。
+   *   埋点范式照 `m2.SQLiteAdapter`（`[Hook] module_entry/module_exit + 耗时`）。
+   *   ⚠️ 本次根因定位被迫靠 `tokens/len` 分布反推，正是因为 m5 层此前**零埋点**。
+   */
   private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
+    const _t0 = Date.now();
+    let _status = 'success';
+    console.log(`[Hook] module_entry module=m5.DeepSeekLLMProvider.callDeepSeekApi max_tokens=${maxTokens}`);
+    // 🔴 关键（实测踩过）：`RetrieverCircuitBreaker.call()` 在 catch 里
+    //   `return fallback()` —— **任何异常都会被 fallback 接管**，原始错误不再上抛。
+    //   而上层（generate → M5Orchestrator）正是靠 `err.noUsableAnswer` 判定「判空 ⇒ 降级重试」。
+    //   故 fallback **必须原样转抛捕获到的原始异常**，只在**真正熔断**（fn 根本没被调用）时
+    //   才给出熔断归因 —— 否则甲/乙 的整条重试链会被静默掐断。
+    let _lastErr: any = null;
+    try {
+      return await this._llmBreaker.call(
+        async () => {
+          try {
+            return await this._callDeepSeekApiInner(messages, maxTokens, temperature, extraParams, streamOpts);
+          } catch (e) {
+            _lastErr = e;
+            throw e;
+          }
+        },
+        // 熔断打开（fn 未被调用，_lastErr 为 null）⇒ 明确失败交上层重试/降级，不静默吞掉
+        () => {
+          throw _lastErr ?? new Error('[DeepSeek] LLM 链路熔断打开（连续失败达阈值 3），本次调用直接失败交上层重试/降级');
+        },
+      );
+    } catch (e) {
+      _status = 'fail';
+      throw e;
+    } finally {
+      console.log(`[Hook] module_exit module=m5.DeepSeekLLMProvider.callDeepSeekApi 耗时=${Date.now() - _t0}ms status=${_status}`);
+    }
+  }
+
+  private async _callDeepSeekApiInner(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
     // 🔴 P1-5 流式分支: onToken 提供时启用流式（token 增量旁路推送，重试只在首 token 前）
     if (streamOpts?.onToken) {
       const r = await this.streamChat(messages, maxTokens, temperature, extraParams, streamOpts.onToken);
@@ -1155,6 +1259,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
       let usage: { prompt: number; completion: number } | undefined;
       let buf = '';
       let finished = false;
+      // 🔵 V31 甲-1：finish_reason 此前在本文件**只出现在类型声明里**（死字段），
+      //   全仓从未被读取 ⇒ 撞长度上限这件事在流式路径上完全不可见。
+      let finishReason = '';
 
       for (;;) {
         if (finished) break;
@@ -1170,6 +1277,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
           if (data === '[DONE]') { finished = true; break; }
           try {
             const json = JSON.parse(data);
+            // 🔵 V31 甲-1：捕获 finish_reason（'length' = 撞 max_tokens，内容必为截断物）
+            const _fr = json?.choices?.[0]?.finish_reason;
+            if (typeof _fr === 'string' && _fr) finishReason = _fr;
             const delta = json?.choices?.[0]?.delta;
             if (json?.usage && !usage) {
               usage = { prompt: json.usage.prompt_tokens ?? 0, completion: json.usage.completion_tokens ?? 0 };
@@ -1215,21 +1325,36 @@ export class DeepSeekLLMProvider implements LLMProvider {
       // 🔴 V21 流式结束字段边界优先: content 承载最终稿、reasoning 承载思维链。
       //   流式期间 text 只累积 content 答案（reasoning 已丢弃，草稿/评估段绝不流式展示）。
       //   content 有答案 → 信任 text；content 空（降级模式: 答案在 reasoning）→ 用 reasoningBuf 全量剥离兜底。
+      // 🔵 V31 甲-1：撞长度上限 ⇒ 内容必然是**截断物**（本次实测：模型复读「】」吃光 3000 额度）
+      //   ⇒ 直接判死交 M5 重试（会降 'low' 再试），绝不把截断物当回复推给前台。
+      if (finishReason === 'length' && !text.trim()) {
+        const e: any = new Error('finish_reason=length 且 content 为空：思维链吃光 max_tokens，内容已被截断');
+        e.sawToken = sawToken;
+        e.noUsableAnswer = true;
+        throw e;
+      }
       if (!text.trim()) {
-        // 🔴 V22 复评（2026-09-12 生产回归实测）: 此处**不得**用 fail-closed 的 resolveReplyFromFields
-        //   —— 它把「剥不出答案」判成空串，会直接让会晤模式退化为
-        //   「…（抱歉，我暂时无法回应，请稍后再试。）」（实测 15 分钟内 3 次）。
-        //   保留「宁可空也不洩漏」的意图，但改为**尽力提取**：extractAnswerFromReasoning
-        //   内部已含 V22 语言无关尾截断（英文起草段照样被切掉），仅当整段确为思维链时才返回空。
-        // 🔴 V23.1(2026-09-13): 出口统一过 gateOutgoingReply —— 实测此出口曾漏出中文元指令型
-        //   思维链并落库（id=2321）。extractAnswerFromReasoning 对"剥不动"的文本会**原样返回**，
-        //   必须由守卫兜底判断。守卫判据零误杀，不会让降级模式下的合法短答被吞
-        //   （与上方注释担心的"退化成抱歉无法回应"无关：那只发生在无条件判空时）。
-        const full = gateOutgoingReply(extractAnswerFromReasoning(stripper.reasoningBuf));
+        // 🔵 V31 甲-2：改用**结构判据** fail-closed —— 终结 V22 留下的 fail-open。
+        //
+        //   V22(2026-09-12) 为修「会晤退化成『抱歉我暂时无法回应』」，把这里从 fail-closed
+        //   改成「尽力提取」；而 extractAnswerFromReasoning 对**剥不动**的文本会**原样返回**
+        //   ⇒ 整段思维链被当回复洩漏。此后 V23(09-13) 加关键词判据、09-24 再次复发，
+        //   同类病共三次 —— 关键词枚举这条路已被证伪。
+        //
+        //   判据改为「四条结构策略有没有找到答案结构」（tryExtractAnswerFromReasoning）：
+        //   找到 → 正常取答案；全未命中 → 判 null ⇒ 抛 noUsableAnswer 交 M5 重试。
+        //   **零关键词 ⇒ 零误杀**；宁可多一次重试，也绝不洩漏。
+        const strict = tryExtractAnswerFromReasoning(stripper.reasoningBuf);
+        const full = strict ? gateOutgoingReply(strict) : '';
         if (full && full.trim().length > 0) {
           sawToken = true;
           text = full;
           onToken({ text: full });
+        } else {
+          const e: any = new Error('No usable answer after reasoning strip (V31 流式 fail-closed，拒绝洩漏思维链)');
+          e.sawToken = sawToken;
+          e.noUsableAnswer = true;
+          throw e;
         }
       }
       // 🔴 V22c 流式收尾护栏（2026-09-12 生产实测）: 累积文本的最终形态检查。
@@ -1582,7 +1707,13 @@ export class DeepSeekLLMProvider implements LLMProvider {
     //   日常对话/闲聊/位置问答不需要深思考；场景/亲密仍用配置或 max）
     //   M-LEAK A: 会晤=实体在场日常对话 → medium（'max' 会让思维链吃光额度致 content 为空）；
     //   仅真正的角色扮演保留 'max'。
-    const _reasoningEffort = _isRoleplay ? 'max' : _isEntityMeeting ? 'medium' : (_llmCfg.reasoningEffort || 'low');
+    // 🔵 V31 乙：角色扮演不再独占 'max' 思维档。
+    //   实测根因②：'max' 让思维链吃光 max_tokens(3000)，content 一个字都产不出
+    //   ⇒ 流式期间 tokens=0/1 ⇒ 兜底把截断物当回复洩漏。
+    //   会晤早已是 'medium'（M-LEAK A 如此修）。降档后思维链变短、content 一开始就有值，
+    //   这正是 M5Orchestrator V25 注释所说的「根因治理 —— 判据再多都不如让 content 一开始就有值」。
+    //   若仍无可用答案，M5 会再降 'low' 重试 ⇒ 形成 medium → low 阶梯。
+    const _reasoningEffort = _isRoleplay ? 'medium' : _isEntityMeeting ? 'medium' : (_llmCfg.reasoningEffort || 'low');
     const frequencyPenalty = _llmCfg.frequencyPenalty;
     const presencePenalty = _llmCfg.presencePenalty;
 
