@@ -37,7 +37,8 @@ export function unlockAudio() {
   if (_audioUnlocked) return;
   _audioUnlocked = true;
   _playerAudio.src = '';
-  _playerAudio.play().then(() => { _playerAudio.pause(); _playerAudio.currentTime = 0; }).catch(() => {});
+  // V32-①: 原 .catch(() => {}) 静默吞掉（P0 禁止静默吞错误）
+  _playerAudio.play().then(() => { _playerAudio.pause(); _playerAudio.currentTime = 0; }).catch((e) => { console.warn('[Audio] 解锁播放失败:', e); });
 }
 
 /** TTS 是否正在播放（供 ChatPanel 检测，防止手机麦克风回采导致回声死循环） */
@@ -139,9 +140,10 @@ export async function sendMessage(message: string, ttsEnabled: boolean = true): 
       _playerAudio.src = audioUrl;
       const onDone = () => { _ttsPlaying = false; _onTTSAudioState?.('idle'); if (_playTimer) { _playTimer(); _playTimer = null; } };
       _playerAudio.onended = onDone;
-      _playerAudio.onerror = onDone;
+      // V32-①: 原 onerror/play().catch 都是静默吞（P0 禁止静默吞错误）——无声时无从定位
+      _playerAudio.onerror = () => { console.warn('[Audio] 段加载失败:', _playerAudio.src); onDone(); };
       _onTTSAudioState?.('playing');
-      _playerAudio.play().catch(() => { onDone(); });
+      _playerAudio.play().catch((e) => { console.warn('[Audio] 播放失败:', e); onDone(); });
     }
 
     // 将 M1-M5 分析结果注入思维流

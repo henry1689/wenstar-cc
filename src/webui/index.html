@@ -548,7 +548,8 @@ function playAudioQueue(urls){
   let i=0;
   const next=()=>{
     if(gen!==_audioGen||i>=urls.length)return;  // 代际过期（被新播报顶替）→ 立即停
-    const ap=new Audio(urls[i++]);
+    const _u=urls[i++];              // V32-①: 先取 url，失败时才报得出是哪一段
+    const ap=new Audio(_u);
     _audioQueueCur=ap;
     ap.volume=0.8;
     // S4 P1-1 修复：onended/onerror 与 play().catch 可能双触发（资源加载失败时 error 事件 + play promise 拒绝同时发生），
@@ -561,7 +562,9 @@ function playAudioQueue(urls){
       next();
     };
     ap.onended=advance;      // 一段播完 → 播下一段
-    ap.onerror=advance;      // 单段失败不中断整个队列
+    // V32-①: 原 `ap.onerror=advance` 是**静默跳过**（P0 禁止静默吞错误）——
+    //   段加载失败时控制台一个字都没有，「无声 + 干净控制台」查不下去（本次实际卡点）。
+    ap.onerror=()=>{console.warn('[Audio] 段加载失败:',_u);advance();};  // 单段失败仍不中断整个队列
     ap.play().catch(e=>{console.warn('[Audio] 播放失败:',e);advance();});
   };
   next();
@@ -574,8 +577,9 @@ function playAudioQueue(urls){
 // 与 playAudioQueue 的差异: playAudioQueue 假定 urls 全量就绪(一段接一段播完)；
 // 此队列按 index 有序消费，index 0 未就绪则等待，就绪后立即播，后续段生成完逐个续播。
 // 消除长文语音"文字写完干等全量段生成"的滞后。
-let _ttsIncr={gen:0,urls:[],cur:0,playing:false,finalized:false};
-function _incrTTSInit(gen){ _ttsIncr={gen,urls:[],cur:0,playing:false,finalized:false}; }
+// V32-②: played = 本轮是否真的调用过 play() —— 收尾快照据此区分「根本没段」与「有段却没播」
+let _ttsIncr={gen:0,urls:[],cur:0,playing:false,finalized:false,played:false};
+function _incrTTSInit(gen){ _ttsIncr={gen,urls:[],cur:0,playing:false,finalized:false,played:false}; }
 function _incrTTSAdd(gen,idx,url){
   if(gen!==_ttsIncr.gen)return;                    // 过期代际丢弃
   _ttsIncr.urls[idx]=url;
@@ -601,8 +605,12 @@ function _incrTTSTryPlay(){
   //   表现即「长文只读一部分」。与 playAudioQueue 的 handled 护栏一致。
   let handled=false;
   const fin=()=>{ if(Q.gen!==_audioGen||handled)return; handled=true; Q.playing=false; Q.cur++; _incrTTSTryPlay(); };
-  ap.onended=fin; ap.onerror=fin;
-  ap.play().catch(e=>{console.warn('[Audio] 增量播失败:',e);fin();});
+  ap.onended=fin;
+  // V32-①: 原 `ap.onerror=fin` 静默吞掉段加载失败（P0 禁止静默吞错误）
+  ap.onerror=()=>{console.warn('[Audio] 增量段加载失败:',url);fin();};
+  // A3: `played` 只在 play() **resolve（真的开始播）之后**置位 ——
+  //   提前置位会被 reject/error 顶着，轮级判据 `!Q.played` 永不触发，快照把「没播」误报成「已播」。
+  ap.play().then(()=>{Q.played=true;}).catch(e=>{console.warn('[Audio] 增量播失败:',e);fin();});
 }
 // 全量段就绪但队列未消费完 → 兜底续播（防止 SSE 漏事件）
 // V22: urls 按原始 idx 保序（含 null 空位=失败段），fill 时保留空位不紧凑压缩；
@@ -616,7 +624,12 @@ function pollTTSJob(jobId){
   const timer=setInterval(async()=>{
     tries++;
     if(gen!==_audioGen){clearInterval(timer);return;} // 期间有新发送/新播放 → 放弃此 job
-    if(tries>120){clearInterval(timer);return;} // 60s 超时兜底
+    if(tries>120){                               // 60s 超时兜底 —— C-2: 原先静默退出，与 ③ 同类（定稿却不踢醒）
+      clearInterval(timer);
+      console.warn('[Audio] TTS job 轮询超时(60s) job='+jobId);
+      if(gen===_audioGen&&!_ttsIncr.finalized){_ttsIncr.finalized=true;_incrTTSTryPlay();}
+      return;
+    }
     try{
       const r=await fetch('/api/tts/status?job='+encodeURIComponent(jobId));
       const d=await r.json();
@@ -654,7 +667,7 @@ async function send(){
 	    var _rf=d.riskFlag?'⚠️'+d.riskFlag:'';
 	    if(_es||_rf){st.textContent=(_es+_rf).substring(0,22);setTimeout(function(){st.textContent='在线'},3000);}
     if(d.audio_urls&&d.audio_urls.length){playAudioQueue(d.audio_urls);}
-    else if(d.audio_url){const ap=new Audio(d.audio_url);ap.volume=0.8;ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
+    else if(d.audio_url){const ap=new Audio(d.audio_url);ap.volume=0.8;ap.onerror=()=>console.warn('[Audio] 单段加载失败:',d.audio_url);ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
     else if(d.tts_job){pollTTSJob(d.tts_job);}   // S4 P1-2: 长文音频异步生成，文字已渲染，轮询补齐后续播
     last=d;
     renderM1(d.m1);renderM3(d.m3);renderM4(d.m4);renderM5(d.m5);
@@ -677,6 +690,32 @@ async function sendStream(t){
   if(!b){busy=false;snd.disabled=false;st.textContent='在线';return;}
   let lastTxt='';let timer=null;let done=0;
   const clearBusy=()=>{if(gen===_audioGen){busy=false;snd.disabled=false;st.textContent='在线';}};
+  // ── V32-②③④ 音频收尾 ──────────────────────────────────────────────
+  // 一轮对话只打一次，把队列终态摊开：此前 onerror 与 _incrTTSTryPlay 的三处 return
+  // 全部静默 ⇒「完全没声音 + 控制台干净」在代码层不可诊断（本次实际代价）。
+  // 同时承担两件收尾事：③ 置 finalized 解除「urls 有洞且未定稿」的永久等待；
+  //                    ④ 关 SSE（不再在首个 audio_urls 为空的 chat-done 就关）。
+  let _finished=false;   // C-5: 一轮只收尾一次（job_gone 之后 60s 超时还会再进来一次）
+  let _pollFails=0;      // C-1: 连续轮询失败计数
+  const _audioFinish=(why)=>{
+    if(gen!==_audioGen)return;                 // 已被新消息接管，不碰别人的队列
+    if(_finished)return;                       // C-5: 同一轮不重复打收尾、不覆盖 failBubble 文案
+    _finished=true;
+    const Q=_ttsIncr;
+    const ready=Q.urls.filter(Boolean).length;
+    const has=ready>0;
+    const stat={why,gen,audioGen:_audioGen,qgen:Q.gen,ready,cur:Q.cur,playing:Q.playing,finalized:Q.finalized,played:Q.played};
+    if(!Q.played&&has)console.warn('[Audio] 🔴 有段却一段都没播',JSON.stringify(stat));
+    else console.log('[Audio] 收尾',JSON.stringify(stat));
+    if(Q.gen===gen&&!Q.finalized)Q.finalized=true;   // V32-③: 退出即定稿
+    // es 可能已由自身 onerror 关闭，close() 抛错属预期、可忽略（非静默吞业务错误）
+    if(_streamES){try{_streamES.close()}catch(_fe){/* 已关闭，忽略 */}_streamES=null;}   // V32-④
+    // 🔴 C-0 阻断项: 置完 finalized **必须踢一脚**。`_incrTTSTryPlay` 只由
+    //   _incrTTSAdd / _incrTTSFill / fin 三处触发，而这三处此刻都已被本函数切断
+    //   （关 ES + clearInterval）—— 不踢则状态机永不醒，本次点名的
+    //   「urls 首位有洞」场景仍 100% 无声，只是多打了一行日志。
+    if(Q.gen===gen)_incrTTSTryPlay();
+  };
   // 🔴 阶段A 终态契约: 拿不到内容必须说明**为什么**，并解锁 UI。
   //   原实现三处都以 lastTxt 兜底裸省略号 —— 零内容时显示一个省略号占位，
   //   且 error 分支不解锁（输入框持续禁用），表现即「卡死不回复」。
@@ -707,7 +746,7 @@ async function sendStream(t){
     }
     // 音频兜底：无论 first/second 都执行（二次 done 帧/轮询补发的 audio_urls 不再被丢）
     if(dd.audio_urls&&dd.audio_urls.length){ if(_ttsIncr.gen===gen){_incrTTSFill(gen,dd.audio_urls,!!dd.audio_done);} else {playAudioQueue(dd.audio_urls);} }
-    else if(dd.audio_url){const ap=new Audio(dd.audio_url);ap.volume=0.8;ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
+    else if(dd.audio_url){const ap=new Audio(dd.audio_url);ap.volume=0.8;ap.onerror=()=>console.warn('[Audio] 单段加载失败:',dd.audio_url);ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
     else if(dd.tts_job){pollTTSJob(dd.tts_job);}   // S4 P1-2: 长文音频异步生成，文字已渲染，轮询补齐后续播
     if(isFirst)clearBusy();
   };
@@ -722,7 +761,7 @@ async function sendStream(t){
         b.textContent=d0.reply;scrollChat();
         tc.textContent=(d0.turn_count||0)+' 轮';
         if(d0.audio_urls&&d0.audio_urls.length){playAudioQueue(d0.audio_urls);}
-        else if(d0.audio_url){const ap=new Audio(d0.audio_url);ap.volume=0.8;ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
+        else if(d0.audio_url){const ap=new Audio(d0.audio_url);ap.volume=0.8;ap.onerror=()=>console.warn('[Audio] 单段加载失败:',d0.audio_url);ap.play().catch(e=>console.warn('[Audio] 播放失败:',e));}
         else if(d0.tts_job){pollTTSJob(d0.tts_job);}
         if(d0.m1){renderM1(d0.m1);renderM3(d0.m3);renderM4(d0.m4);renderM5(d0.m5);loadM68();}
         last=d0;clearBusy();return;
@@ -744,21 +783,30 @@ async function sendStream(t){
         // 🔴 阶段A: ① job 已被回收/不存在 → 原先 {ok:false} 会让所有 dd.ok&& 分支都不进，
         //   空转到 60s；② error/deadline_exceeded → 原先只 clearInterval 不解锁不渲染。
         //   两者都会让 UI 卡在 busy，必须显式终结 + 说明原因。
-        if(!dd.ok){clearInterval(timer);failBubble('⚠ '+(dd.reason||'任务已过期，无法继续接收回复'));return;}
-        if(dd.ok&&(dd.status==='error'||dd.status==='deadline_exceeded')){clearInterval(timer);failBubble('⚠ '+(dd.reason||dd.error||'服务端处理失败'));return;}
+        if(!dd.ok){_audioFinish('job_gone');done=1;clearInterval(timer);failBubble('⚠ '+(dd.reason||'任务已过期，无法继续接收回复'));return;}
+        if(dd.ok&&(dd.status==='error'||dd.status==='deadline_exceeded')){_audioFinish('job_error');done=1;clearInterval(timer);failBubble('⚠ '+(dd.reason||dd.error||'服务端处理失败'));return;}
         if(dd.ok&&dd.status==='done'){
           // 文字/面板只在首次 done 处理（内部 done 守卫防双播）；音频定稿后收尾退出
           await finalizeStream(dd);
           // V24: 等 audio_done 定稿信号（长文 finalize drain 可能 10~30s），
           // 不再用 12s 固定超时丢尾；audio_done 或 60s 硬兜底才退出。
-          if(dd.audio_done||++_audioWaits>400){clearInterval(timer);return;}
+          // V32-③: 两条退出路径都必须走 _audioFinish —— 原先只 clearInterval，
+          //   finalized 不置位 ⇒ urls 首位有洞时队列永久等待且零日志。
+          if(dd.audio_done||++_audioWaits>400){_audioFinish(dd.audio_done?'audio_done':'poll_timeout');clearInterval(timer);return;}
         }
         // S4-m11: running 时用服务端累积 tokens 补齐（SSE 掉线时中途有字）
         if(dd.ok&&!done&&dd.tokens&&dd.tokens.length){
           const t=dd.tokens.join('');
           if(t.length>lastTxt.length){lastTxt=t;b.textContent=t;scrollChat();}
         }
-      }catch(e){}
+      }catch(e){
+        // 🔴 C-1 阻断项: 原 `catch(e){}` —— 零日志且不清 interval。
+        //   `_audioFinish` 的三个调用点全在 try 的**成功**分支内 ⇒ 这里一挂，
+        //   收尾快照永不打印；同时 150ms 轮询无限重试（请求风暴）。
+        if(gen!==_audioGen){clearInterval(timer);return;}
+        if(++_pollFails===1||_pollFails%20===0)console.warn('[Audio] 状态轮询失败 x'+_pollFails+':',e);
+        if(_pollFails>=100){_audioFinish('poll_error');clearInterval(timer);}  // ≈15s 连挂 → 判死收尾
+      }
     },(d0.poll_hint_ms||150));
     // SSE 增强：实时追加 token；done 帧覆盖气泡
     try{
@@ -769,8 +817,10 @@ async function sendStream(t){
         try{const dd=JSON.parse(ev.data);if(dd.job_id===jobId&&dd.token){b.textContent+=dd.token;lastTxt+=dd.token;scrollChat();}}catch(e){}
       });
       es.addEventListener('chat-done',(ev)=>{
-        es.close();if(_streamES===es)_streamES=null;
-        if(gen!==_audioGen)return;
+        // V32-④: **不再无条件关闭** —— 服务端首个 chat-done 帧 audio_urls 是空数组
+        //   （server-chat-routes L625），关了就丢掉带音频的第二帧与之后所有 chat-tts 段推送，
+        //   音频只能靠轮询兜底，兜底一断即无声。关闭时机移到 _audioFinish。
+        if(gen!==_audioGen){es.close();if(_streamES===es)_streamES=null;return;}
         try{const dd=JSON.parse(ev.data);if(dd.job_id===jobId)finalizeStream(dd);}catch(e){}
       });
       // 🔴 S2-F2: 增量 TTS 段推送 — 每段生成完立即追加到增量队列并播放（不等全量）
@@ -782,10 +832,15 @@ async function sendStream(t){
         }catch(e){}
       });
       es.addEventListener('chat-error',(ev)=>{
+        // 🔴 C-4: SSE 是 server.ts 对 sseClients 的**全局广播**，而 chat-token/chat-done/chat-tts
+        //   都按 job_id 过滤、唯独这里没有，且原先在代际判断**之前**就 es.close()。
+        //   ⇒ 多标签/后台任一 job 出错，会顺手关掉本连接、丢掉「带音频的第二帧 + 后续
+        //     chat-tts」（正是 ④ 要保的），并把已渲染成功的回复覆盖成无关错误。
+        let dd={};try{dd=JSON.parse(ev.data)||{}}catch(_pe){console.warn('[Stream] chat-error 帧解析失败:',_pe);return;}
+        if(dd.job_id&&dd.job_id!==jobId)return;          // 别人的错：不关我的连接，不动我的回复
         es.close();if(_streamES===es)_streamES=null;
         if(gen!==_audioGen)return;
         // 🔴 阶段A: 透出服务端分类后的原因（llm_rate_limited/llm_timeout/llm_failed/job_failed）
-        let dd={};try{dd=JSON.parse(ev.data)||{}}catch(_){}
         const why=dd.reason||dd.error||'流式出错，未收到内容';
         failBubble('⚠ '+why);toast('流式出错：'+why);
       });
@@ -795,7 +850,7 @@ async function sendStream(t){
     // 60s 超时兜底（S4-m12: 同时关闭残留 ES，防连接泄漏）
     // 🔴 阶段A: 明示「是超时」而非静默占位；60s 是前端兜底，服务端 job 可能仍在跑
     //   （阶段C 将把 60s 与后端 deadline 契约统一，见 S2 三阶段方案）
-    setTimeout(()=>{if(gen===_audioGen&&!done){if(timer)clearInterval(timer);if(_streamES){try{_streamES.close()}catch(e){}_streamES=null;}failBubble('⏳ 60 秒内未收到回复，服务端可能仍在处理或已失败；可稍后重试');}},60000);
+    setTimeout(()=>{if(gen===_audioGen&&!done){_audioFinish('send_timeout');if(timer)clearInterval(timer);if(_streamES){try{_streamES.close()}catch(e){}_streamES=null;}failBubble('⏳ 60 秒内未收到回复，服务端可能仍在处理或已失败；可稍后重试');}},60000);
   }catch(e){
     console.error(e);b.textContent='嗯…你再说一遍好不好？';toast('请求失败，已用兜底');clearBusy();
   }
