@@ -535,13 +535,27 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       const { indexDocument } = await import('../../m4/SearchIndexBuilder.js');
       // P1-C 修复: source_id 用真实 conversations.id（与 rebuildAllIndexes 一致），
       // 不再用 dna_root_id（两者不同，导致增量索引关联错乱、检索 source 串号）。
-      // 索引用户消息
-      if (input.message?.length > 5) {
-        indexDocument(_sqlite.rawDb, 'conversation', String(_convUserRowId ?? 'conv_' + Date.now()), input.message, (input.dna as any)?.belong_entity_uuid);
-      }
-      // 索引助手回复
-      if (input.reply?.length > 5) {
-        indexDocument(_sqlite.rawDb, 'conversation', String(_convAsstRowId ?? 'conv_' + Date.now()), input.reply, (input.dna as any)?.belong_entity_uuid);
+      //
+      // 🔴 V34(2026-09-25) 孤儿索引行修复：rowid 取不到时**不再**回退 `'conv_' + Date.now()`。
+      //   原因：v34 起砂金库召回主路径改走倒排索引，按 `JOIN conversations c ON
+      //   c.id = CAST(s.source_id AS INTEGER)` 取原文；而 `'conv_1758…'` CAST 成 0 ⇒ **永远 JOIN 不上**，
+      //   等于在索引里堆了一批"检索不可达"的行 —— 白占空间、还会让索引覆盖率统计虚高。
+      //   取不到 rowid 时**跳过写入**，交给检索侧的幂等增量回填（backfillConversationIndex）
+      //   用真实 id 补写；跳过必须**可见**（不静默吞错，P0 禁止静默失败）。
+      if (!_convUserRowId || !_convAsstRowId) {
+        console.warn(
+          '[Persistence] 增量索引跳过本次写入（对话 rowid 不可用: user=' + String(_convUserRowId) +
+          ' asst=' + String(_convAsstRowId) + '）— 将由检索侧幂等回填用真实 id 补写',
+        );
+      } else {
+        // 索引用户消息
+        if (input.message?.length > 5) {
+          indexDocument(_sqlite.rawDb, 'conversation', String(_convUserRowId), input.message, (input.dna as any)?.belong_entity_uuid);
+        }
+        // 索引助手回复
+        if (input.reply?.length > 5) {
+          indexDocument(_sqlite.rawDb, 'conversation', String(_convAsstRowId), input.reply, (input.dna as any)?.belong_entity_uuid);
+        }
       }
     }
   } catch { /* 索引写入不阻塞主流程 */ }

@@ -13,6 +13,8 @@
  * 正常模式：返回最近 N 条（行为不变）
  */
 import type { ConversationTurn } from '../../m5/types/index.js';
+// 🔴 V34(2026-09-25): 上下文窗口轮次的**配置单一事实源**（与 EntityContextStore.queryEntityContext 同口径）
+import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 
 export interface EntityContextWindow {
   turns: ConversationTurn[];
@@ -29,7 +31,7 @@ export class EntityContextManager {
    *
    * @param allHistory 全局 conversationHistory
    * @param entityName 当前会晤实体名（null=正常玉瑶模式）
-   * @param maxTurns 最大轮次
+   * @param maxTurns 最大轮次（经配置下限归一化，见下）
    * @returns 过滤后的对话历史
    */
   getContextWindow(
@@ -38,29 +40,41 @@ export class EntityContextManager {
     maxTurns: number = 40,
     meetingStartIndex?: number,
   ): ConversationTurn[] {
-    // 正常模式：返回最近 N 条（行为完全不变）
+    // 🔴 V34(2026-09-25): 配置下限兜底 —— 与 EntityContextStore.queryEntityContext 同口径。
+    //   本方法的形参默认值 40，而调用点（chat.ts）也硬编码传 40 ⇒ `MemoryConfig.compaction.
+    //   contextWindowTurns`（80）对**这条 RAM 路径完全失效** —— 配置写了等于没写。
+    //   且会晤模式下 RAM 历史够长时根本不会走到 DB 兜底，于是"保留了 100 条却只注入 40 条"
+    //   的老问题在这条路径上依旧存在。
+    //   口径统一：调用方传得比配置小，也按配置取（窗口策略属本层职责，避免散落各调用点）。
+    const _floor = (() => {
+      try { return Number(MEMORY_CONFIG.compaction.contextWindowTurns) || 0; } catch { return 0; }
+    })();
+    const _maxTurns = _floor > 0 ? Math.max(maxTurns, _floor) : maxTurns;
+
+    // 正常模式：返回最近 N 条（仅窗口大小归一化，行为不变）
     if (!entityName) {
-      return allHistory.slice(-maxTurns);
+      return allHistory.slice(-_maxTurns);
     }
 
     // 会晤模式：按 EntityMeeting 记录的时间索引截断
     //   会晤激活之后的所有对话都属于该会晤上下文，
     //   不依赖内容关键词匹配——避免 entity 角色的 "我" 自指回复被丢弃。
     if (meetingStartIndex !== undefined && meetingStartIndex > 0) {
-      const cacheKey = `${entityName}:${meetingStartIndex}:${maxTurns}`;
+      // 缓存键用**归一化后**的轮次：否则同一会话内配置生效前后会产生两份缓存条目
+      const cacheKey = `${entityName}:${meetingStartIndex}:${_maxTurns}`;
       const cached = this._cache.get(cacheKey);
       if (cached && Date.now() - cached.ts < this.CACHE_TTL) {
         return cached.turns;
       }
       const safeStart = Math.max(0, meetingStartIndex);
-      const result = allHistory.slice(safeStart).slice(-maxTurns);
+      const result = allHistory.slice(safeStart).slice(-_maxTurns);
       this._cache.set(cacheKey, { ts: Date.now(), turns: result });
       this._cleanExpiredCache();
       return result;
     }
 
     // 降级：无 startIndex 时用内容关键词过滤（兼容旧调用）
-    const cacheKey = `${entityName}:key:${maxTurns}`;
+    const cacheKey = `${entityName}:key:${_maxTurns}`;
     const cached = this._cache.get(cacheKey);
     if (cached && Date.now() - cached.ts < this.CACHE_TTL) {
       return cached.turns;
@@ -72,7 +86,7 @@ export class EntityContextManager {
         entityTurns.push(turn);
       }
     }
-    const result = entityTurns.slice(-maxTurns);
+    const result = entityTurns.slice(-_maxTurns);
     this._cache.set(cacheKey, { ts: Date.now(), turns: result });
     this._cleanExpiredCache();
     return result;
