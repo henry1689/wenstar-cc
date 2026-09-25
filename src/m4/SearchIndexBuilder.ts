@@ -222,6 +222,48 @@ export function indexWorkChunks(
 }
 
 /**
+ * 🔴 V34(2026-09-25) 砂金库索引**增量回填** —— 补齐 rebuildAllIndexes 覆盖不到的那部分对话。
+ *
+ * 背景：`rebuildAllIndexes` 仅在 `search_index` 为空时执行（防重复回填），因此
+ * 「执行之后才写入的对话」以及「当时因 is_compacted=0 被排除、V34 才恢复可见的归档对话」
+ * 会长期缺席索引。实测：5936 条对话中仅 5214 条进了索引（缺 12%）。
+ * 砂金库召回的主路径已改为倒排索引（查询驱动）⇒ 索引缺一条，那条就永远捞不回来。
+ *
+ * 本函数是**幂等增量**：只索引 `search_index` 里还没有的对话，可重复调用。
+ * 刻意**不带** `is_compacted = 0` 过滤 —— 归档只是内存窗口标记，原文只增不删，索引须覆盖全量。
+ *
+ * @param db         sql.js Database 实例（需有 exec / run 方法）
+ * @param batchLimit 单次最多回填条数（0 = 不限；大批量建议分批，避免长事务阻塞）
+ * @returns 实际索引的对话条数
+ */
+export function backfillConversationIndex(db: any, batchLimit = 0): number {
+  if (!db) return 0;
+  let indexed = 0;
+  try {
+    // source_id 以**文本**比较（写入时为 String(id)），这样能吃到 idx_si_source(source_type, source_id)
+    const limitClause = Number.isFinite(batchLimit) && batchLimit > 0 ? ` LIMIT ${Math.floor(batchLimit)}` : '';
+    const rows = db.exec(
+      `SELECT c.id, c.content, c.belong_entity_uuid FROM conversations c
+       WHERE c.content IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM search_index s
+           WHERE s.source_type = 'conversation' AND s.source_id = CAST(c.id AS TEXT)
+         )
+       ORDER BY c.id${limitClause}`,
+    );
+    if (!rows.length || !rows[0].values) return 0;
+    for (const [id, content, entityUuid] of rows[0].values) {
+      const n = indexDocument(db, 'conversation', String(id), String(content), entityUuid ? String(entityUuid) : undefined);
+      if (n > 0) indexed++;
+    }
+    console.log(`[SearchIndex] 砂金库增量回填: ${indexed} 条`);
+  } catch (e) {
+    console.warn('[SearchIndex] 砂金库增量回填失败:', (e as Error).message);
+  }
+  return indexed;
+}
+
+/**
  * 检查 search_index 是否为空
  */
 export function isIndexEmpty(db: any): boolean {
@@ -233,4 +275,4 @@ export function isIndexEmpty(db: any): boolean {
   }
 }
 
-export default { buildNgrams, indexDocument, indexWorkChunks, rebuildAllIndexes, isIndexEmpty };
+export default { buildNgrams, indexDocument, indexWorkChunks, rebuildAllIndexes, backfillConversationIndex, isIndexEmpty };

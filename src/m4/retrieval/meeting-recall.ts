@@ -13,9 +13,21 @@
  *   现改为：关键词**加权**（命中排前）+ **时间窗无条件兜底**（近 N 天原文总能取回）。
  *   时间窗天数由调用方传 `MEMORY_CONFIG.compaction.sandboxRecallWindowDays`（配置单一事实源）。
  *
+ * 🔴 V34 #3(2026-09-25) 兜底改为「倒排索引查询驱动 + 时间窗采样兜底」两段式：
+ *   原兜底是 `content LIKE '%词%'` + `ORDER BY timestamp DESC LIMIT N` —— 对高频实体，
+ *   "最新 N 条"必然落在**已被上下文覆盖**的区间内 ⇒ 兜底层空转（实测：池内 546 条只取 12 条，
+ *   落在 43分钟~2.4小时，而上下文已覆盖 3.9 小时）。且字面匹配对"说计划、原文写方案"无能为力。
+ *   现改为：① 先用本仓**已有**的 search_index 倒排索引按查询取候选（相关性驱动）；
+ *   ② 索引无命中才按时间窗采样兜底；③ 两路都只取**比当前上下文更早**的原文（`beforeTs` 上界），
+ *   从结构上保证"兜的是没看到的，不是刚看过的"。
+ *
  * retrieval-stage 会晤隔离墙与 MeetingWallAdapter 共用本模块，杜绝同构漂移。
- * 本模块零 import（仅依赖调用方传入的 queryAll 兼容源），不引入 M 层反向依赖。
+ * 🔴 V34 起本模块**不再零 import** —— 复用同层 `buildNgrams`（m4 内聚，非反向依赖），
+ *   以保证切词口径与写入索引时**同源**（切词漂移会让索引查不到）。
  */
+
+// 🔴 V34: 切词与写入 search_index 时**同源**（同层复用，非反向依赖）。口径漂移 = 索引查不到。
+import { buildNgrams } from '../SearchIndexBuilder.js';
 
 /** 最小 sqlite 查询源（SQLiteAdapter.queryAll 兼容形状: 返回行数组） */
 export interface RecallSource {
@@ -215,9 +227,12 @@ export function keywordRecallMemories(
  * @param maxChars    单条截断长度
  * @param windowDays  🔴 时间窗天数。**调用方必须显式传入**
  *                    `MEMORY_CONFIG.compaction.sandboxRecallWindowDays`（配置单一事实源）。
- *                    本模块声明为"零 import"（供检索侧与会晤隔离墙共用，防同构漂移），
- *                    故不直接读配置。传 0 / 省略 / 非法值 ⇒ 时间窗路径**关闭**，退回旧行为
- *                    （纯关键词，仅关键字面匹配）—— 仅供尚未接入配置的历史调用点使用。
+ *                    本模块不直接读配置（供检索侧与会晤隔离墙共用，防同构漂移），
+ *                    故由调用方传入。传 0 / 省略 / 非法值 ⇒ 时间窗路径**关闭**，退回旧行为
+ *                    （纯关键词，仅关键字面匹配）。
+ * @param beforeTs    🔴 V34 新增**上界（不含）**：只取比它更早的原文。传「当前上下文最旧一轮的时间」
+ *                    可保证兜底取回的是**上下文之外**的内容，不与已注入的上下文重复。
+ *                    省略/null ⇒ 无上界（旧行为）。
  */
 export function recallOriginalConversations(
   src: RecallSource,
@@ -226,6 +241,7 @@ export function recallOriginalConversations(
   limit = 12,
   maxChars = 300,
   windowDays = 0,
+  beforeTs: string | null = null,
 ): RecallConversationRow[] {
   const hits: RecallConversationRow[] = [];
   // 边界防护：非法 limit/maxChars 回落到安全值，避免 NaN/负数进 SQL 变成无限制全表扫描
@@ -262,12 +278,16 @@ export function recallOriginalConversations(
   if (hits.length >= _limit) return hits;
   try {
     const since = new Date(Date.now() - _days * 86400000).toISOString();
+    const _upper = typeof beforeTs === 'string' && beforeTs ? ' AND timestamp < ?' : '';
+    const _params: unknown[] = [entityUuid, since];
+    if (_upper) _params.push(beforeTs);
+    _params.push(_limit);
     const rows = (
       src.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND timestamp >= ? AND LENGTH(content) > 40
+         WHERE belong_entity_uuid = ? AND timestamp >= ?${_upper} AND LENGTH(content) > 40
          ORDER BY timestamp DESC LIMIT ?`,
-        [entityUuid, since, _limit],
+        _params,
       ) || []
     ) as RecallConversationRow[];
     for (const r of rows) {
@@ -275,6 +295,113 @@ export function recallOriginalConversations(
     }
   } catch {
     // 时间窗取回失败不阻塞 —— 关键词路径结果照常返回（兜底降级）
+  }
+  return hits;
+}
+
+/** 砂金库两段式召回的调用参数 */
+export interface SandboxRecallOptions {
+  /** 总条数上限（倒排路径 + 时间窗兜底合计） */
+  limit?: number;
+  /** 单条原文截断长度 */
+  maxChars?: number;
+  /** 时间窗天数（调方传 MEMORY_CONFIG.compaction.sandboxRecallWindowDays） */
+  windowDays?: number;
+  /** 🔴 上界（不含）：只取比它更早的原文。传「当前上下文最旧一轮的时间」⇒ 只兜上下文之外 */
+  beforeTs?: string | null;
+  /** 单条原文最小长度（噪声门槛） */
+  minContentLen?: number;
+  /** 倒排查询最大词数 */
+  maxTerms?: number;
+}
+
+/**
+ * 🔴 V34 #3 砂金库召回**两段式**（原设计「砂金库=回忆兜底层」的落地）：
+ *
+ * ```
+ * ① 倒排索引（查询驱动）—— 用"你问的这句话"去 search_index 找相关的历史原文
+ *    命中了 → 取原文（相关性驱动；同一话题即使措辞不同也能命中，因为切的是 n-gram）
+ * ② 时间窗采样（兜底）—— ① 无命中时才按时间跨度取
+ *    措辞与原文完全不同（或用户没提任何实词）时，至少还能看到历史轮廓
+ * ```
+ *
+ * 两路共同约束 `beforeTs`：**只取比当前上下文更早的原文**。
+ * 这条约束同时充当"触发判据" —— 若上下文已覆盖整个窗口（低频实体），
+ * 区间为空 ⇒ 自然不注入，无需任何关键词或阈值判断，也就不会"一会东一会西"。
+ *
+ * 🔴 隐私 fail-closed：`entityUuid` 为空 ⇒ **直接返回空**，绝不发起跨角色检索。
+ *   过滤依据是 `conversations.belong_entity_uuid`（权威字段）——
+ *   `search_index.belong_entity_uuid` 仅 27.5% 非空，**不可**作为过滤依据。
+ */
+export function recallSandboxConversations(
+  src: RecallSource,
+  entityUuid: string,
+  query: string,
+  opts: SandboxRecallOptions = {},
+): RecallConversationRow[] {
+  const hits: RecallConversationRow[] = [];
+  if (!entityUuid) return hits;   // fail-closed：无归属不检索
+
+  const _limit = Number.isFinite(opts.limit) && (opts.limit as number) > 0 ? Math.floor(opts.limit as number) : 12;
+  const _maxChars = Number.isFinite(opts.maxChars) && (opts.maxChars as number) > 0 ? Math.floor(opts.maxChars as number) : 300;
+  const _days = Number(opts.windowDays);
+  const _minLen = Number.isFinite(opts.minContentLen) && (opts.minContentLen as number) > 0 ? Math.floor(opts.minContentLen as number) : 40;
+  const _maxTerms = Number.isFinite(opts.maxTerms) && (opts.maxTerms as number) > 0 ? Math.floor(opts.maxTerms as number) : 40;
+  const _beforeTs = typeof opts.beforeTs === 'string' && opts.beforeTs ? opts.beforeTs : null;
+  const _since = Number.isFinite(_days) && _days > 0 ? new Date(Date.now() - _days * 86400000).toISOString() : null;
+
+  const _push = (r: RecallConversationRow): boolean => {
+    const c = String(r?.content || '').substring(0, _maxChars);
+    if (c.length > 4 && !hits.some((h) => h.content === c)) {
+      hits.push({ role: r.role, content: c, timestamp: r.timestamp });
+    }
+    return hits.length >= _limit;
+  };
+
+  // ── ① 倒排索引（查询驱动）──
+  const terms = buildNgrams(String(query || '')).slice(0, _maxTerms);
+  if (terms.length > 0) {
+    try {
+      const phs = terms.map(() => '?').join(',');
+      const conds = [
+        "s.source_type = 'conversation'",
+        `s.term IN (${phs})`,
+        'c.belong_entity_uuid = ?',                 // 权威隐私过滤
+        '(c.is_test IS NULL OR c.is_test = 0)',
+        'LENGTH(c.content) > ?',
+      ];
+      const params: unknown[] = [...terms, entityUuid, _minLen];
+      if (_beforeTs) { conds.push('c.timestamp < ?'); params.push(_beforeTs); }
+      if (_since) { conds.push('c.timestamp >= ?'); params.push(_since); }
+      const rows = (
+        src.queryAll(
+          `SELECT c.role, c.content, c.timestamp
+           FROM search_index s
+           JOIN conversations c ON c.id = CAST(s.source_id AS INTEGER)
+           WHERE ${conds.join(' AND ')}
+           GROUP BY s.source_id
+           ORDER BY COUNT(DISTINCT s.term) DESC, c.timestamp DESC
+           LIMIT ?`,
+          [...params, _limit],
+        ) || []
+      ) as RecallConversationRow[];
+      for (const r of rows) {
+        if (_push(r)) return hits;
+      }
+    } catch {
+      // 索引路径不可用（表缺失/查询失败）→ 落到 ② 时间窗兜底，不阻断对话
+    }
+  }
+
+  // ── ② 时间窗采样兜底（仅当 ① 不足）──
+  if (hits.length < _limit && _since) {
+    // 关键词传空：①已做过查询驱动的匹配，这里只走时间窗（避免重复的 LIKE 扫描）
+    const fb = recallOriginalConversations(
+      src, entityUuid, [], _limit - hits.length, _maxChars, _days, _beforeTs,
+    );
+    for (const r of fb) {
+      if (_push(r)) break;
+    }
   }
   return hits;
 }

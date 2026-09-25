@@ -19,7 +19,7 @@ import {
   RECALL_TRIGGER_RE,
   extractTopicKeywords,
   keywordRecallMemories,
-  recallOriginalConversations,
+  recallSandboxConversations,
   shouldEscalateToLlmPicker,
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
@@ -35,6 +35,23 @@ const SANDBOX_RECALL_LIMIT = (() => {
   const v = Number(MEMORY_CONFIG.compaction.sandboxRecallLimit);
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 12;
 })();
+/** 砂金库召回：单条原文最小长度（噪声门槛） */
+const SANDBOX_RECALL_MIN_LEN = (() => {
+  const v = Number(MEMORY_CONFIG.compaction.sandboxRecallMinContentLen);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 40;
+})();
+/** 砂金库倒排查询：最大 n-gram 词数 */
+const SANDBOX_RECALL_MAX_TERMS = (() => {
+  const v = Number(MEMORY_CONFIG.compaction.sandboxRecallMaxTerms);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 40;
+})();
+/** 砂金库索引启动补齐：单次最多回填条数（0 = 不限） */
+const SANDBOX_INDEX_BACKFILL_BATCH = (() => {
+  const v = Number(MEMORY_CONFIG.compaction.sandboxIndexBackfillBatch);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 1000;
+})();
+/** 砂金库索引补齐：每进程只做一次（幂等；重复调用是空转） */
+let SANDBOX_INDEX_BACKFILL_DONE = false;
 
 /**
  * C LLM 兜底挑选（2026-09-12）
@@ -112,7 +129,8 @@ export interface RetrievalInput {
   p: Perception24D;
   /** V3: M3 直接产出的 40D 感知向量 — 透传给 searchV13 作为 40D 查询向量 */
   p40?: import('../../m3/types/perception-40d.js').PerceptionV40;
-  enrichedHistory: Array<{ content: string }>;
+  /** V34: 带 timestamp —— 砂金库兜底用它算出「上下文最旧一轮」，只取比它更早的原文 */
+  enrichedHistory: Array<{ content: string; timestamp?: string }>;
   memoryFragments: string[];
   /** 独立网络检索可在意图确定后立即启动，但不得在回调中修改共享上下文。 */
   onIntentReady?: (intent: RetrievalIntent) => void;
@@ -215,6 +233,18 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       const _entityUuid = _fg?.getUUIDByName?.(_meetingEntityName);
       const _sqlite = ctx.storage?.getSQLite?.();
       if (_entityUuid && _sqlite && typeof _sqlite.queryAll === 'function') {
+        // 🔴 V34 #3: 砂金库索引**启动补齐**（每进程一次，幂等，失败不阻塞）。
+        //   倒排索引是砂金库召回的主路径 ⇒ 索引缺一条，那条就永远捞不回来。
+        //   `rebuildAllIndexes` 只在索引为空时跑，故"执行之后新增的对话"与
+        //   "当时因 is_compacted=0 被排除、V34 才恢复可见的归档对话"会长期缺席。
+        //   ⚠️ 已知技术债（debt_mug7q19z_ef4mx4）：写入侧尚无增量索引，靠本补齐兜底。
+        if (!SANDBOX_INDEX_BACKFILL_DONE) {
+          SANDBOX_INDEX_BACKFILL_DONE = true;
+          try {
+            const { backfillConversationIndex } = await import('../../m4/SearchIndexBuilder.js');
+            backfillConversationIndex(_sqlite, SANDBOX_INDEX_BACKFILL_BATCH);
+          } catch { /* 索引补齐失败不阻塞对话 */ }
+        }
         // 🔴 P1-3: 会晤记忆检索排序 — 废弃单一 ORDER BY calcium_score DESC（把近期低钙化记忆挤出 TOP20，
         // 实测"树林记忆 0.56 排第21+ 检索不到"即此根因）。改为**近期+历史双槽位**：
         //   近期槽（当日 <1天）：保底命中当天对话记忆（"回头就忘"直接修复）；
@@ -457,55 +487,46 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             _sandInjected++;
           }
         }
-        // 🔴 记忆召回彻底解决: 内容匹配召回 — 用户问具体过去的事（记得/聊过/上次）时，
-        // 按关键词 LIKE 检索该实体历史对话，精准找回早期特定记忆（时间覆盖兜底不了"问特定内容"）
-        if (_isRecallQuestion) {
-          try {
-            const { EntityContextStore: _ECS2 } = await import('../../app/entity/EntityContextStore.js');
-            const _store2 = new _ECS2(_sqlite);
-            const _exclNames = new Set<string>([_meetingEntityName, '玉瑶', ...((_fg?.getAllPersonNames?.()) || [])]);
-            const _STOP_KW = new Set(['我们', '你们', '他们', '那个', '这个', '什么', '怎么', '今天', '明天', '昨天', '时候', '还是', '一起', '但是', '因为', '如果', '不是', '就是', '记得', '聊过', '说过', '以前', '之前', '上次', '那件', '那次', '回忆', '自己', '咱们', '大家', '真的', '一直', '是不是', '没有', '知道', '你说', '我问', '们是', '是不', '是聊', '过树', '林具', '体怎', '么回', '回事', '具体', '还有', '然后', '后来', '那些', '别的', '其他', '我们是', '们是不', '是聊过', '聊过树', '过树林', '树林具', '林具体', '具体怎', '体怎么', '怎么回', '我们这']);
-            // 关键词提取改进: 2字+3字滑动窗口（原 [一-龥]{2,4} 贪婪切块会把"树林"切成"林具体怎"导致 LIKE 检索失效）
-            const _kwCandidates: string[] = [];
-            for (let _wi = 0; _wi + 2 <= message.length; _wi++) {
-              const _s2 = message.slice(_wi, _wi + 2);
-              if (/^[一-龥]{2}$/.test(_s2) && !_STOP_KW.has(_s2) && !_exclNames.has(_s2)) _kwCandidates.push(_s2);
-              if (_wi + 3 <= message.length) {
-                const _s3 = message.slice(_wi, _wi + 3);
-                if (/^[一-龥]{3}$/.test(_s3) && !_STOP_KW.has(_s3) && !_exclNames.has(_s3)) _kwCandidates.push(_s3);
-              }
+        // 🔴 V34 #3(2026-09-25) 砂金库兜底召回 —— 两段式（倒排索引查询驱动 + 时间窗采样兜底）。
+        //
+        //   原实现有两重结构缺陷：
+        //     ① `if (_isRecallQuestion)` 外层门槛 + `recallOriginalConversations` 内
+        //        `!keywords.length` 早返回 ⇒ **两道关键词门槛**叠加：不提"记得/上次/之前"就压根不查砂金库。
+        //     ② 查了也是 `content LIKE` 字面匹配 + `ORDER BY timestamp DESC LIMIT N` —— 对高频实体，
+        //        "最新 N 条"必然落在**已被上下文覆盖**的区间内 ⇒ 兜底层空转
+        //        （实测：池内 546 条只取 12 条，落在 43分钟~2.4小时，而上下文已覆盖 3.9 小时）。
+        //
+        //   现改为：① 用**当前消息**去 search_index 倒排索引取候选（查询驱动，措辞不同也能命中）；
+        //          ② 索引无命中才按时间窗采样兜底（用户没提实词时至少能看到历史轮廓）。
+        //
+        //   🔴 触发判据 = 数据本身：两路都只取 `timestamp < 上下文最旧一轮` 的原文。
+        //     上下文已覆盖整个窗口的低频实体 ⇒ 区间为空 ⇒ 自然不注入。不比阈值、不看措辞，
+        //     也就不会重演 2026-08-21「早期无关记忆默认注入 ⇒ 一会东一会西」那一幕。
+        try {
+          const _ctxOldestTs = (() => {
+            for (const _t of (enrichedHistory || [])) {
+              if (typeof _t?.timestamp === 'string' && _t.timestamp) return _t.timestamp;
             }
-            // 🔴 2026-09-09 会晤失忆修复(B): 压缩原文取回 — EntityContextStore.searchEntityContext 带
-            //   is_compacted=0 过滤（压缩归档后对其不可见）。此处用 meeting-recall 共享取回（不过滤压缩，
-            //   遵循"原始对话只增不删永久留存")直接命中被压缩归档的《蒹葭》引诗/寒假约定原文注入。
-            const _kwList = [...new Set(_kwCandidates)].slice(0, 4);
-            // 🔴 V34(2026-09-25): 撤除 `if (_topicKw.length > 0)` 门槛 —— 关键词从「门槛」降级为「加权」。
-            //   原门槛 + 函数内 `!keywords.length` 的**双重关键词门槛**叠加 ⇒ 用户不提"记得/之前/上次"
-            //   这类触发词就压根不去砂金库找，砂金库作为"回忆兜底层"的职责形同虚设（实测症状：
-            //   "24 小时的记忆都记不住"、"几天前说的话都记不起来"）。
-            //   现无条件按**时间窗**取回近 sandboxRecallWindowDays 天的原文；关键词命中者由
-            //   recallOriginalConversations 内部优先排前（加权），未命中/无关键词也照样兜底。
-            const _origHits = recallOriginalConversations(
-              _sqlite, _entityUuid, _topicKw,
-              SANDBOX_RECALL_LIMIT, 400, SANDBOX_RECALL_WINDOW_DAYS,
-            );
-            for (const _oh2 of _origHits) {
-              const _cb2 = (_oh2.content || '').substring(0, 400);
-              if (_cb2.length > 4 && !memoryFragments.some((f: string) => f.includes(_cb2.substring(0, 20)))) {
-                memoryFragments.push('【对话·' + _meetingEntityName + '·原文】' + _cb2);
-              }
+            return null;
+          })();
+          const _sandboxHits = recallSandboxConversations(_sqlite, _entityUuid, message, {
+            limit: SANDBOX_RECALL_LIMIT,
+            maxChars: 400,
+            windowDays: SANDBOX_RECALL_WINDOW_DAYS,
+            beforeTs: _ctxOldestTs,
+            minContentLen: SANDBOX_RECALL_MIN_LEN,
+            maxTerms: SANDBOX_RECALL_MAX_TERMS,
+          });
+          for (const _sh of _sandboxHits) {
+            const _sb = (_sh.content || '').substring(0, 400);
+            if (_sb.length > 4 && !memoryFragments.some((f: string) => f.includes(_sb.substring(0, 20)))) {
+              memoryFragments.push('【对话·' + _meetingEntityName + '·更早原文】' + _sb);
             }
-            for (const _kw of _kwList) {
-              const _hits = _store2.searchEntityContext(_entityUuid, _kw, 2);
-              for (const _ht of _hits) {
-                const _cbody = (_ht.content || '').substring(0, 250);
-                if (_cbody.length > 4 && !memoryFragments.some((f: string) => f.includes(_cbody.substring(0, 20)))) {
-                  memoryFragments.push('【对话·' + _meetingEntityName + '】' + _cbody);
-                }
-              }
-            }
-          } catch (_kwErr) { /* 内容匹配失败不阻塞 */ }
-        }
+          }
+          if (_sandboxHits.length > 0) {
+            console.log('[EntityMem·砂金库] 兜底取回 ' + _sandboxHits.length + ' 条（限上下文之外，早于 ' + (_ctxOldestTs || '未定') + '）');
+          }
+        } catch (_sbErr) { /* 砂金库兜底失败不阻塞对话 */ }
         // 🔴 V10.14 隐私隔离: 过滤会晤实体记忆中的他人私密内容
         // 世界规则：每个人的聊天记录通过 UUID 绝对隔离，绝不互通。
         // 徐诗雨的记忆即使提到熊梓铭/玉瑶，涉及私人情感的也要剔除。

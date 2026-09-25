@@ -168,6 +168,21 @@ export const MEMORY_CONFIG = {
      */
     sandboxRecallLimit: 12,
     /**
+     * 砂金库召回单条原文的最小长度（低于此值视为噪声轮次，不入候选）。
+     * 倒排索引路径与时间窗兜底路径共用此门槛。
+     */
+    sandboxRecallMinContentLen: 40,
+    /**
+     * 倒排索引查询的最大 n-gram 词数（控制单次 SQL 的 IN 规模）。
+     */
+    sandboxRecallMaxTerms: 40,
+    /**
+     * 砂金库倒排索引**启动补齐**的单次批量上限（0 = 不限）。
+     * 每进程只跑一次、幂等：只索引 `search_index` 里还没有的对话。
+     * 已知技术债：写入侧尚无增量索引，故靠本补齐在每次重启时收敛缺口。
+     */
+    sandboxIndexBackfillBatch: 1000,
+    /**
      * 全库「未归档轮次」的**硬上限**。
      *
      * 🔴 V34(2026-09-25) 归档策略从「全库头 100 条」改为「**per-entity 保底 + 全库封顶**」：
