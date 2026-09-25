@@ -531,6 +531,47 @@ const MIGRATIONS: Migration[] = [
       } catch (e) { console.warn('[Migration] v14 执行异常:', (e as Error)?.message); }
     },
   },
+
+  // v14 → v15: V34 索引治理 —— 删除 search_index 上的 3 个冗余索引
+  {
+    version: 15,
+    description: 'V34 索引治理: 删除 search_index 冗余索引（与主键前缀重复 / 同列重复）',
+    apply: (db: any) => {
+      // 背景（dbstat 实测）：search_index 相关对象占全库 256.3MB / 319.9MB = 80%，其中 3 个索引纯冗余：
+      //   · idx_si_term / idx_search_term  同列 (term)，且被主键 (term, source_type, source_id) 的前缀覆盖
+      //   · idx_search_source              与 idx_si_source 完全同列 (source_type, source_id)
+      // 副本实测结果：全库 319.9MB → 216.5MB（-32%）；召回主查询计划由 idx_si_source 等效承担
+      //   （195ms → 163ms）；term 优先查询由主键 COVERING INDEX 承担；返回条数一致。
+      //
+      // ⚠️ migrateSchema 对 apply 抛错会**整体 rethrow**（可能拖垮 SQLiteAdapter 初始化）
+      //   ⇒ 每步独立 try/catch，失败只告警不抛出。
+      const _has = (name: string): boolean => {
+        try { return db.exec(`SELECT 1 FROM sqlite_master WHERE type='index' AND name='${name}'`).length > 0; }
+        catch { return false; }
+      };
+      const _drop = (name: string): void => {
+        try {
+          db.run(`DROP INDEX IF EXISTS ${name}`);
+          console.log(`[Migration] v15 ✅ 已删除冗余索引 ${name}`);
+        } catch (e) {
+          console.warn(`[Migration] v15 删除 ${name} 失败（非致命，留存检查）:`, (e as Error)?.message);
+        }
+      };
+      // (source_type, source_id) 必须保留一份 —— 先确认 idx_si_source 在，再删其重复者
+      if (_has('idx_si_source')) {
+        _drop('idx_search_source');
+      } else {
+        console.warn('[Migration] v15 ⚠️ idx_si_source 不存在，跳过删除 idx_search_source（防丢失 source_id 查找路径）');
+      }
+      // (term) 由主键前缀覆盖 —— 先确认主键自动索引在，再删两个 term 索引
+      if (_has('sqlite_autoindex_search_index_1')) {
+        _drop('idx_si_term');
+        _drop('idx_search_term');
+      } else {
+        console.warn('[Migration] v15 ⚠️ search_index 主键自动索引不存在，跳过删除 term 索引（防丢失 term 查找路径）');
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════
