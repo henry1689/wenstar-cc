@@ -348,3 +348,95 @@ describe('P-01（批17 补）· 长度标准单一真源 —— 全仓不得再�
     expect(cm, '功能必须保留').toContain('export function buildCommunicationFragments');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V28 回话方式引导 — 表现层边界锁定
+// 依据：docs/V28-回话方式引导-变更说明.md
+// 本段锁的是作者在 S2 明确划定的边界（不是美学偏好），越界即回归。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[V28] 回话方式引导 — 表现层边界（S2 明确定界）', () => {
+  const BLOCK_RE = /personaBlock\('speech_style',\s*SPEECH_STYLE_GUIDE,\s*\[([^\]]*)\]/;
+
+  it('🔴 块已注册，且 modeScope 显式含 entity_meeting', () => {
+    const src = read('src/webui/chat.ts');
+    const m = src.match(BLOCK_RE);
+    expect(m, 'speech_style 块必须存在').not.toBeNull();
+    const modes = m![1];
+    expect(modes, 'normal 是日常对话的渲染模式，必含').toContain("'normal'");
+    // personaBlock 的默认 modeScope 只有 ['normal'] —— 漏写 entity_meeting 会在会晤模式静默失效
+    expect(modes, '会晤模式必须显式加入，否则静默不生效').toContain("'entity_meeting'");
+  });
+
+  it('🔴 块注册先于 assembler.render（否则不进本次拼装）', () => {
+    const src = read('src/webui/chat.ts');
+    const addIdx = src.search(/personaBlock\('speech_style'/);
+    const renderIdx = src.indexOf('assembler.render({ mode: _mode');
+    expect(addIdx).toBeGreaterThan(-1);
+    expect(renderIdx).toBeGreaterThan(-1);
+    expect(addIdx).toBeLessThan(renderIdx);
+  });
+
+  it('🔴 渲染侧 mode 只有 normal / entity_meeting —— 其余取值在 modeScope 中不生效', () => {
+    const src = read('src/webui/chat.ts');
+    // chat.ts 唯一的 render 调用点；mode 由下方三元式决定，全仓没有任何一处把 mode 设为
+    // 'roleplay'（0 命中）。因此把 'roleplay' 写进 modeScope 不产生行为变化，只会制造
+    // 「已覆盖角色扮演」的假象。该断言把渲染侧事实钉死，防止误改或误加死配置。
+    expect(src).toContain("const _mode = _isMeeting ? 'entity_meeting' as const : 'normal' as const;");
+    expect(src).toMatch(/assembler\.render\(\{\s*mode:\s*_mode/);
+  });
+
+  it('🔴 引导文案不列词表（不得出现语气词/叹词枚举）', () => {
+    const src = read('src/webui/chat.ts');
+    const g = src.match(/const SPEECH_STYLE_GUIDE = \[([\s\S]*?)\]\.join/);
+    expect(g, 'SPEECH_STYLE_GUIDE 必须存在').not.toBeNull();
+    const text = g![1];
+    // S2 边界：只描述「真人说话是什么样」，不把语气词喂给 LLM。
+    const PARTICLES = ['嗯', '啊', '呀', '哦', '呢', '吧', '啦', '嘛', '噢', '嘿', '哈', '唉', '哟'];
+    const hit = PARTICLES.filter(p => text.includes(p));
+    expect(hit, '引导文案出现语气词/叹词枚举: ' + hit.join(' ')).toEqual([]);
+  });
+
+  it('🔴 不做后处理贴词 — 引导只经装配器进入提示词', () => {
+    const src = read('src/webui/chat.ts');
+    // S2 边界：ThinkingPauseInjector 之类的「输出侧贴词」思路明确不采用。
+    expect(src).not.toMatch(/ThinkingPauseInjector\s*\(/);
+    expect(src, 'speech_style 必须经 assembler.add 注册').toMatch(BLOCK_RE);
+  });
+});
+
+describe('[V34] 记忆块定性 — 必须与「记忆即事实」铁律同向（2026-09-25）', () => {
+  // 背景：chat.ts 给记忆块加的包装语原写「你**现在不在那些场景里**」「**绝对不要从记忆里的场景开始说话**」，
+  //      而 EntityContextBuilder 的 entity_memory_fact 铁律写「记忆即事实…必须正面回应，不能否认、不能回避」。
+  //      两段提示词在同一轮上下文里互否，模型倾向采信更晚/更具体的否定句
+  //      ⇒ 实测角色记不住最近几天聊过的事（业主验收样本：25 日晚三人飞杭州）。
+  // 边界：只锁「事实层不得被否定」，**不锁具体措辞** —— 表达层（不要重演过去场景）必须原样保留，
+  //      且与 memoryGuard 的「没有的就是没有，诚实说没有记录」相容（记录内 / 记录外分流）。
+  const CHAT = 'src/webui/chat.ts';
+
+  it('🔴 记忆块不得否定记忆的事实性', () => {
+    expect(read(CHAT), '「你现在不在那些场景里」是事实层否定，与 entity_memory_fact 互否')
+      .not.toContain('你现在不在那些场景里');
+  });
+
+  it('🔴 记忆块必须正面声明「是事实」并要求照实答', () => {
+    const src = read(CHAT);
+    expect(src, '必须正面声明记忆内容是事实').toContain('它们是事实');
+    expect(src, '必须明确禁止用「不记得/没印象」回避记录内已有的内容')
+      .toMatch(/不记得[\s\S]{0,20}没印象/);
+  });
+
+  it('🔴 两条记忆注入路径必须同时修正（assembler + legacy）', () => {
+    const n = read(CHAT).split('它们是事实').length - 1;
+    expect(n, `chat.ts 中出现 ${n} 处，两条注入路径都必须修正（≥2）`).toBeGreaterThanOrEqual(2);
+  });
+
+  it('🔴 表达层边界必须保留 —— 不得因修事实性而放开重演过去场景', () => {
+    expect(read(CHAT), '「不要重演当时的对话」是表达层边界，修事实性时不得连带删除')
+      .toContain('不要重演当时的对话');
+  });
+
+  it('🔴 与 memoryGuard 禁编造相容：记录内 / 记录外分流', () => {
+    expect(read(CHAT), '记录里没写到的，仍须诚实说「没有记录」—— 否则会放开编造')
+      .toMatch(/没写到的[\s\S]{0,12}没有记录/);
+  });
+});
