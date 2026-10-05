@@ -962,6 +962,77 @@ class StreamThinkingStripper {
     reasoningBuf = ''; // V21: 累积 delta.reasoning（思维链字段），仅流结束兜底用，绝不流式展示
     /** V14: 尾部评估句特征（模型在答案后继续输出复盘评估：长度/语气确认、正文检查） */
     private static tailEvalRe = /(?:这个长度很合适|这个长度合适|语气也贴合|语气贴合|语气也合适|确认一下|正文里(?:有|带)|回答里(?:有|带)|内容里(?:有|带)|检查一下.*正文|这段回复|稍微修改|最终确认|最终稿|尺度.{0,8}合适|保持了.{0,12}风格)/;
+
+    /**
+     * 🔴 V35-D: **元话语特征** —— 角色在对话中不可能同时出现 ≥2 个。
+     *   背景（第 5 次思维链泄漏，2026-09-25 业者上报）：
+     *   模型的复盘措辞从「描述式」（这个长度很合适）漂移到「清单式」
+     *   （`约200字。紧扣话题。不编造。时间合理。用户说"应该"。`）—— tailEvalRe 完全失配。
+     *   为何要 ≥2 且成簇：单一特征可能是**合法语境**。例：
+     *     · 「用户说这个功能有问题」—— 玉瑶是私人秘书，办公语境下完全合理；
+     *     · 「我没有编造，这事是真的」—— 角色自辩，合法。
+     *   两者都只命中 1 个特征，故不判泄漏。而真实泄漏是"清单"：多个特征挤在相邻短句里。
+     */
+    private static metaVoiceRes: RegExp[] = [
+        /用户(?:说|问|提到|要求|的原话|的话|的消息)/,   // 第三人称指代对话对象：角色只会说「你说」「鸿艺说」
+        /约\s*\d+\s*字|字数(?:合适|够|对|刚好)/,          // 字面字数统计：角色不会数自己写了几个字
+        /紧扣话题|切题|离题/,                              // 话题贴合自查
+        /不(?:编造|虚构)|没有(?:编造|虚构)/,               // 编造自查
+        /这是(?:问|答|陈述)|不是编造/,                     // 对输出类型的元判断
+    ];
+
+    /**
+     * 🔴 V35-D: 元话语截断点 —— **≥2 个特征且彼此相邻（≤200 字符）**才算"清单式自检"，
+     *   返回该簇起点；否则 −1。相邻条件用于把"散落在正常行文里的单个特征"排除在外。
+     */
+    private static metaVoiceCutIndex(s: string): number {
+        const hits: number[] = [];
+        for (const re of StreamThinkingStripper.metaVoiceRes) {
+            const m = re.exec(s);
+            if (m) hits.push(m.index);
+        }
+        if (hits.length < 2) return -1;
+        hits.sort((a, b) => a - b);
+        for (let i = 1; i < hits.length; i++) {
+            if (hits[i] - hits[i - 1] <= 200) return hits[i - 1];
+        }
+        return -1;
+    }
+
+    /**
+     * 🔴 V35-D: **尾部截断的唯一收口点** —— 三条判据（中文评估句 / 英文起草 / 元话语清单）
+     *   取**最早**命中位置；−1 = 无需截断。
+     *
+     *   为何必须收口：第 5 次泄漏的根因是**结构性**的 —— 原实现只把尾部截断挂在
+     *   `if (this.crossed)` 分支（即"已进入答案区后的**后续** chunk"），而另外 5 条返回路径
+     *   （①findAnswerMark ②findAnswerStart ②b缓冲超长 ④非流式兜底 flush）**全都不过这道工序**。
+     *   于是「答案起点 + 尾部元话语落在同一个 chunk」时整段泄漏 —— 生产表现为 `tokens=1`
+     *   （实测日志 76 次，其中 47 次 len 150~600）。
+     *   端到端对照实验（D:/tmp/v34-leak-repro.ts，喂真实 SSE）：
+     *     词表认得的评估句 —— 同块送 3/3 泄漏，分块送 0/3 截断。
+     *   ⇒ 词表再全也没用，必须先让**每条返回路径**都经过这里。
+     */
+    private static tailCutIndex(s: string): number {
+        if (!s) return -1;
+        const cands: number[] = [];
+        const e = s.search(StreamThinkingStripper.tailEvalRe);
+        if (e >= 0) cands.push(e);
+        const l = findLatinMetaStart(s);
+        if (l >= 0) cands.push(l);
+        const m = StreamThinkingStripper.metaVoiceCutIndex(s);
+        if (m >= 0) cands.push(m);
+        return cands.length ? Math.min(...cands) : -1;
+    }
+
+    /** 对**任意出口文本**施加尾部截断（供 5 条返回路径统一调用） */
+    private static applyTailCut(text: string): string {
+        const i = StreamThinkingStripper.tailCutIndex(text);
+        if (i >= 0) {
+            console.warn('[V35-D] 出口尾部元话语截断: 原文 ' + text.length + ' 字符 → ' + i + ' 字符');
+            return text.slice(0, i);
+        }
+        return text;
+    }
     reset() { this.buf = ''; this.crossed = false; this.tailBuf = ''; this.reasoningBuf = ''; }
     /** 推送一个 chunk，返回可安全展示的 text 增量（''=本 token 不推） */
     push(content: string | undefined, reasoning: string | undefined): string {
@@ -979,15 +1050,10 @@ class StreamThinkingStripper {
             //   （"这个长度很合适，语气也贴合。确认一下：正文里有'诗雨'吗？有——"），
             //   累积 tailBuf 检测评估特征词，命中即停止推送（丢弃后续评估）。
             this.tailBuf += c;
-            // 注意: search 是 String 方法，不是 RegExp 方法（V14 bug: tailEvalRe.search 抛异常吞后续 content）
-            const evalIdx = this.tailBuf.search(StreamThinkingStripper.tailEvalRe);
-            // V22: 英文起草/元推理截断 —— tailEvalRe 只枚举中文特征词，
-            //   模型在真答案后继续用英文写起草自检（Count:/Revised:/Final:/~68 chars）会整段洩漏前台。
-            //   两个判据取**更早**的截断点，任一命中即停止推送。
-            const latinIdx = findLatinMetaStart(this.tailBuf);
-            let cutIdx = evalIdx;
-            if (latinIdx >= 0 && (cutIdx < 0 || latinIdx < cutIdx))
-                cutIdx = latinIdx;
+            // 🔴 V35-D: 改用**统一收口点** tailCutIndex —— 与另外 5 条返回路径共用同一组判据。
+            //   原实现在此内联两条判据（中文评估句 + 英文起草），新增判据时只挂到这里、
+            //   别处照漏，正是第 5 次泄漏的结构性成因。现在判据只在一处定义、六处共用。
+            const cutIdx = StreamThinkingStripper.tailCutIndex(this.tailBuf);
             if (cutIdx >= 0) {
                 const out = this.tailBuf.slice(0, cutIdx);
                 this.tailBuf = '';
@@ -1009,7 +1075,9 @@ class StreamThinkingStripper {
             this.crossed = true;
             const tail = stripPlanningPrefix(cleanTail(this.buf.slice(m.index + m.length)));
             this.buf = '';
-            return tail;
+            // 🔴 V35-D: 出口过统一尾部截断 —— 答案起点与尾部元话语落在同一 chunk 时，
+            //   原先这条路径**完全不过**截断工序（实测同块送 3/3 泄漏）。
+            return StreamThinkingStripper.applyTailCut(tail);
         }
         // ② 结构识别答案起点（V9 括号段扫描识别"（她正准备关火…"动作描写答案；思维链句被 isAnalysisSentence 跳过）
         const as = findAnswerStart(this.buf);
@@ -1017,7 +1085,8 @@ class StreamThinkingStripper {
             this.crossed = true;
             const tail = stripPlanningPrefix(cleanTail(this.buf.slice(as)));
             this.buf = '';
-            return tail;
+            // 🔴 V35-D: 同上 —— 出口过统一尾部截断
+            return StreamThinkingStripper.applyTailCut(tail);
         }
         // ②b V14: 缓冲上限保护——buf 超长仍未识别答案起点（content 全思维链），用 extractAnswerFromReasoning 剥离
         if (this.buf.length > 200) {
@@ -1026,7 +1095,8 @@ class StreamThinkingStripper {
             if (extracted && extracted.trim().length > 0 && extracted.length < this.buf.length - 10) {
                 this.crossed = true;
                 this.buf = '';
-                return extracted;
+                // 🔴 V35-D: 出口过统一尾部截断
+                return StreamThinkingStripper.applyTailCut(extracted);
             }
         }
         // ③ 角色建立段开头（"好的，现在我是…"）→ 缓冲等标记。
@@ -1038,7 +1108,8 @@ class StreamThinkingStripper {
         if (extracted && extracted.trim().length > 0 && extracted.length < this.buf.length - 10) {
             this.crossed = true;
             this.buf = '';
-            return extracted;
+            // 🔴 V35-D: 出口过统一尾部截断
+            return StreamThinkingStripper.applyTailCut(extracted);
         }
         // ⑤ 提取=原文（无思维链可剥）→ 不推，等答案起点/标记/flush（done 帧覆盖气泡）
         return '';
@@ -1051,7 +1122,8 @@ class StreamThinkingStripper {
         const extracted = gateOutgoingReply(extractAnswerFromReasoning(this.buf));
         this.crossed = true;
         this.buf = '';
-        return extracted;
+        // 🔴 V35-D: 流结束兜底出口同样过统一尾部截断（原先完全不过）
+        return StreamThinkingStripper.applyTailCut(extracted);
     }
 }
 
