@@ -706,12 +706,17 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     try {
       const { EntityContextManager } = await import('../app/entity/EntityContextManager.js');
       const _ecm = new EntityContextManager();
-      const _startIndex = ctx._entityMeeting?.getMeetingStartHistoryIndex?.();
       const _meetingUuid = ctx._entityMeeting?.getEntityUUID?.();
       // 🔴 人格独立红线(2026-08-21): 玉瑶态(_meeting=null)必须用**玉瑶专属历史**(belong=玉瑶UUID)，
       // 不能读混合 conversationHistory——否则玉瑶继承实体会话（接话/知道用户与他人隐私/延续实体场景）。
       if (_meetingUuid) {
-        enrichedHistory = _ecm.getContextWindow(ctx.conversationHistory, _activeMeetingName, 40, _startIndex);
+        // 🔴 V35(2026-10-05): 判据由「实体名字」改为「归属 UUID」。
+        //   原实现传 _activeMeetingName，让 getContextWindow 用 content.includes(名字) 猜说话人 ——
+        //   实测把实体自己 24.3% 的、正文未提及自己名字的回复误判为「别人的对话」而整条丢弃，
+        //   直接造成会晤语义断裂（记不住自己刚说过什么）。归属章由 persistence-stage 写入时盖上。
+        //   原第 4 参 _startIndex 一并移除：getMeetingStartHistoryIndex 的 setter 全仓零调用点、
+        //   恒返回 0，该参数从未产生过效果（详见 EntityContextManager.getContextWindow 注释）。
+        enrichedHistory = _ecm.getContextWindow(ctx.conversationHistory, _meetingUuid);
         // Phase 2: DB 侧精准补充 — 如果 startIndex 未覆盖，从 conversations 表按 UUID 补
         if (enrichedHistory.length < 10) {
           try {
@@ -757,9 +762,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     if (_activeMeetingName && enrichedHistory.length > 0) {
       try {
         const { computeStrategy } = await import('../app/entity/EntityContextStrategy.js');
-        const { EntityContextManager: _ECM } = await import('../app/entity/EntityContextManager.js');
         const { compressContext, buildCompressedText } = await import('../app/entity/EntityContextCompressor.js');
-        const _ecm2 = new _ECM();
 
         // ① computeStrategy — 根据实体category+warmth动态窗口
         const _meetingUuid2 = ctx._entityMeeting?.getEntityUUID?.();
@@ -778,13 +781,17 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           } catch { /* 策略计算失败不阻塞 */ }
         }
 
-        // ② isolateEntityTurns — 分离穿插的其他实体对话
-        const _isolated = _ecm2.isolateEntityTurns(enrichedHistory, _activeMeetingName);
-        const _anchorCount = _isolated.interspersed.length > 0 ? 8 : 10;
+        // 🔴 V35(2026-10-05): 原步骤②「isolateEntityTurns — 分离穿插的其他实体对话」已删除。
+        //   该过滤器用 `content.includes(实体名)` 猜说话人，与 getContextWindow 的关键词降级是
+        //   同一个错误判据的第二份实现；而 enrichedHistory 走到这里时**已经**按 belongEntityUuid
+        //   过滤过（RAM 路径经 getContextWindow，DB 路径经 queryEntityContext，两者都只含本实体会话）。
+        //   再套一道名字过滤，等于把正确的过滤结果又毁一次 —— 不变量#7 禁止同一业务规则多处实现。
+        //   注：_anchorCount 原据 interspersed.length 在 8/10 间取值，interspersed 已不存在，
+        //   此处固定 10；B 批会把这段塌缩逻辑整体改为按预算渐进，届时该常量一并收敛。
 
-        // ③ compressContext — 超窗口时压缩
-        if (_isolated.own.length > _maxTurns) {
-          const _compressed = compressContext(_isolated.own, _anchorCount, 30);
+        // ② compressContext — 超窗口时压缩
+        if (enrichedHistory.length > _maxTurns) {
+          const _compressed = compressContext(enrichedHistory, 10, 30);
           // 将 buildCompressedText 输出的摘要文本注入 finalKnowledgeText
           const _ctxText = buildCompressedText(_compressed);
           if (_ctxText && enrichedHistory.length > 40) {
@@ -803,9 +810,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             } catch { /* 非关键 */ }
           }
           enrichedHistory = _compressed.anchor;
-        } else {
-          enrichedHistory = _isolated.own;
         }
+        // 未超窗口时不做改动（原为 enrichedHistory = _isolated.own，本就是同一个数组）
       } catch { /* 增强失败不阻塞 */ }
     }
     let {
@@ -1999,7 +2005,7 @@ if (isFactualRecallQuery && !PROMPT_ASSEMBLER_STRICT) {
         //    改为"如果相关可以自然参考，不要强行衔接"——记忆是背景，不是剧本。
         // 🔴 P0-4 瘦身法: memory_context 由 assembler 承载，strict 模式旧链路跳过。
         if (memoryText && !PROMPT_ASSEMBLER_STRICT && !finalKnowledgeText.includes('【相关记忆】')) {
-          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你以前的记忆片段。你**现在不在那些场景里**。如果当前话题提到了记忆中的人或事，可以用"我记得以前…"的方式轻轻提起。但**绝对不要从记忆里的场景开始说话**——你是正在和对方聊天的活人，不是在重演过去的场景。）';
+          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，仍按铁律诚实说"没有记录"，不许编造。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
           finalKnowledgeText = historyLink + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
         }
         // 家族/社交铁律注入 — 只在消息提到已知家庭人物时注入
@@ -2171,7 +2177,7 @@ try {
   }
   // 🟡 memory: 记忆片段
   if (memoryText && !finalKnowledgeText.includes('【相关记忆】')) {
-    const _memBlock = '【情感背景·过往记忆】' + memoryText + '\n（以上是你以前的记忆片段。你**现在不在那些场景里**。如果当前话题提到了记忆中的人或事，可以用"我记得以前…"的方式轻轻提起。但**绝对不要从记忆里的场景开始说话**——你是正在和对方聊天的活人，不是在重演过去的场景。）';
+    const _memBlock = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，仍按铁律诚实说"没有记录"，不许编造。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
     // 🔴 S4-B1 修复: 含 entity_meeting —— 会晤模式 strict 下 memoryText 由 assembler 唯一承载
     assembler.add(memoryBlock('memory_context', _memBlock, ['normal', 'entity_meeting']));
   }

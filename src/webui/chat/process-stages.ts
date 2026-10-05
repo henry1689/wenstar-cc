@@ -189,7 +189,16 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
             }
           }
           if (recentConversations.length === 0 && ctx.conversationHistory) {
-            const _hist = ctx.conversationHistory.filter((t: any) => (t.content || '').includes(_meetingEntityName!)).slice(-10);
+            // 🔴 V35(2026-10-05): 原实现 `t.content.includes(_meetingEntityName)` ——
+            //   与 EntityContextManager 的关键词降级 / isolateEntityTurns / groupByEntity / mergeThreads
+            //   是同一个错误判据的第 4 份实现（铁律 0.3「同类问题必须全仓库修复」）：
+            //   用「正文里有没有出现实体名字」冒充「这轮是谁说的」。实测徐诗雨 300 条助手回复中
+            //   24.3% 不含自己的名字、且带说话人前缀的为 0 条 ⇒ 判定纯由内容偶然性决定。
+            //   现按 belongEntityUuid 匹配（V35 起 persistence-stage 在内存镜像上也盖归属章）。
+            const _muuid = ctx._entityMeeting?.getEntityUUID?.();
+            const _hist = _muuid
+              ? ctx.conversationHistory.filter((t: any) => t.belongEntityUuid === _muuid).slice(-10)
+              : [];
             if (_hist.length > 0) {
               recentConversations = _hist.map((t: any) => ({
                 role: t.role || 'user', content: (t.content || '').substring(0, 200), timestamp: t.timestamp || '',

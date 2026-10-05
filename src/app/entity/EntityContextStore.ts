@@ -77,6 +77,11 @@ export class EntityContextStore {
           role: r.role as 'user' | 'assistant',
           content: r.content as string,
           timestamp: r.timestamp as string,
+          // 🔴 V35(2026-10-05): 原实现 SQL 取了 belong_entity_uuid 却在映射时丢弃 ——
+          //   归属在链路上被「取出来又扔掉」，下游（contextWindow / isolateEntityTurns）
+          //   只能退化成用「文本里有没有出现实体名字」猜归属，实测 24.3% 的助手回复被误丢。
+          //   户籍管理法：归属是判据的唯一权威，必须在每一层透传。
+          belongEntityUuid: (r.belong_entity_uuid as string) || undefined,
         }));
     } catch (e: any) {
       console.warn('[EntityStore] queryEntityContext 失败:', e?.message);
@@ -106,13 +111,13 @@ export class EntityContextStore {
       if (total <= recent) return this.queryEntityContext(uuid, Math.max(total, recent), includeCompacted ?? false);
 
       const recentRows = this._sqlite.queryAll(
-        `SELECT role, content, timestamp FROM conversations
+        `SELECT role, content, timestamp, belong_entity_uuid FROM conversations
          WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, recent],
       ) || [];
       const earlyRows = this._sqlite.queryAll(
-        `SELECT role, content, timestamp FROM conversations
+        `SELECT role, content, timestamp, belong_entity_uuid FROM conversations
          WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp ASC LIMIT ?`,
         [uuid, early],
@@ -121,7 +126,7 @@ export class EntityContextStore {
       const _midTake = Math.min(mid, _midSpan);
       const _midOffset = early + Math.floor((_midSpan - _midTake) / 2);
       const midRows = this._sqlite.queryAll(
-        `SELECT role, content, timestamp FROM conversations
+        `SELECT role, content, timestamp, belong_entity_uuid FROM conversations
          WHERE belong_entity_uuid = ? ${visibilityFilter}
          ORDER BY timestamp ASC LIMIT ? OFFSET ?`,
         [uuid, _midTake, _midOffset],
@@ -134,7 +139,11 @@ export class EntityContextStore {
         const key = (r.role || '') + (r.content || '').substring(0, 24) + (r.timestamp || '');
         if (seen.has(key)) return;
         seen.add(key);
-        merged.push({ role: r.role as 'user' | 'assistant', content: r.content as string, timestamp: r.timestamp as string });
+        merged.push({
+          role: r.role as 'user' | 'assistant', content: r.content as string, timestamp: r.timestamp as string,
+          // V35: 归属列必须透传（见 queryEntityContext 处注释）
+          belongEntityUuid: (r.belong_entity_uuid as string) || undefined,
+        });
       };
       earlyRows.forEach(add);
       midRows.forEach(add);
@@ -156,7 +165,7 @@ export class EntityContextStore {
   searchEntityContext(uuid: string, keyword: string, limit = 3, _includeCompacted: boolean = false): ConversationTurn[] {
     try {
       const rows = this._sqlite.queryAll(
-        `SELECT role, content, timestamp FROM conversations
+        `SELECT role, content, timestamp, belong_entity_uuid FROM conversations
          WHERE belong_entity_uuid = ? AND (is_test IS NULL OR is_test = 0) AND content LIKE ?
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, `%${keyword}%`, limit],
@@ -166,6 +175,8 @@ export class EntityContextStore {
         role: r.role as 'user' | 'assistant',
         content: r.content as string,
         timestamp: r.timestamp as string,
+        // V35: 同 queryEntityContext —— 归属列必须透传（见该方法处注释）
+        belongEntityUuid: (r.belong_entity_uuid as string) || undefined,
       }));
     } catch (e: any) {
       console.warn('[EntityStore] searchEntityContext 失败:', e?.message);

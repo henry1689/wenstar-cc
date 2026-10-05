@@ -172,14 +172,12 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   let _convUserRowId: number | null = null;
   let _convAsstRowId: number | null = null;
 
-  // ── Step 1: conversationHistory（内存）──
-  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic } as any);
-  input.ctx.saveConversationHistory();
-  if (input.ctx.conversationHistory.length > 500) {
-    input.ctx.conversationHistory.splice(0, input.ctx.conversationHistory.length - 500);
-  }
-
-  // ── Step 2: conversations.db（对话历史库） ──
+  // ── Step 0: 实体归属解析（单一真源，必须最先执行）──
+  // 🔴 V35(2026-10-05): 归属解析原位于 Step 2 之前，却在 **Step 1（内存 push）之后** ——
+  //   于是内存里的每一轮都不带 belongEntityUuid，而该字段正是「这轮是谁说的」的唯一权威判据。
+  //   字段缺失迫使下游用「文本里有没有出现实体名字」来猜归属（EntityContextManager 的关键词
+  //   降级 + isolateEntityTurns），实测徐诗雨 24.3% 的回复因此被整条丢弃、会晤语义断裂。
+  //   户籍管理法第五条：归属必须 fail-closed、无归属即拒之门外 —— 所以**写入方必须先算后写**。
   // P0-4+P1-2: 统一实体归属解析 — EntityOwnershipResolver 单一入口
   // 🔴 户籍管理法（第五条 会晤写入强制）: 会晤模式 belong_entity_uuid 强制 = 会晤实体 UUID，
   // 禁止 entity_genes 推断覆盖（用户消息提到他人时不应把对话归属他人）。
@@ -204,6 +202,17 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     asstUUID = _yuyaoUUID ?? OWNER_UUID;
     ownerEntityName = '玉瑶';
   }
+
+  // ── Step 1: conversationHistory（内存）──
+  // 🔴 V35: 内存镜像必须与数据库同源带上归属 —— 两者曾不一致（库填、内存不填），
+  //   导致「取 80 条上下文」这条主链路拿到的全是无归属轮次，下游只能靠名字猜。
+  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic, belongEntityUuid: belongUUID ?? undefined } as any);
+  input.ctx.saveConversationHistory();
+  if (input.ctx.conversationHistory.length > 500) {
+    input.ctx.conversationHistory.splice(0, input.ctx.conversationHistory.length - 500);
+  }
+
+  // ── Step 2: conversations.db（对话历史库） ──
   // 🔴 P0-2: 实体识别结果独立输出 mentioned_entity_uuids[]（不干预 belong，供 FG 图谱/PAE/M4）
   // 识别来源：消息/回复提到的人（resolveOwnership 分级解析）+ entity_genes person 实体
   const mentionedEntityUuids: string[] = [];
@@ -492,7 +501,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   // ── 更新内存 ──
-  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic } as any);
+  // 🔴 V35: 同 Step 1 —— 助手轮用 asstUUID（会晤实体 / 玉瑶），与数据库写入（:286 一带）同源。
+  //   助手轮尤其关键：它承载「实体自己刚说过什么」，缺归属时正是被下游关键词过滤整条丢掉的那一半。
+  input.ctx.conversationHistory.push({ role: 'assistant', content: input.reply, timestamp: nowTs, topic, belongEntityUuid: asstUUID ?? undefined } as any);
   input.ctx.saveConversationHistory();
 
   if (hadError) {
