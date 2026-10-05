@@ -10,6 +10,8 @@
 
  */
 
+import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
+
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 
 import type { DNAEncoder } from '../m1/DNAEncoder.js';
@@ -703,6 +705,17 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     // 🆕 V10.11: 多角色上下文隔离 — 会晤模式优先从 DB 按 UUID 精准查询
     //   RAM conversationHistory 作为热缓存，DB 作为持久化冷存储
     //   两者合并后按时间排序，确保重启后的上下文完整
+    // 🔴 V35-B(2026-10-05): 上下文窗口的**单一真源**。
+    //   本文件此前写死三种数字（主窗口 40、兜底阈值 20、玉瑶回退 20），
+    //   再叠加 m5 的 slice(-20)、EntityContextStrategy 预算算出的 40、压缩处塌成的 8~10，
+    //   同一概念共 5 套口径互不知情 ⇒「取了 80 条却只注入 20 条」这类事故反复发生。
+    //   现全部由 MEMORY_CONFIG.compaction.contextWindowTurns 派生，不在此处再写第二个数。
+    const _window = (() => {
+      try { const v = Number(MEMORY_CONFIG.compaction.contextWindowTurns); return v > 0 ? v : 80; } catch { return 80; }
+    })();
+    // 兜底触发阈值同样由窗口派生（原为写死的 10 / 20），杜绝第二套刻度
+    const _refillBelow = Math.ceil(_window / 8);   // 内存窗口低于此值 → 去 DB 补
+    const _archivedBelow = Math.ceil(_window / 4); // 取回条数低于此值 → 再拉已归档兜底
     try {
       const { EntityContextManager } = await import('../app/entity/EntityContextManager.js');
       const _ecm = new EntityContextManager();
@@ -718,14 +731,14 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         //   恒返回 0，该参数从未产生过效果（详见 EntityContextManager.getContextWindow 注释）。
         enrichedHistory = _ecm.getContextWindow(ctx.conversationHistory, _meetingUuid);
         // Phase 2: DB 侧精准补充 — 如果 startIndex 未覆盖，从 conversations 表按 UUID 补
-        if (enrichedHistory.length < 10) {
+        if (enrichedHistory.length < _refillBelow) {
           try {
             const { EntityContextStore } = await import('../app/entity/EntityContextStore.js');
             const _store = new EntityContextStore(ctx.storage.getSQLite());
             // P0: 先查未压缩的，不够再从已压缩兜底补充（解决老实体 100% 压缩导致上下文为零的问题）
-            let _dbTurns = _store.queryEntityContext(_meetingUuid, 40, false);
-            if (_dbTurns.length < 20) {
-              const _compactTurns = _store.queryEntityContext(_meetingUuid, 40, true);
+            let _dbTurns = _store.queryEntityContext(_meetingUuid, _window, false);
+            if (_dbTurns.length < _archivedBelow) {
+              const _compactTurns = _store.queryEntityContext(_meetingUuid, _window, true);
               const _seen = new Set(_dbTurns.map((t: any) => t.content?.substring(0, 30)));
               _compactTurns.forEach((t: any) => { if (!_seen.has(t.content?.substring(0, 30))) _dbTurns.push(t); });
             }
@@ -742,44 +755,39 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           const _yuyaoU = ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.('玉瑶') ?? null;
           // P0: 玉瑶态也启用已压缩兜底
           const _yuyaoTurns = _yuyaoU ? (() => {
-            let turns = _store2.queryEntityContext(_yuyaoU, 40, false);
-            if (turns.length < 20) {
-              const compact = _store2.queryEntityContext(_yuyaoU, 40, true);
+            let turns = _store2.queryEntityContext(_yuyaoU, _window, false);
+            if (turns.length < _archivedBelow) {
+              const compact = _store2.queryEntityContext(_yuyaoU, _window, true);
               const seen = new Set(turns.map((t: any) => t.content?.substring(0, 30)));
               compact.forEach((t: any) => { if (!seen.has(t.content?.substring(0, 30))) turns.push(t); });
             }
             return turns;
           })() : [];
-          enrichedHistory = _yuyaoTurns.length > 0 ? _yuyaoTurns : ctx.conversationHistory.slice(-20);
+          enrichedHistory = _yuyaoTurns.length > 0 ? _yuyaoTurns : ctx.conversationHistory.slice(-_window);
         } catch {
-          enrichedHistory = ctx.conversationHistory.slice(-20);
+          enrichedHistory = ctx.conversationHistory.slice(-_window);
         }
       }
     } catch {
-      enrichedHistory = ctx.conversationHistory.slice(-20);
+      enrichedHistory = ctx.conversationHistory.slice(-_window);
     }
     // 🆕 V10.11: 会晤模式下多重增强 — 动态窗口 + isolateTurns + 压缩 + 摘要文本
     if (_activeMeetingName && enrichedHistory.length > 0) {
       try {
-        const { computeStrategy } = await import('../app/entity/EntityContextStrategy.js');
         const { compressContext, buildCompressedText } = await import('../app/entity/EntityContextCompressor.js');
 
-        // ① computeStrategy — 根据实体category+warmth动态窗口
-        const _meetingUuid2 = ctx._entityMeeting?.getEntityUUID?.();
-        let _maxTurns = 40;
-        if (_meetingUuid2) {
-          try {
-            const _ent = ctx.m4?.getFamilyGraph?.()?.getEntityByUUID?.(_meetingUuid2);
-            const _store2 = ctx.storage ? new (await import('../app/entity/EntityContextStore.js')).EntityContextStore(ctx.storage.getSQLite()) : null;
-            const _strategy = computeStrategy({
-              category: (_ent as any)?.category || 'G',
-              warmth: undefined, // edges warmth 需单独查，此处略过
-              interactionCount7d: _store2?.getEntityTurnCount(_meetingUuid2, 7) || 0,
-              lastInteraction: (_ent as any)?.last_interaction || '',
-            });
-            _maxTurns = _strategy.maxTurns;
-          } catch { /* 策略计算失败不阻塞 */ }
-        }
+        // ① 窗口 = 配置真源 _window —— **不再经 computeStrategy**（业主要求，2026-10-05）。
+        //   🔴 V35-B 实测：她（category='A'）被 strategy 压到 40 条，与选定的 80 不符。
+        //   而该策略的两个输入本就不可靠：
+        //     · warmth 恒传 undefined —— 代码注释自陈「edges warmth 需单独查，此处略过」，
+        //       于是 intimate/soulmate 档**永远不可达**；
+        //     · 它读的 `_ent.last_interaction` 在 FG nodes 表里**并不存在**（只有 last_mentioned），
+        //       冷/久未档因此可能误触发，把窗口压到 5~10 条。
+        //   即这套「实体差异化窗口」建立在不存在的输入上，实际只靠 category 一维在工作。
+        //   窗口政策理应只有一处（不变量#7）：MemoryConfig.compaction.contextWindowTurns。
+        //   ⚠️ EntityContextStrategy 模块已随之删除（全仓仅此一处消费者）；
+        //      冷却期收缩窗口的能力一并移除，这是业主明示接受的取舍。
+        const _maxTurns = _window;
 
         // 🔴 V35(2026-10-05): 原步骤②「isolateEntityTurns — 分离穿插的其他实体对话」已删除。
         //   该过滤器用 `content.includes(实体名)` 猜说话人，与 getContextWindow 的关键词降级是
@@ -790,8 +798,12 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         //   此处固定 10；B 批会把这段塌缩逻辑整体改为按预算渐进，届时该常量一并收敛。
 
         // ② compressContext — 超窗口时压缩
+        //   🔴 V35-B(2026-10-05): 锚点由写死的 10 改为 _maxTurns —— 原实现只要超窗，
+        //   窗口就从最多 80 条**断崖式**砍到 10 条（compressContext 内 anchor = allTurns.slice(-anchorCount)），
+        //   用户在"第 81 轮"会突然感到她失忆。现改为「保留满窗口、仅超出部分进摘要」，
+        //   塌缩幅度与窗口同源，不再存在第二个刻度。
         if (enrichedHistory.length > _maxTurns) {
-          const _compressed = compressContext(enrichedHistory, 10, 30);
+          const _compressed = compressContext(enrichedHistory, _maxTurns, 30);
           // 将 buildCompressedText 输出的摘要文本注入 finalKnowledgeText
           const _ctxText = buildCompressedText(_compressed);
           if (_ctxText && enrichedHistory.length > 40) {

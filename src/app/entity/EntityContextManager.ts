@@ -129,14 +129,10 @@ export class EntityContextManager {
   //   删除理由：getContextWindow 已按 belongEntityUuid 完成同一件事，
   //   保留第二道过滤器既违反不变量#7（禁止同一业务规则在多处实现），又会把正确的过滤结果再毁一次。
 
-  /**
-   * E1: 上下文安全上限。
-   * 按 token 预算截断窗口——默认 8000 tokens，每条约 200 tokens。
-   */
-  applyTokenBudget(turns: ConversationTurn[], budgetTokens: number = 8000): ConversationTurn[] {
-    const maxByBudget = Math.min(60, Math.floor(budgetTokens / 200));
-    return turns.slice(-maxByBudget);
-  }
+  // 🔴 V35-B(2026-10-05): 原 applyTokenBudget() 已删除（零调用点）。
+  //   它是「窗口上限」这个概念的第 4 份实现：用 `Math.min(60, budgetTokens / 200)` 又算了一遍
+  //   与 MemoryConfig.compaction.contextWindowTurns 无关的上限（且 60 与配置的 80 冲突）。
+  //   窗口上限的唯一真源是 contextWindowTurns，由调用方读取后传入，本类不再自行推算。
 
   /** 清除缓存 */
   clearCache(): void {

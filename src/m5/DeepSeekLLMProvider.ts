@@ -1694,15 +1694,23 @@ export class DeepSeekLLMProvider implements LLMProvider {
     const isSelfIntroQuery = /你是谁|介绍你自己|你叫什么|你多大了|你多大/.test(rawInput);
 
     // 注入最近对话历史
-    if (_isEntityMeeting) {
-      const recentTurns = history.slice(-20);
-      for (const turn of recentTurns) {
-        messages.push({ role: turn.role, content: turn.content });
-      }
-    } else if (hasSelfProfile && isSelfIntroQuery) {
-      // 跳过历史——防止被之前的亲密对话污染
+    // 🔴 V35-B(2026-10-05): 两条路径**合并为一条**，只保留一处差异（窗口来源），其余同待遇。
+    //   原实现：会晤 `history.slice(-20)` 且**不做单条截断**；普通 `slice(-getHistoryLimit())` + 单条截断。
+    //   两个问题：
+    //   ① 窗口在最后一米被写死成 20 —— 上游 chat.ts 已按配置真源
+    //      `MemoryConfig.compaction.contextWindowTurns`(80) 取好，此处再切一刀 ⇒「取 80 只用 20」，
+    //      配置形同虚设，且与她「刚说过的话」大面积丢失叠加（见 V35-A 归属修复）。
+    //   ② 同一件事两条路两种待遇：会晤不截断（个别超长轮次可吃光预算），普通有
+    //      HISTORY_TURN_MAX_CHARS 兜着。
+    //   现：窗口来源分开（会晤由上游按配置负责、普通保留 P-02 上限），截断逻辑与告警合一。
+    if (hasSelfProfile && isSelfIntroQuery) {
+      // 跳过历史——防止被之前的亲密对话污染（原逻辑保留）
     } else {
-      const recentTurns = history.slice(-getHistoryLimit(rawInput));
+      // 窗口来源：
+      //   · 会晤 —— 上游 chat.ts 已按配置窗口（contextWindowTurns）限好，此处**不再二次切**；
+      //   · 普通 —— 保留 P-02/P-14 的 HISTORY_INJECT_CAP(20)。该上限是针对普通模式实测
+      //     「hist 占整个 prompt 75%、超 L2 预算近 6 倍」而设，在其场景内依然成立，本次不动。
+      const recentTurns = _isEntityMeeting ? history : history.slice(-getHistoryLimit(rawInput));
       let _truncatedTurns = 0;
       let _truncatedChars = 0;
       for (let _i = 0; _i < recentTurns.length; _i++) {
@@ -1710,9 +1718,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
         const _c = turn.content || '';
         // 🔴 P-02 / P-13（PAS v1 / V27批3）: **末条不截断** ——
         //   `chat.ts` 把运行时守卫块（allGuardMsgs，最多 11 条 join，单条可达 700+ 字符）
-        //   作为一条 assistant 伪轮 push 到 history **末尾**（chat.ts:1693-1697）。
-        //   它是数组最后一个元素，必落在 slice(-20) 窗口内。
-        //   若对它应用 HISTORY_TURN_MAX_CHARS，会导致 memoryGuard（共同过去铁律）/\n        //   hallucinationGuard（不得假装认识）/timeGuard/dailyGuard 等 7~10 条守卫**静默消失**
+        //   作为一条 assistant 伪轮 push 到 history **末尾**（chat.ts）。
+        //   它是数组最后一个元素，必落在注入窗口内。
+        //   若对它应用 HISTORY_TURN_MAX_CHARS，会导致 memoryGuard（共同过去铁律）/
+        //   hallucinationGuard（不得假装认识）/timeGuard/dailyGuard 等 7~10 条守卫**静默消失**
         //   （独立评审 P1-1，阻断级）。
         //   ⚠️ 守卫的正式收口（迁往 assembler，不再走 history 通道）登记在批4。
         const _isLast = _i === recentTurns.length - 1;
@@ -1729,7 +1738,8 @@ export class DeepSeekLLMProvider implements LLMProvider {
       // 🔴 P-13: 截断必须记录并告警（静默丢弃视为违规）—— 与 chat.ts 的 [PromptAssembler⚠P-13] 对齐
       if (_truncatedTurns > 0) {
         console.warn('[P-13] 历史注入截断: ' + _truncatedTurns + ' 条超 ' + HISTORY_TURN_MAX_CHARS
-          + ' 字符被剪共 ' + _truncatedChars + ' 字符（mode=normal, 末条守卫已保留）');
+          + ' 字符被剪共 ' + _truncatedChars + ' 字符（mode=' + (_isEntityMeeting ? 'meeting' : 'normal')
+          + ', 末条守卫已保留）');
       }
     }
 

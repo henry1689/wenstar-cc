@@ -1,123 +1,37 @@
 /**
- * EntityContextStrategy — 实体差异化上下文策略
- * =============================================
- * 根据实体的 category + warmth + 互动频次，自动计算最优上下文窗口大小。
+ * EntityContextStrategy —— 已废弃（2026-10-05 删除实现，保留墓碑）
+ * ================================================================
+ * 🔴 V35-B：本模块原有 `computeStrategy()` / `applyTokenBudget()` 两个导出，
+ *    现**全部移除**，文件仅保留此说明。原因如下，勿在原处复活：
  *
- * 原则：
- *   - 亲密关系 → 大窗口（需要情感连续性）
- *   - 业务关系 → 中窗口（需要上下文但不深）
- *   - 低频实体 → 小窗口（节省 token 预算）
- *   - category 是观测标签，warmth 是实时亲密度——两者结合决策
+ * 【一】它是「上下文窗口」这个概念的第 7 份实现。
+ *   V35-B 之前，同一个窗口在仓里共有六套互不知情的口径（配置真源 80、keepFullTurns 100、
+ *   chat.ts 写死 40 与 20、m5 的 slice(-20)、本模块的绝对值档位 5/10/20/40/60、压缩处塌成 8~10）。
+ *   本模块是其中最隐蔽的一份 —— 它压在配置窗口**之上**，把 80 又切一刀。
+ *
+ * 【二】它的两个输入从来就是坏的，也就是说它从未按设计工作过。
+ *   · `warmth`：唯一调用点（chat.ts 会晤增强块）传的是 **undefined**，
+ *     代码注释自陈「edges warmth 需单独查，此处略过」⇒ intimate / soulmate 档**永远不可达**。
+ *   · `lastInteraction`：调用点读的是 `entity.last_interaction`，
+ *     而 FG 的 nodes 表**没有这个字段**（只有 properties.last_mentioned）⇒
+ *     冷对话（>14 天）/ 久未互动（>7 天）两档可能被误触发，把窗口压到 1/16 或 1/8。
+ *   实测（2026-10-05，徐诗雨 category='A'）：它把窗口压到 40 条，
+ *   而业主选定的是 80 条；各档位字符总量的实测反推（4469 + 守卫伪轮 ≈ 生产 hist 5171）证实了这一点。
+ *
+ * 【三】窗口政策理应只有一处（不变量#7：禁止同一业务规则在多处实现）。
+ *   2026-10-05 业主裁定：**会晤窗口 = MemoryConfig.compaction.contextWindowTurns（80）**，
+ *   不接受任何"在其之上再切一刀"的第二套政策；相应地，放弃"冷实体收缩窗口"这一能力
+ *   （该能力本就因输入缺失而未真正生效）。
+ *
+ * 【四】`applyTokenBudget()` 另有一份同族死代码，已于同批删除：
+ *   · `EntityContextStrategy.applyTokenBudget` —— 用 `budgetTokens/200` 封顶 60，零调用点；
+ *   · `EntityContextManager.applyTokenBudget`   —— 同样 `Math.min(60, budgetTokens/200)`，零调用点。
+ *
+ * 若将来确需恢复"按关系亲疏 / 互动频次差异化窗口"，请先确保：
+ *   ① 输入真实可得（warmth 需从 FG edges 查、时间维度需用 nodes 表真实存在的字段）；
+ *   ② 表达方式是"相对配置窗口的比例"，而非另一套绝对值；
+ *   ③ 有回归测试锁住"不得超过配置窗口"。
+ *   在此之前，不要重新引入本模块。
  */
 
-export interface EntityContextStrategy {
-  /** 最大上下文轮次 */
-  maxTurns: number;
-  /** 压缩模式 */
-  compressionMode: 'aggressive' | 'balanced' | 'conservative';
-  /** 锚点层占比 (0-1)，剩余为摘要层 */
-  anchorRatio: number;
-  /** 冷对话归档天数（超时未互动自动归档） */
-  expiryDays: number;
-  /** 是否在重启时自动恢复上下文 */
-  autoRebuild: boolean;
-}
-
-/** 实体属性输入（从 FG + HeatTracker 获取） */
-export interface EntityProfile {
-  category: string;       // A/B/C/D/E/F/G/H/X/S
-  warmth?: string;        // distant/friendly/trusted/intimate/soulmate
-  interactionCount7d: number;
-  lastInteraction: string;
-}
-
-/** 默认策略 — 普通社交关系 */
-const DEFAULT_STRATEGY: EntityContextStrategy = {
-  maxTurns: 20,
-  compressionMode: 'balanced',
-  anchorRatio: 0.25,
-  expiryDays: 30,
-  autoRebuild: true,
-};
-
-/**
- * 根据实体属性自动计算差异化策略。
- * 调用时机：每次会晤进入前 + 每次上下文压缩前。
- */
-export function computeStrategy(profile: EntityProfile): EntityContextStrategy {
-  const daysSince = profile.lastInteraction
-    ? Math.floor((Date.now() - new Date(profile.lastInteraction).getTime()) / 86400000)
-    : 999;
-
-  // 冷对话 → 最小窗口
-  if (daysSince > 14) {
-    return { ...DEFAULT_STRATEGY, maxTurns: 5, compressionMode: 'aggressive', anchorRatio: 0.5, expiryDays: 14 };
-  }
-  if (daysSince > 7) {
-    return { ...DEFAULT_STRATEGY, maxTurns: 10, compressionMode: 'aggressive', anchorRatio: 0.4 };
-  }
-
-  // warmth 为 intimate/soulmate → 大窗口 + 保守压缩
-  if (profile.warmth === 'soulmate' || profile.warmth === 'intimate') {
-    return {
-      maxTurns: 60,
-      compressionMode: 'conservative',
-      anchorRatio: 0.25,
-      expiryDays: 90,
-      autoRebuild: true,
-    };
-  }
-
-  // category = X（情人）→ 大窗口
-  if (profile.category === 'X') {
-    return {
-      maxTurns: 60,
-      compressionMode: 'conservative',
-      anchorRatio: 0.25,
-      expiryDays: 90,
-      autoRebuild: true,
-    };
-  }
-
-  // category = A（家人）+ intimate → 中上窗口
-  if (profile.category === 'A') {
-    return {
-      maxTurns: 40,
-      compressionMode: 'balanced',
-      anchorRatio: 0.3,
-      expiryDays: 60,
-      autoRebuild: true,
-    };
-  }
-
-  // 高频互动（7天 > 50次）→ 扩大窗口
-  if (profile.interactionCount7d > 50) {
-    return {
-      maxTurns: 40,
-      compressionMode: 'balanced',
-      anchorRatio: 0.25,
-      expiryDays: 30,
-      autoRebuild: true,
-    };
-  }
-
-  // 低频互动（7天 < 5次）→ 缩小窗口
-  if (profile.interactionCount7d < 5) {
-    return { ...DEFAULT_STRATEGY, maxTurns: 10, compressionMode: 'aggressive', anchorRatio: 0.5 };
-  }
-
-  return DEFAULT_STRATEGY;
-}
-
-/**
- * 安全上限：确保单次 LLM 上下文不超过 8000 tokens。
- * 每条对话约 200 tokens → maxTurns × 200 ≤ 8000 → maxTurns ≤ 40。
- * 保守模式的上限更高（60条→上下文全量约12000，由调用方按 token 预算截断）。
- */
-export function applyTokenBudget(strategy: EntityContextStrategy, budgetTokens: number = 8000): EntityContextStrategy {
-  const maxByBudget = Math.floor(budgetTokens / 200);
-  if (strategy.maxTurns > maxByBudget) {
-    return { ...strategy, maxTurns: maxByBudget };
-  }
-  return strategy;
-}
+export {};
