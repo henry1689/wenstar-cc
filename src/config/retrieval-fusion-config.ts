@@ -35,6 +35,19 @@ export interface BudgetConfig {
   longtext_max_ratio: number;
   work_max_chars: number;
   hard_max_chars: number;
+  /**
+   * 🔴 V35-C(2026-10-05): 砂金库兜底（时间窗采样）**条数封顶**。
+   *   它是"索引零命中时的最后手段"，不是默认填充 —— 原实现每次走满额 12 条，
+   *   占记忆预算均值 66.7%，把与当前话题无关的旧原文倒进提示词。
+   */
+  sandbox_fallback_limit: number;
+  /** 🔴 V35-C: 砂金库兜底允许占用的**记忆预算比例**上限（对话是主体，记忆是补充） */
+  sandbox_max_ratio_of_memory: number;
+  /**
+   * 🔴 V35-C: 记忆块相对**对话历史体量**的比例上限 —— 落实业主裁定的「历史 ≥ 记忆」。
+   *   实测修复前记忆 8836 字符 vs 历史 4740 字符（1.9×），模型注意力被"过去的素材"带走。
+   */
+  memory_max_ratio_of_history: number;
 }
 export interface FilterConfig {
   min_similarity: number;
@@ -91,7 +104,7 @@ const DEFAULTS: RetrievalFusionConfig = {
   timeline_weight: { base: 0.3, scale: 0.2, cap: 0.9, min_val: 0.6 },
   foundation_rrf_domain_weight: { black_diamond: 0.25, vault: 0.12, knowledge: 0.15, sand_memory: 0.1 },
   v13_rrf_weights: { spine: 0.35, keyword: 0.3, work: 0.25, entity: 0.2, emotion: 0.1, locus: 0.05, multi_hit_bonus: 1.2 },
-  budget: { mem_ratio_normal: 0.6, kb_ratio_normal: 0.4, mem_ratio_longtext: 0.3, kb_ratio_longtext: 0.15, longtext_max_ratio: 0.8, work_max_chars: 4000, hard_max_chars: 8000 },
+  budget: { mem_ratio_normal: 0.6, kb_ratio_normal: 0.4, mem_ratio_longtext: 0.3, kb_ratio_longtext: 0.15, longtext_max_ratio: 0.8, work_max_chars: 4000, hard_max_chars: 8000, sandbox_fallback_limit: 2, sandbox_max_ratio_of_memory: 0.3, memory_max_ratio_of_history: 1.0 },
   filter: { min_similarity: 0.6, max_fusion_items: 16 },
   speed_filter: { second_filter_threshold: 0.15, max_normal_memory_count: 10, meeting_max_normal_memory_count: 20, prompt_depth_enabled: true },
   p1_speed: {

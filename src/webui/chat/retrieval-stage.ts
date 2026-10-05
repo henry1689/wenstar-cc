@@ -24,6 +24,9 @@ import {
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
+// 🔴 V35-C(2026-10-05): 砂金库兜底的条数封顶与子预算 —— 与既有一整套预算体系统一放在
+//   retrieval-fusion.config（mem_ratio_normal / hard_max_chars 等），不另起第二套数字。
+import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 
 /** 砂金库时间窗召回：天数（近 N 天聊过的可被召回） */
 const SANDBOX_RECALL_WINDOW_DAYS = (() => {
@@ -44,6 +47,16 @@ const SANDBOX_RECALL_MIN_LEN = (() => {
 const SANDBOX_RECALL_MAX_TERMS = (() => {
   const v = Number(MEMORY_CONFIG.compaction.sandboxRecallMaxTerms);
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 40;
+})();
+/** 🔴 V35-C: 砂金库**时间窗兜底**的条数封顶（索引零命中时的最后手段，非默认填充） */
+const SANDBOX_FALLBACK_LIMIT = (() => {
+  const v = Number(getRetrievalFusionConfig()?.budget?.sandbox_fallback_limit);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 2;
+})();
+/** 🔴 V35-C: 砂金库兜底可占用的**记忆预算比例**上限（对话是主体，记忆是补充） */
+const SANDBOX_MAX_RATIO_OF_MEMORY = (() => {
+  const v = Number(getRetrievalFusionConfig()?.budget?.sandbox_max_ratio_of_memory);
+  return Number.isFinite(v) && v > 0 ? v : 0.3;
 })();
 /** 砂金库索引启动补齐：单次最多回填条数（0 = 不限） */
 const SANDBOX_INDEX_BACKFILL_BATCH = (() => {
@@ -509,22 +522,37 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
             return null;
           })();
+          // 🔴 V35-C(2026-10-05): **子预算** —— 砂金库最多占用记忆预算的 SANDBOX_MAX_RATIO_OF_MEMORY。
+          //   记忆预算 = hard_max_chars × mem_ratio_normal（与 MemoryInjector 同一套口径）。
+          //   为何必须封顶：实测该兜底占用记忆预算均值 66.7%（峰值 84%），
+          //   把真正与当前话题相关的情感/金库记忆挤出去 —— 与「对话是主体，记忆是补充」相悖。
+          const _bud = getRetrievalFusionConfig()?.budget;
+          const _memBudget = Math.floor(
+            (Number(_bud?.hard_max_chars) || 8000) * (Number(_bud?.mem_ratio_normal) || 0.6),
+          );
+          const _sandboxBudget = Math.floor(_memBudget * SANDBOX_MAX_RATIO_OF_MEMORY);
           const _sandboxHits = recallSandboxConversations(_sqlite, _entityUuid, message, {
             limit: SANDBOX_RECALL_LIMIT,
+            fallbackLimit: SANDBOX_FALLBACK_LIMIT,
             maxChars: 400,
             windowDays: SANDBOX_RECALL_WINDOW_DAYS,
             beforeTs: _ctxOldestTs,
             minContentLen: SANDBOX_RECALL_MIN_LEN,
             maxTerms: SANDBOX_RECALL_MAX_TERMS,
           });
+          let _sandboxUsed = 0;
           for (const _sh of _sandboxHits) {
             const _sb = (_sh.content || '').substring(0, 400);
-            if (_sb.length > 4 && !memoryFragments.some((f: string) => f.includes(_sb.substring(0, 20)))) {
+            if (_sb.length <= 4) continue;
+            if (_sandboxUsed + _sb.length > _sandboxBudget) break;   // 子预算封顶
+            if (!memoryFragments.some((f: string) => f.includes(_sb.substring(0, 20)))) {
               memoryFragments.push('【对话·' + _meetingEntityName + '·更早原文】' + _sb);
+              _sandboxUsed += _sb.length;
             }
           }
           if (_sandboxHits.length > 0) {
-            console.log('[EntityMem·砂金库] 兜底取回 ' + _sandboxHits.length + ' 条（限上下文之外，早于 ' + (_ctxOldestTs || '未定') + '）');
+            console.log('[EntityMem·砂金库] 取回 ' + _sandboxHits.length + ' 条 → 入池 '
+              + _sandboxUsed + '/' + _sandboxBudget + ' 字符（限上下文之外，早于 ' + (_ctxOldestTs || '未定') + '）');
           }
         } catch (_sbErr) { /* 砂金库兜底失败不阻塞对话 */ }
         // 🔴 V10.14 隐私隔离: 过滤会晤实体记忆中的他人私密内容

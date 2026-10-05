@@ -16,7 +16,7 @@ import { getRetrievalFusionConfig } from '../config/retrieval-fusion-config.js';
 import { computeQueryRelevance } from './rerank/AlgorithmicCrossEncoder.js';
 
 /** 记忆片段类别（第二阶段 P0: 精筛/条数上限的豁免依据） */
-export type MemoryKind = 'diamond' | 'vault' | 'sand' | 'timeline' | 'context' | 'knowledge';
+export type MemoryKind = 'diamond' | 'vault' | 'sand' | 'timeline' | 'context' | 'knowledge' | 'conversation';
 
 /** 记忆片段（统一表示） */
 export interface MemoryItem {
@@ -140,9 +140,16 @@ export function injectMemories(opts: InjectOptions): string {
     const isVault = frag.includes('金库');
     // 🔴 P0-3 kind 判定: 基于原始 frag 标签（清洗已在 L96-100 剥离标签），豁免依据
     // context = 当前会话上下文/实体自有记忆（绝对优先，不精筛不计数）
+    // 🔴 V35-C(2026-10-05): 【对话·…·更早原文】从 context 中**拆出**为独立 kind。
+    //   它是"比当前上下文更早"的旧对话原文，**不属于"当前会话上下文"**，却因标签形状
+    //   被一并判为 context，从而**同时豁免**了相关性精筛与条数上限 —— 两道质量闸门全绕过。
+    //   实测该批占用记忆预算 66.7%（峰值 84%），且多为与当前话题无关的旧内容，
+    //   正是话题漂移的直接推手。现独立为 conversation：保留"实体自有对话"语义与优先级，
+    //   但**照常参与精筛与条数上限**。
     const kind: MemoryKind = isDiamond ? 'diamond' : isVault ? 'vault' :
       frag.startsWith('📖') ? 'knowledge' :
-      /^(【用户曾提到】|【用户状态】|【时间检索】|【回忆】|【对话·|【.+的记忆】)/.test(frag) ? 'context' : 'sand';
+      /^【对话·/.test(frag) ? 'conversation' :
+      /^(【用户曾提到】|【用户状态】|【时间检索】|【回忆】|【.+的记忆】)/.test(frag) ? 'context' : 'sand';
     let priority = PRI.memory_normal;
     if (isDiamond) priority = PRI.black_diamond;
     else if (frag.includes('档案') || preservedLabel.includes('档案')) priority = PRI.archive_tag;
@@ -219,7 +226,9 @@ export function injectMemories(opts: InjectOptions): string {
   const _capped: MemoryItem[] = [];
   const _normal: MemoryItem[] = [];
   for (const it of _filtered) {
-    if (it.kind === 'sand' || it.kind === 'timeline') _normal.push(it);
+    // 🔴 V35-C: conversation（【对话·…·更早原文】）与 sand/timeline 同样受条数上限约束 ——
+    //   它原被并入 context 而豁免本次上限，叠加子预算缺失，才会独占记忆预算 66.7%。
+    if (it.kind === 'sand' || it.kind === 'timeline' || it.kind === 'conversation') _normal.push(it);
     else _capped.push(it);
   }
   if (_normal.length > _normalCap) {

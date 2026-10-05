@@ -313,6 +313,11 @@ export interface SandboxRecallOptions {
   minContentLen?: number;
   /** 倒排查询最大词数 */
   maxTerms?: number;
+  /**
+   * 🔴 V35-C(2026-10-05): 时间窗兜底的**条数封顶**（真正的最后手段，不是默认填充）。
+   *   默认 2 —— 原实现走兜底时按 `limit` 取满（实测每次 12 条），把记忆预算吃掉了 66.7%。
+   */
+  fallbackLimit?: number;
 }
 
 /**
@@ -393,11 +398,24 @@ export function recallSandboxConversations(
     }
   }
 
-  // ── ② 时间窗采样兜底（仅当 ① 不足）──
-  if (hits.length < _limit && _since) {
+  // ── ② 时间窗采样兜底（**① 无命中时**才走 —— 见本函数头注释的原始设计）──
+  // 🔴 V35-C(2026-10-05): 原触发条件是 `hits.length < _limit`（"不满额"），
+  //   而倒排索引几乎永远凑不满 `_limit`(=12) ⇒ **每一轮都兜底**。
+  //   实测：109 次触发**全部返回满额 12 条**，占用记忆预算均值 66.7%（峰值 84%）；
+  //   且这批是**与当前话题无关**的旧对话原文 —— 正是 2026-08-21
+  //   「早期无关记忆默认注入 ⇒ 一会东一会西」那次事故的同源复发
+  //   （当时靠关键词门槛压住，后被改为无条件执行，防护失效）。
+  //   后果：记忆块体量压过对话本身（8836 vs 4740 字符），模型注意力被"过去的素材"带走，
+  //   表现为话题惯性弱、说几句就漂到别的事上。
+  //   现改回文档声明的意图：「① 无命中时才按时间跨度取」，并把兜底条数封顶
+  //   —— 给出历史轮廓即可，不是把 12 条旧原文倒进提示词。
+  if (hits.length === 0 && _since) {
+    const _fallbackLimit = Number.isFinite(opts.fallbackLimit) && (opts.fallbackLimit as number) > 0
+      ? Math.floor(opts.fallbackLimit as number)
+      : 2;
     // 关键词传空：①已做过查询驱动的匹配，这里只走时间窗（避免重复的 LIKE 扫描）
     const fb = recallOriginalConversations(
-      src, entityUuid, [], _limit - hits.length, _maxChars, _days, _beforeTs,
+      src, entityUuid, [], _fallbackLimit, _maxChars, _days, _beforeTs,
     );
     for (const r of fb) {
       if (_push(r)) break;

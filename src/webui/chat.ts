@@ -1784,7 +1784,27 @@ try {
   const { injectMemories } = await import('../m4/MemoryInjector.js');
   // 🔴 D3 修复: maxChars 从配置读取（hard_max_chars），不硬编码 8000
   const { getRetrievalFusionConfig } = await import('../config/retrieval-fusion-config.js');
-  const _hardCap = getRetrievalFusionConfig().budget.hard_max_chars;
+  const _budgetCfg = getRetrievalFusionConfig().budget;
+  const _hardCap = _budgetCfg.hard_max_chars;
+  // 🔴 V35-C(2026-10-05): **对话是主体，记忆是补充** —— 记忆块上限由**对话历史体量**派生。
+  //   实测修复前：记忆均值 8836 字符 vs 历史均值 4740 字符（1.9 倍，极端样本 6 倍），
+  //   95% 的会晤调用 est_tokens 超 10000。记忆把提示词的多数篇幅占掉之后，
+  //   模型是在"复述过去的素材"而不是"接住眼前的话" ⇒ 话题惯性弱、说几句就漂到别的事。
+  //   业主裁定：历史 ≥ 记忆。
+  //   实现：maxChars = clamp(历史字符数 × memory_max_ratio_of_history, 200, hard_max_chars)。
+  //   · 下界 200：避免极短对话时把记忆一刀切没（那会让"问起旧事"完全失能）；
+  //   · 上界 hard_max_chars：原有硬上限不变，本改动只可能**收紧**，不会放宽。
+  const _histChars = (enrichedHistory || []).reduce(
+    (s: number, t: any) => s + String(t?.content || '').length, 0,
+  );
+  const _ratioOfHist = Number(_budgetCfg.memory_max_ratio_of_history);
+  const _memCapByHist = _histChars > 0 && Number.isFinite(_ratioOfHist) && _ratioOfHist > 0
+    ? Math.floor(_histChars * _ratioOfHist)
+    : _hardCap;
+  const _memCap = Math.max(200, Math.min(_hardCap, _memCapByHist));
+  if (_memCap < _hardCap) {
+    console.log(`[V35-C·对话是主体] 记忆预算由历史体量派生: 历史 ${_histChars} 字符 ⇒ 记忆上限 ${_memCap}（hardCap ${_hardCap}）`);
+  }
   // 🔴 P2 建议1: 事实查询增强 — 用户问"答应过/记得你说过/之前说好"时拉高金库优先级
   const _vaultBoost = /答应过|记得你说过|之前说好|承诺过|答应我|你说过要|之前约定|说好了/.test(message);
   memoryText = injectMemories({
@@ -1792,7 +1812,7 @@ try {
     m4Timeline: _m4Timeline,
     knowledgeBaseText,
     vaultHits: _vaultHits,
-    maxChars: _hardCap,
+    maxChars: _memCap,
     preserveLabels: !!_meetingEntityName,
     vaultBoost: _vaultBoost,
     // V12.1: 实体感知 — 标注当前活跃实体名，LLM 可区分记忆归属
@@ -1800,6 +1820,10 @@ try {
     // 🔴 P0-1 二次精筛: 会晤模式不传 query（保护实体自有记忆不被误滤），普通模式传用户消息
     query: _meetingEntityName ? undefined : message,
   });
+  // 🔴 V35-C 埋点：把「记忆块实际占多少」量出来（P-15 可观测精神）——
+  //   只有上限没有实测量，无法判断「历史 ≥ 记忆」这条裁定是否真的达成。
+  console.log(`[V35-C·对话是主体] 记忆块实际 ${memoryText.length}/${_memCap} 字符（历史 ${_histChars}）`
+    + ` ⇒ 记忆/历史 = ${_histChars > 0 ? (memoryText.length / _histChars).toFixed(2) : 'N/A'}`);
 } catch (_miErr) {
   // 降级: MemoryInjector 不可用时保留旧行为
   memoryText = memoryFragments.length > 0 ? memoryFragments.slice(0, 8).join('\n') : '';
