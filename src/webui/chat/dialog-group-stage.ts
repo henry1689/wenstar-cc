@@ -6,7 +6,8 @@
  */
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { MemoryWriteGateway } from '../../m2/MemoryWriteGateway.js';
-import { computeCalcium } from '../../m2/math.js';
+// ADR-010 P1-A: `computeCalcium` 的 import 随 CHUNK 碎片写入退役一并移除
+//（它在本文件内的唯一用处是计算碎片钙分，见下方 tombstone 注释）
 import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
 import { getPeriod, getSeason, getLunarTerm } from '../../engine/temporal/global-types.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
@@ -203,33 +204,21 @@ export async function flushDialogGroup(
     });
     if (anchorOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, anchorId);
 
-    // 写入细节碎片（其余轮次）
-    // H3: 每条碎片按其所在轮次的真实感知向量计算钙化分（同标度 [0,1]），
-    //     不再用 dg.maxCalcium*0.7 一刀切压到 0.5（旧公式使全部碎片钙化分恒为 0.5，失真）。
-    for (let i = 0; i < dg.rounds.length; i++) {
-      if (i === anchorIdx) continue;
-      const r = dg.rounds[i];
-      const chunkText = '【第' + (i + 1) + '轮】\n用户: ' + r.q + '\n玉瑶: ' + r.a;
-      const chunkId = dg.id + '_CHUNK_' + String(i).padStart(3, '0');
-      const roundP = dg.perceptions[i] || peakP;
-      const chunkCalcium = Math.round(computeCalcium(roundP as any).score * 1000) / 1000;
-      const chunkOk = gw.write({
-        id: chunkId, seqPos: -dg.rounds.length - i, createdAt: now,
-        perceptionV40: vec40(roundP), calciumScore: chunkCalcium,
-        calciumLevel: calciumLevel(chunkCalcium), locusPath: dg.locusPath || 'general',
-        leafZone: 'language_semantic_zone', rawInput: chunkText,
-        primaryEmotion: decision.primary_emotion || '对话', memoryType: 'dialog',
-        memoryKind: ctx._entityMeeting ? 'roleplay' : 'episodic',
-        dialogGroupId: dg.id,
-        topicLabel: dg.topic, anchorScore: chunkCalcium * 0.5,
-        belongEntityUuid: entityUuid,
-        entityGenes: (dna as any).entity_genes ?? null,
-        timePeriod: getPeriod(anchorDate.getHours()),
-        season: getSeason((anchorDate.getMonth() + 1)),
-        lunarTerm: getLunarTerm(anchorDate),
-      });
-      if (chunkOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, chunkId);
-    }
+    // ── CHUNK 碎片写入已退役（ADR-010 P1-A / 2026-10-06）─────────────────────
+    // 原实现在此写入 N-1 条 `*_CHUNK_nnn`（单轮 Q+A 合并文本）。
+    // 退役依据（调用链追踪实测，全仓 grep `_CHUNK`）：
+    //   ① **没有消费者** —— 该标识只出现于「写入」（此处）与「删除」
+    //      （SQLiteAdapter._rebuildMemoryAnchors 的启动 DELETE），读取方为零；
+    //      scripts/backfill-temporals.cjs 甚至用 `NOT LIKE '%_CHUNK%'` 显式排除它。
+    //   ② **内容纯冗余** —— 同一轮的 q 与 a 已在 `conversations`（原文，保留场景描写）
+    //      与 `mem_*` 逐条行（带 perception_40d）各存一份；CHUNK 只是把两者拼起来再存第三份。
+    //   ③ **不可重建** —— conversations 无感知向量列，重建只能回填空向量 ⇒ 低质量副本。
+    //   ④ **每次重启即被销毁** —— _rebuildMemoryAnchors 的 DELETE 覆盖 `%\_CHUNK%`
+    //      且明说不重建（该函数注释自认「碎片每次重启被永久销毁」），实测全库存活仅 6 条。
+    // 处置：**停写**（此处）。SQLiteAdapter 的启动 DELETE **保留** `%\_CHUNK%` 分支，
+    //      但它自本次起只用于清除退役前残留（已无生产者），残留清空后可整条移除；
+    //      存量残行随下一次启动清除。**ANCHOR 锚点写入不受影响**（它有真实消费者）。
+    // 🔴 块级信息的新载体是 `dialog_groups` 表（MigrationManager v16），不再经由 memories 碎片。
 
     // 情感轨迹标签
     const emotions = dg.perceptions.slice(0, 5).map((p: any) => {

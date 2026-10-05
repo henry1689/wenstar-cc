@@ -572,6 +572,61 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v15 → v16: ADR-010 P1-A —— dialog_groups 对话块元数据表（块级字段的唯一载体）
+  {
+    version: 16,
+    description: 'ADR-010 P1-A: 建 dialog_groups 表（对话块元数据唯一载体）',
+    apply: (db: any) => {
+      // 背景（ADR-010 §1.7，S1 只读实测）：系统原先没有「对话块」这个存储单位 ——
+      //   `dialog_group` 只是 conversations / memories 上的一个 TEXT 字符串列，**没有独立载体**。
+      //   把块级元数据（钙分 / 场景指纹 / 情绪曲线 / 闭合原因）挂到 `*_ANCHOR` 锚点行上会失效：
+      //   SQLiteAdapter._rebuildMemoryAnchors() 每次服务启动都 DELETE 全部 %_ANCHOR / %_CHUNK，
+      //   元数据会被无条件清空 ⇒ 重启即归零。故块级字段必须有独立表。
+      //
+      // 单一真源声明：本表是**块级元数据的唯一真源**；
+      //   conversations.dialog_group_id 与 memories.dialog_group_id 只是外键引用，
+      //   不得重复存块级元数据（防本仓「归属被丢两次」类双写不一致）。
+      //
+      // 刻意不含的字段（ADR-010 §7）：
+      //   · conversation_id —— 组是 1:N，单数外键语义错误，用 first_ts / turn_count 表达
+      //   · virtual_world_ts —— 当前无生产者（瑶光世界模型尚未接入，全仓 grep virtual_world = 0 命中），
+      //     不预先建一个恒为 NULL 的字段；待该项立项后另起迁移加入
+      //
+      // ⚠️ migrateSchema 对 apply 抛错会**整体 rethrow**（可能拖垮 SQLiteAdapter 初始化）
+      //   ⇒ 每步独立 try/catch，失败只告警不抛出（沿用 v15 的既有做法）。
+      const _run = (sql: string, label: string): void => {
+        try { db.run(sql); console.log(`[Migration] v16 ✅ ${label}`); }
+        catch (e) { console.warn(`[Migration] v16 ${label} 失败（非致命）:`, (e as Error)?.message); }
+      };
+
+      _run(
+        `CREATE TABLE IF NOT EXISTS dialog_groups (
+          dialog_group_id     TEXT PRIMARY KEY,
+          belong_entity_uuid  TEXT NOT NULL,
+          narrative_tag       TEXT,
+          primary_emotion     TEXT,
+          block_calcium_score REAL NOT NULL DEFAULT 0,
+          scene_anchor_hash   TEXT,
+          emotion_curve       TEXT,
+          block_close_reason  TEXT,
+          block_summary       TEXT,
+          lifecycle_state     TEXT NOT NULL DEFAULT 'active',
+          is_landmark         INTEGER NOT NULL DEFAULT 0,
+          turn_count          INTEGER NOT NULL DEFAULT 0,
+          first_ts            TEXT,
+          last_ts             TEXT,
+          created_at          TEXT NOT NULL,
+          updated_at          TEXT
+        )`,
+        'dialog_groups 表已建',
+      );
+      _run('CREATE INDEX IF NOT EXISTS idx_dg_belong   ON dialog_groups(belong_entity_uuid)', 'idx_dg_belong');
+      _run('CREATE INDEX IF NOT EXISTS idx_dg_state    ON dialog_groups(lifecycle_state)', 'idx_dg_state');
+      _run('CREATE INDEX IF NOT EXISTS idx_dg_landmark ON dialog_groups(is_landmark)', 'idx_dg_landmark');
+      _run('CREATE INDEX IF NOT EXISTS idx_dg_hash     ON dialog_groups(scene_anchor_hash)', 'idx_dg_hash');
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

@@ -52,7 +52,8 @@ data/knowledge-v4/governance/_archive/
 ## 决策记录（ADR）
 
 ```
-docs/adr/  （编号 001-009，已修复编号冲突）
+docs/adr/  （编号 001-010，已修复编号冲突）
+├── ADR-010-dialog-group-memory-unit.md   （记忆单元由单消息迁移至对话块，2026-10-06）
 ```
 
 ---
