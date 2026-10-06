@@ -49,11 +49,32 @@ parts.push('## 你的身份');
   const _nh = new Date().getHours();
   const _nds = _nh < 6 ? '凌晨' : _nh < 9 ? '早晨' : _nh < 12 ? '上午' : _nh < 14 ? '中午' : _nh < 18 ? '下午' : _nh < 22 ? '晚上' : '深夜';
   parts.push(`🕐 现在是 **${_nbj}**（${_nds}）。你的所有行动必须基于这个时间。深夜不要说上班或出门。`);
+  // 🔴 A3 修复（2026-10-06）：「学历」曾被当成「在读学段」注入。
+  //   原判据 `_ed.includes('大学')` + 出生年 2004~2011 区间 ⇒ 已就业的成年人也命中；
+  //   且文案直接复用 `_ed`（学历字段）当学段，产出
+  //     「🎓 你是 **大学**，日常是上课学习，不是上班族。」
+  //   —— 语法不通且概念错位。业主 2026-10-06 实测：徐诗雨 2008 年生、已在
+  //   高峰电业做跟单员，却被告知「你是大学，日常上课」。
+  //   现把「在校生判据」与「学段文案」分开：
+  //     · 判据：显式「在读/学生」；或 **无职业记录** 且年龄落在在校区间（6~22）
+  //       —— 有职业即已就业，不是在读；「学历含大学」只说明最高学历，不说明在读
+  //     · 文案：由学段推出，且补「生」字（大学→大学生），**不再复用学历字段**
+  //     · 已就业 ⇒ 不注入 —— 不注入好过注入一句错话
   const _by = basicInfo.birthYear || (profile as any).birthYear || 0;
-  const _ed = String(basicInfo.education || '');
-  if ((_by >= 2004 && _by <= 2011) || _ed.includes('在读') || _ed.includes('大学') || _ed.includes('学生')) {
-    if (_ed && _ed !== 'undefined') parts.push(`🎓 你是 **${_ed}**，日常是上课学习，不是上班族。不要说"在办公室加班""开会""出差"。`);
-    else if (_by > 0) parts.push(`🎓 你是 **学生**，日常是上课学习，不是上班族。不要说"在办公室加班""开会""出差"。`);
+  const _edu = String(basicInfo.education || '');
+  const _occupation = String(socialIdentity.currentOccupation || (profile as any).occupation || '').trim();
+  const _age = _by > 0 ? new Date().getFullYear() - _by : 0;
+  const _explicitInSchool = _edu.includes('在读') || _edu.includes('学生');
+  const _inSchool = _explicitInSchool || (!_occupation && _age >= 6 && _age <= 22);
+  if (_inSchool) {
+    let _stage: string;
+    if (_explicitInSchool) {
+      _stage = _edu.replace(/^在读/, '').trim() || '学生';
+      if (_stage && !/生$/.test(_stage)) _stage += '生';
+    } else {
+      _stage = _age <= 12 ? '小学生' : _age <= 15 ? '初中生' : _age <= 18 ? '高中生' : '大学生';
+    }
+    parts.push(`🎓 你是 **${_stage}**，日常是上课学习，不是上班族。不要说"在办公室加班""开会""出差"。`);
   }
   parts.push(`你是 **${entityName}**。以下是你的人生档案，请严格基于此档案回复。`);
   parts.push('');

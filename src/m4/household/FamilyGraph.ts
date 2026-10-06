@@ -2856,8 +2856,29 @@ export class FamilyGraph implements FamilyGraphInterface {
     const SENIOR_KINSHIP = new Set(['妈妈','妈','母亲','爸爸','爸','父亲','爷爷','奶奶','外公','外婆','祖父','祖母']);
 
     for (const person of persons) {
-      // 检查该人名是否在 kinship 词表中
-      const kinshipWord = Object.keys(KINSHIP_MAP).find((kw) => rawInput.includes(kw));
+      // 🔴 A1 修复（2026-10-06）：关系必须**绑定到人**，不得扫全文找称谓词。
+      //
+      //   原实现：`Object.keys(KINSHIP_MAP).find((kw) => rawInput.includes(kw))`
+      //     —— 在**整条消息**里找任意称谓词，而它位于 `for (const person of persons)` 循环内
+      //     ⇒ 「消息里出现『爸爸』二字，这条消息提到的**每个人**都拿到 relation_to_user=爸爸」，
+      //       称谓与人对不上。
+      //   后果（业主 2026-10-06 实测并定性）：情趣互动时用户说含「爸爸」的话，
+      //     正式档案即被写入父亲关系 —— 业主原话「系统收集对话信息时的错误记录……
+      //     不要把对话亲密情趣互动的称呼作为正式档案记录，这个错误很严重，很容易把档案搞乱」。
+      //   ⚠️ 这与 V35-A 修的「用『文本里有没有出现名字』判断这轮是谁说的」是**同族错误**：
+      //     拿文本内容当事实判据。
+      //
+      //   现收窄为两条**都与人绑定**的合法来源：
+      //     · person 自身的名字/allele 就是称谓词（占位节点，如节点名就叫「爸爸」）
+      //     · 名字/allele 命中**显式声明**抽取 namedKinship（← extractNamedKinshipMentions，
+      //       匹配 `我${称谓}叫XXX`）
+      //   其余一律不写 —— 「叫爸爸」这类没有绑定对象 ⇒ 自然不写。
+      //   闸门是**确定性**的（看来源，不看场景）：不依赖任何「这是不是情趣场景」的识别，
+      //   也不误伤「我爸爸今天住院了」这类正常表达（那句同样没有把称谓绑到具体人）。
+      const _personNames = [String((person as any).name || ''), String((person as any).allele || '')].filter(Boolean);
+      const kinshipWord =
+        KINSHIP_TERMS.find((kw) => _personNames.includes(kw))
+        ?? [...namedKinship.entries()].find(([, nm]) => _personNames.includes(nm))?.[0];
       if (kinshipWord) {
         const relation = KINSHIP_MAP[kinshipWord];
         const isSenior = SENIOR_KINSHIP.has(kinshipWord);
