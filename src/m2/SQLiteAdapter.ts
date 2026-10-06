@@ -642,36 +642,42 @@ export class SQLiteAdapter {
       try {
         const _memBefore = (this.queryAll('SELECT COUNT(*) as cnt FROM memories WHERE belong_entity_uuid IS NOT NULL')[0] as any)?.cnt || 0;
 
-        // conversations 回填：按 entity 名称匹配 + 自称检测
-        const _ents = this.queryAll("SELECT DISTINCT name,uuid FROM entities WHERE type='person' AND LENGTH(name)>=2 AND uuid IS NOT NULL");
-        for (const _e of _ents) {
-          const _n = (_e as any).name, _u = (_e as any).uuid;
+        // ═══════════════════════════════════════════════════════════════════
+        // 🔴 P0-3b（2026-10-07）：**删除四处「按正文提及的人名推断归属」的回填**。
+        //
+        // 删掉的是（原文保留在此仅为追溯，已不在代码中）：
+        //   ① conversations 全文匹配   WHERE ... content LIKE '%${name}%'
+        //   ② conversations 自称检测   role='assistant' AND content LIKE '%我是${n}%' / '%${n}来了%' …
+        //   ③ memories 从会话传导      WHERE c.content LIKE '%' || substr(raw_input,1,30) || '%'
+        //   ④ roleplay 直接匹配        WHERE ... raw_input LIKE '%' || e.name || '%'
+        //
+        // 为什么要删 —— 它们是《P0 记忆体系止血任务书 V3》§3.1 **明令禁止**的做法：
+        //   「禁止按正文角色名推断（实测：166 条里 142 条根本不提任何人名；
+        //     全表对照 **29.2%** 的已归属记忆正文提到的是别人 ⇒ 名字推断会整体串档）」
+        //
+        // 实测危害（P0-3 存量清洗的回滚演练暴露，已逐条核查）：
+        //   P0-3 刚把 24 条字符串 'null' 归一为 NULL，**服务一重启就被这条回填认领了 22 条**。
+        //   用**结构列**（entity_genes / fg_entity_names）对照那 22 条 —— 而不是再用正文匹配自证
+        //   （那会构成循环论证）—— 结果 20 条一致、**2 条认错**：
+        //     · mem_000327…WRKS_14  被认领为「熊勇」   而结构列是「同事 / 玉瑶」
+        //     · mem_000555…EMON_29  被认领为「徐诗雨」 而结构列是「徐诗韵」 ← 姐妹串档
+        //   ⇒ 误认率 9.1%，与 V3 预测方向完全一致（正文提谁就认谁 ⇒ 姐妹/父女/同事之间必然串）。
+        //
+        // 🔴 对本批的直接后果：只要这条回填默认执行，**任何把归属置 NULL 的清洗都会在下次重启
+        //   被推翻** —— 即 V3 §3.1 的「关联不上保持 NULL」在架构上不可达。故必须摘除。
+        //
+        // 为什么 ② 也删：它虽名「自称检测」，但后三个模式（'${n}来了' / '${n}在呢' / '是${n}呀'）
+        //   **仍是「名字出现在句子里就认领」**，与 ① 同病根。V3 §3.1 是**分类禁止**而非程度问题。
+        //
+        // 顺带消掉的注入面：①③④ 把实体名**字符串插值进 SQL**（实体名来自 FG、用户可控），
+        //   名字含引号即破坏语句。删掉后该注入面不复存在。
+        //
+        // 刻意**不动** `SKIP_BACKFILL` 总闸：一关会把下面的 ⑤ 与 fg_entity_names 派生一起关掉，太粗。
+        // 回归守卫：__tests__/no-text-inferred-belong.test.ts 扫源码断言上述模式不再出现。
+        // ═══════════════════════════════════════════════════════════════════
 
-          // 全文匹配
-          const _sql1 = `UPDATE conversations SET belong_entity_uuid='${_u}' WHERE belong_entity_uuid IS NULL AND content LIKE '%${_n}%'`;
-          try { (this.db as any).run(_sql1); } catch {}
-
-          // 自称检测：扩展6种模式（"我是XX"/"我就是XX"/"XX来了"/"我叫XX"/"XX在呢"/"是XX呀"）
-          const _sql2 = `UPDATE conversations SET belong_entity_uuid='${_u}' WHERE belong_entity_uuid IS NULL AND role='assistant' AND (content LIKE '%我是${_n}%' OR content LIKE '%我就是${_n}%' OR content LIKE '%我叫${_n}%' OR content LIKE '%${_n}来了%' OR content LIKE '%${_n}在呢%' OR content LIKE '%是${_n}呀%')`;
-          try { (this.db as any).run(_sql2); } catch {}
-        }
-
-        // memories 从 conversations 传导
-        this.runSql("UPDATE memories SET belong_entity_uuid = (SELECT DISTINCT c.belong_entity_uuid FROM conversations c WHERE c.belong_entity_uuid IS NOT NULL AND c.content LIKE '%' || substr(memories.raw_input,1,30) || '%' LIMIT 1) WHERE belong_entity_uuid IS NULL");
-
-        // 🆕 V10.7: 旧 roleplay 记忆直接匹配 entities.name → UUID
-        //    间接回填路径（conversations 传导）可能因 raw_input/前缀不匹配而漏掉，
-        //    此处直接用 raw_input 中的人名匹配 entities 表，确保 roleplay 记忆 UUID 完整。
-        this.runSql(
-          "UPDATE memories SET belong_entity_uuid = (" +
-          "  SELECT e.uuid FROM entities e" +
-          "  WHERE e.type='person' AND e.uuid IS NOT NULL" +
-          "  AND memories.raw_input LIKE '%' || e.name || '%'" +
-          "  LIMIT 1" +
-          ") WHERE belong_entity_uuid IS NULL AND memory_kind='roleplay'"
-        );
-
-        // black_diamond 从 source_id → memories 传导
+        // ⑤ black_diamond 从 source_id → memories 传导
+        //    （**保留** —— 纯结构关联，与 P0-3 的 C 步 353 条回填同源同法，无任何文本判据）
         this.runSql("UPDATE black_diamond SET belong_entity_uuid = (SELECT m.belong_entity_uuid FROM memories m WHERE m.id = black_diamond.source_id AND m.belong_entity_uuid IS NOT NULL) WHERE belong_entity_uuid IS NULL AND source_id IS NOT NULL");
 
         // 🔴 2026-09-11: fg_entity_names **幂等派生回填**（从 entity_genes）——
