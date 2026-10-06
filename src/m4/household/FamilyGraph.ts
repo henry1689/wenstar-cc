@@ -1505,6 +1505,27 @@ export class FamilyGraph implements FamilyGraphInterface {
     return (node as any).uuid || null;
   }
 
+  /**
+   * 🔴 A2（2026-10-06）：用户锚点节点 id（"我"）—— 「与用户的关系」的唯一锚点。
+   *
+   * 为何要这个访问器：`EntityContextBuilder` 的关系标签与 `RelationHeatTracker` 的热力
+   * 都必须**只认「实体 ↔ 用户」这一条边**。此前两边都没有「用户是谁」的概念 ——
+   * 前者扫全部边取第一个命中的（把与父亲的 child_of 边读成「鸿艺的孩子」），
+   * 后者 `edges[0]` 盲取（把 100 条亲密互动写到了父女边上）。
+   *
+   * 单一真源：与 `_ensureSelfNode` 共用 `SELF_NODE_ID` 与 `userNodeId`，
+   * 不另立第二份常量；缓存为空时按固定 ID 现查（与 `_ensureSelfNode` 的判据一致）。
+   */
+  getUserNodeId(): string | null {
+    if (this.userNodeId) return this.userNodeId;
+    try {
+      const rows = this.query('SELECT id FROM nodes WHERE id = ? AND type = ?', [SELF_NODE_ID, 'person']);
+      return rows.length > 0 ? SELF_NODE_ID : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** 获取全部分类统计 */
   getUUIDCategoryStats(): Record<string, number> {
     const rows = this.query("SELECT category, COUNT(*) as cnt FROM nodes WHERE type = 'person' AND category IS NOT NULL GROUP BY category") as Array<{ category: string; cnt: number }>;

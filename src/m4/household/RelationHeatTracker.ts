@@ -60,8 +60,8 @@ export class RelationHeatTracker {
 
     if (!entity) return defaultState;
 
-    // 从 edges.properties 读取历史数据
-    const edges = this._getEdgesForEntity(entity.id);
+    // 从 edges.properties 读取历史数据（🔴 A2：只读「实体 ↔ 用户」的关系边）
+    const edges = this._getUserRelationEdges(entity.id);
     let interactionCount30d = 0;
     let totalIntimacy = 0;
     let intimacySamples = 0;
@@ -132,13 +132,20 @@ export class RelationHeatTracker {
     const entity = this.familyGraph.getEntityByUUID(uuid);
     if (!entity) return;
 
-    const edges = this._getEdgesForEntity(entity.id);
-    // 🔴 只写到一条边（第一条 = 最核心的关系边），避免同一互动被 computeHeat 重复计数
+    // 🔴 A2（2026-10-06）：热力只写「实体 ↔ 用户」这一条关系边。
+    //   原实现 `_getEdgesForEntity` = `WHERE source_id=? OR target_id=?`（**无排序、无锚定**）后取 `edges[0]`，
+    //   实测徐诗雨排第一的边是 `child_of→徐东伟`（她与**父亲**的边）⇒ 100 条亲密互动记录
+    //   连同 warmth=soulmate/heat=1.066 被写到了父女边上，最终渲染成
+    //   「鸿艺的孩子——亲密互动（热力追踪已确认）」。
+    //   没有用户边 ⇒ 不写：宁可无热力，也不把亲密数据落到不相干的边上。
+    const edges = this._getUserRelationEdges(entity.id);
     if (edges.length === 0) return;
 
-    const edge = edges[0];
+    // 互动记录只落**一条**规范边（用户→实体），避免 computeHeat 跨边求和时同一互动被重复计数
+    const userId = this._getUserNodeId();
+    const canonical = edges.find((e) => e.source_id === userId) ?? edges[0];
     const now = new Date().toISOString();
-    const props = edge.properties ? JSON.parse(edge.properties) : {};
+    const props = canonical.properties ? JSON.parse(canonical.properties) : {};
     if (!props._interactions) props._interactions = [];
 
     // 追加本次互动
@@ -154,12 +161,17 @@ export class RelationHeatTracker {
       props._interactions = props._interactions.slice(-100);
     }
 
-    // 更新热力评分
-    const state = await this.computeHeat(uuid);
-    props._heat_score = state.heatScore;
-    props._relation_warmth = state.warmth;
+    // 先落互动记录再算热力 —— 原实现是「先算后落盘」，computeHeat 读到的一直是落盘前的旧值
+    this._updateEdgeProperties(canonical.id, props);
 
-    this._updateEdgeProperties(edge.id, props);
+    // 更新热力评分（每条用户边都同步分数；只有规范边带互动记录）
+    const state = await this.computeHeat(uuid);
+    for (const e of edges) {
+      const p = e.id === canonical.id ? props : (e.properties ? JSON.parse(e.properties) : {});
+      p._heat_score = state.heatScore;
+      p._relation_warmth = state.warmth;
+      this._updateEdgeProperties(e.id, p);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -187,7 +199,7 @@ export class RelationHeatTracker {
     const entity = this.familyGraph.getEntityByUUID(uuid);
     if (!entity) return null;
 
-    const edges = this._getEdgesForEntity(entity.id);
+    const edges = this._getUserRelationEdges(entity.id);
     for (const edge of edges) {
       const props = edge.properties ? JSON.parse(edge.properties) : {};
       props._heat_score = newHeat;
@@ -262,11 +274,30 @@ export class RelationHeatTracker {
     return 'distant';
   }
 
-  private _getEdgesForEntity(nodeId: string): Array<{ id: string; properties: string }> {
+  /** 用户锚点节点 id（"我"）—— 与 FamilyGraph._ensureSelfNode 同源，不另立常量 */
+  private _getUserNodeId(): string | null {
     try {
+      const fg = this.familyGraph as any;
+      return typeof fg.getUserNodeId === 'function' ? fg.getUserNodeId() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 🔴 A2（2026-10-06）：只取「实体 ↔ 用户」的关系边 —— 热力的唯一落点。
+   *
+   * 原实现 `WHERE source_id = ? OR target_id = ?` 会返回该实体的**全部**边，
+   * 调用方再盲取 `edges[0]` ⇒ 热力被写到一条与用户无关的边上（实测是父女边）。
+   * 没有用户边时返回空数组，调用方据此**放弃写入**（宁缺勿滥）。
+   */
+  private _getUserRelationEdges(nodeId: string): Array<{ id: string; source_id: string; properties: string }> {
+    try {
+      const userId = this._getUserNodeId();
+      if (!userId || userId === nodeId) return [];
       return (this.familyGraph as any).query(
-        'SELECT id, properties FROM edges WHERE source_id = ? OR target_id = ?',
-        [nodeId, nodeId]
+        'SELECT id, source_id, properties FROM edges WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)',
+        [nodeId, userId, userId, nodeId]
       ) || [];
     } catch {
       return [];

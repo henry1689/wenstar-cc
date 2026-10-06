@@ -154,74 +154,24 @@ parts.push('## 你的身份');
   if (socialIdentity.currentOccupation) socParts.push(`职业: ${socialIdentity.currentOccupation}`);
   if (socialIdentity.currentWorkplace) socParts.push(`工作单位: ${socialIdentity.currentWorkplace}`);
 
-  // 🔴 关系标签：优先从 FG edges 计算（不会被迁移覆盖），fallback 到 profile.relation_to_user
-  const MY_RELATION_LABELS: Record<string, string> = {
-    'child_of': '鸿艺的孩子', 'parent_of': '鸿艺的家长', 'mother_of': '鸿艺的母亲', 'father_of': '鸿艺的父亲',
-    'younger_sister_of': '鸿艺的妹妹', 'elder_sister_of': '鸿艺的姐姐', 'sister_of': '鸿艺的姐妹',
-    'younger_brother_of': '鸿艺的弟弟', 'elder_brother_of': '鸿艺的哥哥', 'brother_of': '鸿艺的兄弟', 'sibling_of': '鸿艺的兄妹',
-    'spouse_of': '鸿艺的配偶', 'colleague_of': '同事', 'boss_of': '上司', 'subordinate_of': '下属',
-    'friend_of': '朋友', 'classmate_of': '同学', 'acquaintance_of': '认识的人',
-  };
-  let _relationLabel = '';
-  for (const e of edges) {
-    if (MY_RELATION_LABELS[e.relation]) {
-      _relationLabel = MY_RELATION_LABELS[e.relation];
-      if (!['认识的人', '同事', '朋友', '同学'].includes(_relationLabel)) break; // 亲密关系优先
-    }
-  }
-  if (!_relationLabel && profile.relation_to_user) _relationLabel = profile.relation_to_user;
-  // 🆕 V10.8: 感知 HeatTracker 的关系升级 — category='X'(情人) 或 warmth≥intimate
-  //    热力追踪器在每次对话后更新 nodes.category 和 edges._relation_warmth，
-  //    EntityContextBuilder 必须读取这些动态数据，否则 LLM 只能看到静态标签。
-  try {
-    const _uuid = familyGraph.getUUIDByName(entityName);
-    if (_uuid) {
-      const _entity = familyGraph.getEntityByUUID(_uuid);
-      const nodeCategory = (_entity as any)?.category || '';
-      if (nodeCategory === 'X') {
-        // 🆕 V10.10: category='X' 时检查是否存在家族边（A 类亦可升级为 X）
-        //    如果有家族边 → blend 家族标签 + 亲密提示（不覆盖家族身份）
-        //    如果无家族边 → 使用通用"情人"标签
-        const hasFamilyEdge = edges.some((e: any) =>
-          PARENT_RELS.has(e.relation) || SIBLING_RELS.has(e.relation) || EXT_FAMILY_RELS.has(e.relation)
-        );
-        if (hasFamilyEdge && _relationLabel) {
-          _relationLabel += '——亲密关系（热力追踪已确认）';
-        } else if (!hasFamilyEdge) {
-          _relationLabel = '情人——亲密关系（热力追踪已确认）';
-        }
-      }
-      // 🆕 V10.9: A 类实体（亲属）不可改 category（红线§18.3），
-      //    但 edges 上的 warmth 仍代表了真实的互动亲密度。
-      //    读取 edge properties 中的 _relation_warmth，追加提示到关系标签。
-      if (nodeCategory === 'A' && _relationLabel !== '情人——亲密关系（热力追踪已确认）') {
-        try {
-          const nodeId = (_entity as any)?.id;
-          if (nodeId) {
-            const warmEdges = (familyGraph as any).query(
-              "SELECT properties FROM edges WHERE (source_id = ? OR target_id = ?) AND properties LIKE '%_relation_warmth%' LIMIT 5",
-              [nodeId, nodeId]
-            );
-            for (const we of (warmEdges || []) as any[]) {
-              try {
-                const wp = JSON.parse(we.properties || '{}');
-                if (wp._relation_warmth === 'intimate' || wp._relation_warmth === 'soulmate') {
-                  _relationLabel += '——亲密互动（热力追踪已确认）';
-                  break;
-                }
-              } catch { /* 单条 properties JSON 解析失败不影响其他 */ }
-            }
-          }
-        } catch { /* warmth 查询失败不影响主流程 */ }
-      }
-    }
-  } catch { /* category 查询失败不影响主流程 */ }
-  // V10.4: 使用共享修正函数（RelationLabels.ts 唯一定义点）
-  //        亲密关系或 X 分类时跳过静态映射（动态标签优先级更高）
-  if (!_relationLabel.includes('——亲密') && _relationLabel !== '情人——亲密关系（热力追踪已确认）') {
-    _relationLabel = getCorrectedRelation(entityName, _relationLabel);
-  }
+  // 🔴 A2 修复（2026-10-06）：正式身份只认「实体 ↔ 用户」这一条关系。
+  //   原实现扫 `edges`（= _getRelatedEdges = getRelatedPersons，**出边+入边、不分方向、不限对方是谁**），
+  //   命中第一个 `child_of` 就写「鸿艺的孩子」并 break ⇒ 徐诗雨与自己父亲的边（child_of→徐东伟）
+  //   排在她的用户边之前，"与鸿艺的关系"就被渲染成「鸿艺的孩子」。
+  //   实测（2026-10-06 真实库）：她与用户之间有 9 条互斥边（spouse_of/child_of/sibling_of/grandchild_of…），
+  //   而业主定音的正确口径「同事、情人」一条都没有 ⇒ 读取侧挑得再准也只能挑出错的那条。
+  //   ⇒ 读取侧收窄为「用户边」，方向交给 getRelationLabel(relation, isOutgoing)，不再自建第二张映射表。
+  const _userRel = _getUserRelation(familyGraph, entityName);
+  let _relationLabel = _userRel.labels.join('、');
+  if (!_relationLabel) _relationLabel = getCorrectedRelation(entityName, profile.relation_to_user);
+  // 🔴 A2 修复（2026-10-06）：删除「——亲密互动（热力追踪已确认）」后缀，热力状态改独立一行。
+  //   业主定音（2026-10-06）：「不要把对话亲密情趣互动的称呼作为正式档案记录，这个错误很严重，
+  //   很容易把档案搞乱」。原实现（V10.8 category='X' / V10.9 A 类 warmth）把热力状态**拼进了正式身份行**，
+  //   而她那条 warmth 是热力追踪器盲取 `edges[0]` 写到**父女边**上的（见 RelationHeatTracker）——
+  //   于是"正式身份"变成了「鸿艺的孩子——亲密互动（热力追踪已确认）」。
+  //   ⇒ 亲密状态归「互动亲密度」独立行（只影响语气），「与 X 的关系」只放客观关系。
   const _rpProfile=dossier.roleplayProfile||(profile).roleplayProfile;if(_rpProfile?.names?.length){parts.push("### 角色扮演（仅限情趣互动场景）");parts.push("你在亲密互动时曾用以下称谓称呼鸿艺："+_rpProfile.names.join("、")+"。");parts.push("🔴 这些称谓仅限情趣互动/角色扮演场景，不影响正式身份。");if(_relationLabel)parts.push("你的正式身份："+_relationLabel+"。");parts.push("日常聊天/正式对话请以正式身份交流。");parts.push("");};if (_relationLabel) socParts.push(`与鸿艺的关系: ${_relationLabel}`);
+  if (_userRel.warmth) socParts.push(`互动亲密度: ${WARMTH_LABEL[_userRel.warmth]}（热力追踪）—— 只影响语气，不改变正式身份`);
   if (socParts.length > 0) { parts.push('### 社会身份'); parts.push(socParts.join('  |  ')); parts.push(''); }
 
   // ═══ 性格 ═══
@@ -352,6 +302,79 @@ parts.push('## 你的身份');
     completeness: Math.round((profile.completeness || 0) * 100),
     rules,
   };
+}
+
+/** 关系标签优先级：数字越小越靠前（业主 2026-10-06 口径「同事、情人」⇒ 情人先展示） */
+const USER_REL_PRIORITY: string[] = [
+  'spouse_of', 'lover_of',
+  'parent_of', 'father_of', 'mother_of', 'child_of',
+  'elder_brother_of', 'younger_brother_of', 'brother_of',
+  'elder_sister_of', 'younger_sister_of', 'sister_of', 'sibling_of',
+  'colleague_of', 'boss_of', 'subordinate_of',
+  'friend_of', 'classmate_of', 'neighbor_of', 'acquaintance_of',
+];
+
+const WARMTH_LABEL: Record<string, string> = {
+  soulmate: '灵魂伴侣级', intimate: '亲密', trusted: '信任', friendly: '友好', distant: '疏远',
+};
+const WARMTH_RANK: Record<string, number> = { distant: 0, friendly: 1, trusted: 2, intimate: 3, soulmate: 4 };
+
+/**
+ * 🔴 A2（2026-10-06）：取「实体 ↔ 用户」这一条关系 —— 正式身份的唯一来源。
+ *
+ * 为什么必须是「唯一来源」：原实现遍历该实体的**全部**边（出+入、不限对方、不分方向），
+ * 命中第一个关系词就 break。实测徐诗雨名下 `child_of→徐东伟`（真·父女边）排在前面，
+ * 于是她的"与鸿艺的关系"被渲染成「鸿艺的孩子」——**跟用户毫无关系的一条边**。
+ *
+ * 方向语义（本条修复新增，原实现完全丢失了方向）：
+ *   · `实体 --R--> 用户`  ⇒ 正向，标签 = label(R)          （她 --child_of--> 我 ⇒ 子女）
+ *   · `用户 --R--> 实体`  ⇒ 反向，标签 = label(reverse(R))（我 --child_of--> 她 ⇒ 父母）
+ * 方向交给 `getRelationLabel(relation, isOutgoing)` 的既有实现，
+ * **不再自建第二张「关系→中文」映射表**（本仓不变量 #7：同一规则禁止多处实现）。
+ */
+function _getUserRelation(familyGraph: FamilyGraph, entityName: string): { labels: string[]; warmth: string | null } {
+  const empty = { labels: [] as string[], warmth: null as string | null };
+  try {
+    const fg = familyGraph as any;
+    const userId: string | null = typeof fg.getUserNodeId === 'function' ? fg.getUserNodeId() : null;
+    if (!userId) return empty;
+    const uuid: string | null = typeof fg.getUUIDByName === 'function' ? fg.getUUIDByName(entityName) : null;
+    const node = uuid && typeof fg.getEntityByUUID === 'function' ? fg.getEntityByUUID(uuid) : null;
+    const entityId: string | null = node?.id ? String(node.id) : null;
+    if (!entityId || entityId === userId) return empty;
+
+    const rows = (fg.query(
+      'SELECT source_id, relation, properties FROM edges WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)',
+      [entityId, userId, userId, entityId],
+    ) || []) as Array<{ source_id: string; relation: string; properties: string }>;
+    if (rows.length === 0) return empty;
+
+    // key 带方向：同一 relation 的正反两条边语义不同（child_of 正向=子女、反向=父母），不能互相覆盖
+    const byRelDir = new Map<string, { relation: string; label: string }>();
+    let warmth: string | null = null;
+    for (const r of rows) {
+      const rel = String(r.relation || '');
+      if (!rel) continue;
+      const isOutgoing = String(r.source_id) === entityId;
+      byRelDir.set(`${rel}|${isOutgoing ? 1 : 0}`, { relation: rel, label: getRelationLabel(rel, isOutgoing) });
+      try {
+        const w = String(JSON.parse(r.properties || '{}')._relation_warmth || '');
+        if (WARMTH_RANK[w] !== undefined && (warmth === null || WARMTH_RANK[w] > WARMTH_RANK[warmth])) warmth = w;
+      } catch { /* 单条 properties 解析失败不影响其他 */ }
+    }
+
+    const labels: string[] = [];
+    for (const { relation, label } of [...byRelDir.values()].sort((a, b) => {
+      const ia = USER_REL_PRIORITY.indexOf(a.relation);
+      const ib = USER_REL_PRIORITY.indexOf(b.relation);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    })) {
+      if (label && !labels.includes(label)) labels.push(label);
+    }
+    return { labels, warmth };
+  } catch {
+    return empty;
+  }
 }
 
 /** 获取实体的关系边——过滤+去重+按类型分类 */

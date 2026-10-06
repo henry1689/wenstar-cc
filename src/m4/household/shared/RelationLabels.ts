@@ -35,6 +35,9 @@ const DIRECTED_FAMILY_LABEL: Record<string, DirectedPair> = {
 };
 
 const SOCIAL_LABEL: Record<string, string> = {
+  // 🔴 A2（2026-10-06）：`lover_of` 此前无标签，getRelationLabel 会 fallback 成裸串「lover_of」。
+  //    业主 2026-10-06 定口径：徐诗雨与鸿艺的正式关系 =「同事、情人」，情人是**正式身份**而非情趣称呼。
+  'lover_of':         '情人',
   'colleague_of':     '同事',
   'boss_of':          '上级',
   'subordinate_of':   '下属',
