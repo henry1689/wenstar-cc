@@ -27,6 +27,11 @@ export const BACKREF_TABLE: Record<SearchDomain, { table: string; idCol: string 
   work:            { table: 'works',          idCol: 'work_id' },
   family_graph:    null,   // FG 节点无归属列，uuid 即户籍 UUID，不校验
   note:            { table: 'memories',       idCol: 'id' },
+  // 🔴 ADR-010 P1-C1: 对话块回源到块表本身（不是 conversations）——
+  //   下游若要取块的正文/元数据，按 dialog_group_id 去 conversations 聚合即可；
+  //   回源键指向 dialog_groups 才能校验「这个块真的存在且归这个户口」。
+  //   缺此条 = TS2741 编译失败（SearchDomain 是联合类型，穷举映射必须同步补齐）。
+  dialog_group:    { table: 'dialog_groups',  idCol: 'dialog_group_id' },
 };
 
 /** 校验单条命中回源键真实存在（sqlite.queryAll 兼容任意带该方法的数据源） */

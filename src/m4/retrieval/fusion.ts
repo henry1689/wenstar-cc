@@ -36,6 +36,14 @@ export const FOUNDATION_DEFAULT_WEIGHTS: Record<string, number> = (() => {
     note: 0.08,                          // 玉瑶记事
     profile: 0.08,                       // FG 人物档案
     conversation: 0.05,                  // 对话直取
+    // 🔴 ADR-010 P1-C1: 对话块（一段连贯场景，多轮聚合）。
+    //   必须在此显式映射 —— RRFFusion 是 `config.weights[route] ?? 0.05`，
+    //   缺映射**不报错**，但块路会被静默压到最低档 0.05（比 conversation 还低），
+    //   几乎永远排不上来 ⇒ P1-C1 白做，且失败完全静默。
+    //   取值从 yaml foundation_rrf_domain_weight.dialog_group 读（与既有 5 个域同源，不硬编码）。
+    //   0.28 的定位：高于单条对话/记事（块是中期记忆的主要承载者），
+    //   低于黑钻（块是原始素材，黑钻是已提炼的结论）。
+    dialog_group: fw.dialog_group ?? 0.28,
   };
 })();
 

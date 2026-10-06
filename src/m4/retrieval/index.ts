@@ -20,6 +20,9 @@ import { NoteAdapter } from './adapters/NoteAdapter.js';
 import { ConversationAdapter } from './adapters/ConversationAdapter.js';
 import { FamilyGraphAdapter, type FamilyGraphSource } from './adapters/FamilyGraphAdapter.js';
 import { MemoryAdapter, type MemoryRetrieverSource } from './adapters/MemoryAdapter.js';
+// 🔴 ADR-010 P1-C1: 对话块域（块 = 一段连贯场景，多轮聚合）
+import { DialogGroupAdapter } from './adapters/DialogGroupAdapter.js';
+import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 
 /** 数据源依赖（与 SQLiteAdapter 兼容的最小形状） */
 export interface FoundationDeps {
@@ -55,6 +58,16 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
     reg.register(new BlackDiamondAdapter(deps.sqlite));
     reg.register(new VaultAdapter(deps.sqlite));
     reg.register(new NoteAdapter(deps.sqlite));
+    // 🔴 ADR-010 P1-C1: 对话块域。
+    //   为什么可以进默认注册（与 conversation/memory/family_graph「默认不注册」不同）：
+    //   那三域已由 V13/V11 主链覆盖，接入会**重复注入**；而「块」是一个**新的聚合粒度**，
+    //   主链任何一路都不产出它 —— 不会与既有路重叠。
+    //   为什么用「注册级」开关而非查询级：注册表在编排层构造，关掉即整条路不存在，
+    //   不会出现「开关关了但某处仍在查」的半失效状态，回退语义干净。
+    let _dgOn = true;
+    try { _dgOn = getRetrievalFusionConfig().enable_dialog_group_memory !== false; }
+    catch { /* 配置读取失败 → 保持默认开（块检索是本期交付的能力，失败不应静默降级） */ }
+    if (_dgOn) reg.register(new DialogGroupAdapter(deps.sqlite));
   }
 
   return reg;

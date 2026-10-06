@@ -126,7 +126,7 @@ describe('MemoryAdapter', () => {
 });
 
 describe('createExtendedRegistry', () => {
-  it('6 域注册（默认 3 + S6 3）— S2-E1 收编后 knowledge/work 由主链覆盖', async () => {
+  it('7 域注册（默认 4 + S6 3）— S2-E1 收编后 knowledge/work 由主链覆盖', async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
     db.exec(`CREATE TABLE black_diamond (id TEXT PRIMARY KEY); CREATE TABLE works (work_id TEXT PRIMARY KEY); CREATE TABLE vault_log (id TEXT PRIMARY KEY); CREATE TABLE memories (id TEXT PRIMARY KEY); CREATE TABLE conversations (id INTEGER PRIMARY KEY);`);
@@ -138,16 +138,22 @@ describe('createExtendedRegistry', () => {
       memoryRetriever: { retrieveMultiRank: async () => ({ lists: [] }) },
     });
     // 🔴 S2-E1: createDefaultRegistry 去掉 knowledge/work 适配器（由 KnowledgeContextBuilder / V13 work 路覆盖）
-    //   默认 3 域（black_diamond/vault/note）+ S6 3 域（conversation/family_graph/memory）= 6
-    expect(reg.all()).toHaveLength(6);
+    //   默认 4 域（black_diamond/vault/note + ADR-010 P1-C1 的 dialog_group）+ S6 3 域
+    //   （conversation/family_graph/memory）= 7
+    //   ⚠️ 本断言是**清单记录**（登记了哪些域），不是行为规格 —— 域集合被有意扩大时，
+    //      清单随之更新且**保留精确计数**（不改成 toBeGreaterThan 之类的宽松形式）。
+    //      块域真正的行为规格在 retrieval/__tests__/dialog-group-adapter.test.ts。
+    expect(reg.all()).toHaveLength(7);
     // 默认注册表不含 S6 三域，且不含 knowledge/work（收编后）
     const def = createDefaultRegistry({ sqlite, knowledgeBase: { search: async () => [] } });
-    expect(def.all()).toHaveLength(3);
+    expect(def.all()).toHaveLength(4);
     const domains = def.all().map(a => a.domain);
     expect(domains).not.toContain('knowledge');
     expect(domains).not.toContain('work');
     expect(domains).toContain('black_diamond');
     expect(domains).toContain('vault');
     expect(domains).toContain('note');
+    // ADR-010 P1-C1: 块域显式登记（不让它只是「数字 +1」）
+    expect(domains).toContain('dialog_group');
   });
 });

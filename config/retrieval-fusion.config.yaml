@@ -24,6 +24,12 @@ foundation_rrf_domain_weight:
   vault:         0.12
   knowledge:     0.15
   sand_memory:   0.10
+  # ADR-010 P1-C1: 对话块（一段连贯场景，多轮聚合）。
+  # 高于单条对话(conversation 0.05)与记事(note 0.08) —— 块是中期记忆的主要承载者；
+  # 低于黑钻(0.25 附近的同档) —— 块是原始素材，黑钻是已提炼的结论。
+  # ⚠️ 该值必须同时在 src/m4/retrieval/fusion.ts 的 FOUNDATION_DEFAULT_WEIGHTS 里映射，
+  #    否则 RRFFusion 的 `weights[route] ?? 0.05` 兜底会把块静默降到最低档。
+  dialog_group:  0.28
 
 # ── V13 七层管线 RRF 权重（RRFFusion.ts）──
 v13_rrf_weights:
@@ -75,3 +81,9 @@ p1_speed:
     kb_route_rule: true            # KB 路由纯规则（会晤保留 LLM）
     bionic_health_shortcircuit: true # Bionic 健康快照短路（7200 不可用不发网络）
     bionic_timeout_ms: 2500        # Bionic 搜索超时（原 5s）
+
+# ── ADR-010 P1-C1: 对话块记忆总开关 ──
+# 关 = 不注册 DialogGroupAdapter ⇒ 检索链路完全回到「单条消息」旧行为（一键回退）。
+# 开 = 块作为一种检索域参与 Foundation 多路融合（不触碰 V13/V11 主链）。
+# 生效点：src/m4/retrieval/index.ts 的 createDefaultRegistry。
+enable_dialog_group_memory: true

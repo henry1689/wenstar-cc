@@ -96,6 +96,16 @@ export interface RetrievalFusionConfig {
   filter: FilterConfig;
   speed_filter: SpeedFilterConfig;
   p1_speed: P1SpeedConfig;
+  /**
+   * 🔴 ADR-010 P1-C1: 对话块记忆总开关。
+   *
+   * 关 = 不注册 DialogGroupAdapter ⇒ 检索链路完全回到「单条消息」旧行为，可一键回退。
+   * 开 = 块作为一种检索域参与多路融合（Foundation 适配器注册表，不触碰 V13/V11 主链）。
+   *
+   * 之所以是**注册级**开关而非查询级：注册表在编排层构造，关掉即整条路不存在，
+   * 不存在"开关关了但某处仍在查"的半失效状态。
+   */
+  enable_dialog_group_memory: boolean;
 }
 
 // ── 默认值（yaml 缺失时兜底，保持系统可用）──
@@ -115,6 +125,8 @@ const DEFAULTS: RetrievalFusionConfig = {
       kb_route_rule: true, bionic_health_shortcircuit: true, bionic_timeout_ms: 2500,
     },
   },
+  // ADR-010 P1-C1: 对话块记忆。yaml 缺失时默认开（块检索是本期交付的能力）
+  enable_dialog_group_memory: true,
 };
 
 let _cache: RetrievalFusionConfig | null = null;
@@ -138,6 +150,10 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
         streaming: { ...DEFAULTS.p1_speed.streaming, ...(parsed.p1_speed?.streaming || {}) },
         llm_reduction: { ...DEFAULTS.p1_speed.llm_reduction, ...(parsed.p1_speed?.llm_reduction || {}) },
       },
+      // 布尔开关不能走 `?? ` 之外的隐式转换：显式判 undefined，避免 yaml 写 false 被当成缺失
+      enable_dialog_group_memory: parsed.enable_dialog_group_memory === undefined
+        ? DEFAULTS.enable_dialog_group_memory
+        : parsed.enable_dialog_group_memory === true,
     };
   } catch (e) {
     console.warn('[RetrievalFusionConfig] yaml 加载失败，使用默认值:', (e as Error)?.message);

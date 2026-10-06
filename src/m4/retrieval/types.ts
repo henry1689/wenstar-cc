@@ -30,14 +30,24 @@ export type SearchDomain =
   | 'vault'           // 金库 vault_log 表（promote 记录）
   | 'work'            // 作品 works 表（长文/小说）
   | 'family_graph'    // 家族图谱 FG（person 节点 / profile）
-  | 'note';           // 玉瑶记事（memories memory_kind='note'）
+  | 'note'            // 玉瑶记事（memories memory_kind='note'）
+  /**
+   * 🔴 ADR-010 P1-C1: 对话块（`dialog_groups` 表 + 其名下 conversations 聚合）。
+   *
+   * 与 'conversation' 的区别：conversation 是**单条消息**这一存储域；
+   * dialog_group 是**一段连贯场景**（多轮聚合）这一存储域。两者共用同一份
+   * `search_index`（块不另建索引，见 ADR-010 P1-C1 细化 4）——
+   * 差异只在聚合粒度，不在索引。
+   */
+  | 'dialog_group';
 
 /** 召回路标识 — 一条命中从哪条检索路进来，融合阶段按此取 RRF 权重 */
 export type RetrievalRoute =
   | 'emotion' | 'keyword' | 'spine' | 'locus' | 'entity' | 'work'  // 现有 6 路（MemoryRetriever）
   | 'diamond' | 'knowledge' | 'vault' | 'note' | 'profile'          // 新增域路由
   | 'conversation' | 'default'
-  | 'meeting';                                                      // 会晤隔离墙（MeetingWallAdapter）
+  | 'meeting'                                                       // 会晤隔离墙（MeetingWallAdapter）
+  | 'dialog_group';                                                 // ADR-010 P1-C1: 对话块路
 
 /**
  * 统一命中 — 多路并行检索的原子单位。
