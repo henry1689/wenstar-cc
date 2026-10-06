@@ -473,6 +473,34 @@ const RELATION_LABEL_CN: Record<string, string> = {
 /** P0-1: "我"节点固定ID，防止DB重建后ID漂移导致关系网断裂 */
 const SELF_NODE_ID = 'SELF-00001';
 
+/**
+ * 🆕 A3（2026-10-06）：用户边关系归一 —— 授权范围与判据（业主 2026-10-06 明确授权）。
+ *
+ * 业主定音：徐诗雨与用户的正式关系是「**同事、情人**」，而库里她与用户之间
+ * 同时挂着 9 条互斥边（spouse_of / child_of / sibling_of / grandchild_of /
+ * acquaintance_of / father_of / parent_of / mother_of / grandfather_of），
+ * 「同事」「情人」一条都没有。批 A2 把读取侧收窄为「只认用户边」之后，这 9 条
+ * 被并列渲染成「与鸿艺的关系: 配偶、父母、父亲、母亲、兄弟姐妹、认识的人、祖父、祖辈」。
+ *
+ * 授权范围（业主原话「授权删这 9 条边 + 建 2 条新边」）：**只处理这一对节点**。
+ * 全库同类互斥清理需另行授权（批 B），不在本迁移内做。
+ */
+const USER_EDGE_REPAIR_ENTITY = '徐诗雨';
+/** 授权删除的 9 条互斥边（原话里的「9 条边」） */
+const USER_EDGE_REVERSE_REMOVE: ReadonlySet<string> = new Set([
+  'spouse_of', 'child_of', 'sibling_of', 'grandchild_of', 'acquaintance_of',
+  'father_of', 'parent_of', 'mother_of', 'grandfather_of',
+]);
+/** 建立的唯一一组正确关系（原话里的「2 条新边」；按本库既有写法成对建双向） */
+const USER_EDGE_REPAIR_KEEP: readonly string[] = ['colleague_of', 'lover_of'];
+/** relation_to_user 展示缓存的目标值（与 A2 读取侧推导出的标签一致） */
+const USER_EDGE_REPAIR_LABEL = '同事、情人';
+/** 情趣语境下被误写成正式关系的称谓词 —— 只在命中这些时才改写展示缓存 */
+const MISPLACED_KIN_RELATIONS: ReadonlySet<string> = new Set([
+  '爸爸', '妈妈', '父亲', '母亲', '孩子', '儿子', '女儿',
+  '哥哥', '姐姐', '弟弟', '妹妹', '爷爷', '奶奶', '外公', '外婆',
+]);
+
 function uid(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).substring(2, 8);
@@ -683,6 +711,8 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     this._ensureSelfNode();
     this._ensureYuyaoProfile();
+    // A3(2026-10-06): 用户边关系归一 —— 必须放在 _ensureSelfNode 之后（锚点节点要先存在）
+    try { this._migrateToV6(); } catch (e) { console.warn('[FamilyGraph] V6迁移失败(非致命):', (e as Error)?.message || e); }
   }
 
   /**
@@ -1236,6 +1266,111 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (uuidChanged > 0) {
       console.log(`[FamilyGraph] V5 迁移: UUID重编号${uuidChanged}人(共${seq}人)`);
     }
+  }
+
+  /**
+   * 🆕 A3（2026-10-06）：用户边关系归一 —— 把「与用户的关系」从一堆互斥边收敛成唯一一组。
+   *
+   * 现象（业主实测）：徐诗雨与用户之间有 9 条互斥边同时成立，「同事」「情人」一条都没有。
+   * 批 A2 已把**读取侧**收窄为「只认实体↔用户的那条边」，于是这 9 条被并列渲染成
+   * 「与鸿艺的关系: 配偶、父母、父亲、母亲、兄弟姐妹、认识的人、祖父、祖辈」。
+   * 本迁移修**数据侧**：删互斥边、建唯一一组正确边、归一关系展示缓存。
+   *
+   * 幂等：判据 = 「这对节点之间还存在授权删除的边」。清完即不再命中。
+   *
+   * 🔴 热力互动是**复制**不是搬运：写错边的 `_interactions`（实测 100 条写在
+   *   `徐诗雨 -[child_of]-> 徐东伟` 这条**父女边**上）原样保留不动 —— 无法排除其中
+   *   混有徐东伟本人的互动记录，删了就找不回来。只把一份写进新的规范用户边，
+   *   使批 A2 锚定后的 `computeHeat` 能正常计入。（旧边上的 `_relation_warmth` 标记
+   *   属另一处清理，未在本次授权范围内，另行提案。）
+   *
+   * 授权范围：只处理 `USER_EDGE_REPAIR_ENTITY` ↔ 用户 这一对节点（业主原话
+   * 「授权删这 9 条边 + 建 2 条新边」）。全库同类清理需另行授权。
+   */
+  private _migrateToV6(): void {
+    const selfId = this.getUserNodeId();
+    if (!selfId) return;
+    const nodes = this.query("SELECT id FROM nodes WHERE name = ? AND type = 'person'", [USER_EDGE_REPAIR_ENTITY]);
+    if (!nodes.length) return;
+    const entityId = String(nodes[0].id);
+    if (entityId === selfId) return;
+
+    const rows = this.query(
+      'SELECT id, source_id, relation, properties FROM edges WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)',
+      [entityId, selfId, selfId, entityId],
+    ) as Array<{ id: string; source_id: string; relation: string; properties: string }>;
+
+    const conflicts = (rows || []).filter((r) => USER_EDGE_REVERSE_REMOVE.has(String(r.relation)));
+    // 🔴 触发条件是「**≥2 条**授权删除的边同时成立」——即真正的互斥状态。
+    //   不取「≥1」是为了不与后台例程对打：`_auto_fix` 会给"我↔各实体"补 `acquaintance_of`，
+    //   只补回一条属正常，不该每次启动都被迁移删掉（那会变成迁移与例程互刷）。
+    if (conflicts.length < 2) return; // 幂等：已归一
+
+    const now = new Date().toISOString();
+
+    // ① 复制她名下已有的热力互动与最高热力值（来源边一律不动）
+    const carriedIx: Array<Record<string, unknown>> = [];
+    const seenTs = new Set<string>();
+    let carriedHeat = 0;
+    let carriedWarmth = '';
+    try {
+      const mine = this.query('SELECT properties FROM edges WHERE source_id = ? OR target_id = ?', [entityId, entityId]) as Array<{ properties: string }>;
+      for (const e of mine || []) {
+        const p = JSON.parse(e.properties || '{}');
+        for (const ix of (Array.isArray(p._interactions) ? p._interactions : [])) {
+          const ts = String((ix as any)?.timestamp || '');
+          if (!ts || seenTs.has(ts)) continue;
+          seenTs.add(ts);
+          carriedIx.push(ix as Record<string, unknown>);
+        }
+        const h = Number(p._heat_score);
+        if (Number.isFinite(h) && h > carriedHeat) {
+          carriedHeat = h;
+          carriedWarmth = String(p._relation_warmth || '');
+        }
+      }
+    } catch { /* 复制失败不阻塞归一 */ }
+    carriedIx.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+
+    // ② 建唯一一组正确边（按本库既有写法成对建双向；已存在的跳过）
+    let created = 0;
+    for (const rel of USER_EDGE_REPAIR_KEEP) {
+      for (const [s, t] of [[selfId, entityId], [entityId, selfId]] as Array<[string, string]>) {
+        if ((rows || []).some((r) => String(r.source_id) === s && String(r.relation) === rel)) continue;
+        const props: Record<string, unknown> = { _v2: true, _src: 'migrateToV6:用户边关系归一' };
+        // 热力分数两条边都写（与 updateHeat 的行为一致）—— 只读反向边的消费者也能看到亲密度；
+        // 互动**记录**只落规范边（用户→实体），防 computeHeat 跨边求和重复计数
+        if (carriedHeat > 0) { props._heat_score = carriedHeat; props._relation_warmth = carriedWarmth; }
+        if (s === selfId && carriedIx.length) props._interactions = carriedIx.slice(-100);
+        this.run(
+          'INSERT INTO edges (id, source_id, target_id, relation, properties, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
+          [uid(), s, t, rel, JSON.stringify(props), now, now],
+        );
+        created++;
+      }
+    }
+
+    // ③ 删授权范围内的互斥边
+    for (const c of conflicts) this.run('DELETE FROM edges WHERE id = ?', [c.id]);
+
+    // ④ 关系展示缓存归一：情趣语境下的称谓被写成了正式关系（实测 relation_to_user='爸爸'）
+    let labelFixed = 0;
+    try {
+      const nr = this.query('SELECT properties FROM nodes WHERE id = ?', [entityId]) as Array<{ properties: string }>;
+      const np = JSON.parse((nr[0] as any)?.properties || '{}');
+      if (MISPLACED_KIN_RELATIONS.has(String(np.relation_to_user || ''))) {
+        np.relation_to_user = USER_EDGE_REPAIR_LABEL;
+        this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [JSON.stringify(np), now, entityId]);
+        labelFixed = 1;
+      }
+    } catch { /* 缓存归一失败不阻塞 */ }
+
+    this.markDirty();
+    console.log(
+      `[FamilyGraph] V6 迁移·用户边关系归一: ${USER_EDGE_REPAIR_ENTITY} 删互斥边 ${conflicts.length} 条 / ` +
+      `建正确边 ${created} 条（${USER_EDGE_REPAIR_KEEP.join('、')}）/ 复制互动 ${carriedIx.length} 条` +
+      `/ 归一关系缓存 ${labelFixed} 处`,
+    );
   }
 
   /** entity_source 存量推断 */
