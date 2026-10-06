@@ -527,6 +527,15 @@ async function initPipeline(): Promise<void> {
   try { familyGraph.pruneVoidEdges(); } catch (e: any) { console.warn('[server] 启动 void 边对账失败(非阻塞):', e?.message || e); }
   markModuleAlive('FG·户籍数据层');
   (globalThis as any).__familyGraph = familyGraph;
+  // P0-2a（2026-10-06）：记事子系统归属兜底。
+  //   yuyaoMemory 在 499 行创建（早于 familyGraph），构造时不传 entityUuid ⇒ 内部恒 null；
+  //   而 setEntityUuid 全仓零调用点 ⇒ 全部记事落 belong_entity_uuid=NULL（累计 166 条）。
+  //   记事是户主（玉瑶）的私有事实，归属户主语义正确。此处只**读取** FG 取 UUID，不写 FG。
+  try {
+    const _yuyaoUuid = familyGraph.getUUIDByName('玉瑶');
+    yuyaoMemory.setFallbackUuid(_yuyaoUuid ?? null);
+    console.log(`  [YuyaoMemory] 记事归属兜底已设: ${_yuyaoUuid ?? '（未取到玉瑶 UUID，将保持告警）'}`);
+  } catch (e: any) { console.warn('[YuyaoMemory] 归属兜底设置失败(非阻塞):', e?.message || e); }
   // V3.2.1 调试模式: 全部限制解锁
   (globalThis as any).__DEBUG_UNLOCK_ALL = true;
   setGlobal('familyGraph', familyGraph);

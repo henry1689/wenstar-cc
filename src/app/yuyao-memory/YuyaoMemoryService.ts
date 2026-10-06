@@ -22,10 +22,34 @@ function noteId(): string {
 export class YuyaoMemoryService {
   private sqlite: SQLiteAdapter;
   private entityUuid: string | null;
+  /** P0-2a: 归属兜底 UUID（会话实体为空时的默认归属） */
+  private fallbackUuid: string | null = null;
   constructor(sqlite: SQLiteAdapter, entityUuid?: string) { this.sqlite = sqlite; this.entityUuid = entityUuid || null; }
 
   /** V13: 设置当前会话的实体UUID（由 chat.ts 每轮更新） */
   setEntityUuid(uuid: string | null): void { this.entityUuid = uuid; }
+
+  /**
+   * P0-2a（2026-10-06）：设置归属兜底 UUID。
+   *
+   * 背景：上一行注释称 setEntityUuid「由 chat.ts 每轮更新」，实测**全仓零调用点** ——
+   * 本类三处写入（storeObjectLocation / storeFact / setReminder）的 belong_entity_uuid
+   * 自 2026-09-19 收口到 writeMemory 起**恒为 NULL**，累计 166 条记事落出归属链路（89 条仍在产生）。
+   * 记事是**户主（玉瑶）**的私有事实子系统（车钥匙放哪、某人是谁），归属户主是语义正确的默认值，
+   * 与 persistence-stage 自身兜底链的末段（玉瑶 → OWNER_UUID）同源。
+   *
+   * 口径：兜底 ≠ 丢弃。两者皆空时**告警但照写**（用户数据绝不静默丢）。
+   */
+  setFallbackUuid(uuid: string | null): void { this.fallbackUuid = uuid; }
+
+  /** 归属解析：会话实体优先 → 兜底 → 告警（仍写入，不丢弃） */
+  private resolveBelongUuid(): string | null {
+    const u = this.entityUuid ?? this.fallbackUuid;
+    if (!u) {
+      console.warn('[YuyaoMemoryService] 归属未定（会话实体与兜底均为空），本条记事将以 belong_entity_uuid=NULL 落库 —— 检查 server 装配是否调用了 setFallbackUuid');
+    }
+    return u;
+  }
 
   storeObjectLocation(key: string, location: string, dgId?: string, dnaId?: string): void {
     // 旧记事作废（只标记不删除，恪守「只增不删」）
@@ -55,7 +79,7 @@ export class YuyaoMemoryService {
       isValid: 1,
       dialogGroupId: dgId ?? null,
       dnaRootId: dnaId ?? null,
-      belongEntityUuid: this.entityUuid,
+      belongEntityUuid: this.resolveBelongUuid(),
     });
   }
 
@@ -88,7 +112,7 @@ export class YuyaoMemoryService {
       isValid: 1,
       dialogGroupId: dgId ?? null,
       dnaRootId: dnaId ?? null,
-      belongEntityUuid: this.entityUuid,
+      belongEntityUuid: this.resolveBelongUuid(),
     });
   }
 
@@ -125,7 +149,7 @@ export class YuyaoMemoryService {
       repeatRule: repeatRule ?? null,
       dialogGroupId: dgId ?? null,
       dnaRootId: dnaId ?? null,
-      belongEntityUuid: this.entityUuid,
+      belongEntityUuid: this.resolveBelongUuid(),
     });
     return { id, memory_type: 'note', sub_type: 'reminder', note_key: text, raw_input: text,
       is_valid: 1, remind_at: remindAt, reminded: 0, repeat_rule: repeatRule ?? null,
