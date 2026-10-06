@@ -16,6 +16,9 @@ import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
 // 2026-09-11: 启动期 fg_entity_names 派生回填需与写入侧共用同一序列化格式
 import { formatNames } from './EntityNameCodec.js';
+// 🔴 V22(2026-09-23) 锚点/碎片重建需派生 40D 时空标签 —— 复用批次4 已统一的唯一实现。
+//   依赖方向已核：m2→engine 依赖已存在（FusionStorageAdapter.ts 同源 import），无新增反向依赖。
+import { getPeriod, getSeason, getLunarTerm } from '../engine/temporal/global-types.js';
 // 🔴 2026-09-19 批 2：conversations 列清单**单一事实源**（与 ConversationDB 共用同一构造器）。
 //   本文件原 insertConversation 自己手写 13 列 SQL —— 与 ConversationDB 的 22 列形成双通道漂移：
 //   缺 belong_entity_uuid/message_id、entity_names 写成 JSON 数组（实库为逗号分隔）、
@@ -35,6 +38,43 @@ function checkEntityWriteObj(name: string): { allowed: boolean; reason: string }
   if (OBJECT_FRAG_TAIL.test(n) || CHAT_RESIDUE.test(n)) return { allowed: false, reason: '句子片段/对话残留' };
   if (APPEARANCE_FEATURE_TAIL.test(n)) return { allowed: false, reason: '外貌/体态特征词，应存档案字段' };
   return { allowed: true, reason: '合规object名词' };
+}
+
+// ══════════════════════════════════════════════════════════════
+// V22(2026-09-23) 锚点重建器「列漂移」防护 —— 模块级纯规则（可单测）
+//
+// 背景：_rebuildMemoryAnchors() 每次启动 DELETE 全部 %_ANCHOR/%_CHUNK 后重建，
+//   重建时**只会主动重算一部分列**（本集合），其余列必须从重建前快照回填，
+//   否则被静默清 NULL。实测代价：anchor_score / topic_label / time_period 等
+//   被清零（2026-09-22 回填的 907 条次日仅剩 8 条）；历史上 entity_genes 同样被抹。
+//
+// 设计意图：回填清单**不写死**，而是「表实际列 − 派生列」动态求出，
+//   未来 memories 新增任何列 → 自动纳入回填，无需再改本文件。
+// ══════════════════════════════════════════════════════════════
+
+/** 重建时主动重算的列（不接受快照回填，否则旧值会覆盖新算值） */
+export const ANCHOR_REBUILD_DERIVED_COLUMNS: ReadonlySet<string> = new Set([
+  'id', 'seq_pos', 'created_at', 'perception_40d', 'calcium_score', 'calcium_level',
+  'locus_path', 'leaf_zone', 'raw_input', 'memory_kind', 'lifecycle_state',
+  'confidence_score', 'stability_score', 'thread_id', 'effective_strength',
+  'strength_updated_at', 'is_landmark', 'primary_emotion', 'memory_type',
+  'dialog_group_id', 'belong_entity_uuid', 'entity_genes', 'fg_entity_names',
+  'global_uid', 'dna_root_id', 'location_fingerprint', 'is_foresight',
+  'valid_until_ms', 'foresight_status', 'source_type',
+  // V22 新增派生列（原先完全不写 → 被清零的元凶）
+  'anchor_score', 'topic_label', 'time_period', 'season', 'lunar_term',
+  'last_verified_at', 'round_count',
+]);
+
+/**
+ * 计算需要从快照回填的列清单 = 表实际列 − 派生列。
+ * 纯函数：不依赖数据库，便于直接单测「新增列是否自动纳入回填」。
+ * @param tableColumns memories 表实际列名（PRAGMA table_info 第 2 列）
+ */
+export function computeAnchorRestoreColumns(tableColumns: readonly string[]): string[] {
+  return tableColumns.filter(
+    c => !ANCHOR_REBUILD_DERIVED_COLUMNS.has(c) && /^[a-z_][a-z0-9_]*$/i.test(c),
+  );
 }
 import type { Perception24D } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
@@ -832,7 +872,10 @@ export class SQLiteAdapter {
   getRecentConversations(limit = 100): Array<{ role: string; content: string; timestamp: string }> {
     this.ensureReady();
     const rows = this.queryAll<{ role: string; content: string; timestamp: string }>(
-        'SELECT role, content, timestamp FROM conversations WHERE is_compacted = 0 ORDER BY timestamp DESC LIMIT ?',
+        // 🔴 2026-09-22 上下文连贯性：历史加载必须排掉测试行（namespace='test' 或 is_test=1）
+        //   实测：近 200 轮里 58 条 is_test=1 + 2 条 ns=test，共 30.5% 为测试/极短行，
+        //   它们会插入她的对话流 ⇒ “接不上话”（）
+        'SELECT role, content, timestamp FROM conversations WHERE is_compacted = 0 AND COALESCE(namespace,\'default\') <> \'test\' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT ?',
         [limit]
       );
       return rows.reverse();
@@ -1417,6 +1460,26 @@ export class SQLiteAdapter {
     return result;
   }
 
+  /**
+   * P0-4（2026-10-07）：该记录是否**真的携带**感知向量。
+   *
+   * 为什么不能只判 `r40` 是否为 null：本文件内三处注释共同声明「无向量行不参与情感余弦」
+   * （`_scoreMemory40D`、`applyReinforcement`、`rowToRecord`），但这条契约**从未生效**——
+   *   ① 全零向量（锚点 / 记事 / 金库 / 睡眠巩固按设计写 `encodeEmptyPerceptionV40()`）
+   *      经 `toNormalizedVector40D` 后**并非全零**：双极性维度 D36/D37 走 `(v+1)/2`，
+   *      **0 被映射成 0.5** ⇒ 归一化后范数 = 0.707107 ≠ 0
+   *      ⇒ `cosineSimilarity40D` 里那道 `normA === 0 → return 0` 的防线**永不触发**；
+   *   ② `rowToRecord` 写的是 `decodePerceptionV40(...) ?? createEmptyPerceptionV40()`，
+   *      即 r40 **永不为 null** ⇒ 调用点的 `r40 ? cosine(...) : 0` 守卫恒为真。
+   * 实测后果：全零行对含 D36/D37 能量的查询 cos 可达 **1.000000**（伪中性签名）。
+   *
+   * 为何对**原始** 40D 求范数即可精确区分：`computeL2Norm40D` 作用在未归一化的向量上，
+   * 「全零」（无向量）与「真实的中性向量」在此判据下可分辨 —— 归一化后的向量做不到。
+   */
+  private _hasPerception(r40: PerceptionV40 | null | undefined): r40 is PerceptionV40 {
+    return !!r40 && computeL2Norm40D(r40) > 0;
+  }
+
   /** V12.4: 40D 单条评分 — cosineSimilarity40D 扇区加权。
    * 合成语义对齐 24D _scoreMemory（S4 评审 P1 修复）：
    *   - 钙化分 /10 归一化（累积级钙化最高 [0,10]，不归一化会淹没情感相似度）
@@ -1427,8 +1490,10 @@ export class SQLiteAdapter {
     // S4 P1-1 修复: 40D 缺失行不再从 record.perception（反解含 10 维中性 0.5）map 兜底——
     //   否则金库/记事/锚点会以相同 14×0.5 签名参与余弦，污染情感召回。
     //   缺失行 → emotional=0，仅按钙化分+recency 降级排序（与注释契约一致）。
+    // 🔴 P0-4: 该契约原先靠 `r40 ? ... : 0` 落实，而 r40 恒非 null（见 _hasPerception 注释）
+    //   ⇒ 契约落空，1540 条全零行带着伪中性签名参与排序。改用显式判据。
     const r40 = record.perceptionV40 ?? null;
-    const emotional = r40 ? cosineSimilarity40D(q40, r40) : 0;
+    const emotional = this._hasPerception(r40) ? cosineSimilarity40D(q40, r40) : 0;
 
     const calcium = record.calcium_score ?? 0;
     let recency = 1.0;
@@ -1612,8 +1677,10 @@ export class SQLiteAdapter {
       if (!record) continue;
 
       // S4 P1-1 一致性修复: 40D 缺失行不 map 反解中性 0.5（避免 14×0.5 假相似），similarity=0 自然不过 0.3 门槛
+      // 🔴 P0-4: 同上 —— `r40` 恒非 null（rowToRecord 兜底 createEmptyPerceptionV40），
+      //   原守卫恒为真 ⇒ 全零行可越过 0.3 门槛拿到**强化加成**。改用显式判据。
       const r40 = record.perceptionV40 ?? null;
-      const similarity = r40 ? cosineSimilarity40D(newP40, r40) : 0;
+      const similarity = this._hasPerception(r40) ? cosineSimilarity40D(newP40, r40) : 0;
       if (similarity < 0.3) continue;
 
       const boost = reinforcementBoost(record.calcium_score, newCalcium, similarity);
@@ -2348,6 +2415,75 @@ export class SQLiteAdapter {
   private _rebuildMemoryAnchors(): number {
     if (!this.db) return 0;
     const now = new Date().toISOString();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 🔴 V22(2026-09-23) 快照-回填：根治「重建器列清单漂移」型**静默数据清零**。
+    //
+    // 根因实证：本函数在每次服务启动 DELETE 全部 %_ANCHOR/%_CHUNK 后重建，
+    //   而 INSERT 仅写 32 列 / memories 表实有 70 列 → 其余 38 列被重置为 NULL/DEFAULT。
+    //   实测代价（2026-09-23）：anchor_score 918/926、topic_label 918/926、
+    //   time_period 925/926 被抹 —— 2026-09-22 回填的 907 条锚点分值，次日仅剩 8 条。
+    //   历史同类事故：entity_genes 曾被同样抹除（批次1 靠**逐列补清单**修复）。
+    //
+    // 为什么不是再逐列补清单：列清单会持续漂移，补一列只挡一次（已复发过一轮）。
+    //   本方案改为「重建前快照旧行全部非空列 → 重建后按【表实际列 − 派生列】**动态**回填」，
+    //   未来新增任何列都自动纳入回填范围，从结构上不再需要逐列维护。
+    // ═══════════════════════════════════════════════════════════════════════
+    const _snap = new Map<string, Record<string, any>>();
+    try {
+      const _s = this.db.exec("SELECT * FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\'");
+      if (_s.length && _s[0]?.columns) {
+        const _cols = _s[0].columns as string[];
+        for (const _row of (_s[0].values as any[][])) {
+          const _rec: Record<string, any> = {};
+          for (let _i = 0; _i < _cols.length; _i++) {
+            if (_row[_i] !== null && _row[_i] !== undefined) _rec[_cols[_i]] = _row[_i];
+          }
+          _snap.set(String(_row[0]), _rec);
+        }
+      }
+      if (_snap.size > 0) console.log(`[SQLiteAdapter] 锚点重建前快照: ${_snap.size} 条（用于重建后回填非派生列）`);
+    } catch (e) { console.warn('[SQLiteAdapter] 锚点快照失败（降级为无回填）:', (e as Error)?.message); }
+
+    // 回填列清单 = 表实际列 − 派生列（**动态**获取，未来新增列自动纳入）
+    //   规则实现已提到模块级（ANCHOR_REBUILD_DERIVED_COLUMNS / computeAnchorRestoreColumns），
+    //   以便单测直接验证「防列漂移」能力，无需启动整库。
+    let _restoreCols: string[] = [];
+    try {
+      const _ti = this.db.exec('PRAGMA table_info(memories)');
+      const _names = (_ti.length && _ti[0]?.values ? (_ti[0].values as any[][]) : []).map(r => String(r[1]));
+      _restoreCols = computeAnchorRestoreColumns(_names);
+    } catch { /* PRAGMA 失败 → 跳过回填（不阻塞重建） */ }
+
+    // V22: 派生列填充（锚点/碎片共用同一路径，避免两处各自漂移）
+    const _fillDerived = (rowId: string, anchorScoreVal: number, topicVal: string | null, roundCnt: number, tsIso: string): void => {
+      try {
+        const _d = new Date(tsIso);
+        const _bad = Number.isNaN(_d.getTime());
+        this.db!.run(
+          'UPDATE memories SET anchor_score=?, topic_label=?, time_period=?, season=?, lunar_term=?, last_verified_at=?, round_count=? WHERE id=?',
+          [anchorScoreVal, topicVal || null, _bad ? null : getPeriod(_d.getHours()),
+           _bad ? null : getSeason(_d.getMonth() + 1), _bad ? null : getLunarTerm(_d), tsIso, roundCnt, rowId],
+        );
+      } catch { /* 单行派生失败不阻塞 */ }
+    };
+
+    // V22: 快照回填（只回填快照中**实际存在非空值**的列）
+    const _restoreSnap = (rowId: string): void => {
+      const _old = _snap.get(rowId);
+      if (!_old || _restoreCols.length === 0) return;
+      const _sets: string[] = []; const _vals: any[] = [];
+      for (const _c of _restoreCols) {
+        if (!(_c in _old)) continue;
+        _sets.push(_c + '=?'); _vals.push(_old[_c]);
+      }
+      if (_sets.length === 0) return;
+      try {
+        _vals.push(rowId);
+        this.db!.run('UPDATE memories SET ' + _sets.join(',') + ' WHERE id=?', _vals);
+      } catch { /* 单行回填失败不阻塞 */ }
+    };
+
     // 🔴 S2-H1: 移除角色扮演误判 — 系统已只有会晤模式。
     // 原 RP_RE 把含家庭称谓(爸爸/妈妈/哥哥/妹妹)的对话误判为 roleplay → 会晤记忆被正常检索排除
     // (实测: 熊梓铭会晤对话"梓铭。是你吗/介绍一下你自己/说说你的经历"全被标 roleplay)。
@@ -2365,16 +2501,31 @@ export class SQLiteAdapter {
       }
     } catch { /* 统计失败不阻塞 */ }
 
-    // 清理旧 ANCHOR
-    try { this.db.run("DELETE FROM memories WHERE id LIKE '%_ANCHOR' OR id LIKE '%_CHUNK%'"); } catch {}
+    // 清理旧 ANCHOR / CHUNK
+    //   V22: 补 ESCAPE —— 原写法 '%_ANCHOR' 中 '_' 是 LIKE 通配符（匹配任意单字符），
+    //   语义上会误伤形如 "...XANCHOR" 的 id；显式转义后只匹配字面量 '_ANCHOR'。
+    //
+    // 🔴 ADR-010 P1-A（2026-10-06）CHUNK 生产者已退役（dialog-group-stage 删除写入循环），
+    //   ⇒ `%\_CHUNK%` 分支自本次起**只用于清除退役前残留**，不再有新增行；
+    //   残留清空后（全表 `id LIKE '%\_CHUNK%'` 计数为 0）本分支可整条移除。
+    //
+    // 🔴 本函数**不得触碰 `dialog_groups`**：该表是块级元数据（block_calcium_score /
+    //   scene_anchor_hash / emotion_curve / block_close_reason / lifecycle_state）的**唯一载体**，
+    //   建立在独立表上正是为了不被这里的启动 DELETE 清空。
+    //   若日后有人要让本函数「顺带重建 dialog_groups」，必须先读 ADR-010 §7 的单一真源声明
+    //   —— 重建会覆盖真源，属破坏性操作。（回归守卫见 __tests__/restart-invariant.test.ts）
+    try { this.db.run("DELETE FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\' OR id LIKE '%\\_CHUNK%' ESCAPE '\\'"); } catch {}
     // 按对话组聚合
     // 🔴 2026-09-12 隔离区过滤: 不得从被隔离的对话（is_test=1，已标记的洩漏污染型回复）重生成锚点记忆，
     //   否则污染会通过“删除旧锚点→从 conversations 重建”这条路径**回流**进 memories。
     const groups = this.db.exec(
-      "SELECT dg.dialog_group_id, dg.belong_entity_uuid, dg.tc, dg.first_ts, dg.last_ts, dg.avg_ca, dg.max_ca " +
+      "SELECT dg.dialog_group_id, dg.belong_entity_uuid, dg.tc, dg.first_ts, dg.last_ts, dg.avg_ca, dg.max_ca, dg.topic " +
       "FROM (SELECT dialog_group_id, belong_entity_uuid, COUNT(*) as tc, MIN(timestamp) as first_ts, " +
       "MAX(timestamp) as last_ts, AVG(COALESCE(calcium_score,0.5)) as avg_ca, " +
-      "MAX(COALESCE(calcium_score,0.5)) as max_ca FROM conversations " +
+      "MAX(COALESCE(calcium_score,0.5)) as max_ca, " +
+      // V22: 话题标签来源 —— conversations.topic（原重建器完全不写 topic_label，实测 918/926 被清零）
+      "(SELECT t2.topic FROM conversations t2 WHERE t2.dialog_group_id = conversations.dialog_group_id " +
+      "AND t2.topic IS NOT NULL AND t2.topic != '' ORDER BY t2.timestamp LIMIT 1) as topic FROM conversations " +
       "WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND dialog_group_id IS NOT NULL " +
       "AND (is_test IS NULL OR is_test = 0) " +
       "GROUP BY dialog_group_id, belong_entity_uuid) dg ORDER BY dg.belong_entity_uuid, dg.first_ts"
@@ -2390,6 +2541,14 @@ export class SQLiteAdapter {
       }
     } catch {}
 
+    // ⚠️ V22 范围声明：本次**不重建碎片（CHUNK）**。
+    //   下方 DELETE 仍覆盖 %\_CHUNK%（保持改动前行为不变）；但碎片不会被重建。
+    //   已知后果（已登记为后续专项，见交接单）：碎片每次重启被永久销毁。
+    //   不重建的原因（S4 评审发现）：碎片是逐轮原文级内容，其 memory_kind/is_landmark/40D/序号口径
+    //   与运行期 dialog-group-stage 存在多处分歧，尤其 memory_kind（roleplay 隔离）
+    //   会导致扮演轮原文泄漏进户主检索——需先定口径再单独立项。
+    //   因此本函数只对自己重建的 %\_ANCHOR 行做快照与回填。
+
     // seq_pos 起始值
     let seq = 1;
     try {
@@ -2398,10 +2557,11 @@ export class SQLiteAdapter {
     } catch {}
 
     let n = 0, nSkipped = 0;
-    for (const [dgId, eUuid, _tc, firstTs, _lastTs, avgCa, maxCa] of (groups[0].values as any[][])) {
+    for (const [dgId, eUuid, tc, firstTs, _lastTs, avgCa, maxCa, topicVal] of (groups[0].values as any[][])) {
       const dg = String(dgId), eu = String(eUuid || '');
       if (!eu) { nSkipped++; continue; }  // 空 UUID 跳过
       const ename = entMap.get(eu) || eu;
+      const dgTopic = topicVal ? String(topicVal) : null;
       const id = dg + '_ANCHOR';
 
       const tvs: any[][] = [];
@@ -2428,8 +2588,11 @@ export class SQLiteAdapter {
       const kind = 'normal';
 
       const ca = Math.min(9.99, parseFloat(((Number(maxCa) || Number(avgCa) || 0.5)).toFixed(3)));
-      const cl = ca >= 2 ? 3 : ca >= 1 ? 2 : ca >= 0.5 ? 1 : 0;
-      const es = Math.min(1.0, ca * 0.8);
+      // 批次1(2026-09-11): 锚点含归属实体 ename，直接同源生成基因（与派生逻辑同格式）。
+      //   V22 上移出 try —— 碎片重建同样需要它（原先是 try 内局部变量）。
+      const anchorGenes = ename
+        ? JSON.stringify([{ name: ename, type: 'person', allele: ename, phenotype: 'neutral', knowledge_type: 'factual' }])
+        : null;
 
       // 🆕 编码健康修复: 从 conversations 继承规范 global_uid/dna_root_id/location_fingerprint（否则重建的锚点无 UID/DNA/fp）
       let anchorGlobalUid = '', anchorDnaRootId = '', anchorLocationFp = '';
@@ -2446,18 +2609,13 @@ export class SQLiteAdapter {
       } catch (err) {
         console.warn('[SQLiteAdapter] 锚点身份继承查询失败:', (err as Error)?.message);
       }
+      // ═══════════════════════════════════════════════════════════
+      // V22: 单一写入点（本次只写锚点行；碎片重建已拆出本批）
+      // ═══════════════════════════════════════════════════════════
+      const _cl = ca >= 2 ? 3 : ca >= 1 ? 2 : ca >= 0.5 ? 1 : 0;
       try {
-        // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零（S4 P1-2 修复：
-        //   与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
-        const anchor40D = encodeEmptyPerceptionV40();
-        // 🔴 批次1(2026-09-11) 修复：锚点重建器列清单缺 entity_genes/fg_entity_names。
-        //   本写入器在**每次启动**重建全部对话组锚点（INSERT OR REPLACE），
-        //   缺失列被重置为 NULL → 实测把 repairDataIntegrity 刚派生的 735 条里的
-        //   ~387 个锚点基因全抹掉（log 写 735，落库仅 348）。
-        //   锚点本身含归属实体 ename，直接同源生成基因（与派生逻辑同格式）。
-        const anchorGenes = ename
-          ? JSON.stringify([{ name: ename, type: 'person', allele: ename, phenotype: 'neutral', knowledge_type: 'factual' }])
-          : null;
+        // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零
+        //   （S4 P1-2: 与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
         this.db!.run(
           "INSERT OR REPLACE INTO memories (id,seq_pos,created_at,perception_40d,calcium_score,calcium_level," +
           "locus_path,leaf_zone,raw_input,memory_kind,lifecycle_state,confidence_score,stability_score," +
@@ -2468,13 +2626,17 @@ export class SQLiteAdapter {
           "is_foresight,valid_until_ms,foresight_status,source_type) " +
           "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,?,?,0,NULL,'none','conversation')",
           [id, seq++, String(firstTs || now),
-           anchor40D,
-           ca, cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
-           cl >= 2 ? 'active' : 'candidate', 0.55, cl >= 2 ? 0.45 : 0.2,
-           dg, es, now, '平静', dg, eu,
+           encodeEmptyPerceptionV40(),
+           ca, _cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
+           _cl >= 2 ? 'active' : 'candidate', 0.55, _cl >= 2 ? 0.45 : 0.2,
+           dg, Math.min(1.0, ca * 0.8), now, '平静', dg, eu,
            anchorGenes, ename,
            anchorGlobalUid, anchorDnaRootId, anchorLocationFp || '0'.repeat(32)]
         );
+        // V22: ① 派生列（含原先被清零的 anchor_score/topic_label/时空标签/round_count）
+        //      ② 快照回填（其余非派生列：recall_count / last_recalled_at / is_promoted / 伤痕 / 溯源等）
+        _fillDerived(id, ca, dgTopic, Number(tc) || 1, String(firstTs || now));
+        _restoreSnap(id);
         n++;
       } catch { /* 单条失败不阻塞 */ }
       if (n % 100 === 0) console.log(`[SQLiteAdapter] memories锚点进度: ${n}条`);
