@@ -137,63 +137,149 @@ export function extractTopicKeywords(
   return base.slice(0, limit);
 }
 
-/** 近期槽：当日(<1天)记忆按钙化分取 TOP（保底槽，内容相关召回不足时兜底） */
+/** 近期槽候选池倍数：先按钙化取 pool 倍，再按「钙化 + 近因」重排取 limit */
+const RECENT_SLOT_POOL_FACTOR = 2.5;
+
+/**
+ * 近期槽打分（P0-1）：钙化（归一）× 0.6 + 24 小时线性近因 × 0.4。
+ *
+ * 🔴 钙化归一用 `min(1, calcium)` 而**不是** `calcium / 10`：
+ *   实测全表 95.8%（9186/9593）记忆钙化 < 1、绝大多数落在 0.2~1。若除以 10，
+ *   钙化项整体缩到 0.007~0.036，而近因项上限 0.4 ⇒ 近因压倒性主导，
+ *   近期槽会退化成「纯最新 8 条」，把"当天重要的事"这个信号整个丢掉。
+ */
+function recentSlotScore(row: RecallMemoryRow, nowMs: number): number {
+  const calciumNorm = Math.min(1, Math.max(0, Number(row.calcium_score) || 0));
+  const ts = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  const ageHours = Number.isFinite(ts) ? Math.max(0, (nowMs - ts) / 3_600_000) : 24;
+  const recency = Math.max(0, 1 - ageHours / 24);
+  return calciumNorm * 0.6 + recency * 0.4;
+}
+
+/**
+ * 近期槽：当日(<1天)记忆 —— **候选池扩容后按「钙化 + 时间近因」重排**（P0-1）。
+ *
+ * 原实现：`ORDER BY calcium_score DESC LIMIT 8` —— 纯钙化序，同钙化时退化为"最新优先"，
+ *   当天的高钙旧内容会压住新内容。
+ *
+ * @param nowMs 注入当前时间（纯函数化，便于确定性测试；缺省取真实时间）
+ */
 export function recentCalciumRows(
   src: RecallSource,
   entityUuid: string,
   limit = 8,
+  nowMs: number = Date.now(),
 ): RecallMemoryRow[] {
-  return (
-    src.queryAll(
-      `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
-       WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1
-       ORDER BY calcium_score DESC LIMIT ?`,
-      [entityUuid, limit],
-    ) || []
-  ) as RecallMemoryRow[];
+  const pool = (src.queryAll(
+    `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
+     WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1
+     ORDER BY calcium_score DESC LIMIT ?`,
+    [entityUuid, Math.max(limit, Math.ceil(limit * RECENT_SLOT_POOL_FACTOR))],
+  ) || []) as RecallMemoryRow[];
+
+  return pool
+    .map((r) => ({ r, s: recentSlotScore(r, nowMs) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, limit)
+    .map((x) => x.r);
 }
 
-/** 历史槽：≥1天记忆按钙化分取 TOP（历史地标保底） */
+/**
+ * 历史槽时间片配额（P0-1）：**每一片单独占名额**，取代"全历史按钙化抢 6 个位"。
+ *
+ * 为什么必须分层：实测 14 条 calcium=10 的记忆**全部来自 29~40 天前**
+ * （2026-08-27/28、09-08，其中 4 条是 roleplay 地标），而最近 5 天的 176 条记忆
+ * 在同一排序里**最好排名第 43** ⇒ 纯钙化序下「一两天前聊过的」永远进不了历史槽。
+ */
+const HISTORY_BUCKETS: ReadonlyArray<{ fromDays: number; toDays: number; quota: number }> = [
+  { fromDays: 1, toDays: 3, quota: 2 },      // 1~3 天
+  { fromDays: 3, toDays: 7, quota: 1 },      // 3~7 天
+  { fromDays: 7, toDays: 30, quota: 2 },     // 7~30 天
+  { fromDays: 30, toDays: 36500, quota: 1 }, // 30 天+（古老地标仍保留 1 席）
+];
+
+/**
+ * 历史槽：≥1 天的记忆，**按时间片配额**取（P0-1）。
+ *
+ * 语义：
+ *   ① 逐片按配额取，片内仍按钙化序（`calcium_score DESC, created_at DESC`）；
+ *   ② 某片不足额时，**用"最近的"记忆补足**（`ORDER BY created_at DESC`）——
+ *      刻意不用钙化序补，否则一有片空就又被古老地标填回，等于没分层。
+ */
 export function historyCalciumRows(
   src: RecallSource,
   entityUuid: string,
   limit = 6,
 ): RecallMemoryRow[] {
-  return (
-    src.queryAll(
+  const out: RecallMemoryRow[] = [];
+  const seen = new Set<string>();
+
+  for (const b of HISTORY_BUCKETS) {
+    if (out.length >= limit) break;
+    const rows = (src.queryAll(
+      `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
+       WHERE belong_entity_uuid = ?
+         AND julianday('now') - julianday(created_at) >= ?
+         AND julianday('now') - julianday(created_at) < ?
+       ORDER BY calcium_score DESC, created_at DESC LIMIT ?`,
+      [entityUuid, b.fromDays, b.toDays, b.quota],
+    ) || []) as RecallMemoryRow[];
+    for (const r of rows) {
+      if (r.id && !seen.has(r.id)) { seen.add(r.id); out.push(r); }
+    }
+  }
+
+  // ② 补足：按**时间近因**而非钙化 —— 空片不能让古老地标回填
+  if (out.length < limit) {
+    const fill = (src.queryAll(
       `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
        WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) >= 1
-       ORDER BY calcium_score DESC LIMIT ?`,
+       ORDER BY created_at DESC LIMIT ?`,
       [entityUuid, limit],
-    ) || []
-  ) as RecallMemoryRow[];
+    ) || []) as RecallMemoryRow[];
+    for (const r of fill) {
+      if (out.length >= limit) break;
+      if (r.id && !seen.has(r.id)) { seen.add(r.id); out.push(r); }
+    }
+  }
+
+  return out.slice(0, limit);
 }
 
 /**
- * 内容相关召回：当日记忆中 raw_input 含关键词的（LIKE），每个关键词取**最近 1 条**，遍历全部关键词。
+ * 内容相关召回：raw_input 含关键词的记忆（LIKE），每个关键词取**最近 1 条**，遍历全部关键词。
  * 修复"钙化分低的近期关键记忆（如引诗/约定细节）被高钙情感 ANCHOR 挤出 TOP8"。
  * 🔴 排序用 created_at DESC（时间近因）而非 calcium DESC：续聊场景用户想接的是"上次聊到哪"
  *   ——高钙 ANCHOR(1.6-2.05) 若按钙化序仍占满每关键词首位，低钙但最新的细节记忆（6:05-6:10 引诗/描述）
  *   永远轮不到；时间近因 + 关键词话题圈定 = 注入"最近聊的相关内容"，语义贴合续聊。
  * 🔴 每关键词深度 1、全关键词广度遍历：防前序宽泛词（如"诗雨"）先命中高钙 ANCHOR
  *   填满 limit → 后序关键词（"诗韵"）来不及查询。
+ *
+ * @param windowDays 时间窗（天）。🔴 P0-1（2026-10-06 / ADR-011 P1-a）：原实现**硬编码 `< 1`**（当日），
+ *   而 P0 诊断列出的四条通道里它是第三条 —— 用户隔天提起话题（"我们前几天说的国美"）时
+ *   关键词路完全够不到，与"没有任何一条通道会取 1 天以上的记忆"是同一个洞。
+ *   现与砂金库兜底**同窗**（`MEMORY_CONFIG.compaction.sandboxRecallWindowDays`，默认 7）。
+ *   ⚠️ 本模块保持**零 import**（供检索侧与会晤隔离墙共用，防同构漂移）⇒ 缺省值 7 与配置默认同源，
+ *   调用方若需不同窗口请显式传入（retrieval-stage 传 `SANDBOX_RECALL_WINDOW_DAYS`）。
  */
 export function keywordRecallMemories(
   src: RecallSource,
   entityUuid: string,
   keywords: string[],
   limit = 4,
+  windowDays = 7,
 ): RecallMemoryRow[] {
   const out: RecallMemoryRow[] = [];
   if (!keywords.length) return out;
+  const days = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 1;
   for (const kw of keywords) {
     if (out.length >= limit) break;
     const rows = (
       src.queryAll(
         `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
-         WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1 AND raw_input LIKE ?
+         WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < ? AND raw_input LIKE ?
          ORDER BY created_at DESC, calcium_score DESC LIMIT 1`,
-        [entityUuid, `%${kw}%`],
+        [entityUuid, days, `%${kw}%`],
       ) || []
     ) as RecallMemoryRow[];
     for (const r of rows) {

@@ -21,6 +21,10 @@ import {
   keywordRecallMemories,
   recallSandboxConversations,
   shouldEscalateToLlmPicker,
+  // 🔴 P0-1 收编（2026-10-06 / ADR-011 P1-a）：两条槽位此前在本文件里**内联**了
+  //   与 meeting-recall 完全相同的 SQL —— 同一规则两份实现。现统一从真源调用。
+  recentCalciumRows,
+  historyCalciumRows,
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
@@ -265,18 +269,13 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         // 🔴 记忆召回策略(2026-08-21): 三槽位时间覆盖导致早期无关记忆**默认注入**，冲散当前话题（用户反馈"一会东一会西"）。
         // 调整为**早期按需触发**: 常规只注入近期钙化8 + 历史地标6（聚焦当前话题）；
         //   用户明确问过去的事（回忆问句）时才追加最早6条（时间轴兜底，早期记忆仍可召回）。
-        const _recentRows = _sqlite.queryAll(
-          `SELECT id, raw_input, calcium_score, effective_strength, perception_40d FROM memories
-           WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) < 1
-           ORDER BY calcium_score DESC LIMIT 8`,
-          [_entityUuid]
-        ) || [];
-        const _histRows = _sqlite.queryAll(
-          `SELECT id, raw_input, calcium_score, effective_strength, perception_40d FROM memories
-           WHERE belong_entity_uuid = ? AND julianday('now') - julianday(created_at) >= 1
-           ORDER BY calcium_score DESC LIMIT 6`,
-          [_entityUuid]
-        ) || [];
+        // 🔴 P0-1 收编（2026-10-06 / ADR-011 P1-a）：此前这里**内联**了与
+        //   meeting-recall.recentCalciumRows / historyCalciumRows 完全相同的两条 SQL ——
+        //   同一规则两份实现，而 MeetingWallAdapter 的注释却写着「与隔离墙同源」。
+        //   现收编为调用共享函数：SELECT 列与谓词逐一等价，属**纯等价替换**（零行为变化）。
+        //   此后槽位逻辑只有一处真源，时间分层等调整只需改 meeting-recall。
+        const _recentRows = recentCalciumRows(_sqlite, _entityUuid, 8);
+        const _histRows = historyCalciumRows(_sqlite, _entityUuid, 6);
         // 🔴 2026-09-09 会晤失忆修复: 触发词升级为共享 RECALL_TRIGGER_RE（含"还是X的事/继续说"等续聊引导），
         //   用户不写"记得/上次"也能触发原文兑底。共享常量唯一源 = m4/retrieval/meeting-recall.ts。
         const _isRecallQuestion = RECALL_TRIGGER_RE.test(message);
@@ -399,7 +398,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         } catch (_kw2e) { /* 校验失败→回退原前4 */ }
         if (_topicKw.length > 0) {
           try {
-            const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4);
+            // 🔴 P0-1：关键词路的时间窗与砂金库兜底同源（原来是硬编码当日 <1 天，
+            //   隔天提起话题时够不到 —— 与"四条通道都不覆盖 1 天以上"是同一个洞）
+            const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4, SANDBOX_RECALL_WINDOW_DAYS);
             // 内容相关命中无条件前置注入（每条 250 字，不占钙化槽 15 条名额）：
             // 低钙关键记忆(如引诗)即使钙化排 50+ 也能进上下文。
             for (const _kr of _kwRows) {

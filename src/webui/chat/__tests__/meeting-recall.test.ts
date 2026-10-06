@@ -101,7 +101,10 @@ describe('keywordRecallMemories — 内容相关召回', () => {
     const calls: string[] = [];
     const src: RecallSource = {
       queryAll<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {
-        const kw = String((params?.[1] ?? '') as string).replace(/%/g, '');
+        // 🔴 P0-1：keywordRecallMemories 的 SQL 新增了「时间窗（天）」参数，关键词不再固定在 [1]
+        //   （实测：按下标取会拿到天数 7）。改为"取那个 %词% 形态的参数"，对参数顺序变化免疫。
+        //   断言内容不变：诗韵必须被查询到、且其行必须被召回。
+        const kw = String((params || []).find((p) => typeof p === 'string' && p.includes('%')) || '').replace(/%/g, '');
         calls.push(kw);
         if (kw === '诗韵') return [lowCalciumPoem] as T[];
         if (kw === '诗雨') return [highCalciumAnchor] as T[];
