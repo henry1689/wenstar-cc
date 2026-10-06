@@ -208,6 +208,27 @@ CREATE TABLE IF NOT EXISTS decay_log (
     PRIMARY KEY (memory_id, checked_at)
 );
 
+-- 钙化变更溯源 (P0-5b′, 2026-10-07)
+-- 为什么需要：memories 只存当前值、没有任何变更历史 ⇒ 「钙化凭什么爬到 10」无法事后反推
+--   （见 docs/P0-5-钙化升级机制调查报告.md §4：来源字段值域已污染、id 反查只对 7/35 有效）。
+-- 写入方：src/m2/calciumWatch.ts 的「快照差分」（source='snapshot_diff'）；
+--   日后方案甲（精确事件埋点）复用本表，只补 source 标签，不另起炉灶。
+-- 🔴 刻意**不**加 REFERENCES memories(id) ON DELETE CASCADE：_rebuildMemoryAnchors() 每次启动
+--   会 DELETE 全部锚点行，若带级联，锚点的变更历史会被每次重启清空 —— 而锚点正是高钙嫌疑对象之一。
+--   历史记录应当比被观测的行活得更久。
+-- 纯观测表，从不参与检索；由 calciumWatch 的裁剪策略控制体积（每行 30 条 / 全局 90 天）。
+CREATE TABLE IF NOT EXISTS calcium_change_log (
+    memory_id  TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    old_value  REAL,
+    new_value  REAL,
+    source     TEXT NOT NULL,
+    note       TEXT,
+    PRIMARY KEY (memory_id, changed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_ccl_changed_at ON calcium_change_log(changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ccl_source ON calcium_change_log(source, changed_at DESC);
+
 -- 黑钻库 (V4.0 增强字段已直接纳入 CREATE TABLE)
 CREATE TABLE IF NOT EXISTS black_diamond (
     id TEXT PRIMARY KEY,

@@ -1460,6 +1460,16 @@ async function initPipeline(): Promise<void> {
   else console.log('  AQC 质检引擎已启动 ✓');
   markModuleAlive('AQC·质检引擎');
 
+  // ── P0-5b′ 钙化变更溯源（方案乙·快照差分）──
+  // 为什么需要：memories 只存当前值、无变更历史 ⇒「钙化凭什么爬到 10」无法事后反推
+  //   （P0-5b 已用实测证明此路不通，见 docs/P0-5-钙化升级机制调查报告.md §4）。
+  // 只读 memories、只写新表 calcium_change_log，不改任何钙化值、不参与检索。
+  // 传 addTimer 而非模块自带 setInterval：与其余后台定时器同规，WS_LAZY_TIMERS 下一起停摆。
+  try {
+    const { startCalciumWatch } = await import('../m2/calciumWatch.js');
+    startCalciumWatch(storage.getSQLite(), addTimer);
+  } catch (e: any) { console.warn('[CalciumWatch] 启动失败(非阻塞):', e?.message || e); }
+
   console.log(`  融合存储已初始化 (${storage.getSQLite().getStatus().totalRecords} 条记忆 ✓`);
   // 🆕 V10.11: UUID 索引维护 — 保障多角色检索性能
   try {
