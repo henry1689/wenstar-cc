@@ -12,6 +12,9 @@ import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCo
 import { getPeriod, getSeason, getLunarTerm } from '../../engine/temporal/global-types.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
 import { sanitizeBelongUuid } from '../../app/vault/belong-uuid.js';
+// 🔴 ADR-010 P1-B: 块价值判定 + 判据单一定义处（FEATURE_ROUND_RE 由此收拢）
+import { scoreBlock, FEATURE_ROUND_RE } from '../../app/memory/BlockValueScorer.js';
+import type { Perception24D } from '../../m3/types/perception.js';
 // V13.0: 在线 DAG 建边（feature flag 控制，不阻塞闭组主流程）
 let _dagEdgeBuilders: { entity: any; causal: any; repo: any } | null = null;
 let _lastGroupCtx: any = null;  // V13: 上一个闭组上下文（供因果边构建）
@@ -132,7 +135,9 @@ export async function flushDialogGroup(
     //   钙化分仅来自情感强度(低) → 易被召回挤出（实证: 6:05 引诗《蒹葭》钙化 0.70 排 55/257 取不到）。
     //   闭组时把这些特征轮并入 ANCHOR 摘要文本（最多补 2 轮），保证"重要的非情感轮"留下可召回内容。
     //   特征判定用通用承诺/约定/书面引用词集，零硬编码人名/诗名。
-    const FEATURE_ROUND_RE = /答应|承诺|约定|约好|保证|一定|下次|寒假|暑假|开学|回来|盼着|记得|记住|重要|关键|写过|念过|背过|那首诗|那句话|答应过|白露|时节|一首诗/;
+    // 🔴 ADR-010 P1-B: 词表已**收拢到单一定义处** —— BlockValueScorer.FEATURE_ROUND_RE（见文件头 import）。
+    //   同一份词表现在同时服务「锚点特征轮补充」（此处）与「块价值判定」（BlockValueScorer）；
+    //   复制一份即违反不变量 #7「禁止同一业务规则在多个地方重复实现」。
     const _featRounds: string[] = [];
     if (dg.rounds.length > 1) {
       for (let _fi = 0; _fi < dg.rounds.length; _fi++) {
@@ -187,8 +192,21 @@ export async function flushDialogGroup(
     // 写入核心锚点（高钙化分，带anchor_score标记）—— 经 MemoryWriteGateway 值守卫
     const anchorDate = new Date(now);
     const anchorId = dg.id + '_ANCHOR';
+    // 🔴 ADR-010 P1-B: 锚点 seq_pos 取**该组首轮真实 seq_pos 的负值**。
+    //   原为 `-(dg.rounds.length + 100)` —— 按「轮数」算值 ⇒ **同轮数的组算出同一个数**，
+    //   撞 memories.seq_pos 的 UNIQUE 约束（schema.sql:7「seq_pos INTEGER UNIQUE NOT NULL」）
+    //   ⇒ 同轮数的第二个组起，锚点写入静默失败（gw.write 返回 false）。
+    //   实测代价（2026-10-06 生产取证）：当天闭合 4 个「1 轮组」（DG_9340/9342/9348/9350），
+    //   全部算出 -101，**只有第一个写进去**，其余三个的运行期锚点被丢弃；
+    //   而这正是 ADR-010 §1.4 要救回的那份（情感峰值轮**全文、保留场景**，
+    //   对比重启重建版的「每行截 150 字符」）。已在生产库副本上用真实 flushDialogGroup 复现
+    //   `UNIQUE constraint failed: memories.seq_pos`。
+    //   首轮 seq_pos 由 conversations 逐轮递增保证组间唯一 ⇒ 其负值亦唯一，且同组跨重启稳定
+    //   （不依赖任何运行时计数器）。`|| 1` 仅兜底 seqPos 缺失/为 0 的退化输入，避免算出 0
+    //   去撞真实 seq_pos。
+    const anchorSeqPos = -Math.abs(Number(dg.rounds[0]?.seqPos) || 1);
     const anchorOk = gw.write({
-      id: anchorId, seqPos: -(dg.rounds.length + 100), createdAt: now,
+      id: anchorId, seqPos: anchorSeqPos, createdAt: now,
       perceptionV40: vec40(peakP), calciumScore: anchorCalcium,
       calciumLevel: calciumLevel(anchorCalcium), locusPath: dg.locusPath || 'general',
       leafZone: 'language_semantic_zone', rawInput: anchorText,
@@ -203,6 +221,58 @@ export async function flushDialogGroup(
       lunarTerm: getLunarTerm(anchorDate),
     });
     if (anchorOk) sql.writeRaw('UPDATE memories SET round_count=? WHERE id=?', dg.rounds.length, anchorId);
+
+    // ── 块级元数据落库（ADR-010 P1-B / 2026-10-06）─────────────────────────
+    // `dialog_groups` 是块级元数据的**唯一载体**（MigrationManager v16 建表）。
+    // P1-A 只是把表建好，本段是**第一个往里面写的代码** —— 至此「对话块」才真正被记录。
+    //
+    // 判定用 BlockValueScorer（**确定性规则，零 LLM**）：理由是①撞本仓「Harness 零 LLM
+    // 监控」铁律；②不可复现的判据 × 不可逆的持久化决策 = 检索池随机漂移。
+    //
+    // 失败不阻塞闭组主流程（与上方锚点写入同策略），但**必须告警可追责**（P-13 精神：
+    // 丢弃必须可见）—— 块元数据是 P1-C 检索的全部依据，静默失败会让块层看起来"存在但空白"。
+    try {
+      const _p24 = (dg.perceptions || []) as unknown as Perception24D[];
+      const _score = scoreBlock({
+        rounds: dg.rounds.map((r: any) => ({ q: String(r?.q ?? ''), a: String(r?.a ?? '') })),
+        perceptions: _p24,
+        maxCalcium: Number(dg.maxCalcium) || 0,
+        maxCalciumRound: Number(dg.maxCalciumRound) || 0,
+        locusPath: dg.locusPath || 'general',
+        closeReason: String(ctx._dgCloseReason || 'unknown'),
+        entityNames: (dg.entities || []).filter((n: string) => n && n !== '我' && n !== '玉瑶'),
+      });
+      const _firstTs = dg.rounds.length > 0 ? new Date(dg.rounds[0].time).toISOString() : now;
+      const _lastTs = dg.rounds.length > 0 ? new Date(dg.rounds[dg.rounds.length - 1].time).toISOString() : now;
+      sql.writeRaw(
+        'INSERT OR REPLACE INTO dialog_groups (dialog_group_id, belong_entity_uuid, narrative_tag, ' +
+        'primary_emotion, block_calcium_score, scene_anchor_hash, emotion_curve, block_close_reason, ' +
+        'block_summary, lifecycle_state, is_landmark, turn_count, first_ts, last_ts, created_at, updated_at) ' +
+        'VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)',
+        [
+          dg.id, entityUuid,
+          // narrative_tag 列按 v16 设计承载「内容类别 → 推导衰减率」（ADR-010 §7 / 修正 C），
+          // 取值即 BlockDecayClass；**不**伪造「家人」之类中文标签去迎合 memories 层 runDecay 的
+          // 关键词匹配 —— dialog_groups 是独立表，块层衰减自成一处，混用会造成新的口径分叉。
+          _score.decayClass,
+          decision.primary_emotion || '对话',
+          _score.score,
+          _score.sceneAnchorHash,
+          JSON.stringify(_score.emotionCurve),
+          String(ctx._dgCloseReason || 'unknown'),
+          'active', 0,
+          _score.turnCount, _firstTs, _lastTs, now, now,
+        ],
+      );
+      console.log(
+        `[DG·块] ${dg.id} 钙分=${_score.score} 类别=${_score.decayClass} ` +
+        `轮=${_score.turnCount} 场景占比=${_score.sceneRatio} 指纹=${_score.sceneAnchorHash}` +
+        `${_score.degraded ? ' ⚠️退化块' : ''} 信号=${JSON.stringify(_score.signals)}`,
+      );
+    } catch (e) {
+      // 只告警不抛出：块元数据写入失败不应让整组对话的记忆一并丢失
+      console.error('[DG·块] ❌ dialog_groups 写入失败（块级元数据缺失，P1-C 检索将取不到本块）:', (e as Error)?.message);
+    }
 
     // ── CHUNK 碎片写入已退役（ADR-010 P1-A / 2026-10-06）─────────────────────
     // 原实现在此写入 N-1 条 `*_CHUNK_nnn`（单轮 Q+A 合并文本）。

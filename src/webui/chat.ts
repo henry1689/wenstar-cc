@@ -2656,15 +2656,42 @@ if (_meetingExited) {
       const _locusChanged = _dg && _locusPath !== _dg.locusPath &&
         _locusPath.split('.')[1] !== _dg.locusPath?.split('.')[1];
 
-      const _shouldCloseGroup = _dg && (
-        _locusChanged || _meetingExited ||
-        _dg.rounds.length >= 10 ||
-        (Date.now() - _dg.startTime) > 30 * 60 * 1000
-      );
+      // 🔴 ADR-010 P1-B(2026-10-06): 封组阈值读 MemoryConfig.compaction.dialogGroup 单一真源。
+      //   原为两个硬编码魔数（`rounds >= 10` 与 `30 * 60 * 1000`）—— 与 compaction 段
+      //   自己立的法「本段是唯一事实源，同一概念不得多处各自定义」直接冲突，且不可解释、不可调。
+      //   实测后果：1297 个对话组里 747 组（57.6%）只有 1 轮、平均 2.4 轮 ——
+      //   长场景在 10 轮就被砍断，「对话块」从未成形。现 dgMaxTurns = 80（与 contextWindowTurns
+      //   对齐：一块 ≈ 一个上下文窗口），且仍由话题切换/闲置超时守住真实边界。
+      const _dgCfg = MEMORY_CONFIG.compaction.dialogGroup;
+      const _dgMaxTurns = Number(_dgCfg?.dgMaxTurns) > 0 ? Number(_dgCfg.dgMaxTurns) : 80;
+      const _dgIdleCloseMs = Number(_dgCfg?.dgIdleCloseMs) > 0 ? Number(_dgCfg.dgIdleCloseMs) : 30 * 60 * 1000;
 
-      if (_shouldCloseGroup) {
+      // 🔴 语义修正：原判据用 `Date.now() - _dg.startTime`，那是「**组时长**上限」而非「闲置超时」
+      //   —— 一组连续聊满 31 分钟就会被切断，哪怕中间一秒都没停。现改为距**上一条消息**的间隔，
+      //   这才是「闲置」的本义，也才让三种会话场景用同一个阈值成立：
+      //     ① 窗口开着长时间闲置 ≥ T1 → 封组；② 关窗短时重开 < T1 → 场景续上（不弹全新欢迎）；
+      //     ③ 关窗长时离线 ≥ T1 → 封组，不卡在未完成动作。
+      //   （关窗本身对服务端不可见 —— 前端无 beforeunload/visibilitychange 监听；
+      //     但「窗口开着闲置」与「关窗后重开」在服务端是同一件事：消息间隔，故一个阈值足够。）
+      const _lastMsgTime = _dg && _dg.rounds.length > 0
+        ? _dg.rounds[_dg.rounds.length - 1].time
+        : (_dg?.startTime ?? 0);
+      const _idleMs = _dg ? Date.now() - _lastMsgTime : 0;
+
+      // 闭合原因 —— 按判定顺序取第一个成立的。写入 dialog_groups.block_close_reason，
+      // 是「这个块为什么在这里断开」的唯一可追责线索（调闭组规则时先看它）。
+      const _dgCloseReason: string | null = !_dg ? null
+        : _meetingExited ? 'meeting_exit'
+        : _locusChanged ? 'topic_switch'
+        : _dg.rounds.length >= _dgMaxTurns ? 'max_turn'
+        : _idleMs > _dgIdleCloseMs ? 'idle_timeout'
+        : null;
+
+      if (_dgCloseReason) {
         const _old = _dg;
         _dg = null;
+        // 传给 flushDialogGroup 供 BlockValueScorer 判定（turningPoint 信号 + block_close_reason 列）
+        (ctx as any)._dgCloseReason = _dgCloseReason;
         flushDialogGroup(ctx, _old, dna, decision, message, reply, isValidPersonName).catch(() => {});
         // 🔴 P1-2: flush 落库后清除快照，防止重启恢复已关闭的对话组
         try { _clearDialogGroupSnapshot(ctx.storage?.getSQLite?.()); } catch { /* 非关键 */ }
