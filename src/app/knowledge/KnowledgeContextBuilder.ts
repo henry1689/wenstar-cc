@@ -11,6 +11,9 @@
 import type { DNA } from '../../m1/types/dna.js';
 import { ConfigService } from '../../config/ConfigService.js';
 import { buildKnowledgeArchiveFragment } from '../../webui/chat/long-text-retrieval.js';
+// 🔴 户籍三元组(2026-10-07) 批1：知识库可见性判定的唯一来源（《UUID 户籍管理法》铁律 0.4 —
+//   新代码必须走 UUIDPoliceFilter，禁止手写 UUID 判据）。
+import { policyFor, passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
 
 /** 🆕 V4.0: 去除 markdown frontmatter（LLM 不需要看到 id/tags 等元数据） */
 function stripFrontmatter(content: string): string {
@@ -251,11 +254,14 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
       let _topHits = knResults.filter((k: any) => k.matchScore >= _minScore);
 
       // V5.3: 会晤模式下按 entity UUID 过滤 KB 结果
+      //
+      // 🔴 户籍三元组(2026-10-07) 批1 收口：原先手写 `!ku || ku === _meetingEntityUuid`，
+      //   与检索侧的 SQL 子句**并行实现同一条规则**（违反不变量 #7）。改为调用唯一判定源的
+      //   `passes()`；域由 `policyFor('shared', …)` 声明（知识库 = 实体档案件域 ⇒ 无归属 = 共享）。
+      //   ⚠️ 注意区分：下面 `_ownF1/_otherF1` 是**排序**（自有档案前移）不是筛除 —— 不动。
         if (_meetingEntityUuid) {
-          _topHits = _topHits.filter(function(k: any) {
-            var ku = k.belong_entity_uuid || null;
-            return !ku || ku === _meetingEntityUuid;
-          });
+          const _kbPolicy = policyFor('shared', [_meetingEntityUuid]);
+          _topHits = _topHits.filter((k: any) => policePasses(k.belong_entity_uuid ?? null, _kbPolicy));
           // 🔴 S2-F1: 会晤模式实体自有档案优先 — 实测 matchScore 相同时按 updated_at 稳定排序，
           //   系统架构文档(公共)挤掉实体自己的档案("梓铭简介" belong=TXS-000000003)。自有档案前移。
           const _ownF1 = _topHits.filter((k: any) => k.belong_entity_uuid === _meetingEntityUuid);

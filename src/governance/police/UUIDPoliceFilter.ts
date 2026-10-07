@@ -44,6 +44,70 @@ function _clampParam(uuid: string): string {
   return String(uuid ?? '').trim();
 }
 
+/**
+ * 记录域 —— 「无归属是否可见」的唯一决定依据。
+ *
+ * 依据：《户籍三元组全域统一任务书 V1》法条第三条（按域分治），业主 2026-10-07 裁定：
+ *   · 实体档案件（knowledge_base）—— `belong = NULL` 语义为**共享** ⇒ 全体人格可见
+ *     （业主原话：「那些无归属的允许存在，并且还是知识库的主流，这也无归属的就是共享的」）
+ *   · 经历记忆件（memories / conversations / black_diamond / vault_log）
+ *     —— `belong = NULL` 语义为**未登记** ⇒ 仅户主钥匙可见（《UUID 户籍管理法》铁律 4）
+ *   🔴 两域语义**不得互相援引**。
+ */
+export type RecordDomain = 'private' | 'shared';
+
+/**
+ * 域的单一决定点 —— `allowUnowned` 与 `searchScope` 的**唯一产出处**。
+ *
+ * 🔴 为什么必须有这个函数（任务书缺陷 D5）：
+ *   此前 5 个调用点各自手写 `allowUnowned`，取值不一 ——
+ *   `KnowledgeEngine:607/:958` 传 true，而 `MemoryRetriever:78` 与
+ *   `UnifiedSearchEngine` 的 4 处用默认 false。**同一个问题「无归属能不能看」，
+ *   代码里有两个答案**，且两个都与当时的法条不符。
+ *
+ * 🔴 另修一个实测出来的真 bug：`buildSqlClause` **只认 `searchScope`、不认 `allowUnowned`**
+ *   （见其内部：`const scope = p.searchScope ?? 'strict'`）。而 `KnowledgeEngine:607/:958`
+ *   只传了 `allowUnowned: true`、没传 `searchScope` ⇒ 实际走 `strict` ⇒
+ *   ` AND belong_entity_uuid IN (?)` ⇒ **无归属文档被整个排除**。
+ *   这正是业主实测「熊梓铭看得到自己的档案，却看不到其它知识文档」的根因：
+ *   `weightedSearch` 主 SQL 把 33+ 篇无归属公共文档全滤掉了，而
+ *   `KnowledgeContextBuilder:255` 的 post-filter 事后无法把它们找回来（上游就没了）。
+ *   ⇒ 本函数让两个字段**同源产出**，从结构上消除这类「传了参数但参数无效」的错配。
+ *
+ * @param domain       被检索的表属于哪个域（决定 `belong = NULL` 的语义）
+ * @param visibleUuids 当前请求的可见白名单快照
+ *
+ * ── 容错说明（正常路径 / 异常路径 / 边界条件）──────────────────────────────
+ * 正常路径：调用方声明域 → 本函数产出 PolicePolicy → buildSqlClause 出 SQL 子句 /
+ *           passes 做行级判定。两条路径读**同一份** allowUnowned + searchScope，不会错配。
+ * 异常路径：本函数是**纯函数**（只构造 Set 与字面量，无 I/O、无 FG 依赖、不抛异常）
+ *           ⇒ 不给调用链引入任何新的失败模式。调用方原有的降级不受影响：
+ *           知识库检索侧 FTS5 不可用时经 RetrieverCircuitBreaker 回退到 LIKE 子句
+ *           （KnowledgeEngine.ftsSearch 的第二个回调），而 weightedSearch 走纯 SQL
+ *           ngram 全表扫描、本就不依赖索引 —— 两条回退路径本次均**保留原样**，
+ *           本批只是把它们的归属子句从手写改为同源产出。
+ * 边界条件：① `visibleUuids` 为空 → buildSqlClause 仍 fail-closed 返回 `AND 1=0`
+ *           （宁拒不放，不因换域而放宽）；② `domain` 是编译期字面量联合类型，
+ *           非法值无法通过 tsc；③ `enforce:false` 时返回空子句，仅供离线巡检探针，
+ *           生产调用方不得传该值。
+ */
+export function policyFor(
+  domain: RecordDomain,
+  visibleUuids: Iterable<string>,
+  opts?: { enforce?: boolean },
+): PolicePolicy {
+  const shared = domain === 'shared';
+  return {
+    visibleUuids: new Set(visibleUuids),
+    // 共享域：无归属 = 共享 ⇒ 行级放行
+    // 私有域：无归属 = 未登记 ⇒ 行级拒绝（仅户主钥匙场景由调用方显式另建策略）
+    allowUnowned: shared,
+    // SQL 级必须与行级同源 —— strict 会排除无归属行，两者不一致就是本函数要消灭的错配
+    searchScope: shared ? 'allow-unowned' : 'strict',
+    enforce: opts?.enforce,
+  };
+}
+
 /** 判断单条记录的 UUID 是否放行（行级 deny-by-default） */
 export function passes(uuid: string | null | undefined, p: PolicePolicy): boolean {
   if (p.enforce === false) return true;

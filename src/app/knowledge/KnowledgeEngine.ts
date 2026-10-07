@@ -7,7 +7,7 @@
  * - API 不可用时自动降级为纯 LIKE
  */
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
-import { buildSqlClause } from '../../governance/police/UUIDPoliceFilter.js';
+import { buildSqlClause, policyFor, passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
 import type { KnowledgeItem } from './types.js';
 import type { Perception24D } from '../../m3/types/perception.js';
 import { parseFile } from './FileUploadService.js';
@@ -600,11 +600,15 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       const params: any[] = [`%${kw}%`, `%${kw}%`];
       if (interactionType) { sql += ` AND interaction_type = ?`; params.push(interactionType); }
       // V13: entityUuid 过滤 — 精准隔离人物知识
-      // V12.7(批3): allowUnowned:true → 与 L574 post-filter + weightedSearch 对称的 allow-common
-      // 语义（belong = 该实体 OR 公共无归属）。此前纯 IN 排除公共知识，两处过滤不一致，
-      // 且违背批3 S2 承诺的"自己的 + 公共"语义。
+      // V12.7(批3): allow-common 语义（belong = 该实体 OR 公共无归属）—— "自己的 + 公共"。
+      //
+      // 🔴 户籍三元组(2026-10-07) 批1 收口：原先此处手写 `allowUnowned: true`，但
+      //   `buildSqlClause` **只认 `searchScope`、不认 `allowUnowned`**，于是实际走 strict
+      //   ⇒ `AND belong_entity_uuid IN (?)` ⇒ **无归属的公共知识被整个排除**，
+      //   与下方 L~690 post-filter 的 allow-common 语义自相矛盾（上游已滤掉，下游救不回）。
+      //   改由 `policyFor('shared', …)` 单一决定点同源产出 allowUnowned + searchScope。
       if (belongEntityUuid) {
-        const _police = buildSqlClause({ visibleUuids: new Set([belongEntityUuid]), allowUnowned: true });
+        const _police = buildSqlClause(policyFor('shared', [belongEntityUuid]));
         sql += _police.clause;
         params.push(..._police.params);
       }
@@ -679,10 +683,14 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
 
     // 🔥 ImpressionModel: 更新被召回知识的印象值
     // V13: entityUuid 过滤 — 精准隔离人物知识 (post-filter, 因为 FTS5 不支持此列)
+    //
+    // 🔴 户籍三元组(2026-10-07) 批1 收口：原先是手写判据 `!r.belong_entity_uuid || r.belong_entity_uuid === belongEntityUuid`
+    //   —— 与 FTS 降级路径的 SQL 子句**并行实现同一条规则**，违反不变量 #7
+    //   「禁止同一业务规则在多个地方重复实现」。改为调用唯一判定源的 `passes()`，
+    //   语义由 `policyFor('shared', …)` 供给（该域下无归属 = 共享 ⇒ 放行）。
     if (belongEntityUuid && results.length > 0) {
-      results = results.filter((r: any) =>
-        !r.belong_entity_uuid || r.belong_entity_uuid === belongEntityUuid
-      );
+      const _postPolicy = policyFor('shared', [belongEntityUuid]);
+      results = results.filter((r: any) => policePasses(r.belong_entity_uuid ?? null, _postPolicy));
     }
 
     for (const r of results.slice(0, 5)) {
@@ -953,9 +961,15 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     const _effUuid = belongEntityUuid ?? _sessionEntityUuid ?? null;
     // 🔴 户籍管理法（铁律4）: 收编手写 UUID SQL 逃生口 → UUIDPoliceFilter.buildSqlClause。
     // 原手写 `AND (belong_entity_uuid = ? OR IS NULL OR '')` 是硬编码逃生口，脱离唯一判定源。
-    // 现委托 buildSqlClause({ visibleUuids:[_effUuid], allowUnowned:true })，与 L544 已收编范式一致：
-    // 会晤实体自己的知识 + 公共无归属资料可见（用户明确允许），他人专属知识 deny-by-default。
-    const _police = _effUuid ? buildSqlClause({ visibleUuids: new Set([_effUuid]), allowUnowned: true }) : { clause: '', params: [] as string[] };
+    //
+    // 🔴 户籍三元组(2026-10-07) 批1 收口 + 修 bug：原传 `{visibleUuids:[_effUuid], allowUnowned:true}`，
+    //   但 `buildSqlClause` **只认 searchScope、不认 allowUnowned** ⇒ 实际走 strict ⇒
+    //   无归属的公共知识被**整个排除**，与注释声称的"自己的 + 公共资料可见"完全相反。
+    //   这是业主实测「她看得到自己的档案，却看不到其它知识文档」的直接根因
+    //   （会晤路径走的就是本函数）。改由 `policyFor('shared', …)` 同源产出两个字段。
+    const _police = _effUuid
+      ? buildSqlClause(policyFor('shared', [_effUuid]))
+      : { clause: '', params: [] as string[] };
     const allRows: any[] = sqlite.queryAll(
       `SELECT * FROM knowledge_base WHERE (source_type IN (${srcFilter}) OR source_type IS NULL OR source_type = '')${_police.clause} ORDER BY COALESCE(impression_score,0.5) DESC, updated_at DESC LIMIT 500`,
       _police.params,
