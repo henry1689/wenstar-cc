@@ -11,7 +11,6 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 // C3(2026-09-11): 实体名解析收口到 EntityNameCodec（唯一事实源）
-import { parseNames } from './EntityNameCodec.js';
 import { hasSurname } from '../config/app-identity.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -778,9 +777,9 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
   // —— 函数级加载，供第 2 段(实体归属)与第 4 段(DNA 基因)共用，避免两套读取口径。
   const _fgEntries = await loadFgPersonEntries(fgDbPath);
 
-  // 2. belong_entity_uuid 回填（V13: 从 FamilyGraph 动态获取真实 TXS UUID，替代硬编码假 UUID）
+  // 2. belong_entity_uuid —— 🔴 P0-3d 起**不再做任何推断式回填**，只清理已知假值 + 统计现状
   try {
-    // 先清理旧假 UUID（uuid-* 格式全是错误的）
+    // 清理旧假 UUID（uuid-* 格式全是错误的 —— 那不是本系统的 UUID 形态）
     const fakeCleaned = db.exec("SELECT COUNT(*) FROM memories WHERE belong_entity_uuid LIKE 'uuid-%'");
     const fakeCount = fakeCleaned.length ? (fakeCleaned[0]?.values?.[0]?.[0] ?? 0) : 0;
     if (fakeCount > 0) {
@@ -788,68 +787,40 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
       console.log(`[Repair] 清理假 UUID (uuid-*格式): ${fakeCount} 条 → 重置为 NULL`);
     }
 
-    // 从 FamilyGraph 获取真实 person name/别名 → TXS UUID 映射
-    // 🔴 批次1(2026-09-11): 收口到 loadFgPersonEntries（函数级 _fgEntries）——统一口径 + status!='void' 过滤
-    const nameToUuid: Array<[string, string]> = _fgEntries.map((e) => [e.key, e.uuid]);
+    // 🔴🔴 P0-3d(2026-10-07): 原 2a / 2b / 2c **三步全部删除**，此处不再有任何按人名推断归属的路径。
+    //   三个被删的写法（保留原文供追溯）：
+    //     2a  UPDATE memories SET belong_entity_uuid = ? WHERE raw_input      LIKE '%人名%'
+    //     2b  UPDATE memories SET belong_entity_uuid = ? WHERE fg_entity_names LIKE '%人名%'
+    //     2c  SELECT id, fg_entity_names FROM memories … → UPDATE memories SET belong_entity_uuid = ? WHERE id = ?
+    //
+    //   为什么必须删：《P0 记忆体系止血任务书 V3》§3.1 **分类禁止**「按正文提及的人名推断归属」。
+    //     实测依据 —— 166 条无归属记录里 **142 条根本不提任何人名**；全表 **29.2%** 的已归属记忆
+    //     正文提到的是**别人**（提到 A 就认领成 A，实际归属可能是 B）⇒ 名字推断会整体串档。
+    //
+    //   🔴 2c 也必须删（一度以为它「按 id 精确写入」所以无害 —— 那是错的）：
+    //     `fg_entity_names` 这一列的语义就是「**这条记忆的正文里提到了谁**」，本身即文本派生物。
+    //     用"提到了谁"决定"归属谁"，与 2a/2b 是同一件事，只是入口换成了派生列。
+    //
+    //   🔴 实测危害（连续两次，第二次是打脸式的）：
+    //     · P0-3 回滚演练：清洗刚把 24 条置 NULL，重启即被认领回 22 条。
+    //     · P0-3c：把 24 条还原为 NULL、runner 复核通过（达成 V3 §3.3 判据），
+    //       **重启 60 秒内 22 条再次被认领**。本段**不受 schema_version 门控、每次启动都跑、
+    //       且立即强制 export 落盘** ⇒ 是 P0-3b 漏掉的第二条通道（它只摘了 SQLiteAdapter V10.5 那条）。
+    //
+    //   ⚠️ 方法论教训（写在这里防复发）：**三步彼此掩蔽，顺序测必然错判。**
+    //     第一版受控实验把 2a→2b→2c 顺序执行，2a/2b 先把行填满，而 2c 的谓词含 `belong IS NULL`
+    //     ⇒ 无行可填 ⇒ 得出"2c 贡献 0"的错误结论。改成**每步各自在全新副本上独立执行**才看清：
+    //     2a 独 17 条 / 2b 独 22 条 / 2c 独 22 条。**测"某步有没有贡献"必须让它独占起跑线。**
+    //
+    //   现状语义：归属**只能来自写入期**（persistence-stage 写入时就知道 belongEntityUuid）。
+    //     关联不上的记录**保持 NULL** —— 这正是 V3 §3.1 要求的；NULL 是安全态
+    //     （会晤路径 deny-by-default 看不到、户主路径 allow-unowned 能看到）。
 
-    if (nameToUuid.length > 0) {
-      // 去重：同一名字只保留一个 UUID
-      const seen = new Set<string>();
-      const deduped = nameToUuid.filter(([n]) => {
-        if (seen.has(n)) return false;
-        seen.add(n);
-        return true;
-      });
-      const uuidSet = new Set(deduped.map(([, u]) => u));
-      console.log(`[Repair] FamilyGraph 提供 ${deduped.length} 个人名/${uuidSet.size} 个真实 TXS UUID`);
-
-      let filled = 0;
-      for (const [name, uuid] of deduped) {
-        if (!uuid || !uuid.startsWith('TXS-')) continue;
-        // 2a. 关键词匹配 raw_input（排除已正确标注的）
-        db.run(
-          "UPDATE memories SET belong_entity_uuid = ? WHERE raw_input LIKE ? AND (belong_entity_uuid IS NULL OR belong_entity_uuid = '' OR belong_entity_uuid LIKE 'uuid-%')",
-          [uuid, `%${name}%`]
-        );
-        // 2b. fg_entity_names 字段（已有逗号分隔人名）
-        db.run(
-          "UPDATE memories SET belong_entity_uuid = ? WHERE fg_entity_names LIKE ? AND (belong_entity_uuid IS NULL OR belong_entity_uuid = '')",
-          [uuid, `%${name}%`]
-        );
-      }
-      // 2c. 直接解析 fg_entity_names 逗号分隔 → FG UUID（比 LIKE 更精准）
-      try {
-        const fgRows = db.exec(
-          "SELECT id, fg_entity_names FROM memories WHERE fg_entity_names IS NOT NULL AND fg_entity_names != '' AND (belong_entity_uuid IS NULL OR belong_entity_uuid = '')"
-        );
-        if (fgRows.length > 0 && fgRows[0].values) {
-          const nameToUuidMap = new Map(deduped);
-          let fgFilled = 0;
-          for (const [memId, fgNames] of fgRows[0].values) {
-            const names = parseNames(fgNames);
-            for (const name of names) {
-              const fgUuid = nameToUuidMap.get(name);
-              if (fgUuid && fgUuid.startsWith('TXS-')) {
-                db.run("UPDATE memories SET belong_entity_uuid = ? WHERE id = ?", [fgUuid, String(memId)]);
-                fgFilled++;
-                break; // 第一个有效人名即可
-              }
-            }
-          }
-          if (fgFilled > 0) console.log(`[Repair] fg_entity_names 解析回填: ${fgFilled} 条`);
-        }
-      } catch (e2c) { /* fg_entity_names 解析失败不阻塞 */ }
-      // 重新统计
-      const after = db.exec("SELECT COUNT(*) FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
-      result.entityUuid = after.length ? (after[0]?.values?.[0]?.[0] ?? 0) : 0;
-      if (result.entityUuid > 0) console.log(`[Repair] belong_entity_uuid 回填 (真实 TXS UUID): ${result.entityUuid} 条`);
-    } else {
-      // 无 FamilyGraph 时至少统计现状
-      const after = db.exec("SELECT COUNT(*) FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
-      result.entityUuid = after.length ? (after[0]?.values?.[0]?.[0] ?? 0) : 0;
-      console.warn(`[Repair] ⚠️ 无 FamilyGraph UUID 映射可用，entity 回填跳过。现有 ${result.entityUuid} 条已标注`);
-    }
-  } catch (e) { console.warn('[Repair] belong_entity_uuid 回填失败:', e); }
+    // 现状统计（供日志与下游判断；**本段不回填任何一行**）
+    const after = db.exec("SELECT COUNT(*) FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
+    result.entityUuid = after.length ? (after[0]?.values?.[0]?.[0] ?? 0) : 0;
+    console.log(`[Repair] belong_entity_uuid 现状 ${result.entityUuid} 条 · 本次回填 0 条（P0-3d 起不再按正文/人名推断归属）`);
+  } catch (e) { console.warn('[Repair] belong_entity_uuid 处理失败:', e); }
 
   // 3. null 感知向量 → 零向量（🔴 V12.4 根除24D: perception_json 列已删，仅当列仍存在时执行）
   try {

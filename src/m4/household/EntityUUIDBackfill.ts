@@ -1,84 +1,73 @@
 /**
- * EntityUUIDBackfill — 实体 UUID 即时回填 (V12.1)
- * =================================================
- * 解决新实体首次对话时 belong_entity_uuid=NULL 的问题。
+ * EntityUUIDBackfill — 实体归属的**结构传播**（原 V12.1 的文本推断部分已由 P0-3d 移除）
+ * ==================================================================================
+ * 🔴 历史与现状（2026-10-07 P0-3d 改写，务必读完再改）：
  *
- * 场景: 用户首次提及一个人名 → FG 中尚无此节点
- *   → persistence-stage 写入 conversation/memory 时 belong_entity_uuid=NULL
- *   → 同一轮 FG.addNode() 创建节点并分配 UUID
- *   → 此函数在同一轮结束时回填刚才写入的记录
+ *   本模块原以「新实体首次对话时 belong_entity_uuid=NULL」为由，用**全文匹配**回填归属：
+ *     · UPDATE conversations SET belong_entity_uuid=? WHERE belong_entity_uuid IS NULL AND content   LIKE '%人名%'
+ *     · UPDATE memories      SET belong_entity_uuid=? WHERE belong_entity_uuid IS NULL AND raw_input LIKE '%人名%'
+ *   —— 这两步属《P0 记忆体系止血任务书 V3》§3.1 **分类禁止**的「按正文提及的人名推断归属」，
+ *   已删除。依据（实测）：166 条无归属记录里 142 条根本不提任何人名；全表 **29.2%** 的已归属记忆
+ *   正文提到的是**别人**。P0-3c 的实测后果：刚把 24 条还原为 NULL，本模块（与
+ *   MigrationManager.repairDataIntegrity）在下次启动/下一轮对话时把它们**重新认领**回去。
  *
- * 设计:
- *   - 独立纯函数，不依赖 FG（避免循环依赖）
- *   - 基于文本匹配 + 人名查找
- *   - 幂等安全：只回填 belong_entity_uuid IS NULL 的记录
+ *   现仅保留**结构关联**一步：black_diamond 沿 `source_id → memories.id` 传导归属 ——
+ *   与 `SQLiteAdapter.initialize()` 的第 ⑤ 步、P0-3 的 vault_log C 步同源同法，**不读任何正文**。
+ *
+ * ⚠️ 功能缺口（已登记为待办，本批刻意不补）：删掉文本回填后，那些"写入时就没定归属"的记录会
+ *   **永久保持 NULL**。正解是**写入期就落值**（persistence-stage 在写入时本就知道本轮的
+ *   belongEntityUuid，YuyaoMemoryService 的 P0-2a 就是这么做的），而不是事后按正文猜。
+ *
+ * 设计：独立纯函数，不依赖 FG（避免循环依赖）；幂等（只填 belong_entity_uuid IS NULL 的行）。
  */
 
 /**
- * 对指定人名的新实体进行即时 UUID 回填。
+ * 结构传播：把 memories 的归属按 `source_id → memories.id` 传导给 black_diamond。
+ * 🔴 只读结构列（id / source_id / belong_entity_uuid），**不做任何文本匹配**。
  *
  * @param sqliteDB  fusion_memory.db 的 sql.js 实例
- * @param name      FG 中已创建的人名
- * @param uuid      该人的 UUID (TXS-ID)
- * @returns 回填的记录总数
+ * @param uuid      实体 UUID (TXS-ID)
+ * @returns 本次实际写入的行数（增量，不是总量）
  */
-export function backfillEntityUUID(sqliteDB: any, name: string, uuid: string): number {
-  if (!sqliteDB || !name || !uuid) return 0;
+export function propagateBelongBySourceId(sqliteDB: any, uuid: string): number {
+  if (!sqliteDB || !uuid) return 0;
 
   let count = 0;
-
-  // 回填 conversations — 全文匹配
-  try {
-    const convResult = sqliteDB.run(
-      "UPDATE conversations SET belong_entity_uuid = ? WHERE belong_entity_uuid IS NULL AND content LIKE ?",
-      [uuid, '%' + name + '%']
-    );
-    count += (sqliteDB.getRowsModified?.() || 0);
-  } catch { /* 回填不阻塞 */ }
-
-  // 回填 memories — 全文匹配
-  try {
-    sqliteDB.run(
-      "UPDATE memories SET belong_entity_uuid = ? WHERE belong_entity_uuid IS NULL AND raw_input LIKE ?",
-      [uuid, '%' + name + '%']
-    );
-    count += (sqliteDB.getRowsModified?.() || 0);
-  } catch { /* 回填不阻塞 */ }
-
-  // 回填 black_diamond — 通过 source_id 链传导
   try {
     sqliteDB.run(
       "UPDATE black_diamond SET belong_entity_uuid = ? WHERE belong_entity_uuid IS NULL AND source_id IN (SELECT id FROM memories WHERE belong_entity_uuid = ?)",
       [uuid, uuid]
     );
-  } catch { /* 回填不阻塞 */ }
+    count += (sqliteDB.getRowsModified?.() || 0);
+  } catch { /* 传播不阻塞 */ }
 
-  if (count > 0) {
-    console.log(`[EntityUUIDBackfill] "${name}" (${uuid}) → ${count} 条回填`);
-  }
-
+  if (count > 0) console.log(`[EntityUUIDBackfill] black_diamond 结构归属传播 (${uuid}) → ${count} 条`);
   return count;
 }
 
 /**
- * 批量回填 — 对 FG 全部已知人名重试一次
- * 供 pipeline 中在 FG 变更后调用
+ * 批量传播 —— 对 FG 全部已知 person 的 UUID 各重试一次。
+ * 供 pipeline 在 FG 变更后调用（调用点在 persistence-stage）。
+ *
+ * 🔴 改名说明（P0-3d）：原名 `backfillAllEntities` 保留（调用方未变），但它现在**只做结构传播**；
+ *    内部的 `backfillEntityUUID(name, uuid)` 已删除 —— 那个函数名承诺的"按人名回填"正是被禁的做法。
+ *    此处按 **UUID 去重**后逐个传播（原实现按人名循环，同一个人多个别名会重复执行同一条 UPDATE）。
  */
 export function backfillAllEntities(sqliteDB: any, fg: any): number {
   if (!sqliteDB || !fg) return 0;
   let total = 0;
   try {
     const names = fg.getAllPersonNames?.() || [];
+    const uuids = new Set<string>();
     for (const name of names) {
       if (name.length < 2 || name === '我') continue;
       const uuid = fg.getUUIDByName?.(name);
-      if (uuid) {
-        total += backfillEntityUUID(sqliteDB, name, uuid);
-      }
+      if (uuid) uuids.add(String(uuid));
     }
+    for (const uuid of uuids) total += propagateBelongBySourceId(sqliteDB, uuid);
   } catch { /* 不阻塞 */ }
-  if (total > 0) console.log(`[EntityUUIDBackfill] 批量回填: ${total} 条`);
+  if (total > 0) console.log(`[EntityUUIDBackfill] 批量结构传播: ${total} 条`);
   return total;
 }
 
-export default { backfillEntityUUID, backfillAllEntities };
+export default { propagateBelongBySourceId, backfillAllEntities };
