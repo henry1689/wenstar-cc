@@ -1005,93 +1005,24 @@ export async function detectOrphanEntityUUIDs(db: any, fgDbPath?: string): Promi
 }
 
 /**
- * V13: 知识库净化迁移 — 将 805 条梦境 landmark + 2 条对话归纳从 knowledge_base
- * 转移到 vault_log（金库），遵循金库的 UUID 标注和钙化升降级规则。
- * 以后 knowledge_base 仅保留用户上传的文件/文档知识（md/txt/person/architecture）。
+ * 🔴🔴 P0-7b(2026-10-07) 已**移除** `migrateKnowledgeBaseToVault()`（原 V13「知识库净化迁移」）。
  *
- * 此迁移每次启动都检查（幂等：id 冲突自动跳过）。
+ * 为什么移除（业主原话：「知识库里的东西是不能随便被清理的，除非是我确认的或者手动的」）：
+ *   该函数第 3 段有三条**按类别扫**的删除语句，其中最后一条是
+ *       DELETE FROM knowledge_base WHERE source_type = 'text'
+ *   —— 它与 4 份【FG档案范式】（source_type='text'）的消失**完全吻合**：
+ *   那 4 份的原始 id（kn_mr4k8led_l994 / kn_mr4k8t3y_0996 / kn_mr4k9qn0_gbj3 / kn_mr4k90xr_1y30）
+ *   在 2026-08-25 的备份里**就已不存在**，该备份 `source_type='text'` 计数为 0。
+ *   而该删除**与函数自己的文档注释相矛盾** —— 注释写「以后 knowledge_base 仅保留用户上传的
+ *   文件/文档知识（md/txt/person/architecture）」，text 恰恰属于这一类。
+ *   该函数在本仓**零调用点**（死代码），但仍是一把上了膛的枪：任何人把它当作"可复用的迁移"
+ *   重新接回启动流程，即原样重演同一次清除。
+ *
+ * 原实现另有次要问题：第 4 段用字符串插值把实体名/UUID 拼进 SQL（注入口）。
+ *
+ * 若日后确需 landmark → vault_log 的迁移能力：从 git 历史取回本函数，
+ * 先**删掉 delTest（source_type='text'）那条**、把字符串插值改为参数绑定，
+ * 并走「业主确认 → 停服 → 备份 → 治理闸门 → 只按明确列举的 id 白名单删除」。
+ *
+ * 调查报告：docs/P0-6-知识库人物档案丢失调查报告.md
  */
-export async function migrateKnowledgeBaseToVault(db: any, fgDbPath?: string): Promise<{ landmark: number; inducted: number; deleted: number }> {
-  const result = { landmark: 0, inducted: 0, deleted: 0 };
-  const t0 = Date.now();
-
-  try {
-    // ── 1. 迁移 landmark (梦境沉淀) → vault_log ──
-    const landmarks = db.exec(
-      "SELECT id, title, content, tags, belong_entity_uuid, classification, created_at FROM knowledge_base WHERE source_type = 'landmark'"
-    );
-    if (landmarks.length > 0 && landmarks[0].values) {
-      for (const [kbId, title, content, tags, euuid, cls, createdAt] of landmarks[0].values) {
-        const vlId = 'vl_lm_' + String(kbId).replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 20);
-        const detail = `${String(title || '记忆地标')}: ${String(content || '').substring(0, 80)}`;
-        const tagsJson = String(tags || '[]');
-        const uuid = euuid && String(euuid).length > 0 ? String(euuid) : null;
-        db.run(
-          "INSERT OR IGNORE INTO vault_log (id, operation, source_type, detail, content_md, belong_entity_uuid, created_at) VALUES (?, 'landmark', 'knowledge_base', ?, ?, ?, ?)",
-          [vlId, detail, String(content || '').substring(0, 500), uuid, String(createdAt)],
-        );
-        result.landmark++;
-      }
-    }
-
-    // ── 2. 迁移对话自动归纳 (auto_inducted) → vault_log ──
-    const inducted = db.exec(
-      "SELECT id, title, content, belong_entity_uuid, created_at FROM knowledge_base WHERE source_type = 'research' AND tags LIKE '%auto_inducted%'"
-    );
-    if (inducted.length > 0 && inducted[0].values) {
-      for (const [kbId, title, content, euuid, createdAt] of inducted[0].values) {
-        const vlId = 'vl_migrate_induct_' + String(kbId).substring(0, 12);
-        const uuid = euuid && String(euuid).length > 0 ? String(euuid) : null;
-        db.run(
-          "INSERT OR IGNORE INTO vault_log (id, operation, source_type, detail, content_md, belong_entity_uuid, created_at) VALUES (?, 'auto_induct', 'knowledge_base', ?, ?, ?, ?)",
-          [vlId, String(title || ''), String(content || '').substring(0, 500), uuid, String(createdAt)],
-        );
-        result.inducted++;
-      }
-    }
-
-    // ── 3. 删除已迁移的记录 + 测试残留 ──
-    const delLandmark = db.run("DELETE FROM knowledge_base WHERE source_type = 'landmark'");
-    const delInduct = db.run("DELETE FROM knowledge_base WHERE source_type = 'research' AND tags LIKE '%auto_inducted%'");
-    const delTest = db.run("DELETE FROM knowledge_base WHERE source_type = 'text'");
-    result.deleted = result.landmark + result.inducted + 2; // +2 test entries
-
-    // ── 4. 为新迁移的 landmark vault_log 条目回填 UUID ──
-    // 使用 detail/content_md 中的人名 + 默认玉瑶策略
-    try {
-      const fgPath = fgDbPath || join(dirname(dirname(__dirname)), 'data', 'webui', 'knowledge', 'family_graph.db');
-      const { existsSync, readFileSync } = await import('node:fs');
-      if (existsSync(fgPath)) {
-        const initSqlJs = (await import('sql.js')).default;
-        const SQL = await initSqlJs();
-        const fgBuf = readFileSync(fgPath);
-        const fgDb = new SQL.Database(fgBuf);
-        const peopleRows = fgDb.exec(
-          "SELECT name, uuid FROM nodes WHERE type = 'person' AND uuid IS NOT NULL AND uuid LIKE 'TXS-%' AND LENGTH(name) >= 2"
-        );
-        if (peopleRows.length > 0 && peopleRows[0].values) {
-          // 人名匹配
-          for (const [name, uuid] of peopleRows[0].values) {
-            db.run(
-              `UPDATE vault_log SET belong_entity_uuid = '${String(uuid)}' WHERE belong_entity_uuid IS NULL AND detail LIKE '%${String(name)}%' AND operation = 'landmark'`
-            );
-          }
-          // 默认玉瑶
-          const yaoyao = [...peopleRows[0].values].find(([n]: any) => n === '玉瑶');
-          const yaoyaoUuid = yaoyao ? String(yaoyao[1]) : 'TXS-000000001';
-          db.run(
-            `UPDATE vault_log SET belong_entity_uuid = '${yaoyaoUuid}' WHERE belong_entity_uuid IS NULL AND operation = 'landmark'`
-          );
-        }
-        fgDb.close();
-      }
-    } catch (e4) { /* UUID 回填失败不阻塞 */ }
-
-    const elapsed = Date.now() - t0;
-    console.log(`[Migration] 知识库净化: landmark${result.landmark}条+归纳${result.inducted}条 → vault_log (${elapsed}ms)`);
-  } catch (e) {
-    console.warn('[Migration] 知识库净化失败:', e);
-  }
-
-  return result;
-}

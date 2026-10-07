@@ -2162,31 +2162,38 @@ export class SQLiteAdapter {
    */
   private _fixKnowledgeBase(): void {
     if (!this.db) return;
-    // 通则: 人物档案按 belong_entity_uuid 去重（保留最早一条，适用于所有实体）
+    // 🔴🔴 P0-7b(2026-10-07): 本段原为「人物档案按 belong_entity_uuid 去重（保留最早一条，其余 DELETE）」，
+    //   现**降级为「只报告、不删除」**。业主原话：「知识库里的东西是不能随便被清理的，
+    //   除非是我确认的或者手动的」。原实现有四个问题：
+    //     ① **不看 locked** —— 已置的保护对它无效；
+    //     ② **直接违背业主「两份材料都进，分工明确」的决定** —— 它按"每个实体只能有一份人物档案"
+    //        删掉了其中一份（实测删掉「徐诗韵 · 人物档案」与「【FG档案范式】徐诗雨」）；
+    //     ③ 与 scripts/fix-all-entities-final.cjs 的 P1-2 是**同一套逻辑**，被"通则"化后在
+    //        **每次启动**自动执行 —— P0-7a 找回的 72 条，重启即被它删掉 2 条；
+    //     ④ 删除无提示、无留痕、无人工确认，且原 `catch {}` 连异常都吞掉。
+    //   现在只 `console.warn` 列出同实体多份人物档案的 id 清单，**交人工决定去留**。
+    //   若日后确实需要去重，必须走：业主确认 → 停服窗口 → 备份 → 只删明确列举的 id 白名单。
     try {
       const d = this.db.exec(
-        "SELECT belong_entity_uuid, id FROM knowledge_base " +
+        "SELECT belong_entity_uuid, id, title FROM knowledge_base " +
         "WHERE classification='人物档案' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' " +
         "ORDER BY created_at ASC"
       );
       if (d.length && d[0].values) {
-        const seen = new Map<string, boolean>();
-        let dupCount = 0;
+        const byEntity = new Map<string, string[]>();
         for (const row of d[0].values as any[][]) {
-          const [uuid, id] = row;
-          if (seen.has(String(uuid))) {
-            this.db.run('DELETE FROM knowledge_base WHERE id=?', [String(id)]);
-            dupCount++;
-          } else {
-            seen.set(String(uuid), true);
-          }
+          const [uuid, id, title] = row;
+          const k = String(uuid);
+          if (!byEntity.has(k)) byEntity.set(k, []);
+          byEntity.get(k)!.push(`${String(id)}（${String(title || '').slice(0, 24)}）`);
         }
-        if (dupCount > 0) {
-          console.log(`[SQLiteAdapter] KB人物档案去重（通则）: 删除 ${dupCount} 条重复档案`);
-          this._dirtyCount++;
+        const dups = [...byEntity.entries()].filter(([, ids]) => ids.length > 1);
+        if (dups.length > 0) {
+          console.warn(`[SQLiteAdapter] ⚠️ ${dups.length} 个实体存在多份人物档案 —— **只报告，不删除**（知识库禁止无确认清理，交人工决定）：`);
+          for (const [uuid, ids] of dups) console.warn(`    ${uuid}: ${ids.join(' | ')}`);
         }
       }
-    } catch {}
+    } catch (e) { console.warn('[SQLiteAdapter] KB 人物档案重复检测失败(不阻塞):', (e as Error)?.message); }
   }
 
   /** V16: 启动时完整性检查 — 4 项核验，输出 PAS S/FAIL/WARN。 */

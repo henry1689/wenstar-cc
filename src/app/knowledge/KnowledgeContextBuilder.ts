@@ -166,6 +166,11 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
           // 实测: 查询"熊梓铭"，matchScore 相同(0.745)时按 updated_at 稳定排序，系统架构文档(公共)
           //   挤掉熊梓铭自己的档案("梓铭简介" belong=TXS-000000003)；"秦可卿"(0.245)等无关条目也混入。
           //   排序: belong==会晤实体 优先，同组内按 matchScore 降序；过滤 matchScore<0.3 的噪音。
+          //
+          // 🔴 P0-7b(2026-10-07) 更正：上句举例的「梓铭简介（belong=TXS-000000003）」当时**并不在库中**
+          //   —— 它连同 63 条知识库行在 2026-08-26~08-28 一起被清掉了，全库 `title LIKE '%简介%'` 命中 0。
+          //   这条注释把排查引向了"排序有问题"，而真相是"数据没了"（见 docs/P0-6-知识库人物档案丢失调查报告.md）。
+          //   已于 P0-7a 从备份找回（KB 1060 → 1132）。**后人不要把本注释当作"档案机制在运作"的证据 —— 先查库。**
           const _own = _entityResults.filter((k: any) => _meetingEntityUuid && k.belong_entity_uuid === _meetingEntityUuid);
           const _other = _entityResults.filter((k: any) => !(_meetingEntityUuid && k.belong_entity_uuid === _meetingEntityUuid));
           const _sorted = [

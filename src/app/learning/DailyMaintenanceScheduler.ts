@@ -69,6 +69,34 @@ export class DailyMaintenanceScheduler {
     console.log('[DailyMaintenance] 🔄 开始每日维护...');
     const result = { decay: null as any, strength: 0, persona: null as any };
 
+    // ⓪ 知识库行数骤降告警（P0-7b，2026-10-07）
+    //   背景：2026-08-26→08-28 知识库从 68 条塌到 3 条，**两个月无人察觉**，直到业主问
+    //     「怎么熊梓铭看不到知识库关于她的资料了」才被发现（见 docs/P0-6-...调查报告.md）。
+    //   机制：与上次基线（engine_store 持久化）对比，降幅 >30% 即告警。
+    //   🔴 只报告，不阻断、不自动修复 —— 与「知识库里的东西不能随便被清理，除非业主确认或手动」一致。
+    //   确定性实现、零 LLM 调用。放在衰减之前，以便把本轮的降幅归因清楚。
+    try {
+      const kbSqlite = this.storage.getSQLite();
+      if (kbSqlite) {
+        const cur = Number((kbSqlite.queryAll('SELECT COUNT(*) c FROM knowledge_base')?.[0] as any)?.c ?? 0);
+        const _kbKey = 'kb_count_baseline';
+        const prevRow = kbSqlite.queryAll('SELECT value FROM engine_store WHERE key = ? LIMIT 1', [_kbKey]);
+        const prev = prevRow?.[0] ? parseInt(String((prevRow[0] as any).value ?? ''), 10) : NaN;
+        if (Number.isFinite(prev) && prev > 0 && cur < prev * 0.7) {
+          const drop = prev - cur;
+          const pct = ((drop / prev) * 100).toFixed(1);
+          console.warn(`[DailyMaintenance] 🔴 知识库行数骤降: ${prev} → ${cur}（-${drop} 条 / -${pct}%）`);
+          console.warn('[DailyMaintenance]    🔴 知识库禁止无确认清理 —— 请立即人工核查。' +
+            '同类事故记录：68→3 条，两个月无人察觉（docs/P0-6-知识库人物档案丢失调查报告.md）');
+        } else {
+          console.log(`[DailyMaintenance] 知识库行数: ${cur}（基线 ${Number.isFinite(prev) ? prev : '首次记录'}）`);
+        }
+        kbSqlite.writeRaw('INSERT OR REPLACE INTO engine_store (key, value) VALUES (?, ?)', [_kbKey, String(cur)]);
+      }
+    } catch (err) {
+      console.warn('[DailyMaintenance] 知识库行数校验失败(不阻塞):', err);
+    }
+
     try {
       // ① 知识衰减
       const decayEngine = new KnowledgeDecayEngine(this.storage);
