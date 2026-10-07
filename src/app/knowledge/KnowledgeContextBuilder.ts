@@ -260,8 +260,11 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
       //   `passes()`；域由 `policyFor('shared', …)` 声明（知识库 = 实体档案件域 ⇒ 无归属 = 共享）。
       //   ⚠️ 注意区分：下面 `_ownF1/_otherF1` 是**排序**（自有档案前移）不是筛除 —— 不动。
         if (_meetingEntityUuid) {
-          const _kbPolicy = policyFor('shared', [_meetingEntityUuid]);
-          _topHits = _topHits.filter((k: any) => policePasses(k.belong_entity_uuid ?? null, _kbPolicy));
+          // 批2：第三参数传行的可见集（受限共享）；与 weightedSearch 的 SQL 子句同源
+          const _kbPolicy = policyFor('shared', [_meetingEntityUuid], { restrictedSharing: true });
+          _topHits = _topHits.filter((k: any) =>
+            policePasses(k.belong_entity_uuid ?? null, _kbPolicy, k.visible_entity_uuids ?? null),
+          );
           // 🔴 S2-F1: 会晤模式实体自有档案优先 — 实测 matchScore 相同时按 updated_at 稳定排序，
           //   系统架构文档(公共)挤掉实体自己的档案("梓铭简介" belong=TXS-000000003)。自有档案前移。
           const _ownF1 = _topHits.filter((k: any) => k.belong_entity_uuid === _meetingEntityUuid);

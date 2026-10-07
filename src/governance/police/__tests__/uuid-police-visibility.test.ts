@@ -83,6 +83,74 @@ describe('[户籍三元组] policyFor — allowUnowned 与 searchScope 同源产
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 批2：受限共享三态（业主裁定「工作微信只对玉瑶 + 徐诗雨开放」）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ME = 'TXS-000000003';   // 熊梓铭（不在微信可见名单里）
+const A = 'TXS-000000001';    // 玉瑶
+const B = 'TXS-000000007';    // 徐诗雨
+const WECHAT_LIST = JSON.stringify([A, B]);
+
+describe('[户籍三元组 批2] 受限共享三态 —— 归属与可见性分离', () => {
+  it('restrictedSharing 默认 false，不写就不改语义（私有域零回归面）', () => {
+    for (const d of ['private', 'shared'] as const) {
+      expect(policyFor(d, [UUID]).restrictedSharing, `域=${d} 未显式开启时必须是 false`).toBe(false);
+    }
+  });
+
+  it('共享域 SQL 在开启受限共享后仍保留「无归属分支」（不能因加新分支而丢掉旧的）', () => {
+    const { clause } = buildSqlClause(policyFor('shared', [ME], { restrictedSharing: true }));
+    expect(clause, '受限共享子句必须把可见集与归属两部分都表达出来').toMatch(/visible_entity_uuids/);
+    expect(clause, 'visible 为空时必须回落归属判据，故 IS NULL 分支不能丢').toMatch(/belong_entity_uuid IS NULL/);
+    expect(clause).toMatch(/json_each/);
+  });
+
+  it('受限共享子句的占位符与绑定值等量（错位会把 UUID 绑到别的列）', () => {
+    const { clause, params } = buildSqlClause(policyFor('shared', [ME], { restrictedSharing: true }));
+    expect(params.length).toBe((clause.match(/\?/g) || []).length);
+    expect(params).toEqual([ME, ME]);   // 先 json_each 名单，后 byOwner 归属
+  });
+
+  it('行级：可见集非空 ⇒ 由名单决定，归属不再参与', () => {
+    const p = policyFor('shared', [A], { restrictedSharing: true });   // 会晤 = 玉瑶
+    expect(passes(null, p, WECHAT_LIST), '玉瑶在名单内 ⇒ 放行（即使无归属）').toBe(true);
+
+    const p2 = policyFor('shared', [ME], { restrictedSharing: true }); // 会晤 = 熊梓铭
+    expect(passes(null, p2, WECHAT_LIST), '熊梓铭不在名单内 ⇒ 拒绝').toBe(false);
+
+    const p3 = policyFor('shared', [B], { restrictedSharing: true });  // 会晤 = 徐诗雨
+    expect(passes(null, p3, WECHAT_LIST), '徐诗雨在名单内 ⇒ 放行').toBe(true);
+  });
+
+  it('🔴 回归钉死：受限共享下可见集非空的普通文档归属也不再参与（防漏判放行）', () => {
+    // 若可见集非空但名单里没有当前实体，**不得**因「归属碰巧匹配」而放行
+    const p = policyFor('shared', [A], { restrictedSharing: true });
+    expect(passes(ME, p, JSON.stringify([B])), '归属=熊梓铭 但名单只给徐诗雨 ⇒ 必须拒绝').toBe(false);
+  });
+
+  it('可见集为空 ⇒ 完好回落到归属判据（三态的第二/第三态）', () => {
+    const p = policyFor('shared', [ME], { restrictedSharing: true });
+    expect(passes(ME, p, null), '空可见集 + 归属=自己 ⇒ 私有，放行').toBe(true);
+    expect(passes(null, p, ''), '空可见集 + 无归属 ⇒ 共享，放行').toBe(true);
+    expect(passes(A, p, null), '空可见集 + 归属=他人 ⇒ 拒绝').toBe(false);
+  });
+
+  it('parseVisibleList 失败一律返回空数组（fail-closed，回落归属判据而非放行）', () => {
+    const p = policyFor('shared', [ME], { restrictedSharing: true });
+    for (const bad of ['not-json', '{bad}', '"a string"', '{"a":1}', undefined, null, '']) {
+      expect(passes(A, p, bad as any), `非法可见集 ${JSON.stringify(bad)} 不得放行他人数据`).toBe(false);
+    }
+  });
+
+  it('未开启 restrictedSharing 时，第三参数一律被忽略（私有域行为零变化）', () => {
+    const p = policyFor('private', [A]);
+    expect(passes(A, p, WECHAT_LIST)).toBe(true);
+    expect(passes(ME, p, WECHAT_LIST), '私有域不看可见集 ⇒ 他人数据仍拒绝').toBe(false);
+    expect(passes(null, p, WECHAT_LIST), '私有域无归属仍拒绝（户籍法铁律4）').toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // C. 全仓守卫：禁止口径再次分叉
 // ─────────────────────────────────────────────────────────────────────────────
 

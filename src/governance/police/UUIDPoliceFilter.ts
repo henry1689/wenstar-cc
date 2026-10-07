@@ -32,6 +32,11 @@ export interface PolicePolicy {
    *  - 'full': 全库搜索（离线巡检）
    *  默认 'strict'（deny-by-default 硬边界）。 */
   searchScope?: 'strict' | 'allow-unowned' | 'full';
+  /** 户籍三元组批2(2026-10-08)：该表是否支持「受限共享」三态语义（含 visible_entity_uuids 列）。
+   *  - 默认 false ⇒ 子句与行级判定完全维持原语义（私有域零回归面）
+   *  - true ⇒ 归属判据之外再开「户籍域内可见」通路：行的 visible_entity_uuids 与白名单有交集即放行
+   *  ⚠️ 只接受布尔值，不接受列名字符串（避免摊开列名注入面）。目前唯一开启者为知识库。 */
+  restrictedSharing?: boolean;
 }
 
 /** 文本片段（带源 UUID 或纯文本） */
@@ -94,7 +99,7 @@ export type RecordDomain = 'private' | 'shared';
 export function policyFor(
   domain: RecordDomain,
   visibleUuids: Iterable<string>,
-  opts?: { enforce?: boolean },
+  opts?: { enforce?: boolean; restrictedSharing?: boolean },
 ): PolicePolicy {
   const shared = domain === 'shared';
   return {
@@ -104,13 +109,48 @@ export function policyFor(
     allowUnowned: shared,
     // SQL 级必须与行级同源 —— strict 会排除无归属行，两者不一致就是本函数要消灭的错配
     searchScope: shared ? 'allow-unowned' : 'strict',
+    // 🔴 批2：只有声明支持「户籍域内可见」的表才开启（现仅知识库）
+    restrictedSharing: opts?.restrictedSharing === true,
     enforce: opts?.enforce,
   };
 }
 
-/** 判断单条记录的 UUID 是否放行（行级 deny-by-default） */
-export function passes(uuid: string | null | undefined, p: PolicePolicy): boolean {
+/**
+ * 解析行的「可见集」列（`visible_entity_uuids`，JSON 数组）为 UUID 列表。
+ * 解析失败一律返回空数组 —— **fail-closed**：宁可回落到达归属判据，也不放行。
+ */
+export function parseVisibleList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const s = String(raw).trim();
+  if (!s) return [];
+  try {
+    const a = JSON.parse(s);
+    if (Array.isArray(a)) return a.map((x) => String(x ?? '').trim()).filter(Boolean);
+  } catch { /* 非法 JSON → 空（回落归属判据） */ }
+  return [];
+}
+
+/**
+ * 判断单条记录的 UUID 是否放行（行级 deny-by-default）。
+ *
+ * 🔴 户籍三元组(2026-10-08) 批2：新增第 3 参数承载行的「可见集」。
+ *  `restrictedSharing` 开启时，「户籍域内可见」优先于归属判据 —— 行的可见集非空
+ *  且与白名单有交集 ⇒ 放行（工作微信：玉瑶 + 徐诗雨）。
+ *  第 3 参数**不传**时行为与批 1 完全一致 ⇒ 既有调用点零影响。
+ */
+export function passes(
+  uuid: string | null | undefined,
+  p: PolicePolicy,
+  visibleEntityUuids?: string | null,
+): boolean {
   if (p.enforce === false) return true;
+
+  // 受限共享（知识库域）：可见集非空 ⇒ 由名单决定，归属不再参与
+  if (p.restrictedSharing) {
+    const list = parseVisibleList(visibleEntityUuids);
+    if (list.length > 0) return list.some((x) => p.visibleUuids.has(x));
+  }
+
   const u = _clampParam(uuid ?? '');
   if (!u) {
     // 无归属记录：仅户主钥匙场景（allowUnowned=true）可见
@@ -144,6 +184,23 @@ export function buildSqlClause(p: PolicePolicy): { clause: string; params: strin
   }
   
   const phs = uuids.map(() => '?').join(',');
+
+  // 🔴 户籍三元组(2026-10-08) 批2：受限共享（三态）
+  //  可见集非空 ⇒ 由名单决定；可见集为空 ⇒ 回落原归属判据（域决定是否含无归属）。
+  //  两处 IN 各占 N 个占位符，故 params = 2×N（顺序：先 json_each，后 byOwner）。
+  if (p.restrictedSharing) {
+    const byOwner = scope === 'strict'
+      ? `belong_entity_uuid IN (${phs})`
+      : `( belong_entity_uuid IN (${phs}) OR belong_entity_uuid IS NULL OR belong_entity_uuid = '' )`;
+    return {
+      clause:
+        ` AND ( ( COALESCE(visible_entity_uuids,'') <> ''` +
+        ` AND EXISTS (SELECT 1 FROM json_each(visible_entity_uuids) WHERE json_each.value IN (${phs})) )` +
+        ` OR ( COALESCE(visible_entity_uuids,'') = '' AND ${byOwner} ) )`,
+      params: [...uuids, ...uuids],
+    };
+  }
+
   if (scope === 'strict') {
     // 🔴 Foundation V2.0: 严格模式 — 仅在该 UUID 范围内搜索（不走 OR IS NULL）
     return {
@@ -151,7 +208,7 @@ export function buildSqlClause(p: PolicePolicy): { clause: string; params: strin
       params: uuids,
     };
   }
-  
+
   // allow-unowned 模式：UUID 范围内 + 允许无归属记录（户主场景）
   return {
     clause: ` AND (belong_entity_uuid IN (${phs}) OR belong_entity_uuid IS NULL OR belong_entity_uuid = '')`,

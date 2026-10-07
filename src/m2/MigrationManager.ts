@@ -626,6 +626,44 @@ const MIGRATIONS: Migration[] = [
       _run('CREATE INDEX IF NOT EXISTS idx_dg_hash     ON dialog_groups(scene_anchor_hash)', 'idx_dg_hash');
     },
   },
+  {
+    version: 17,
+    description: '户籍三元组批2: knowledge_base 增 visible_entity_uuids（归属与可见性分离 · 受限共享三态）',
+    apply: (db: any) => {
+      // 背景（《户籍三元组全域统一任务书 V1》法条第三条 · 业主 2026-10-07 裁定）：
+      //   `belong_entity_uuid` 一列此前同时回答两个**不同维度**的问题 ——
+      //   「这是谁的数据」（DNA 溯源）与「谁能看见」（UUID 隔离）；
+      //   且 NULL 还重载了「共享」与「未登记」两种含义。
+      //   业主裁定「工作微信只对玉瑶 + 徐诗雨开放」时，现行两态模型**表达不了**。
+      //   故拆出本列，形成三态：
+      //     非空             ⇒ 户籍域内可见（名单内实体）
+      //     空 ∧ belong 非空 ⇒ 仅该户籍主体私有
+      //     空 ∧ belong 空   ⇒ 全局共享
+      //
+      // 🔴 本迁移**只加列、不写任何行** ⇒ 全部行该列为 NULL ⇒ 行为与迁移前**完全一致**
+      //   （零行为变更）。真正改变行为的是数据批把微信 910 行填上可见集；
+      //   代码侧开关 `PolicePolicy.restrictedSharing` 默认 false，且仅知识库域开启。
+      //
+      // 读取方式：SQL 侧用 `json_each`（sql.js 已确认带 JSON1，2026-10-07 实测）；
+      //   JS 侧统一走 `UUIDPoliceFilter.parseVisibleList`（解析失败返回空数组 = fail-closed，
+      //   回落到归属判据而非放行）。
+      //
+      // 刻意不做的：**不建索引** —— 知识库当前千行量级，全表扫描在既有 ngram 评分里本就是
+      //   常态（weightedSearch 注释「459 行全扫约 50ms」）；收益低而维护面增。
+      //   若日后量级显著上升，另起迁移补 idx_kb_visible。
+      //
+      // ⚠️ migrateSchema 对 apply 抛错会整体 rethrow（可能拖垮 SQLiteAdapter 初始化）
+      //   ⇒ 独立 try/catch，失败只告警不抛出（沿用 v15/v16 做法）。「列已存在」也走这条 → 幂等。
+      const _run = (sql: string, label: string): void => {
+        try { db.run(sql); console.log(`[Migration] v17 ✅ ${label}`); }
+        catch (e) { console.warn(`[Migration] v17 ${label} 失败（非致命）:`, (e as Error)?.message); }
+      };
+      _run(
+        'ALTER TABLE knowledge_base ADD COLUMN visible_entity_uuids TEXT',
+        'knowledge_base.visible_entity_uuids 列已加（归属与可见性分离）',
+      );
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════
@@ -638,6 +676,32 @@ const MIGRATIONS: Migration[] = [
  * @returns 本次执行的迁移数
  */
 export function migrateSchema(db: any): number {
+  // ── Hook 埋点（户籍三元组批2 补齐）──────────────────────────────────────────
+  //   背景：本文件此前**全无埋点**（v15/v16 亦无），而评审要求「M 层管线节点需埋点
+  //   （module_entry / module_exit + 耗时）」。schema 迁移恰好是最需要可观测的一步 ——
+  //   它决定服务启动成败，且每加一版迁移就多一次全库 DDL 机会。
+  //   字段口径与全局一致：operation_type（操作类型）/ duration_ms（耗时）/ status。
+  //   纯 stdout 结构化日志，不引第三方依赖、不写库、不改变任何迁移语义。
+  const _t0 = Date.now();
+  const _hook = (status: 'success' | 'fail' | 'error', extra: Record<string, unknown> = {}): void => {
+    try {
+      console.log('[Hook] ' + JSON.stringify({
+        module: 'M2.MigrateSchema',
+        event: 'module_exit',
+        operation_type: 'schema_migration',
+        duration_ms: Date.now() - _t0,
+        status,
+        ...extra,
+      }));
+    } catch { /* 埋点失败绝不影响迁移主流程 */ }
+  };
+  console.log('[Hook] ' + JSON.stringify({
+    module: 'M2.MigrateSchema',
+    event: 'module_entry',
+    operation_type: 'schema_migration',
+    from_version: (() => { try { return getCurrentVersion(db); } catch { return null; } })(),
+  }));
+
   // 确保 schema_version 表存在
   try {
     db.run(`CREATE TABLE IF NOT EXISTS schema_version (
@@ -648,6 +712,7 @@ export function migrateSchema(db: any): number {
     )`);
   } catch (err) {
     console.warn('[Migration] schema_version 表创建失败:', err);
+    _hook('fail', { reason: 'schema_version_table_create_failed' });
     return 0;
   }
 
@@ -669,6 +734,7 @@ export function migrateSchema(db: any): number {
         console.log(`[Migration] v${m.version} ✅: ${m.description}`);
       } catch (err) {
         console.error(`[Migration] v${m.version} ❌ 失败:`, err);
+        _hook('error', { failed_version: m.version, message: (err as Error)?.message });
         throw err;
       }
     }
@@ -677,6 +743,7 @@ export function migrateSchema(db: any): number {
   if (executed === 0) {
     console.log(`[Migration] Schema v${currentVersion} 已最新，无需迁移`);
   }
+  _hook('success', { from_version: currentVersion, executed });
   return executed;
 }
 

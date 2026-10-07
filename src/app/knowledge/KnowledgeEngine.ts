@@ -153,6 +153,9 @@ function rowToEntry(r: Record<string, any>): KnowledgeItem {
     created_at: r.created_at as string,
     updated_at: r.updated_at as string,
     belong_entity_uuid: (r.belong_entity_uuid as string) || null,
+    // 户籍三元组(2026-10-08) 批2：受限共享可见名单。行级 passes() 与 SQL 子句都依赖它，
+    // 漏了会让「户籍域内可见」整体失效（工作微信对玉瑶/徐诗雨不可见）。
+    visible_entity_uuids: (r.visible_entity_uuids as string) || null,
     locked: r.locked === 1 || r.locked === true,
     classification: r.classification as string | undefined,
     classification_pending: r.classification_pending === 1 || r.classification_pending === true,
@@ -608,7 +611,8 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       //   与下方 L~690 post-filter 的 allow-common 语义自相矛盾（上游已滤掉，下游救不回）。
       //   改由 `policyFor('shared', …)` 单一决定点同源产出 allowUnowned + searchScope。
       if (belongEntityUuid) {
-        const _police = buildSqlClause(policyFor('shared', [belongEntityUuid]));
+        // 批2：知识库开启受限共享三态（visible_entity_uuids 非空 ⇒ 名单内可见）
+        const _police = buildSqlClause(policyFor('shared', [belongEntityUuid], { restrictedSharing: true }));
         sql += _police.clause;
         params.push(..._police.params);
       }
@@ -689,8 +693,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     //   「禁止同一业务规则在多个地方重复实现」。改为调用唯一判定源的 `passes()`，
     //   语义由 `policyFor('shared', …)` 供给（该域下无归属 = 共享 ⇒ 放行）。
     if (belongEntityUuid && results.length > 0) {
-      const _postPolicy = policyFor('shared', [belongEntityUuid]);
-      results = results.filter((r: any) => policePasses(r.belong_entity_uuid ?? null, _postPolicy));
+      // 批2：第三参数传行的可见集 —— 行级判定与 SQL 子句必须同源，否则「户籍域内可见」会漏
+      const _postPolicy = policyFor('shared', [belongEntityUuid], { restrictedSharing: true });
+      results = results.filter((r: any) =>
+        policePasses(r.belong_entity_uuid ?? null, _postPolicy, r.visible_entity_uuids ?? null),
+      );
     }
 
     for (const r of results.slice(0, 5)) {
@@ -968,7 +975,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     //   这是业主实测「她看得到自己的档案，却看不到其它知识文档」的直接根因
     //   （会晤路径走的就是本函数）。改由 `policyFor('shared', …)` 同源产出两个字段。
     const _police = _effUuid
-      ? buildSqlClause(policyFor('shared', [_effUuid]))
+      ? buildSqlClause(policyFor('shared', [_effUuid], { restrictedSharing: true }))
       : { clause: '', params: [] as string[] };
     const allRows: any[] = sqlite.queryAll(
       `SELECT * FROM knowledge_base WHERE (source_type IN (${srcFilter}) OR source_type IS NULL OR source_type = '')${_police.clause} ORDER BY COALESCE(impression_score,0.5) DESC, updated_at DESC LIMIT 500`,

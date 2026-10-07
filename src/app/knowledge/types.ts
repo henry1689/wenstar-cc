@@ -49,4 +49,18 @@ export interface KnowledgeItem {
 
   /** V12.1: 实体归属UUID（对应 FamilyGraph nodes.uuid），用于跨实体知识隔离 */
   belong_entity_uuid?: string | null;
+
+  /**
+   * 户籍三元组(2026-10-08) 批2：受限共享的可见名单（JSON 数组字符串）。
+   *
+   * 三态语义（业主 2026-10-07 裁定，《户籍三元组全域统一任务书 V1》法条第三条）：
+   *   · 非空            ⇒ 户籍域内可见 —— 名单内实体可见（工作微信 → 玉瑶 + 徐诗雨）
+   *   · 空 ∧ belong 非空 ⇒ 仅该户籍主体私有
+   *   · 空 ∧ belong 空   ⇒ 全局共享
+   *
+   * ⚠️ 归属（belong_entity_uuid）只回答「这是谁的数据」（DNA 溯源维度）；
+   *    可见性由此列回答（UUID 隔离维度）。批2 之前两者由同一列承担 ——
+   *    那是任务书缺陷 D1/D5「同一问题两种答案」的结构性根源。
+   */
+  visible_entity_uuids?: string | null;
 }
