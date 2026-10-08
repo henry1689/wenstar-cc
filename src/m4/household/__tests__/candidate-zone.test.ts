@@ -150,16 +150,23 @@ describe('批12 · FamilyGraph 观察区集成', () => {
     // 修复前 _accumulateCandidateEvidence 在 persons 循环【前】调用，
     // 首次提及时候选节点尚不存在 → 首次证据丢失 → 介绍句无法触发晋升。
     const gene = {
-      name: '批12验证壬',
+      // 🔴 修复3(2026-10-08): 占位名由「批12验证壬」(6字) 改为「批12验证」(5字)。
+      //   写入闸门的 person 长度上限是 EntityWriteGate.PERSON_MAX_LEN = 5（**既有设计**，
+      //   理由：防整段描述/散文句被当人名，如「大眼睛又圆又亮」以「大」为姓误判 L3）。
+      //   修复3 在 FG 写入侧串联了该闸门的第二道判据后，6 字占位名被正确拒绝 →
+      //   节点未创建 → 本断言的晋升无从谈起。
+      //   **改的是测试数据、不是闸门**：本用例的意图（首次提及 + 介绍句 → 立即晋升）与名字长度
+      //   无关，占位名需同时满足「库中不存在」与「合乎人名长度约束」两个条件。
+      name: '批12验证',
       type: 'person',
-      allele: '我姐姐叫批12验证壬',
+      allele: '我姐姐叫批12验证',
       phenotype: 'neutral',
       knowledge_type: 'family',
     } as any;
     // 批15: 改用库中必然不存在的名字。「明伶俐」在批14 已被判为噪声并 void，
     // 用它会让本用例受存量数据影响（同名 void 节点干扰），失去"首次提及"语义。
-    await fg.integrateFromEntity([gene], '我姐姐叫批12验证壬');
-    expect(statusOf('批12验证壬'), '首次提及带介绍句必须立即晋升（P0-1）').toBe('active');
+    await fg.integrateFromEntity([gene], '我姐姐叫批12验证');
+    expect(statusOf('批12验证'), '首次提及带介绍句必须立即晋升（P0-1）').toBe('active');
   });
 
   it('🔴 P1-4 回归：已 void 的名字再次出现不应直接 active', async () => {

@@ -38,6 +38,12 @@ import { validatePersonName, validateRelationType } from '../EntityValidator.js'
 import { dossierRead, dossierWrite } from './shared/DossierPath.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
 import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
+// 🔴 修复3-A(2026-10-08): 写入侧串联第二道 person 判据（纯函数，静态引入不占懒加载路径）。
+//   `EntityWriteGate.checkPersonEntity` 相较 `GarbageEntityGuard.checkEntity` 额外具备
+//   CHAT_RESIDUE 虚词拦截、PERSON_MAX_LEN 长度上限、ENTITY_BLACKLIST —— 而后者一项都没有。
+//   二者本应对齐（见 EntityWriteGate.ts:18 注释自陈「与 GarbageEntityGuard.FG_EXTRA_BLOCK 对齐」），
+//   本批在**最危险的写入路径**（FG addNode）先串上，判据统一收敛为后续批次。
+import { checkPersonEntity } from './EntityWriteGate.js';
 import type {
   FamilyGraph as FamilyGraphInterface,
   GraphNode,
@@ -607,6 +613,22 @@ export const CHANGE_HISTORY_LIMIT = 200;
  * 分制替代单一维度硬阈值，避免「首次提及 + 仅弱上下文 + 不再出现」被不可逆 void：
  *   强上下文（介绍句/关系词）×3  弱上下文（紧邻称谓动词）×1  每次提及 ×1
  *   3 次提及=3 ✓ 1 次强上下文=4 ✓ 1 次弱+1 次再提及=3 ✓ 纯噪声单次=1 ✗
+ *
+ * ⚠️ 修复3 期间曾把阈值改为 6，**随即被 candidate-zone.test.ts 的 5 个断言否决而回滚**：
+ *   - `:162` 首次提及带介绍句 → 必须立即 active
+ *   - `:198` 「candidate 被提及 3 次 → 晋升 active」—— **测试直接固化了 count=3 即晋升**
+ *   - `:213` 2 次弱上下文应晋升 / `:223` 强上下文 1 次晋升 / `:231` 关系词上下文应晋升
+ *   说明 3→6 与 P2-6 的设计意图直接冲突，不是可调的旋钮。
+ *
+ *   **根因诊断随后修正**：垃圾（`经常` `明白` `文档` 均 count=3）之所以能晋升，
+ *   不是门槛偏低，而是**它们本就不该进观察区** —— 缺陷在**准入**（滑窗产物经
+ *   ChatEntry 的 `slideDetected` 无条件直通，绕过全部闸门），不在晋升。
+ *   故本批改准入（A）与 status 语义（C），**保留本阈值与计分公式不动**；
+ *   存量中已晋升的垃圾另行走 status='void' 软清理。
+ *
+ *   顺带记录一个未解决的事实（供后续批次）：真人名的 `evidence` 字段普遍为空
+ *   （徐诗雨/玉瑶/熊梓铭/王全芬 均无），因为她们走直接建档路径、不经过
+ *   candidate→active 流水线 —— 这条流水线实际只服务滑窗候选。
  */
 const CANDIDATE_PROMOTE_SCORE = 3;
 
@@ -1039,7 +1061,15 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
 
     // Step 3: status 存量补齐
-    this.run("UPDATE nodes SET status = 'active' WHERE type = 'person' AND (status IS NULL OR status = '')");
+    // 🔴 修复3-C(2026-10-08): 由 `active` 改为 `candidate`。
+    //   原语义是「没判过 status 的节点 = 已确认真人」—— 等于**从没走过任何判定就直接落 active**。
+    //   实测后果：`程序`/`周末`/`许多`/`都还`/`容易`/`方式`/`颜色`/`高兴` 等垃圾节点的
+    //   `properties.evidence` **完全为空**（从未进入观察区、从未累积证据），却是 `active` ——
+    //   正是这批空 status 存量被本行 UPDATE 批量转正的。
+    //   改为 `candidate` 后：语义回到「未判定 = 观察区」，由证据分决定是否晋升。
+    //   ⚠️ 行为影响有限（`getAllPersonNames()` 过滤的是 `status != 'void'`，candidate 与
+    //   active 同样参与召回），本行是 **status 标记语义的诚实性修复**，不是召回修复。
+    this.run("UPDATE nodes SET status = 'candidate' WHERE type = 'person' AND (status IS NULL OR status = '')");
 
     // Step 4: legacy_ids 存量补齐
     this.run("UPDATE nodes SET legacy_ids = '[]' WHERE type = 'person' AND legacy_ids IS NULL");
@@ -1977,15 +2007,39 @@ export class FamilyGraph implements FamilyGraphInterface {
           console.warn('[FG Guard] 垃圾实体已拦截: "' + node.name + '" — ' + result.reason + ' (L' + result.grade + ')');
           return;
         }
+
+        // 🔴 修复3-A 第二道判据(2026-10-08): 补齐虚词/长度/黑名单拦截。
+        //   实测（GarbageEntityGuard.checkEntity vs EntityWriteGate.checkPersonEntity）：
+        //     `东坑这`/`公明这` 含虚词「这」→ checkPersonEntity **拒**，checkEntity **放行**；
+        //     `那两个` 两者都拒；而 `GarbageEntityGuard` 中 `CHAT_RESIDUE` 出现次数 = **0**。
+        //   ⇒ 同一 person 准入规则两处实现、判据不一致（违反不变量#7），写入侧先串上更强的那道。
+        //   ⚠️ 已登记实体不受影响：checkPersonEntity 对 existingNames 命中直接放行，
+        //   故本判据只拦**新写入**，不会误伤库里已有的真人名；存量由后续清理处置。
+        const _gate2 = checkPersonEntity(node.name, allNames);
+        if (!_gate2.allowed) {
+          console.warn('[FG Guard] 虚词/长度判据拦截: "' + node.name + '" — ' + _gate2.reason);
+          return;
+        }
+
         // 🔵 批12修正: 全部 L3（grade 3）进观察区，靠行为证据晋升。
         // 原方案「有姓氏=强证据」实测失效：13/15 个 3 字噪声（明伶俐/后找男/谢想法…）首字
         // 恰为罕见姓氏字（明/后/谢/国/家/米/盖/麻/方/计/水/安）→ 全被判 strong。
         // 根因：中文人名与滑窗片段在字面特征上不可分 → 唯有用行为/上下文判定。
+        // 🔴 修复3-B 配套：晋升阈值已由 3 提至 6（见 CANDIDATE_PROMOTE_SCORE），
+        //   故「字面分不清的」不会靠高频提及自行转正。
         if (result.grade === 3) {
           initialStatus = 'candidate';
           console.log('[FG Candidate] L3 进观察区: "' + node.name + '" (累积证据后晋升)');
         }
-      } catch { /* guard不可用不阻塞——防御式降级 */ }
+      } catch (_guardErr) {
+        // 🔴 修复3-A(2026-10-08): 由「静默放行」改为 **fail-closed 拦截 + 告警**。
+        //   原 `catch { /* guard不可用不阻塞 */ }` 意味着闸门一旦抛错（查询失败/懒加载失败/
+        //   判据自身 bug），**所有 person 节点都能畅通无阻地写进户籍** —— 守卫形同虚设。
+        //   按户籍管理法「无户口写入拒绝」：闸门不可用 = 无法确认合法，应拒绝本次写入。
+        //   代价是闸门故障期间新实体进不来，但故障会以告警形式暴露，而非静默放行垃圾。
+        console.warn('[FG Guard] 闸门异常 — 按 fail-closed 拒绝写入 "' + node.name + '":', (_guardErr as Error)?.message);
+        return;
+      }
     }
 
     // V3.2: person 节点自动分配户籍 UUID
