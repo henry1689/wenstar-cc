@@ -2025,8 +2025,12 @@ export class FamilyGraph implements FamilyGraphInterface {
         // 原方案「有姓氏=强证据」实测失效：13/15 个 3 字噪声（明伶俐/后找男/谢想法…）首字
         // 恰为罕见姓氏字（明/后/谢/国/家/米/盖/麻/方/计/水/安）→ 全被判 strong。
         // 根因：中文人名与滑窗片段在字面特征上不可分 → 唯有用行为/上下文判定。
-        // 🔴 修复3-B 配套：晋升阈值已由 3 提至 6（见 CANDIDATE_PROMOTE_SCORE），
-        //   故「字面分不清的」不会靠高频提及自行转正。
+        // ⚠️ 修复3-B 曾拟把晋升阈值由 3 提至 6，实测与 candidate-zone.test.ts:198
+        //   「candidate 被提及 3 次 → 晋升 active」的 P2-6 设计意图直接冲突
+        //   （连同 :162/:213/:223/:231 共 5 个断言挂），已回滚 ——
+        //   当前 CANDIDATE_PROMOTE_SCORE = 3（见 :633）。**勿按 6 推断行为。**
+        //   ⇒ 因此「字面分不清的」**无法**靠阈值拦住，改由乙1 的【转正闸门】拦：
+        //   _accumulateCandidateEvidence 内晋升前复用 checkPersonEntity（详见该处）。
         if (result.grade === 3) {
           initialStatus = 'candidate';
           console.log('[FG Candidate] L3 进观察区: "' + node.name + '" (累积证据后晋升)');
@@ -2797,7 +2801,24 @@ export class FamilyGraph implements FamilyGraphInterface {
         // 🔵 批12(P2-6 二轮): 累计证据分制 —— strong(介绍句/关系词)=3, 弱上下文=1, 每次提及=1。
         // 消除"弱上下文硬阈值 2 次"造成的不可逆遗漏：1 次弱上下文 + 1 次再提及即可晋升。
         const evidenceScore = (ev.strongHits || 0) * 3 + (ev.titleHits || 0) * 1 + ev.count * 1;
-        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE;
+        // 🔴 乙1(2026-10-08): 转正前补挂【准入同源】闸门 —— 进门查过，转正也要查。
+        //   原 promoted 只看 evidenceScore（纯计数），只问「被提过几次」不问「这名字是人吗」。
+        //   而 checkPersonEntity 此前仅在进门时调用（_addNodeInner:2018 / ChatEntry:165），
+        //   转正时不再复用 ⇒ 存量地名碎片靠「提及满 3 次」自我加冕。
+        //   实测反证：[FG Candidate] 晋升 active: "明凤凰" (证据分3, 提及3次)
+        //   —— 其语境是「以前是公明，现在叫光明…光明凤凰街道东坑这里」，纯地名。
+        //   改为与准入共用同一实现（不新增第二份判据副本）；闸门异常按 fail-closed
+        //   不晋升并告警，与 _addNodeInner 的闸门异常处置保持一致（守卫故障必须暴露）。
+        //   实测覆盖面：闸门判拒的 43 个 candidate（东坑这/公明这/麻批这/宿舍这…）将失去
+        //   晋升资格，留在观察区由 STATUS_THRESHOLDS.CANDIDATE_EXPIRE_DAYS(30天) 超期转 void。
+        let _promoteGateOk = false;
+        try {
+          _promoteGateOk = checkPersonEntity(name).allowed;
+        } catch (_ge) {
+          console.warn('[FG Candidate] 转正闸门异常 — 按 fail-closed 不晋升 "' + name + '":',
+            (_ge as Error)?.message);
+        }
+        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE && _promoteGateOk;
         if (promoted) {
           this.run(
             "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",
