@@ -722,18 +722,43 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
 
   const hasPersonEntity = dna.entity_genes.some((g: any) => g.type === 'person' && g.name !== '我' && g.name.length > 1);
 
-  // 🔴 P0-4: 聊天检索过滤条件强制取自 UUIDGatekeeper.sessionEntities（+ 玉瑶默认兜底）
-  // 不再从消息文本提取人名作为检索过滤——消息人名留给图谱/关联分析（mentioned_entity_uuids）
+  // 🔴 户籍隔离 fail-closed(2026-10-08): 检索主体的**唯一真源 = 「当前正在跟谁说话」**。
+  //
+  // 原实现（P0-4）取 UUIDGatekeeper.sessionEntities —— 那是**访问控制层**（谁有权读谁的档案），
+  // 不是「会话对手方」的真源，且实测存在泄漏链条：
+  //   ① process-stages 的 `if (personUUIDs.length > 0)` 使「消息里没解析出人名」时**不更新**会话层；
+  //   ② 会晤退出判据是**整句锚定** + 短消息限制，「很好，你去忙，。再见」（正好 10 字符）
+  //      两个条件都不满足 → 会晤不退出 → 会话层不清；
+  //   ⇒ 叠加后 sessionEntities 冻结在上一个会晤实体上，**玉瑶的每一次检索都用对方的 UUID**。
+  //   实测后果：玉瑶嘴上答「玉瑶这儿没记录」（提示词的不知道守卫在要求她诚实），
+  //             检索到的却是徐诗雨的记忆；扮演徐诗雨时则精确说出 4008/8630/仓库卸车/物流单号
+  //             这些只存在于该次会话的细节 —— 嘴上说不知道、身体很诚实。
+  //
+  // 改判：真源 = EntityMeeting（会晤态的对手方 UUID）；无会晤 → 玉瑶 UUID。**恒非空**。
+  // 这样即使退出判据漏匹配、会话层冻结，检索主体也不会跟着错（根因在真源，不在出口）。
+  // 注：不再从消息文本提取人名作为检索过滤——消息人名留给图谱/关联分析（mentioned_entity_uuids）。
   const _activeEntityUuids: string[] = [];
   try {
-    const _session = ctx._gatekeeper?.getSessionEntities?.() ?? [];
+    const _meetingUuidNow = ctx._entityMeeting?.isActive?.()
+      ? ctx._entityMeeting.getEntityUUID?.() ?? null
+      : null;
     const _yuyaoU = ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.('玉瑶') ?? null;
-    if (_session.length > 0) {
-      _activeEntityUuids.push(..._session);
+    if (_meetingUuidNow) {
+      _activeEntityUuids.push(_meetingUuidNow);
+      // 多人会晤：追加其他在场者。**仅在确实处于会晤态时**才读会话层 —— 退出后会话层可能
+      // 残留旧值，此时 _meetingUuidNow 为空、本分支不进入，僵尸实体天然带不进来。
+      for (const u of ctx._gatekeeper?.getSessionEntities?.() ?? []) {
+        if (u && !_activeEntityUuids.includes(u)) _activeEntityUuids.push(u);
+      }
     } else if (_yuyaoU) {
-      _activeEntityUuids.push(_yuyaoU);  // 玉瑶默认态兜底（私聊-玉瑶检索自己的记忆）
+      _activeEntityUuids.push(_yuyaoU);  // 玉瑶默认态（私聊-玉瑶检索自己的记忆）
     }
-  } catch { /* 不阻塞 */ }
+    if (_activeEntityUuids.length === 0) {
+      // 丢弃必须可见，不得静默（P-13 精神）：空数组会让下游 8 处 `length > 0 ? X : undefined`
+      // 退化成「不限范围」，故此处显式告警，便于巡检发现「玉瑶 UUID 解析失败」这类户籍故障。
+      console.warn('[Police] 检索主体解析失败（无会晤实体且玉瑶 UUID 取不到）— 本轮检索无归属过滤');
+    }
+  } catch (_e) { console.warn('[Police] 检索主体解析异常:', (_e as Error)?.message); }
 
   const hasContinuationMarkers = /嗯|对|好|行|是|是的|没错|就是|[那这]样/.test(message) && message.length < 20;
 

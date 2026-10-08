@@ -104,7 +104,12 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
           if (uuid) personUUIDs.push(uuid);
         }
       }
-      if (personUUIDs.length > 0) ctx._gatekeeper.setSessionEntities(personUUIDs);
+      // 🔴 户籍隔离 fail-closed(2026-10-08): **无条件更新**，不得因「解析不出人名」而保持旧值。
+      //   原 `if (personUUIDs.length > 0)` 在消息里没有可识别人名时直接跳过 → 会话层
+      //   冻结在上一个实体上；与会晤退出判据漏匹配叠加，即「玉瑶检索到徐诗雨记忆」的直接成因。
+      //   空数组 → setSessionEntities 清空会话层，检索主体由 retrieval-stage 按
+      //   「当前会晤实体 / 玉瑶 UUID」独立解析，不再依赖本层可能残留的旧值。
+      ctx._gatekeeper.setSessionEntities(personUUIDs);
       ctx.m4.setGatekeeper?.(ctx._gatekeeper);
     } catch (_gErr) { /* 门阀设置失败不影响对话 */ }
   }
@@ -136,10 +141,31 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
   }
 
   // ── 会晤退出 ──
-  const _exitMatch = /^(?:散会|结束.*会议|会议.*结束|不开了|今天就到这儿|今天就到这里|先这样|下了|拜拜|再见|瑶瑶|玉瑶|瑶儿)\s*$/.test(message.trim());
-  const _isShortMsg = message.trim().length < 10;
+  const _trimmedMsg = message.trim();
+  const _isShortMsg = _trimmedMsg.length < 10;
   const _prevTurnIsQuestion = ctx.conversationHistory.slice(-1)[0]?.content?.match(/[？?]$/);
-  if (ctx._entityMeeting?.isActive() && _exitMatch && _isShortMsg && !_prevTurnIsQuestion) {
+  // 🔴 户籍隔离 fail-closed(2026-10-08): 退出判据由**双障碍**改为**句尾判据**。
+  //
+  //   原实现有两个条件同时卡住退出：
+  //     ① `^(…|再见|瑶瑶…)\s*$` —— **整句锚定**，要求消息本身就是结束语；
+  //     ② `_isShortMsg = length < 10` —— 「很好，你去忙，。再见」正好 **10 字符**，不满足。
+  //   实测：用户说「很好，你去忙，。再见」→ 会晤不退出 → EntityMeeting.exit() 不调用
+  //   → gatekeeper.clearSessionEntities() 不执行 → 会话层冻结在徐诗雨上 →
+  //   随后「瑶瑶，今天天气怎样」因 personUUIDs 为空而不更新会话层 → 玉瑶检索用徐诗雨 UUID。
+  //
+  //   现改：句尾判据（结束语可出现在句尾，前面允许有告别正文），且**句尾判据不受短消息限制**
+  //   （判据本身已要求结束语在末尾，足够严格）；原整句判据保留但仅在短消息时生效。
+  //   `_prevTurnIsQuestion` 不变（「结束了吗？」不算退出）。
+  //
+  //   ⚠️ 本仓退出判据共 5 处实现（EntityMeeting._exit1:492 / _exitTail:496 / :783、本处、
+  //   chat.ts:933、PrefrontalCortex:287），判据互不一致，违反不变量#7「同一规则禁止多处实现」。
+  //   **判据全仓收敛为单一函数属独立批次**：本批只修好隔离（retrieval-stage 已改为不依赖
+  //   退出成败的真源），本处对齐是为了恢复「退出→清会话层」这一卫生行为本身。
+  //   唯一权威在 m4/household/EntityMeeting.detectIntent。
+  const _exitBare = /^(?:散会|结束.*会议|会议.*结束|不开了|今天就到这儿|今天就到这里|先这样|下了|拜拜|再见|瑶瑶|玉瑶|瑶儿)\s*$/.test(_trimmedMsg);
+  const _exitTail =
+    /(?:散会|结束.*会议|会议.*结束|不开了|今天就到这儿|今天就到这里|先这样|下了|拜拜|再见|聊到这儿|聊到这|就到这儿|就到这|下次再聊|改天聊|回聊|回头聊|下次聊|回头再聊)\s*(?:吧|了|啦|~|～|!|！|。|，|,)?\s*$/.test(_trimmedMsg);
+  if (ctx._entityMeeting?.isActive() && (_exitTail || (_exitBare && _isShortMsg)) && !_prevTurnIsQuestion) {
     const exitResult = await ctx._entityMeeting.exit();
     if (exitResult?.minutes) console.log('[EntityMeeting] 多人会议结束，纪要已自动归档');
   }

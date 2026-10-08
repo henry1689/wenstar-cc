@@ -63,8 +63,21 @@ export class EntityContextManager {
     })();
     const _maxTurns = _floor > 0 ? Math.max(maxTurns, _floor) : maxTurns;
 
-    // 玉瑶态（无会晤实体）：历史本就按玉瑶 UUID 单独装载，此处不做归属过滤
+    // 玉瑶态（无会晤实体）
+    // 🔴 户籍隔离 fail-closed(2026-10-08): 原注释「历史本就按玉瑶 UUID 单独装载」是**错误前提** ——
+    //   入参 allHistory 是**全局** conversationHistory，跟徐诗雨聊的轮次就在里面，
+    //   直接 slice(-N) 等于把他人会话原样倒给玉瑶。
+    //   生产路径**不经过这里**：chat.ts:731 仅在 `if (_meetingUuid)` 时才调用本方法，
+    //   玉瑶态走 else 分支从 EntityContextStore 按玉瑶 UUID 查专属历史（其 catch 回落
+    //   已改为不回落混合历史，见 chat.ts 玉瑶态分支）。故此处不可能因生产调用而泄漏。
+    //   但留着一条静默放行通道本身就是隐患（谁新增一个调用点就中招），故显式告警留痕：
+    //   丢弃必须可见，不得静默（P-13 精神）。修复方向不是在这里猜玉瑶 UUID（那会造成
+    //   第二份归属真源，违反不变量#7），而是由调用方保证 entityUuid 非空。
     if (!entityUuid) {
+      console.warn(
+        `[EntityContextManager] getContextWindow 收到空 entityUuid — 按「无主体」直取最近 ${_maxTurns} 条` +
+        `（不做归属过滤）。生产路径不经过此分支；若你正在新增调用点，请改为传入真实归属 UUID。`,
+      );
       return allHistory.slice(-_maxTurns);
     }
 

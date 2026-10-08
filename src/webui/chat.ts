@@ -372,20 +372,20 @@ export interface ChatResponse {
  *  格式：{ 行号, 阶段, 描述, 传播方式 }
  */
 const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; via: string }> = [
-  { line: 651, stage: 'L0-路由', desc: '活跃会议名传入 processChat', via: '_activeMeetingName' },
-  { line: 764, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()' },
-  { line: 798, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
-  { line: 861, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
-  { line: 876, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
-  { line: 963, stage: 'L5-记忆门控', desc: '会晤模式跳过主人记忆检索', via: '!meetingEntityName guard' },
-  { line: 1327, stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
-  { line: 1380, stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
-  { line: 1451, stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint = null' },
-  { line: 1487, stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问', via: '!meetingEntityName guard' },
-  { line: 1513, stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像', via: '!meetingEntityName guard' },
-  { line: 1647, stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
-  { line: 1752, stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate', via: '!!_meetingEntityName' },
-  { line: 1778, stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
+  { line: 852, stage: 'L0-路由', desc: '活跃会议名传入下层 stage', via: '_meetingEntityName: _activeMeetingName' },
+  { line: 704, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()' },
+  { line: 1129, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
+  { line: 1231, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
+  { line: 1248, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
+  { line: 2251, stage: 'L5-记忆门控', desc: '会晤模式跳过主人侧自我模型注入（⚠原「跳过主人记忆检索」守卫 ChatPolicy.canRetrieveMemories 全仓零调用点＝死代码，实际由 M6 guard 承担）', via: 'if (ctx.m6 && !_isMeeting)' },
+  { line: 1833, stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
+  { line: 1921, stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
+  { line: 2003, stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint = null' },
+  { line: 2049, stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问（知识边界检测）', via: '!meetingEntityName guard' },
+  { line: 2325, stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像', via: 'ctx.masterProfile && !_meetingEntityName' },
+  { line: 2212, stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
+  { line: 2583, stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate', via: '!!_meetingEntityName' },
+  { line: 2614, stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
 ];
 
 export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
@@ -763,13 +763,30 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             }
             return turns;
           })() : [];
-          enrichedHistory = _yuyaoTurns.length > 0 ? _yuyaoTurns : ctx.conversationHistory.slice(-_window);
-        } catch {
-          enrichedHistory = ctx.conversationHistory.slice(-_window);
+          // 🔴 户籍隔离 fail-closed(2026-10-08): 原回落 `ctx.conversationHistory.slice(-_window)`
+          //   是**混合历史** —— 上面的注释「绝对不读其他实体对话」被这一行当场推翻：
+          //   _yuyaoTurns 为空（新会话 / UUID 解析失败 / 表异常）时就直接把全局历史倒给玉瑶，
+          //   而全局历史里正装着刚跟徐诗雨聊的内容。实测后果见 retrieval-stage 同批注释。
+          //   改为**回落空历史**：宁可玉瑶这一轮「不记得」，不可让她「知道不该知道的」。
+          //   _yuyaoTurns 为空多为「玉瑶尚无历史」这一正常情形，空历史不影响新对话；
+          //   若是故障导致，则由下方告警留痕，可巡检排查。
+          enrichedHistory = _yuyaoTurns;
+          if (_yuyaoTurns.length === 0) {
+            console.warn(
+              '[Police] 玉瑶态专属历史为空 — 按 fail-closed 使用空历史（不回落全局历史）。' +
+              `玉瑶UUID=${_yuyaoU ?? '(解析失败)'}`,
+            );
+          }
+        } catch (_e) {
+          // 同上：异常时绝不能退到混合历史（那正是泄漏通道本身），fail-closed 取空。
+          console.warn('[Police] 玉瑶态历史查询异常 — fail-closed 使用空历史:', (_e as Error)?.message);
+          enrichedHistory = [];
         }
       }
-    } catch {
-      enrichedHistory = ctx.conversationHistory.slice(-_window);
+    } catch (_e) {
+      // 最外层兜底：玉瑶态失败同样不得回落混合历史；会晤态已有 _meetingUuid 归属过滤。
+      console.warn('[Police] 上下文窗口装配异常 — fail-closed 使用空历史:', (_e as Error)?.message);
+      enrichedHistory = [];
     }
     // 🆕 V10.11: 会晤模式下多重增强 — 动态窗口 + isolateTurns + 压缩 + 摘要文本
     if (_activeMeetingName && enrichedHistory.length > 0) {
