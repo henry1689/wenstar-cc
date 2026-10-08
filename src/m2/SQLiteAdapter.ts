@@ -2363,20 +2363,29 @@ export class SQLiteAdapter {
       } catch (e) { console.warn('[V21] knowledge_base 40D 补齐异常:', (e as Error)?.message); }
 
       // ── 3. black_diamond emotion_vector 修复为 40D ──
+      // 🔴 户籍三元组批3(2026-10-08): **停止兜底写零**。
+      //   原实现在解析失败时写 `JSON.stringify(new Array(40).fill(0))` —— 把「无法解析」
+      //   伪装成「感知维度全为零」，**等于凭空制造数据**：下游（检索/钙化/情感重排）无法
+      //   区分「真的全零」与「根本没解析出来」，坏行被当成有效数据参与推演。
+      //   改为**跳过 + 告警**（fail-safe：不写坏值，也不假装有值）。
+      //   本处只负责**不再产生新的**；存量处置是后续批次议题。
       try {
         const bdRows = this.db.exec("SELECT id, emotion_vector FROM black_diamond")[0]?.values ?? [];
-        let bdUpdated = 0;
+        let bdSkipped = 0;
         for (const [id, evRaw] of bdRows) {
           try {
             // V12.4 阶段B: 用 decodePerceptionV40 识别 v1纯数组 与 v2对象（{__v:2,dims}）→ 已是 40D 跳过
             const dec = decodePerceptionV40(evRaw ? String(evRaw) : null);
             if (dec) continue;
-            // 非 40D（时间戳/24D/空）→ 写 40D 默认数组（v1 纯数组，兼容）
-            this.db.run("UPDATE black_diamond SET emotion_vector = ? WHERE id = ?", [JSON.stringify(new Array(40).fill(0)), String(id)]);
-            bdUpdated++;
-          } catch { /* 空/坏 → 写默认 */ }
+            bdSkipped++;   // 非 40D（时间戳/24D/空/坏 JSON）→ 跳过，绝不写零向量
+            if (bdSkipped <= 5) {
+              console.warn(`[V21] black_diamond ${String(id)} emotion_vector 无法解码为 40D → 跳过（不写零向量）`);
+            }
+          } catch { bdSkipped++; /* 空/坏 → 跳过 */ }
         }
-        if (bdUpdated > 0) console.log(`[V21] black_diamond 40D 补齐: ${bdUpdated} 条`);
+        if (bdSkipped > 0) {
+          console.warn(`[V21] black_diamond 40D 无法解码已跳过 ${bdSkipped} 条（未写入任何零向量）`);
+        }
       } catch (e) { console.warn('[V21] black_diamond 40D 补齐异常:', (e as Error)?.message); }
 
       return total;
@@ -2827,7 +2836,25 @@ export class SQLiteAdapter {
     const t0 = Date.now();
     // 🔴 2026-09-20 M 层节点埋点（module_entry / module_exit + 耗时）：落盘是本仓最高频的 M 层操作，
     //   有 entry/exit + 耗时才能在运维侧区分"是落盘慢还是别的慢"（原先仅 >300ms 才有一行日志）。
-    console.log(`[Hook] module_entry module=m2.SQLiteAdapter.flushNowAsync dirty=${this._dirtyCount}`);
+    //
+    // 🔴 户籍三元组批3(2026-10-08) 补齐字段口径：评审要求持久化埋点带
+    //   `write_latency` / `save_flush` / `transaction_status`（原实现只有中文「耗时」，
+    //   机器侧无法按统一字段名解析）。现与全局口径对齐：`operation_type` / `duration_ms` / `status`
+    //   外加这三个持久化专属字段。**纯 stdout 结构化日志，不写库、不改变落盘语义。**
+    //   ⚠️ `transaction_status` 语义说明：本方法的落盘走**整库原子写**（`_safeWriteDbFileAsync`
+    //   内部为「写临时文件 + 原子改名」），不涉及 SQL 事务 —— 故取 `committed`（原子写成功）
+    //   或 `rolled_back`（失败，内存数据未受影响，等下一轮重试），而非 SQL 的 BEGIN/COMMIT 状态。
+    const _hook = (event: string, extra: Record<string, unknown>): void => {
+      try {
+        console.log('[Hook] ' + JSON.stringify({
+          module: 'm2.SQLiteAdapter',
+          event,
+          operation_type: 'persistence_flush',
+          ...extra,
+        }));
+      } catch { /* 埋点失败绝不影响落盘 */ }
+    };
+    _hook('module_entry', { save_flush: 'start', transaction_status: 'in_progress', dirty: this._dirtyCount });
     let _hookOk = false;
     try {
       const data = (this.db as any).export();
@@ -2843,7 +2870,14 @@ export class SQLiteAdapter {
     } catch (err) {
       console.error('[SQLiteAdapter] 异步落盘失败（数据仍在内存，等下一轮重试）:', (err as Error)?.message);
     } finally {
-      console.log(`[Hook] module_exit module=m2.SQLiteAdapter.flushNowAsync ok=${_hookOk} 耗时=${Date.now() - t0}ms`);
+      const ms = Date.now() - t0;
+      _hook('module_exit', {
+        duration_ms: ms,
+        write_latency: ms,                                   // 持久化专属：本次落盘写入耗时
+        save_flush: _hookOk ? 'done' : 'failed',
+        transaction_status: _hookOk ? 'committed' : 'rolled_back',
+        status: _hookOk ? 'success' : 'fail',
+      });
       this._flushing = false;
       if (this._flushPending) {
         this._flushPending = false;

@@ -15,7 +15,11 @@ import { hasSurname } from '../config/app-identity.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { PERCEPTION_40D_ENCODING_VERSION } from './PerceptionVector40DCodec.js';
+import {
+  PERCEPTION_40D_ENCODING_VERSION,
+  decodePerceptionV40,
+  encodePerceptionV40,
+} from './PerceptionVector40DCodec.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -662,6 +666,90 @@ const MIGRATIONS: Migration[] = [
         'ALTER TABLE knowledge_base ADD COLUMN visible_entity_uuids TEXT',
         'knowledge_base.visible_entity_uuids 列已加（归属与可见性分离）',
       );
+    },
+  },
+  {
+    version: 18,
+    description: '户籍三元组批3: 统一 40D 存储形态为 v2 包装（knowledge_base / black_diamond）',
+    apply: (db: any) => {
+      // 背景（《户籍三元组全域统一任务书 V1》§1.2.2 · 2026-10-08 实测更正版）：
+      //   用**真实** `decodePerceptionV40` 全库扫描确认 —— **三种形态解码失败 = 0**
+      //   （v2 包装 / v1 裸数组 / v0 命名对象，实现见 PerceptionVector40DCodec 的
+      //   hasV2Shape + parseV2Dims）。故本迁移**不是修解码缺陷**，而是**统一存储卫生**：
+      //     · memories.perception_40d        10,669 行已全为 v2 包装（无需处理）
+      //     · knowledge_base.emotion_vector   1,123 行全为 v1 裸数组  ← 本迁移统一
+      //     · black_diamond.emotion_vector    2,464 行中 118 行为 v1   ← 本迁移统一
+      //
+      // 🔴 **硬约束：只改包装形态，绝不动任何向量数值。**
+      //   故每行改完都做一次往返校验（encode 后再 decode，逐维比对旧值）——
+      //   不一致就**放弃该行**并计数，宁可少改也不改错。
+      //
+      // 🔴 解不出来的行**不碰**（批3 已在 SQLiteAdapter 停止「兜底写零」，
+      //   本迁移同样不制造数据）。存量全零向量行属于后续批次的议题，此处不越权处理。
+      //
+      // 幂等：已是 v2 包装的行直接跳过 ⇒ 可复跑。
+      const _targets: Array<[string, string]> = [
+        ['knowledge_base', 'emotion_vector'],
+        ['black_diamond', 'emotion_vector'],
+      ];
+      for (const [table, col] of _targets) {
+        let rows: unknown[][] = [];
+        try {
+          const res = db.exec(`SELECT id, ${col} FROM ${table} WHERE ${col} IS NOT NULL AND ${col} != ''`);
+          rows = res[0] ? (res[0].values as unknown[][]) : [];
+        } catch (e) {
+          console.warn(`[Migration] v18 读取 ${table}.${col} 失败（非致命）:`, (e as Error)?.message);
+          continue;
+        }
+        let changed = 0, alreadyV2 = 0, undecodable = 0, mismatch = 0;
+        for (const [id, raw] of rows) {
+          const s = String(raw ?? '');
+          const t = s.trim();
+          // 已是 v2 包装 → 跳过（幂等）
+          if (t.startsWith('{') && t.includes('"__v"') && t.includes('"dims"')) { alreadyV2++; continue; }
+
+          // 🔴 严格形态预检（2026-10-08 由本批守卫测试当场抓获的坑）：
+          //   `decodePerceptionV40` 的 **v0 命名对象分支是 fail-open 的** ——
+          //   对任意 JSON 对象都会返回一个「全零 40D 向量」（因为 `Number(undefined)=NaN`
+          //   被 `isFinite` 跳过，于是 40 个维度全留 0）。实测：
+          //     decode('{"this":"is not a 40d vector"}') → 合法的全零 40D ✓（不是 null）
+          //   ⇒ 若只靠 `if (!dec)` 判可解，本迁移会把**垃圾对象统一成 v2 全零向量** ——
+          //     正是本批要消灭的「凭空制造数据」。
+          //   故此处先做**形态级**预检，只放行真正是三种已知形态的行：
+          let shapeOk = false;
+          try {
+            const parsed: unknown = JSON.parse(s);
+            if (Array.isArray(parsed)) {
+              shapeOk = parsed.length === 40;                        // v1 纯数组
+            } else if (parsed && typeof parsed === 'object') {
+              const rec = parsed as Record<string, unknown>;
+              shapeOk = Array.isArray(rec.dims)
+                ? (rec.dims as unknown[]).length === 40               // v2 包装
+                : Object.keys(rec).some((k) => /^d\d{2}_/.test(k));   // v0 命名对象（至少一个已知维键）
+            }
+          } catch { shapeOk = false; }
+          if (!shapeOk) { undecodable++; continue; }   // 形态不明 → 不碰、不制造数据
+
+          const dec = decodePerceptionV40(s);
+          if (!dec) { undecodable++; continue; }
+          const next = encodePerceptionV40(dec);
+          const back = decodePerceptionV40(next);
+          // 往返校验：逐维比对，任一不等即放弃该行
+          const vals = (v: unknown): number[] => Object.values(v as Record<string, number>).map((x) => Number(x) || 0);
+          const a = vals(dec), b = back ? vals(back) : [];
+          if (b.length !== a.length || a.some((x, i) => x !== b[i])) { mismatch++; continue; }
+          try {
+            db.run(`UPDATE ${table} SET ${col} = ? WHERE id = ?`, [next, String(id)]);
+            changed++;
+          } catch (e) {
+            console.warn(`[Migration] v18 更新 ${table} ${String(id)} 失败（非致命）:`, (e as Error)?.message);
+          }
+        }
+        console.log(
+          `[Migration] v18 ${table}.${col}: 统一 ${changed} 条 · 已是v2 ${alreadyV2} · 无法解码跳过 ${undecodable}` +
+          (mismatch > 0 ? ` · ⚠️ 往返校验不一致而放弃 ${mismatch}` : ''),
+        );
+      }
     },
   },
 ];
