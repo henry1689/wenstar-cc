@@ -642,7 +642,13 @@ const NAME_TITLE_AFTER = ['说', '道', '答', '告诉', '喊', '讲'];
 /** 批12: 关系词 —— 名字前出现（"我朋友张小龙"）⇒ 介绍性上下文 */
 const NAME_RELATION_BEFORE = ['朋友', '同事', '同学', '老板', '老师', '领导', '亲戚', '家人', '老乡', '对象', '男朋友', '女朋友'];
 /** 批12: 介绍句式 —— 名字前紧邻（"这是张小龙"/"我叫张小龙"）*/
-const NAME_INTRO_BEFORE = ['这是', '叫做', '名叫', '我叫', '他叫', '她叫', '叫', '是'];
+// 🔴 乙1-B(2026-10-09): 删去单字 '是' —— 它是强判据的误报源。
+//   判定为 `beforeWin.endsWith(w)`（名字前 6 字窗口的**结尾**匹配），单字 '是' 过于宽泛：
+//   实测 `公明`（地名）的语境「以前**是**公明，现在叫光明」命中 endsWith('是')
+//   ⇒ strongHits=1 ⇒ 证据分 4/3 ⇒ **转正 active**。`公明` 的转正直接来自这个误报。
+//   '是' 的合法介绍用法（「这是张小龙」）已被上一项 '这是' 覆盖，剩余场景全是误报。
+//   '叫' 予以保留：它是介绍句的核心动词，且 '我叫/他叫/她叫/名叫/叫做' 已覆盖多数形态。
+const NAME_INTRO_BEFORE = ['这是', '叫做', '名叫', '我叫', '他叫', '她叫', '叫'];
 /** 批12: 介绍句式 —— 名字后紧邻（"张小龙是我同事"）*/
 const NAME_INTRO_AFTER = ['是我', '叫'];
 
@@ -2818,7 +2824,19 @@ export class FamilyGraph implements FamilyGraphInterface {
           console.warn('[FG Candidate] 转正闸门异常 — 按 fail-closed 不晋升 "' + name + '":',
             (_ge as Error)?.message);
         }
-        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE && _promoteGateOk;
+        // 🔴 乙1-B(2026-10-09): 晋升须有【真实上下文】—— 裸提及次数不再单独构成晋升依据。
+        //   实测依据（V43 §一.2）：观察区 candidate 498 个中 **497 个是纯裸提及**
+        //   （strongHits=0 且 titleHits=0），区内业主确认真人 **0 个**；而 active 97 个里
+        //   **72 个（74%）** 正是此路径产出的垃圾（关于/经历/强烈/高潮/游泳…）。
+        //   根因：evidenceScore 的 count 项可**独立凑满阈值 3** —— 任何高频词在日常对话里
+        //   都会被提到 3 次 ⇒ 观察区退化为「高频词计数器」，只问「被提过几次」不问「被认识吗」。
+        //   现在要求名字出现在【关系词/介绍句/称谓动词】的语法结构中才算「被认识」。
+        //   阈值 CANDIDATE_PROMOTE_SCORE(=3) 与两个判据函数本身**均不变**
+        //   （_hasNameStrongContext / _hasNameTitleContext 零改动，保持单一实现）。
+        //   兜底：无上下文但确实存在的新人由**梦境 LLM 终审**认定（applyJudgments, :2932），
+        //   该通道能读 evidence.contexts 做语义判断，本批不动它。
+        const _hasRealContext = (ev.strongHits || 0) >= 1 || (ev.titleHits || 0) >= 1;
+        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE && _hasRealContext && _promoteGateOk;
         if (promoted) {
           this.run(
             "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",

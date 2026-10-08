@@ -202,7 +202,19 @@ describe('批12 · FamilyGraph 观察区集成', () => {
     await internals._accumulateCandidateEvidence(['观察区乙'], '另一句无关的话');
     expect(statusOf('观察区乙'), '2 次还不够').toBe('candidate');
     await internals._accumulateCandidateEvidence(['观察区乙'], '第三句话');
-    expect(statusOf('观察区乙'), '3 次应晋升').toBe('active');
+    // 🔴 乙1-B(2026-10-09) 期望订正：原断言为 'active'，固化的是「**无任何上下文**的裸提及
+    //   也能晋升」。该行为经实测证伪（V43 §一.2）：观察区 candidate 498 个中 **497 个是纯裸提及**
+    //   （strongHits=0 且 titleHits=0），区内业主确认真人 **0 个**；而 active 97 个里
+    //   **72 个（74%）** 正是此路径产出的垃圾（关于/经历/强烈/高潮…）。
+    //   现要求晋升必须具备对话语法证据（strongHits≥1 或 titleHits≥1）。
+    //   ⚠️ 这不是「把阈值调高」：修复3 曾试阈值 3→6，那次挂了 5 个断言（全局影响）；
+    //   本次是**增加判据维度**，其余 4 个晋升断言均带上下文，一个都不受影响。
+    expect(statusOf('观察区乙'), '裸提及不构成晋升依据，应留在观察区').toBe('candidate');
+
+    // 正向对照：同样累计到 3 分，只要补上一次「介绍句上下文」即晋升
+    // ⇒ 证明 CANDIDATE_PROMOTE_SCORE(=3) 阈值本身未变，变的只是「必须带上下文」。
+    await internals._accumulateCandidateEvidence(['观察区乙'], '我同事观察区乙来了');
+    expect(statusOf('观察区乙'), '有上下文后即晋升（阈值 3 未变）').toBe('active');
   });
 
   it('candidate 有称谓动词（弱上下文）→ 需累积 2 次（P2-6）', async () => {
