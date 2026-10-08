@@ -723,8 +723,12 @@ async function initPipeline(): Promise<void> {
     // running 防重入标记形同虚设（跨实例不互斥），叠加定时器残留可造成并发双跑。
     const entityTriageSvc = new EntityTriageService({
       familyGraph,
-      rawCall: async (messages, maxTokens, temperature) => {
-        if (llmProvider?.rawCall) return llmProvider.rawCall(messages as any, maxTokens, temperature);
+      rawCall: async (messages, maxTokens, temperature, opts) => {
+        // 🔴 丙1(2026-10-09): **必须透传第 4 参** —— 原实现只声明 3 参，
+        //   实体终审传入的 `{ reasoning_effort: 'low' }` 会在此被静默丢弃，
+        //   等于入口没打通。其余 rawCall 调用方（server.ts:743/362 等）不传第 4 参，
+        //   行为不变。
+        if (llmProvider?.rawCall) return llmProvider.rawCall(messages as any, maxTokens, temperature, opts);
         throw new Error('rawCall 不可用（LLM 未就绪）');
       },
     });

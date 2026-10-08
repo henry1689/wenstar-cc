@@ -1177,8 +1177,21 @@ export class DeepSeekLLMProvider implements LLMProvider {
    * 原始 LLM 调用（绕过玉瑶 persona 和角色路由）
    * 供提取类、分析类任务使用（如 ProfileAcquisitionEngine）
    */
-  async rawCall(messages: DeepSeekMessage[], maxTokens: number, temperature: number): Promise<string> {
-    const result = await this.callDeepSeekApi(messages, maxTokens, temperature, { timeoutMs: 45_000 });
+  async rawCall(
+    messages: DeepSeekMessage[],
+    maxTokens: number,
+    temperature: number,
+    // 🔴 丙1(2026-10-09): 新增**可选** opts —— 仅透传，不改任何剥离/容错逻辑。
+    //   把 `reasoning_effort` 送到下方 callDeepSeekApi 的【既有】条件展开分支
+    //   （见本文件 `...(extraParams.reasoning_effort ? {...} : {})`）。
+    //   ⚠️ 本批**不触碰** resolveReplyFromFields 与 V22/V31 fail-closed 思维链剥离逻辑
+    //   （那是三次泄漏事故的根治产物）。此处只增加一个入参入口。
+    opts?: { reasoning_effort?: string },
+  ): Promise<string> {
+    const result = await this.callDeepSeekApi(messages, maxTokens, temperature, {
+      timeoutMs: 45_000,
+      ...(opts?.reasoning_effort ? { reasoning_effort: opts.reasoning_effort } : {}),
+    });
     return result.text;
   }
 

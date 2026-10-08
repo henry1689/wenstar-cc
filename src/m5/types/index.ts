@@ -107,5 +107,9 @@ export interface LLMProvider {
   setPersona?(persona: import('../../app/persona/types.js').IPersona): void;
 
   /** V3.2: 原始 LLM 调用（绕过 persona 和角色路由），供提取/分析类任务使用 */
-  rawCall?(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, maxTokens: number, temperature: number): Promise<string>;
+  // 🔴 丙1(2026-10-09): 追加**可选** opts 入参 —— 向后兼容，既有调用方零适配。
+  //   用途：把「推理强度」这一 m5 早已支持的能力（DeepSeekLLMProvider:1277 的
+  //   reasoning_effort 条件展开）暴露给上游 —— 判定性任务（如实体离线终审）
+  //   不需要深度推理，压低可省 token 并缩短响应。
+  rawCall?(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, maxTokens: number, temperature: number, opts?: { reasoning_effort?: string }): Promise<string>;
 }
