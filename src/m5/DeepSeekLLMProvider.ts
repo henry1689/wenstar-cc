@@ -210,6 +210,14 @@ export function resolveReplyFromFields(content?: string, reasoning?: string): st
     // ① 字段边界优先（content 也可能被模型用来承载思维链，同样不得原样透传）
     const c = (content || '').trim();
     if (c) {
+        // 🔴 V45(2026-10-09) 合法 JSON 短路 —— 修复剥离器误伤「工具型调用」的 JSON 输出。
+        //   判据是【结构性的】：思维链是自然语言散文（中文元指令 / 英文起草稿），JSON.parse 必然
+        //   失败 ⇒ 走下方原逻辑，V22/V31/V34 三次根治的 fail-closed 防护**原样保留**；
+        //   只有「模型确实按要求输出了合法 JSON」时才短路放行 —— 那正是被要求输出 JSON 的任务场景。
+        //   实测依据：完整的 1010 字符判定 JSON 曾被削成 "[{"（3 字符），致实体终审 66 次零提升。
+        if (c[0] === '[' || c[0] === '{') {
+            try { JSON.parse(c); return c; } catch { /* 非合法 JSON → 继续走原剥离逻辑 */ }
+        }
         // content 非空: ① 默认视为答案；② 但若剥离器能真正剥下东西（变短 >10 字）
         //   → 说明 content 里裹着思维链（含中文复盘型，由 extractAnswerFromReasoning 内部 V2–V20 判据负责）→ 用剥离结果。
         // ❗ 无论如何**不得整体判空**——判空会让会晤模式退化成「…（抱歉，我暂时无法回应…）」
@@ -1192,7 +1200,12 @@ export class DeepSeekLLMProvider implements LLMProvider {
       timeoutMs: 45_000,
       ...(opts?.reasoning_effort ? { reasoning_effort: opts.reasoning_effort } : {}),
     });
-    return result.text;
+    // 🔴 V45(2026-10-09): 工具型通道取【未经思维链剥离的原始 content】—— 本方法语义即「原始调用」，
+    //   调用方（实体终审 / FG 关系抽取 / 记忆检索编号 / 档案采集 / 对话压缩摘要）要的是模型原始
+    //   输出，而非「被回复语义处理过」的文本。剥离器只应作用于会晤/rp 的回复出口。
+    //   兜底：原始内容为空/纯空白时回落既有剥离结果（保留 fail-closed，绝不因本改动产生空串）。
+    const _raw = String(result.rawContent ?? '').trim();
+    return _raw ? result.rawContent! : result.text;
   }
 
   /**
@@ -1221,7 +1234,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
    *   埋点范式照 `m2.SQLiteAdapter`（`[Hook] module_entry/module_exit + 耗时`）。
    *   ⚠️ 本次根因定位被迫靠 `tokens/len` 分布反推，正是因为 m5 层此前**零埋点**。
    */
-  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
+  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
     const _t0 = Date.now();
     let _status = 'success';
     console.log(`[Hook] module_entry module=m5.DeepSeekLLMProvider.callDeepSeekApi max_tokens=${maxTokens}`);
@@ -1254,7 +1267,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     }
   }
 
-  private async _callDeepSeekApiInner(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
+  private async _callDeepSeekApiInner(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
     // 🔴 P1-5 流式分支: onToken 提供时启用流式（token 增量旁路推送，重试只在首 token 前）
     if (streamOpts?.onToken) {
       const r = await this.streamChat(messages, maxTokens, temperature, extraParams, streamOpts.onToken);
@@ -1325,6 +1338,14 @@ export class DeepSeekLLMProvider implements LLMProvider {
 
         return {
           text,
+          // 🔴 V45(2026-10-09) 原始 content 回传 —— 修复「工具型调用被思维链剥离器削短」。
+          //   根因（三代探针实测确证）：`resolveReplyFromFields` 在 content **非空**时仍会先过
+          //   `extractAnswerFromReasoning`，只要剥离结果比原文短 >10 字就**采用剥离结果**。
+          //   而该剥离器是为【自然语言回复】设计的 —— 对【纯 JSON 输出】会误判：实测把完整的
+          //   1010 字符判定 JSON 削成 "[{"（3 字符），且因「返回非空串」而不抛错 ⇒ status=success
+          //   ⇒ 实体终审连续 66 次「提升0 观察N」，故障与「LLM 判 unknown」在日志上完全同形。
+          //   本字段仅供 rawCall（工具型通道）消费；会晤/rp 路径仍用 text，剥离逻辑原样保留。
+          rawContent: String(msg?.content ?? ''),
           usage: data.usage
             ? { prompt: data.usage.prompt_tokens, completion: data.usage.completion_tokens }
             : undefined,
