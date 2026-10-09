@@ -73,7 +73,12 @@ export interface TriageReport {
    *   上层据此把「故障」与「判定」分开记录。
    */
   parseFailed?: boolean;
-  /** 🔴 丙1: 原始响应长度（诊断用 —— 截断故障的特征是它极短，实测为 3） */
+  /**
+   * 🔴 丙1: 原始响应长度（诊断用）。
+   * ⚠️ V45(2026-10-09) 订正：原注释称「截断故障的特征是它极短」——**特征描述对，归因错**。
+   *   实测该字段 =3 的成因不是截断，而是思维链剥离器把完整 JSON 削成 "[{"（削掉 1007 字）。
+   *   详见文件头 JUDGE_MAX_TOKENS 处的 V45 订正说明与 `DeepSeekLLMProvider.resolveReplyFromFields`。
+   */
   rawLength?: number;
   /** 失败原因（若有） */
   error?: string;
@@ -91,12 +96,20 @@ export const DEFAULT_TRIAGE_BATCH = 15;
 // 🔴 丙1(2026-10-09) 修正 —— 该估算**只算了输出 JSON 本体，没算 reasoning 开销**：
 //   实测 66 次运行，err.log 全部为
 //     `[EntityTriage] 判定响应无法解析（可能被截断）… raw 前120字: [{"`
-//   （raw 实际内容 = "[{" 共 3 字符）—— 模型先把 token 花在 reasoning_content 上，
-//   轮到 content 时预算已耗尽。而 rawCall 返回非空串 ⇒ resolveReplyFromFields 不抛错
-//   ⇒ 外层记 status=success ⇒ 维护日志打印「扫描30 提升0 标注0 观察30」，**故障与
-//   「LLM 判定全 unknown」在日志上无法区分**，因此藏了 66 次无人发现。
-//   ⇒ 现提至 8000 给 reasoning 留足预算；同时调用时传 reasoning_effort='low'
-//     （判定性任务不需深度推理），双管齐下。
+//   （raw 实际内容 = "[{" 共 3 字符）。而 rawCall 返回非空串 ⇒ resolveReplyFromFields
+//   不抛错 ⇒ 外层记 status=success ⇒ 维护日志打印「扫描30 提升0 标注0 观察30」，
+//   **故障与「LLM 判定全 unknown」在日志上无法区分**，因此藏了 66 次无人发现。
+//
+// 🔴🔴 V45(2026-10-09) 根因订正 —— 上方丙1 的归因（「reasoning 吃光 max_tokens，
+//   故提到 8000」）已被三代探针**证伪**，勿再沿用：
+//     · 直打 API（构造数据 / 真实候选 两种）→ 8000 下 finish_reason 一律 stop，
+//       content 完整约 1100 字符，峰值仅用 2338 completion tokens（远未触及 8000）
+//     · 16k / 32k 同样正常 ⇒「加大预算」对症状**零影响**
+//     · 纯函数级复现：完整 1010 字符 JSON 经 resolveReplyFromFields → 输出 "[{"（3 字符）
+//   **真根因**：思维链剥离器（为自然语言回复而设计）对【纯 JSON 输出】误判并削短 ——
+//   详见 `DeepSeekLLMProvider.resolveReplyFromFields` 的 V45 条目（修复已提交 fb7e924）。
+//   ⚠️ 故 8000 **并非必需**（保留仅因 15 条 × 4 键本就宽裕，且无副作用）；真正的修复不在此文件。
+//   同理 reasoning_effort='low' 亦保留 —— 判定性任务确实不需深推理，但它不是根因所在。
 const JUDGE_MAX_TOKENS = 8000;
 
 export class EntityTriageService {
