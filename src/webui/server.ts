@@ -607,8 +607,15 @@ async function initPipeline(): Promise<void> {
         if (level1Pct > 90) checks.push('钙化L1占比' + level1Pct + '%(>90%分级失效)');
       }
       // 2. 黑钻命中
-      const bdHit = esql3.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE recall_count > 0") || [];
-      const bdAll = esql3.queryAll("SELECT COUNT(*) as cnt FROM black_diamond") || [];
+      // 🔴 V46(2026-10-09): 分母只算 active —— 原查询取全表，把 1787 条已归档(status='removed')
+      //   也算进分母（实测 890 active + 1787 removed = 2677），命中率被归档记录稀释失真。
+      //   归档语义见 BlackDiamondGate.ts:142 / VaultManager.ts:202（均写 status='removed'，不删行）。
+      //   写 (status IS NULL OR ...) 而非 = 'active'：防将来新增状态值把已归档漏算，与 removed 对齐。
+      //   ⚠️ 如实说明：当前分子亦为 0（active 890 条 recall_count 全 0），故本改动**不改变告警文案**；
+      //      真正的 0% 成因是召回路径未走到黑钻（retrieval-stage.ts:1062 仅检查前 3 条且需
+      //      source==='black_diamond'），属 P0 记忆召回课题，不在本批范围。本批只修分母口径。
+      const bdHit = esql3.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE (status IS NULL OR status != 'removed') AND recall_count > 0") || [];
+      const bdAll = esql3.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE (status IS NULL OR status != 'removed')") || [];
       const hitCnt: number = (bdHit[0] as any)?.cnt || 0;
       const allCnt: number = (bdAll[0] as any)?.cnt || 0;
       if (allCnt > 0 && hitCnt / allCnt < 0.1) checks.push('黑钻命中率' + Math.round(hitCnt/allCnt*100) + '%(<10%)');
