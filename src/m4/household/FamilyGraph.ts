@@ -726,7 +726,16 @@ export class FamilyGraph implements FamilyGraphInterface {
     // V3.3: 户籍管理法 V1.1 列级补齐
     this.migrateToV4();
     // V2.0: UUID去前缀 + name清洗 + 卷宗永久
-    try { this._migrateToV5(); } catch (e) { console.warn('[FamilyGraph] V5迁移失败(非致命):', (e as Error)?.message || e); }
+    // 🔴 V48(2026-10-09): 关闭 V5 全量重排 —— 迁移应一次性执行，不应每次启动都跑。
+    //   实测缺陷：`_migrateToV5()` 按 created_at 全量重排 TXS-000000001..N，会撞
+    //   idx_nodes_uuid 唯一索引 → 抛错中断且**已改的不回滚** ⇒ 形成「半迁移」状态；
+    //   每次重启再推一轮 ⇒ uuid 持续漂移 ⇒ **基于 uuid 的数据修复被推翻**
+    //   （2026-10-09 户籍清理的 6 行改挂即因此错位：改挂时 028=章若楠，重启后 028=崔莺莺）。
+    //   生产日志证据：`[FamilyGraph] V5迁移失败(非致命): UNIQUE constraint failed: nodes.uuid`（≥2 次）。
+    //   ⇒ 补 null/空 uuid 的职责已由下方 `migrateToV3()`(:975-1006) 独立承担，且它只处理
+    //     `uuid IS NULL OR uuid=''`、不碰已有编号，故关闭 V5 不影响新节点编号。
+    //   ⚠️ 若要恢复一次性迁移，请改为带版本标记的单次执行，不要恢复成每次启动跑。
+    // try { this._migrateToV5(); } catch (e) { console.warn('[FamilyGraph] V5迁移失败(非致命):', (e as Error)?.message || e); }
     try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_circle ON nodes(circle_level)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
     try { this.run('CREATE INDEX IF NOT EXISTS idx_edges_source_rel ON edges(source_id, relation)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
     try { this.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_uuid ON nodes(uuid) WHERE uuid IS NOT NULL'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
