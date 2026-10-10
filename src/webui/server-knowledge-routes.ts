@@ -88,6 +88,11 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
           interaction_type: body.interaction_type,
           scene_tags: body.scene_tags,
           classification: body.classification,
+          // 🔴 户籍三元组：归属 + 受限共享可见名单（业主 2026-10-07：工作微信只对玉瑶/徐诗雨开放）
+          //   此前 body 里这两个字段**根本没接** ⇒ `KnowledgeEngine.add()` 支持也白搭，
+          //   HTTP 入库的新条目恒为「公共归属 + 空可见集」= 全库可见，限流对新数据永不生效。
+          belongEntityUuid: body.belongEntityUuid ?? body.belong_entity_uuid,
+          visibleEntityUuids: body.visible_entity_uuids ?? body.visibleEntityUuids ?? null,
         });
         // 🔴 2026-09-20：重复提交不再拒给（409）而是**更新既有条目** ⇒ 用状态码区分：
         //   新建 201 / 命中重复并更新 200（响应体带 updated:true 与 dedup_hit）。

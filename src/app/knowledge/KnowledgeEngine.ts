@@ -254,6 +254,42 @@ export function mergeDuplicateContent(
   return { content: oldC ? oldC + '\n\n---\n\n' + newC : newC, appended: true };
 }
 
+/**
+ * 规范化「受限共享可见名单」入参 —— 唯一的入库归一化点。
+ *
+ * 输入三种形态（HTTP 路由 / 脚本 / 内部调用各不相同，必须在此收口）：
+ *   · `undefined` / `null` / `''`        → `null`（列留空 ⇒ 走原三态语义，老行为不变）
+ *   · `'["TXS-000000001"]'` JSON 字符串  → 校验后原样规范输出
+ *   · `['TXS-000000001', 'TXS-000000007']` 数组 → JSON 序列化
+ *
+ * 🔴 fail-closed：JSON 解析失败 ⇒ `null`（列留空）。
+ *    宁可回落到「归属判据」这一**已有**分支，也不写入一个 `parseVisibleList`
+ *    会静默解析成空数组的畸形值 —— 畸形值会让 `passes()` 走到
+ *    `list.length === 0` 分支，行为退化但不报错，排查成本极高。
+ */
+function normalizeVisibleList(v: string | string[] | null | undefined): string | null {
+  if (v == null) return null;
+  if (Array.isArray(v)) {
+    const ids = v.map((x) => String(x ?? '').trim()).filter(Boolean);
+    return ids.length ? JSON.stringify(ids) : null;
+  }
+  const s = String(v).trim();
+  if (!s) return null;
+  if (s.startsWith('[')) {
+    try {
+      const a = JSON.parse(s);
+      if (Array.isArray(a)) {
+        const ids = a.map((x) => String(x ?? '').trim()).filter(Boolean);
+        return ids.length ? JSON.stringify(ids) : null;
+      }
+    } catch { /* 非法 JSON → 见上方 fail-closed 说明 */ }
+    return null;
+  }
+  // 裸 UUID 串（"TXS-000000001" 或逗号分隔）
+  const ids = s.split(',').map((x) => x.trim()).filter(Boolean);
+  return ids.length ? JSON.stringify(ids) : null;
+}
+
 export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   /**
    * 修复双重 UTF-8 编码的中文字符串
@@ -303,6 +339,14 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     emotion_vector?: string;
     /** V3.2: 户籍卷宗归档 — 此知识归属的实体 UUID */
     belongEntityUuid?: string;
+    /**
+     * 户籍三元组(2026-10-08) 批2 配套：受限共享的可见名单（JSON 数组字符串或数组）。
+     * 非空 ⇒ 名单内实体可见；空 ⇒ 维持原三态语义（belong 决定，或全局共享）。
+     * 业主裁定（2026-10-07）：工作微信只对玉瑶 + 徐诗雨开放。
+     * 🔴 此前本列只在离线脚本里写得进，`add()` 的 INSERT 缺该列 ⇒ 任何经
+     *    HTTP 入库的新条目恒为 NULL ⇒ 限流对新数据永不生效。本次补齐。
+     */
+    visibleEntityUuids?: string | string[] | null;
   }): Promise<KnowledgeItem> {
     // 🔴 隐私守卫：拒绝个人/用户信息进入知识库
     const _privacyPatterns = /^用户信息[:：]|^用户地址[:：]|^用户偏好[:：]|^用户厌恶[:：]|^习惯[:：]|^喜好[:：]|^重点关注[:：]|^待查询[:：]|^回忆[:：]|^研究[:：]|徐诗雨身高|梓铭简介|我的名字是|我的女友|我的工作|我的老婆|我的这根|我在哪个公园|我在哪家公司|我在外面|我在问你在哪里|我在深圳市|我把一切|我家里面|我在他们面/;
@@ -335,7 +379,12 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
           const _existing = getById(dup.id);
           if (_existing && !_existing.locked) {
             const _merged = mergeDuplicateContent(_existing.content as any, fixedContent as any);
-            const _okUpd = await update(dup.id, { title: fixedTitle, content: _merged.content });
+            const _okUpd = await update(dup.id, {
+              title: fixedTitle,
+              content: _merged.content,
+              // 🔴 合并也必须带走可见集，否则受限消息并进公共条目 = 限流失效
+              visibleEntityUuids: params.visibleEntityUuids,
+            });
             const _after = _okUpd ? getById(dup.id) : null;
             if (_after) {
               console.log('[KE-Dedup] 重复 → 已更新既有条目 ' + dup.id + (_merged.appended ? '（内容已追加，旧内容保留）' : '（内容未变）'));
@@ -396,10 +445,12 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       scene_tags: sceneTagsStr ?? undefined,
       interaction_type: params.interaction_type ?? 'other',
       emotion_vector: params.emotion_vector,
+      // 与 INSERT 用同一份归一化结果 —— 免得「响应里写的」和「库里存的」不是一回事
+      visible_entity_uuids: normalizeVisibleList(params.visibleEntityUuids),
     };
     sqlite.writeRaw(
-      `INSERT INTO knowledge_base (id, title, content, source_type, source_name, file_size, tags, created_at, updated_at, locked, classification, classification_pending, dna_id, scene_tags, interaction_type, emotion_vector, belong_entity_uuid)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge_base (id, title, content, source_type, source_name, file_size, tags, created_at, updated_at, locked, classification, classification_pending, dna_id, scene_tags, interaction_type, emotion_vector, belong_entity_uuid, visible_entity_uuids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       entry.id, entry.title, entry.content, entry.source_type,
       entry.source_name, entry.file_size, JSON.stringify(entry.tags),
       entry.created_at, entry.updated_at, entry.locked ? 1 : 0,
@@ -407,6 +458,8 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       entry.dna_id ?? null, entry.scene_tags ?? null,
       entry.interaction_type ?? 'other', entry.emotion_vector ?? null,
       params.belongEntityUuid ?? null,
+      // 受限共享可见名单（null/未传 ⇒ 空列 ⇒ 沿用原三态语义，老行为零变化）
+      entry.visible_entity_uuids ?? null,
     );
 
     // 异步分块 + 嵌入（不阻塞返回）
@@ -476,20 +529,31 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
    */
   async function update(id: string, params: {
     title?: string; content?: string; tags?: string[]; locked?: boolean;
+    /**
+     * 受限共享可见名单 —— **不传即保持既有值**（HTTP PUT 不带该字段时零影响）。
+     * 🔴 为什么 update 也要能改它：`add()` 的 FTS 去重分支走「合并进既有条目」，
+     *    合并用的就是本函数。若本函数不写该列，一条**受限**消息会并进一条**公共**
+     *    条目 ⇒ 限流被静默绕过（受限内容变成全库可见）。这是真泄漏，不是理论问题。
+     */
+    visibleEntityUuids?: string | string[] | null;
   }): Promise<boolean> {
     const existing = getById(id);
     if (!existing || existing.locked) return false;
     const newTitle = params.title ? fixDoubleEncoded(params.title) : existing.title;
     const newContent = params.content ? fixDoubleEncoded(params.content) : existing.content;
     const now = new Date().toISOString();
+    // 未显式传入 ⇒ 保留既有可见集（与 `locked` 同款 `?? existing.x` 语义）
+    const vis = params.visibleEntityUuids === undefined
+      ? (existing.visible_entity_uuids ?? null)
+      : normalizeVisibleList(params.visibleEntityUuids);
     sqlite.writeRaw(
-      `UPDATE knowledge_base SET title=?, content=?, tags=?, locked=?, updated_at=? WHERE id=?`,
+      `UPDATE knowledge_base SET title=?, content=?, tags=?, locked=?, visible_entity_uuids=?, updated_at=? WHERE id=?`,
       newTitle, newContent,
       JSON.stringify(params.tags ?? existing.tags),
-      (params.locked ?? existing.locked) ? 1 : 0, now, id,
+      (params.locked ?? existing.locked) ? 1 : 0, vis, now, id,
     );
     // 同步到 Markdown 文件
-    const updated = { ...existing, ...params, updated_at: now, tags: params.tags ?? existing.tags };
+    const updated = { ...existing, ...params, updated_at: now, tags: params.tags ?? existing.tags, visible_entity_uuids: vis };
     syncToCabinet(updated);
     syncToMd(updated);
     // 内容变了就重新索引

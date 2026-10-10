@@ -97,6 +97,44 @@ export class DailyMaintenanceScheduler {
       console.warn('[DailyMaintenance] 知识库行数校验失败(不阻塞):', err);
     }
 
+    // ⓪-b 清「微信临时信息」（P0-8a，2026-10-07 立规；2026-10-08 加时间边界）
+    //   业主原话（2026-10-07）：「微信信息每天晚上还要彻底清除避免污染」。
+    //   🔴 这是**业主明文定义的例行清理规则**，也是「知识库只增不删」原则的**明文例外** ——
+    //      不是脚本自行判断"看起来像垃圾"。判据是结构性的：source_name 以 'wechat_relay/' 开头。
+    //
+    // 🔴 2026-10-08 修正（业主：「要改」）：原为**无时间条件的全量 DELETE**。
+    //   缺陷链：`_lastRunDate` 是**内存态**（见 `_runOnce` 开头），服务一重启即清零，
+    //   而 `start()` 的语义是「启动后立即执行一次」⇒ **每次重启都全量清一遍**。
+    //   实测：微信条目 909 → 0 全部发生在白天（pm2 当日 ↺20 次重启），此时中继侧
+    //   `RETENTION_HOURS=24` 的 22:00 清扫**还没到** ⇒ 业主要求的「保留当天」被打破，
+    //   玉瑶/诗雨白天查不到当天的外部消息。
+    //   改法：只删**超过 24h** 的，与中继保留期同语义 —— 当天消息保得住，过期的照清。
+    //   ⚠️ 本块新增 2 个条件分支（before>0 / deleted>0），已在此标记说明：
+    //      一个是「没数据就不打日志」，一个是区分「本次删除 N 条」与「都在 24h 内不删」，
+    //      两者都是**可观测性**必需（业主原则：清了没清必须看得见），非业务判断分支。
+    try {
+      const wkSqlite = this.storage.getSQLite();
+      if (wkSqlite) {
+        const before = Number((wkSqlite.queryAll("SELECT COUNT(*) c FROM knowledge_base WHERE source_name LIKE 'wechat_relay/%'")?.[0] as any)?.c ?? 0);
+        if (before > 0) {
+          // 与中继保留期同为 24h；created_at 为 ISO-8601 UTC，字符串比较即时间比较
+          const cutoff = new Date(Date.now() - 24 * 3600_000).toISOString();
+          const res = wkSqlite.writeRaw(
+            "DELETE FROM knowledge_base WHERE source_name LIKE 'wechat_relay/%' AND created_at < ?",
+            [cutoff],
+          );
+          const deleted = Number((res as any)?.changes ?? 0);
+          if (deleted > 0) {
+            console.log(`[DailyMaintenance] 🧹 微信过期清理(>24h): 删除 ${deleted} 条（阈值 ${cutoff}）`);
+          } else {
+            console.log(`[DailyMaintenance] 微信条目 ${before} 条均未超 24h，本次不清理`);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[DailyMaintenance] 微信临时信息清理失败(不阻塞):', err);
+    }
+
     try {
       // ① 知识衰减
       const decayEngine = new KnowledgeDecayEngine(this.storage);
@@ -258,26 +296,18 @@ export class DailyMaintenanceScheduler {
           }
           const top10 = [...words.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
           if (top10.length > 0) {
-            const summary = `本月对话主题 Top10:\n${top10.map(([w, c], i) => `${i + 1}. ${w} (${c}次)`).join('\n')}`;
+            // 🔴🔴 P0-8a(2026-10-07) 已**移除此处对 knowledge_base 的写入**（原为 `monthly_topic`
+            //   「对话主题月报」类，正文约 130 字）。
+            //   业主定义的边界：知识库**只存文档 + 微信临时信息**。月度主题是系统分析产物、不是文档；
+            //   留在库里只会稀释检索 —— 短条目在 KnowledgeEngine.weightedSearch 里凭 titleBoost
+            //   （标题命中最高 3 倍）反而更容易压过长文档。
+            //   主题词本身仍照常计算并打进日志，调度基线照常推进；只是不再落进知识库。
             const monthStr = new Date().toISOString().substring(0, 7);
-            const knId = `topic_${monthStr.replace('-', '')}`;
-            // 🔴 2026-09-19 归属显式化（《UUID 户管管理法》第七条）：
-            //   本条是**跨实体的月度聚合**（上方 SELECT 取全库 role='user' 对话，未按户口分组），
-            //   不存在唯一户口 → 写 unowned（NULL）。第七条：无户口写入仅户主钥匙场景可写并打 unowned 标记。
-            //   ⚠️ 不得改成 OWNER_UUID：'TXS-000000001' 是**玉瑶（系统默认本体）**，不是用户本人。
-            //   另：本行是 INSERT OR REPLACE + 确定性 id（topic_YYYYMM）→ 列清单若缺席，
-            //   归属会被每次月报重写隐式抹成 NULL；显式绑定后该行为变为可审计的既定语义。
-            sqlite.writeRaw(
-              `INSERT OR REPLACE INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, classification, classification_pending, belong_entity_uuid)
-               VALUES (?, ?, ?, 'monthly_topic', ?, datetime('now'), datetime('now'), '对话主题月报', 0, NULL)`,
-              [knId, `对话主题月报 ${monthStr}`, summary,
-               JSON.stringify(['monthly_topic', monthStr, ...top10.slice(0, 5).map(([w]) => w)])]
-            );
             sqlite.writeRaw(
               "INSERT OR REPLACE INTO engine_store (key, value) VALUES (?, ?)",
               [_lastTopicRunKey, String(_days)]
             );
-            console.log('[DailyMaintenance] 📊 月度主题: ' + top10.map(([w]) => w).join(', '));
+            console.log('[DailyMaintenance] 📊 月度主题(' + monthStr + '，不入知识库): ' + top10.map(([w]) => w).join(', '));
           }
         } catch { /* 月度主题提取失败不阻塞 */ }
       });

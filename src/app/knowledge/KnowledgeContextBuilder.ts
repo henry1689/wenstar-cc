@@ -30,6 +30,140 @@ function stripFrontmatter(content: string): string {
 }
 
 // ═══════════════════════════════════════════════════════
+//  🌍 外界动态（WX-EXT-1，2026-10-08）—— 独立于 matchScore 的外部感知注入
+// ═══════════════════════════════════════════════════════
+//
+// 🔴 为什么要独立成块，而不是让微信条目走主检索：
+//   实测（2026-10-08，真实库 206 条候选、按会晤模式阈值复刻）：
+//     「微信里生产和品质整理的资料…」 → 微信最佳排名 **#183**，进上下文 **0 条**
+//     「最近工作群里生产和品质的消息」 → **#151**，0 条
+//     「微信里有什么新消息」          → **#168**，0 条
+//     「高峰电业工作群」（点名会话）  → **#1**，3 条 ✅   ← 权限/分类/通道全通
+//   机制：matchScore = 文本×0.50 + 印象分×0.20 + 场景×0.15 + 情感×0.15，
+//     泛问时 ngram 命中极少 ⇒ textScore≈0.06 ⇒ ~0.175，**卡在 0.30 门槛下**；
+//     而「行为归纳/话题归纳」类条目一字未命中，靠印象分（每召回一次 +0.05）
+//     与情感分就能拿 0.355 ⇒ **不相关的条目反而进了上下文**。
+//   ⇒「最近外界发生了什么」是**时效感知**问题，不是关键词匹配问题，
+//     用同一个引擎必然拧巴。独立成块按时间倒序直取，绕开打分与门槛。
+//   零修改现有逻辑：weightedSearch 与所有既有注入块一行不动。
+
+/**
+ * 解析一条外部微信知识条目 → 单行展示（纯函数，可单测）。
+ * content 逐字沿用任务书固定模板：
+ *   【外部微信社交信息】时间：…｜对话对象：…｜发送人：…｜消息类型：…｜内容：…
+ */
+export function parseExternalLine(content: string): string {
+  const m = /时间：(.+?)｜对话对象：(.+?)｜发送人：(.+?)｜消息类型：(.+?)｜内容：([\s\S]*)$/
+    .exec(content || '');
+  if (!m) return '';
+  const [, ts, chat, sender, type, body] = m;
+  const t = (ts || '').trim();
+  // 日期只留 MM-DD（模板里已带完整日期，省 token 又不失可读）
+  const when = /^\d{4}-\d{2}-\d{2}\s/.test(t)
+    ? `${t.slice(5, 10)} ${t.slice(11, 16)}`
+    : t;
+  // 自己发出的写「我」，免得模型把本人发言误当成外部人的
+  const who = (type || '').trim() === 'self' ? '我' : (sender || '').trim();
+  return `${when} ${(chat || '').trim()}｜${who}：${(body || '').trim()}`;
+}
+
+/**
+ * 取出条目里的**消息时间**（`YYYY-MM-DD HH:MM:SS`），取不到返回空串。
+ * 🔴 为什么要它：`created_at` 是**入库顺序**，不是消息时间 —— 实测入库顺序与
+ *   消息时间不一致（OCR 越晚读到的行越晚入库，昨天的消息也可能比今天的晚入库），
+ *   按 `created_at` 排会让「昨天的」挤掉「今天最新的」，正好踩中业主的原始诉求
+ *   「玉瑶查不到**最新的**信息」。故取出来在内存里按消息时间排序。
+ */
+export function externalTimestampOf(content: string): string {
+  const m = /时间：(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/.exec(content || '');
+  return m ? m[1] : '';
+}
+
+/**
+ * 判断这句话是不是在**打听外界**（WX-EXT-1 · 方案 A：按需扩量）。
+ *
+ * 业主 2026-10-08 决策：**不落库归纳** —— 会与 10-07「知识库只存文档 + 微信临时信息」
+ * 的边界冲突，且会重蹈「行为归纳条目挤掉微信」的污染覆辙（实测那些零命中的归纳条目
+ * 拿 0.355 而微信条目只有 0.175）。改为**按需扩量 + 模型现场归纳**，零新增存储。
+ *
+ * 命中 ⇒ 注入量从分级预算 8 条扩到 EXTERNAL_INQUIRY_LINES，给足素材让它自己综合；
+ * 不命中 ⇒ 维持分级预算（闲聊只给 3~8 条，不浪费 token）。
+ *
+ * ⚠️ 词表偏「外部指向」：微信/群/朋友圈/聊天 + 生产品质类话题
+ *   （业主的实际问法就是「生产、品质、跟单的资料」，这些内容只可能来自工作微信群）。
+ *   宁可略多触发（多几行素材、多花点 token），也不要让主题类问题拿不到料。
+ */
+export const EXTERNAL_INQUIRY_RE =
+  /微信|群|外界|外面|朋友圈|聊天|外部|生产|品质|跟单|来料|样板|物料|交期|入库|产线|工艺/;
+
+/** 命中外界问句时的注入量（其余仍按分级预算 8/8/5/3） */
+export const EXTERNAL_INQUIRY_LINES = 25;
+
+export function isExternalInquiry(message: string): boolean {
+  return EXTERNAL_INQUIRY_RE.test(message || '');
+}
+
+/** 注入块返回值 —— expanded 决定用哪套指令（见注入点） */
+export interface ExternalPerception {
+  lines: string[];
+  expanded: boolean;
+}
+
+/**
+ * 取最近 N 条外界动态（**不参与 matchScore 竞争**）。
+ *
+ * 与主检索的三处刻意差异：① 按**消息时间**倒序而非按分数；
+ * ② 没有 matchScore≥0.3 门槛（泛问时本就该看到）；③ 不受印象分马太效应影响。
+ *
+ * 🔴 可见性仍走唯一判定源（《UUID 户籍管理法》铁律 0.4：禁止手写 UUID 判据）——
+ *    否则本块会绕过刚打通的受限共享闸门，让名单外实体读到工作微信。
+ *    会晤模式必带实体 UUID ⇒ 闸门生效；默认模式无在场实体 ⇒ 与 `weightedSearch`
+ *    现有边界一致（见 wechat-visibility-contract.test.ts 的「现状锁定」用例）。
+ */
+export function loadExternalPerceptionLines(
+  ctx: any, searchLevel: number, meetingUuid?: string | null, message?: string,
+): ExternalPerception {
+  const empty: ExternalPerception = { lines: [], expanded: false };
+  try {
+    if (!ConfigService.getBool('KB_EXTERNAL_PERCEPTION', true)) return empty;
+    const sqlite = ctx?.storage?.getSQLite?.();
+    if (!sqlite) return empty;
+    // 扩量判定在前：命中外界问句 → 给足素材让它现场归纳；否则走既有分级预算
+    const expanded = isExternalInquiry(message ?? '');
+    const limit = expanded
+      ? EXTERNAL_INQUIRY_LINES
+      : (searchLevel <= 2 ? 8 : searchLevel === 3 ? 5 : 3);
+    // SQL 只按 created_at 收敛取一批（免得全表拉进内存），**排序在下面按消息时间做**
+    const rows: any[] = sqlite.queryAll(
+      `SELECT content, belong_entity_uuid, visible_entity_uuids
+         FROM knowledge_base
+        WHERE classification = ? AND classification_pending = 0
+        ORDER BY created_at DESC LIMIT ?`,
+      ['外部微信社交', Math.max(limit * 8, 100)],
+    ) || [];
+    const policy = meetingUuid
+      ? policyFor('shared', [meetingUuid], { restrictedSharing: true })
+      : null;
+    const picked: Array<{ ts: string; line: string }> = [];
+    for (const r of rows) {
+      if (policy && !policePasses(r.belong_entity_uuid ?? null, policy, r.visible_entity_uuids ?? null)) {
+        continue;   // 名单外实体看不到工作微信（与主检索同源判定）
+      }
+      const raw = String(r?.content ?? '');
+      const line = parseExternalLine(raw);
+      if (line) picked.push({ ts: externalTimestampOf(raw), line });
+    }
+    // 🔴 按**消息时间**倒序；解析不出时间的排最后（不丢，但不占前面的黄金位置）
+    picked.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+    return { lines: picked.slice(0, limit).map((p) => p.line), expanded };
+  } catch (e: any) {
+    // 外界感知失败绝不影响正常回答
+    console.warn('[KB·外界] 跳过（不阻塞）:', e?.message);
+    return empty;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 //  S2-A1/A2: 知识查询意图检测 + 查询词构造 — 导出纯函数（可单测）
 // ═══════════════════════════════════════════════════════
 
@@ -383,6 +517,32 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
     } catch (err: any) { console.warn('[EntityOverlap] 关联知识检索失败:', err); }
     } // 🛡️ V5.2: 会晤模式知识库检索结束
   } catch (err: any) { console.warn('[KnowledgeSearch] 检索失败:', err); }
+
+  // 🌍 外界动态（WX-EXT-1）—— 独立块，**不参与 matchScore 竞争**
+  //   ① 放在会晤隔离墙**之外**：默认模式与会晤模式都要有外界视野
+  //      （业主决策 C 三人可读 + 10-07「只对玉瑶/徐诗雨开放」由 load 内部的闸门裁决）；
+  //   ② 放在主检索**之后**：主检索失败也能注入（本块自成 try，永不抛）。
+  const _ext = loadExternalPerceptionLines(
+    ctx, _searchLevel, (input as any).ctx?._meetingEntityUuid ?? null, message,
+  );
+  if (_ext.lines.length > 0) {
+    // 🔴 指令按「是否扩量」分流（WX-EXT-1 方案 A）—— 本块唯一的条件分支。
+    //   扩量 = 鸿艺明确在打听外界 ⇒ 允许他归纳；否则维持「别复述」的日常提醒。
+    const _extHint = _ext.expanded
+      ? '（鸿艺正在向你了解外界情况：可以按主题归纳，给出时间与人物，'
+        + '把散在多条里的消息串成结论；没看到的细节不要编造。）'
+      : '（这些是鸿艺真实世界正在发生的事。自然地在合适的时候关心或提起，'
+        + '不要逐条复述、不要盘问。）';
+    const _extBlock =
+      '【外界动态】你通过外部感知了解到的、鸿艺真实微信里的最近消息（不是你和鸿艺的对话）：\n'
+      + _ext.lines.map((l: string) => '· ' + l).join('\n')
+      + '\n\n' + _extHint;
+    knowledgeBaseText = knowledgeBaseText
+      ? knowledgeBaseText + '\n\n' + _extBlock
+      : _extBlock;
+    console.log('[KB·外界] 注入 ' + _ext.lines.length + ' 条'
+      + (_ext.expanded ? '（扩量）' : ''));
+  }
 
   // 🔧 V10.1 P0-2: SecondBrain → KB 桥接 —— 同时检索 MD 文件系统
   // 知识库(SQLite)为空或无结果时，从 SecondBrain Gateway 的内存索引中补充
