@@ -2496,7 +2496,21 @@ export class SQLiteAdapter {
       //      object/place 节点，判据会比运行期真源更宽 → 可能放行不该放行的 uuid。
       //   实测：FG 有 uuid 的 73 个节点全部是 person（47 个 object/place 行 uuid 均 NULL）
       //   ⇒ 改前后 entUuids 集合不变、跳过组数仍为 92、锚点 1420 不变（防漂移，非修 bug）。
-      const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE type='person' AND uuid IS NOT NULL AND uuid != ''");
+      //
+      // 🔴 V49 判据补 status 过滤（2026-10-11）：排除 status='candidate'（备选区、未转正）。
+      //   原判据只看 uuid 存在性不看状态，而 FG 会持续生成 candidate：
+      //     · FamilyGraph.ts:2049 `if (result.grade === 3) initialStatus = 'candidate'`
+      //     · FamilyGraph.ts:1087 `UPDATE ... SET status='candidate' WHERE status IS NULL OR status=''`
+      //   实测 candidate 创建日期：10-09=2、10-10=1、**10-11=37**（23:26:59，本次启动后 30 秒，
+      //   与当日 23:01 删除的 37 个同名、但 uuid 是新的 074+）。其中 0079/0083/0089（明白/国美/
+      //   公室只）恰是已清理的 8 个死 uuid 中的 3 个、被判据放行 ⇒ **下次重启其 22 组噪音锚点会复活**
+      //   （本次未复活纯属时序巧合：锚点重建在 23:26:2x，早于 23:26:59 的 candidate 生成）。
+      //   为什么排除 candidate 而非只认 active：candidate 未转正不应产出正式锚点；dormant(19)
+      //   是休眠但曾真实存在、void(1) 保留档案，有历史对话就应正常重建 —— 只认 active 会误伤 dormant。
+      //   COALESCE 是保险：实测 `status IS NULL OR status=''` 的行 = 0，故不改变现状、不误伤任何行。
+      //   实测：FG uuid 73→33（差 40 = candidate 全数）；跳过组数 70→92（回到 V49 原始目标）；
+      //   **被跳过的组按 status 分布 = {candidate: 22}** —— active/dormant/void 零误伤。
+      const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE type='person' AND uuid IS NOT NULL AND uuid != '' AND COALESCE(status,'') != 'candidate'");
       const s = new Set<string>();
       if (fgRows.length && fgRows[0].values) for (const [u] of fgRows[0].values) s.add(String(u));
       fgDb.close();
