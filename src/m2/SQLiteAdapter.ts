@@ -2260,9 +2260,14 @@ export class SQLiteAdapter {
       console.log(`  ${oc<=5?'✅':'⚠️'} CK-M3 孤儿记忆: ${oc}条`);
     } catch {}
     try {
-      const d = this.db.exec("SELECT belong_entity_uuid,COUNT(*)c FROM knowledge_base WHERE belong_entity_uuid IS NOT NULL GROUP BY belong_entity_uuid HAVING c>1");
-      const dc = d.length&&d[0]?.values?.length||0;
-      console.log(`  ${dc===0?'✅':'⚠️'} CK-M4 KB重复: ${dc}实体`);
+      // 🔴 CK-M4 判据订正（V49 收尾）：原 SQL `GROUP BY belong_entity_uuid HAVING c>1`
+      //   统计的是「同一实体有几条知识」——一实体多条知识是正常态，恒 >1 即报「N 实体重复」，
+      //   实测把 7 个正常实体全判成重复 = **全量误报**。
+      //   改为按「实体 + 标题」双键分组，并过滤空标题（防 TRIM 空串自成一组），只在
+      //   **同实体同标题** 时计数，才是语义上的「KB 重复」。
+      const d = this.db.exec("SELECT belong_entity_uuid,TRIM(IFNULL(title,'')) AS t,COUNT(*) AS c FROM knowledge_base WHERE belong_entity_uuid IS NOT NULL AND TRIM(IFNULL(title,'')) <> '' GROUP BY belong_entity_uuid,TRIM(IFNULL(title,'')) HAVING c>1");
+      const dc = (d.length && d[0]?.values?.length) || 0;
+      console.log(`  ${dc===0?'✅':'⚠️'} CK-M4 KB重复: ${dc}组（同实体同标题）`);
     } catch {}
   }
 
@@ -2606,7 +2611,9 @@ export class SQLiteAdapter {
     //   不能只把并集收窄成 entities 照常 DELETE：FG-only 的 uuid 会先被删、再被拒收
     //   = 永久丢失且不可恢复，正是前轮 P0-1 要防的失败方向。
     if (this._fgLoadFailed) {
-      console.warn('[SQLiteAdapter] 🔴 V49 FG 判据真源不可用 → 本轮锚点重建整轮跳过（保留库现状，不执行 DELETE）');
+      // 🔴 V49 P3-4：fail-safe 的连带副作用必须留痕 —— 下方那条无条件 DELETE 同时承担
+      //   `%\_CHUNK%` 退役残留清理职责，整轮跳过意味着**本轮它也不会被清**（下轮成功时补上）。
+      console.warn('[SQLiteAdapter] 🔴 V49 FG 判据真源不可用 → 本轮锚点重建整轮跳过（保留库现状，不执行 DELETE；注意：本轮 %_CHUNK 退役残留清理一并跳过）');
       return 0;
     }
     let entUuids: Set<string> | null = null;
@@ -2617,10 +2624,13 @@ export class SQLiteAdapter {
       // 真源之二：FG nodes（init() 已异步载入 this._fgUuids；未初始化时判据仍以 entities 为下限）
       if (this._fgUuids) for (const u of this._fgUuids) s.add(u);
       if (s.size > 0) entUuids = s;
-      else console.warn('[SQLiteAdapter] 🔴 V49 判据可用集为空(entities∪FG 均无 uuid) → 跳过整轮重建，保留库现状');
+      else console.warn('[SQLiteAdapter] 🔴 V49 判据可用集为空(entities∪FG 均无 uuid) → 跳过整轮重建，保留库现状（本轮 %_CHUNK 退役残留清理一并跳过）');
     } catch (e) {
-      console.warn('[SQLiteAdapter] 🔴 V49 判据构建异常 → 跳过整轮重建，保留库现状:', (e as Error)?.message);
+      console.warn('[SQLiteAdapter] 🔴 V49 判据构建异常 → 跳过整轮重建，保留库现状（本轮 %_CHUNK 退役残留清理一并跳过）:', (e as Error)?.message);
     }
+    // 🔴 V49 P3-4：fail-safe 出口。两条失败路径（零行 / 异常）已在上方各自 warn 中声明了
+    //   连带副作用 —— 下方那条无条件 DELETE 同时承担 `%\_CHUNK%` 退役残留清理职责，
+    //   整轮跳过意味着**本轮它也不会被清**（下轮判据可用时自然补上）。
     if (!entUuids) return 0;
 
     // V18: 重建前存量空 UUID 锚点统计 — DELETE 之前检测，暴露运行时 flush 写入的空 UUID 锚点
@@ -2691,13 +2701,15 @@ export class SQLiteAdapter {
     } catch {}
 
     let n = 0, nSkipped = 0, nOrphaned = 0;
+    // 🔴 V49 P3-1：收集被跳过的具体 uuid —— 只给计数时「若有活实体被判据拒收」无法定位
+    const orphanUuids = new Set<string>();
     for (const [dgId, eUuid, tc, firstTs, _lastTs, avgCa, maxCa, topicVal] of (groups[0].values as any[][])) {
       const dg = String(dgId), eu = String(eUuid || '');
       if (!eu) { nSkipped++; continue; }  // 空 UUID 跳过
       // 🔴 V49: 无 entities/FG 行持有该 uuid → 不重建其锚点
       //   注意措辞：这不是「实体被删除」，而是「没有任何行持有该 uuid」——
       //   也可能是 uuid 被清空或失配（实测 8 个孤儿 uuid 中至少 5 个的 person 行仍在、只是 uuid=NULL）。
-      if (!entUuids.has(eu)) { nOrphaned++; continue; }
+      if (!entUuids.has(eu)) { nOrphaned++; orphanUuids.add(eu); continue; }
       const ename = entMap.get(eu) || eu;
       const dgTopic = topicVal ? String(topicVal) : null;
       const id = dg + '_ANCHOR';
@@ -2782,7 +2794,10 @@ export class SQLiteAdapter {
     if (nSkipped > 0) console.log(`[SQLiteAdapter] memories锚点跳过: ${nSkipped}条(空UUID)`);
     // 🔴 V49: 实体户籍判据的可观测性 —— 跳过必须留痕，禁止静默少写
     if (nOrphaned > 0) {
-      console.warn(`[SQLiteAdapter] ⚠️ V49 实体户籍: 跳过 ${nOrphaned} 行对话组锚点重建（其 belong_entity_uuid 不在 entities∪FG 集合内；同一对话组挂双 uuid 时其余行仍会产出锚点）`);
+      // 🔴 V49 P3-1：告警必须能定位到具体 uuid（只给计数时误杀不可诊断）
+      const _sample = [...orphanUuids].slice(0, 20).join(', ');
+      const _more = orphanUuids.size > 20 ? ` …(共 ${orphanUuids.size} 个)` : '';
+      console.warn(`[SQLiteAdapter] ⚠️ V49 实体户籍: 跳过 ${nOrphaned} 行 / ${orphanUuids.size} 个 uuid 的锚点重建（不在 entities∪FG 集合内）: ${_sample}${_more}  ← 若其中有 status=active 的实体，属判据误杀，须立即核查`);
     }
     if (n > 0) {
       this._dirtyCount += Math.ceil(n / 10);
