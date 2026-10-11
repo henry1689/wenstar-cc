@@ -271,6 +271,28 @@ export class SQLiteAdapter {
    * - close() 增强：落盘前清定时器，确保不丢数据
    */
   private _dirtyCount = 0;
+  /**
+   * 🔴 V49 判据真源之二：FamilyGraph nodes 的 uuid 集合。
+   *
+   * 运行期写锚点的第一层真源是 FG（resolveAnchorOwnership → fg.getUUIDByName），
+   * 只用 entities 当判据会误杀「FG 有、entities 没有」的 active 实体。
+   * 由 init() 在调用 _rebuildMemoryAnchors() **之前**异步载入；载入失败/未初始化时为 null，
+   * 此时判据退化为「仅 entities」（仍有下限保护，不至于完全失效）。
+   */
+  private _fgUuids: Set<string> | null = null;
+  /**
+   * 🔴 V49（S4 复审 P2-1）：FG uuid 载入是否**失败**。
+   *
+   * 语义与 `_fgUuids === null` 不同，两者必须分开：
+   *   · `_fgUuids === null` 且本标记 false ⇒ **从未载入过**（测试直调 / 未走 init），不阻断；
+   *   · 本标记 true ⇒ **尝试载入但失败**（文件不存在 / 读异常 / 零 uuid）⇒ 重建器
+   *     fail-safe 整轮 `return 0`，不执行无条件 DELETE。
+   *
+   * 为什么必须阻断：若只把并集收窄成 entities 照常 DELETE，FG-only 的 uuid 会
+   * **先被删、再被拒收** = 永久丢失且不可恢复（前轮 P0-1 要防的正是这个方向）。
+   * 默认 false —— 不走 init() 的调用方行为不变。
+   */
+  private _fgLoadFailed = false;
   private _flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** 🔴 C1-a（2026-09-20）异步落盘互斥 + 写入代次（防止在途的旧写入 rename 覆盖更新的内容） */
   private _flushing = false;
@@ -716,6 +738,14 @@ export class SQLiteAdapter {
     // 🔴 V17: 锚点重建 + 完整性检查 — init() 最末端，确保所有上游修复完成后执行
     //   必须在 Backfill 落盘之后执行，否则 Backfill 的 flushNow() 会覆盖锚点重建的写入
     try {
+      // 🔴 V49: 判据真源之二 —— 必须在重建**之前**载入 FG nodes 的 uuid。
+      //   运行期写锚点第一层真源是 FG（resolveAnchorOwnership → fg.getUUIDByName），
+      //   只用 entities 会误杀 FG 有、entities 没有的 active 实体（警幻仙姑 026/崔莺莺 028/陈都灵 029）。
+      //   载入失败会置 _fgLoadFailed，由 _rebuildMemoryAnchors 的 fail-safe 整轮 return 0、
+      //   **不执行 DELETE** —— 与「判据不可用就不重建」语义对齐（S4 复审 P2-1 修订：
+      //   原注释称「退化为仅 entities 由 fail-safe 兜底」不成立，那条 fail-safe 只覆盖
+      //   「可用集为空」，FG 读失败仍会照常 DELETE 并拒收 FG-only 锚点 = 先删后拒、不可恢复）。
+      await this._loadFgUuids();
       const anchored = this._rebuildMemoryAnchors();
       if (anchored > 0) console.log(`[SQLiteAdapter] memories锚点: ${anchored}条`);
       // 🔴 V20: 40D 启动补全 — 必须在锚点重建之后执行
@@ -2434,6 +2464,41 @@ export class SQLiteAdapter {
     }
   }
 
+  /**
+   * 🔴 V49（S4 复审 P2-2）载入 FG nodes 的 uuid，供锚点重建判据使用。
+   *
+   * 抽成独立方法的原因：原先是 init() 内联的 18 行 try/catch，降级路径**零测试覆盖**，
+   * 「失败会怎样」只靠注释承诺，容易继续漂。抽出后可直接用 tmpdir 缺库场景单测。
+   *
+   * 三个失败分支（文件不存在 / 读异常 / 零 uuid）都置 `_fgLoadFailed = true`，
+   * 由 `_rebuildMemoryAnchors` 的 fail-safe 统一阻断整轮重建（不是「退化为仅 entities」）。
+   */
+  private async _loadFgUuids(): Promise<void> {
+    this._fgUuids = null;
+    this._fgLoadFailed = true;   // 先置失败，成功路径末尾才翻转 —— 避免任何早返回漏标
+    try {
+      const fgPath = join(dirname(this.dbPath), 'knowledge', 'family_graph.db');
+      if (!existsSync(fgPath)) {
+        console.warn('[SQLiteAdapter] 🔴 V49 FG 库不存在 → 本轮锚点重建整轮跳过（不 DELETE）:', fgPath);
+        return;
+      }
+      const SQL = await initSqlJs();
+      const fgDb = new SQL.Database(readFileSync(fgPath));
+      const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE uuid IS NOT NULL AND uuid != ''");
+      const s = new Set<string>();
+      if (fgRows.length && fgRows[0].values) for (const [u] of fgRows[0].values) s.add(String(u));
+      fgDb.close();
+      if (s.size === 0) {
+        console.warn('[SQLiteAdapter] 🔴 V49 FG nodes 无 uuid → 本轮锚点重建整轮跳过（不 DELETE）');
+        return;
+      }
+      this._fgUuids = s;
+      this._fgLoadFailed = false;
+    } catch (e) {
+      console.warn('[SQLiteAdapter] 🔴 V49 FG uuid 载入异常 → 本轮锚点重建整轮跳过（不 DELETE）:', (e as Error)?.message);
+    }
+  }
+
   private _rebuildMemoryAnchors(): number {
     if (!this.db) return 0;
     const now = new Date().toISOString();
@@ -2511,6 +2576,53 @@ export class SQLiteAdapter {
     // (实测: 熊梓铭会晤对话"梓铭。是你吗/介绍一下你自己/说说你的经历"全被标 roleplay)。
     // 系统只有会晤模式后，对话组锚点统一为 normal 记忆。const RP_RE 已删除。
 
+    // ═══════════════════════════════════════════════════════════════════
+    // 🔴 V49(2026-10-11) 实体户籍判据 —— 必须在无条件 DELETE **之前**构建并裁决
+    //
+    // 缺陷（2026-10-10 户籍清理实测）：本函数每次启动 DELETE 全部 %_ANCHOR 后从 conversations
+    //   按 dialog_group_id 重建，而**循环里压根没有归属存在性检查**，于是「没有任何行持有
+    //   该 uuid」的对话组照常重建。实测：8 个 uuid 的 92 条锚点离线删除后重启，
+    //   id 集合 100% 相同复原（memories 9852→9944，正整 92）；源为 conversations 384 行 /
+    //   92 个对话组，全库 1583 组中恰 92 组属「源还在而无人认领」。
+    //   注：这不等于「实体被删除」—— 实测 8 个孤儿 uuid 中至少 5 个的 person 行仍在、只是
+    //   uuid=NULL；警幻仙姑更属 uuid 失配（FG 有 active 026、entities 同名行持 027、对话挂 079）。
+    //
+    // 判据真源 = entities ∪ FG nodes（两个都要，缺一不可）：
+    //   · 运行期写锚点的第一层真源是 FamilyGraph —— resolveAnchorOwnership()
+    //     (dialog-group-stage.ts:45) 调 fg.getUUIDByName(name)；
+    //   · 只用 entities 会**误杀活着的实体**：FG 73 个 uuid vs entities 70 个，且 3 个 active
+    //     实体因 entities 同名行持有别的 uuid 而永远进不了 entities：
+    //       TXS-000000026 警幻仙姑 → entities 同名行持 027；TXS-000000028 崔莺莺 → 持 554；
+    //       TXS-000000029 陈都灵 → 持 030。
+    //     它们的锚点若被判据拒收 = 先被下面的 DELETE 摧毁、再不给重建 → **永久消失且不可恢复**。
+    //   · 时序也要求读 FG：storage.initialize()（本函数）在 server.ts:496，而 FG→entities 的
+    //     uuid 同步在 :549 —— 判据每次都在同步之前评估，只看 entities 必然落后一拍。
+    //
+    // fail-safe（不是 fail-open）：判据构建失败或可用集为空 → **直接 return 0、不执行 DELETE**。
+    //   两种失败模式都被挡住：既不「复活孤儿」，也不「摧毁在册锚点」，保持库现状。
+    //   （fail-open 会让判据故障退化成原缺陷本身，S4 评审已否决。）
+    // ═══════════════════════════════════════════════════════════════════
+    // 🔴 V49 P2-1: FG 载入失败 → 整轮 fail-safe（与「判据可用集为空」同语义）。
+    //   不能只把并集收窄成 entities 照常 DELETE：FG-only 的 uuid 会先被删、再被拒收
+    //   = 永久丢失且不可恢复，正是前轮 P0-1 要防的失败方向。
+    if (this._fgLoadFailed) {
+      console.warn('[SQLiteAdapter] 🔴 V49 FG 判据真源不可用 → 本轮锚点重建整轮跳过（保留库现状，不执行 DELETE）');
+      return 0;
+    }
+    let entUuids: Set<string> | null = null;
+    try {
+      const s = new Set<string>();
+      const us = this.db.exec("SELECT uuid FROM entities WHERE uuid IS NOT NULL AND uuid != ''");
+      if (us.length && us[0].values) for (const [u] of us[0].values) s.add(String(u));
+      // 真源之二：FG nodes（init() 已异步载入 this._fgUuids；未初始化时判据仍以 entities 为下限）
+      if (this._fgUuids) for (const u of this._fgUuids) s.add(u);
+      if (s.size > 0) entUuids = s;
+      else console.warn('[SQLiteAdapter] 🔴 V49 判据可用集为空(entities∪FG 均无 uuid) → 跳过整轮重建，保留库现状');
+    } catch (e) {
+      console.warn('[SQLiteAdapter] 🔴 V49 判据构建异常 → 跳过整轮重建，保留库现状:', (e as Error)?.message);
+    }
+    if (!entUuids) return 0;
+
     // V18: 重建前存量空 UUID 锚点统计 — DELETE 之前检测，暴露运行时 flush 写入的空 UUID 锚点
     //     （重建产物恒带 UUID，只有重建前残留的空 UUID 锚点能反映运行时对话闭组未归实体）
     try {
@@ -2578,10 +2690,14 @@ export class SQLiteAdapter {
       if (mx.length && mx[0].values?.[0]?.[0]) seq = Number(mx[0].values[0][0]) || 1;
     } catch {}
 
-    let n = 0, nSkipped = 0;
+    let n = 0, nSkipped = 0, nOrphaned = 0;
     for (const [dgId, eUuid, tc, firstTs, _lastTs, avgCa, maxCa, topicVal] of (groups[0].values as any[][])) {
       const dg = String(dgId), eu = String(eUuid || '');
       if (!eu) { nSkipped++; continue; }  // 空 UUID 跳过
+      // 🔴 V49: 无 entities/FG 行持有该 uuid → 不重建其锚点
+      //   注意措辞：这不是「实体被删除」，而是「没有任何行持有该 uuid」——
+      //   也可能是 uuid 被清空或失配（实测 8 个孤儿 uuid 中至少 5 个的 person 行仍在、只是 uuid=NULL）。
+      if (!entUuids.has(eu)) { nOrphaned++; continue; }
       const ename = entMap.get(eu) || eu;
       const dgTopic = topicVal ? String(topicVal) : null;
       const id = dg + '_ANCHOR';
@@ -2664,6 +2780,10 @@ export class SQLiteAdapter {
       if (n % 100 === 0) console.log(`[SQLiteAdapter] memories锚点进度: ${n}条`);
     }
     if (nSkipped > 0) console.log(`[SQLiteAdapter] memories锚点跳过: ${nSkipped}条(空UUID)`);
+    // 🔴 V49: 实体户籍判据的可观测性 —— 跳过必须留痕，禁止静默少写
+    if (nOrphaned > 0) {
+      console.warn(`[SQLiteAdapter] ⚠️ V49 实体户籍: 跳过 ${nOrphaned} 行对话组锚点重建（其 belong_entity_uuid 不在 entities∪FG 集合内；同一对话组挂双 uuid 时其余行仍会产出锚点）`);
+    }
     if (n > 0) {
       this._dirtyCount += Math.ceil(n / 10);
       // 🔴 V16: 强制立即落盘 — 防止 AlignmentGuard 后续写操作前 server 崩溃丢失数据
