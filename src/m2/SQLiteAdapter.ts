@@ -2489,7 +2489,14 @@ export class SQLiteAdapter {
       }
       const SQL = await initSqlJs();
       const fgDb = new SQL.Database(readFileSync(fgPath));
-      const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE uuid IS NOT NULL AND uuid != ''");
+      // 🔴 V49 P3-3：按 type='person' 过滤 —— 与另外两处真源对齐，消除同一概念的口径分叉：
+      //   ① 运行期写锚点真源 FamilyGraph.getUUIDByName() → findPersonNodeByNameOrAlias（只认 person）
+      //   ② MigrationManager.detectOrphanEntityUUIDs() `WHERE type='person'`
+      //   ③ 本判据（原未过滤）。①②按 person 取、③取全类型，FG 若新增带 uuid 的
+      //      object/place 节点，判据会比运行期真源更宽 → 可能放行不该放行的 uuid。
+      //   实测：FG 有 uuid 的 73 个节点全部是 person（47 个 object/place 行 uuid 均 NULL）
+      //   ⇒ 改前后 entUuids 集合不变、跳过组数仍为 92、锚点 1420 不变（防漂移，非修 bug）。
+      const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE type='person' AND uuid IS NOT NULL AND uuid != ''");
       const s = new Set<string>();
       if (fgRows.length && fgRows[0].values) for (const [u] of fgRows[0].values) s.add(String(u));
       fgDb.close();
