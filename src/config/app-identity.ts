@@ -87,6 +87,31 @@ export const ENTITY_BLACKLIST = new Set([
   '爸爸','妈妈','姐姐','妹妹','哥哥','弟弟','叔叔','阿姨','舅舅','姑姑',
   '公司','学校','家','学生','老师','朋友','同事','客户',
   '小说','开心','难过','时候','东西','什么','怎么','这个','那个',
+  // V50 观察区噪音词 42 个（2026-10-11 23:26:59 批次全部 candidate）：
+  // 这批词首字多为姓氏字（关/安/周/成/经/都/边/方/麻/房）→ hasSurname 命中 → 原判 grade 3
+  // 全部放行进观察区（实测 42/42 零拦截）。字面判据路线已到头（见 FamilyGraph.ts:2044
+  // 自陈「中文人名与滑窗片段在字面特征上不可分」），故走数据驱动配置：加入 L0 后
+  // gradeEntity / checkPersonEntity / GarbageEntityGuard.checkEntity 三处同源拒绝。
+  //
+  // 🔴 本词表【不是】全链路闸门，覆盖面有 4 个已知缺口（改这里前必读）：
+  //   ① 统一入口 checkEntityWrite（EntityWriteGate.ts:96-105）在 person 被拒后**回退
+  //      checkObjectEntity**，实测 40/42 仍 allowed —— 而它正是唯一有生产调用方的入口
+  //      （InductionScheduler.ts:332）。
+  //   ② 晋升计数闸门（FamilyGraph.ts:2831，不传 existingNames）覆盖不到 applyJudgments
+  //      的 promote 分支（:2954-2983）—— 那条通道零闸门，LLM 判 promote 即直转 active。
+  //   ③ 三处闸门都把 existingNames 判定排在黑名单**之前**（EntityWriteGate.ts:53-55），
+  //      而 addNode 传入的 allNames 含 candidate ⇒ 存量 41 个走 UPDATE 不产生新行。
+  //   ④ 上游滑窗层 L3EntityAnnotator 的 COMMON_WORDS_PERSON 与本表**零交集**（0/42），
+  //      ⇒ 滑窗照常产出这些词（由闸门层兜住），且对新碎片**零覆盖** ——
+  //      实测落地重启后同一次对话新建 6 个：关于经/居然连/周末终/于能休/安全第/经常加。
+  //   ⇒ 词表是**事后名单**（对已观测字符串永久拒绝），不是事前判据；治本在语义终审
+  //      （dream-judge 已判 46 节点 verdict='noise'，但 applyJudgments 只写标记不改 status）
+  //      与滑窗切分本身。
+  // 词表只作用于 person 分支；object 通道不套用（见 EntityWriteGate.ts:80 防误伤设计）。
+  '关于','经理','方便','经常','安全','厉害','居然','连续','满意','安静',
+  '周末','成真','乐趣','明白','高潮','经受','管用','都挺起','都进去','终于进',
+  '毕竟日','终于射','杭州玩','公室只','安排真','后看起','边理解','能学','边捏','都差',
+  '边聊','水吧','石公园','国画展','国美','何不同','公室','宿舍','方式','麻烦','能叫','滑液',
 ]);
 
 // ── 百家姓（用于人名识别） ──
