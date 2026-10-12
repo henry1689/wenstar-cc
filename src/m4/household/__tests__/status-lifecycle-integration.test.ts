@@ -154,19 +154,76 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
   });
 
   // ── ⑥ noise 只标注、不改 status（保守边界）──
-  it('🔴 noise 标注后 status 仍为 candidate（永不自动回收）', async () => {
+  it('🔴 低置信(conf<0.95) noise 标注后 status 仍为 candidate（2026-09-20 决策保留档）', async () => {
     if (!fg) return;
     await fg.addNode({ id: 'v27b13-cand-4', type: 'person', name: '终审噪声甲' });
+    // ⚠️ confidence=0.9（< V50 安全阀阈值 0.95）—— 本条守护的是 2026-09-20 决策的
+    //    **低置信保护档**：「真人被误 void 的代价远大于噪声多留一阵，故低置信只写标记」。
+    //    高置信(conf>=0.95)会自动回收，见下方 V50 E2 新增用例。
     const r = fg.applyJudgments(
-      { promote: [], annotate: [{ name: '终审噪声甲', confidence: 0.95, reason: '滑窗片段' }] },
+      { promote: [], annotate: [{ name: '终审噪声甲', confidence: 0.9, reason: '滑窗片段' }] },
       'dream-judge',
     );
     expect(r.annotated).toBe(1);
-    expect(statusOf('终审噪声甲'), '标注不得改变状态').toBe('candidate');
+    expect(statusOf('终审噪声甲'), '低置信标注不得改变状态').toBe('candidate');
     const row = fg.query("SELECT properties FROM nodes WHERE name='终审噪声甲'");
     const props = JSON.parse((row[0] as any).properties || '{}');
     expect(props._judge?.verdict).toBe('noise');
     expect(props._judge?.autoReclaimed).toBe(false);
+  });
+
+  // ── V50 E2 安全阀（业主 2026-10-12 裁决，覆盖 9-20「一律只写标记」的高置信档）──
+  it('🔴 V50 E2: conf=0.95 的 noise → candidate 自动回收 void + 审计 + 清边', async () => {
+    if (!fg) return;
+    const id = 'v50-reclaim-95';
+    await fg.addNode({ id, type: 'person', name: '安全阀甲' });
+    expect(statusOf('安全阀甲')).toBe('candidate');
+    const edgeBefore = edgeCountOf(id);
+
+    const r = fg.applyJudgments(
+      { promote: [], annotate: [{ name: '安全阀甲', confidence: 0.95, reason: '跨词边界碎片，非人名' }] },
+      'dream-judge',
+    );
+    expect(r.annotated).toBe(1);
+    expect(statusOf('安全阀甲'), 'conf>=0.95 且 candidate → 应回收 void').toBe('void');
+    expect(edgeCountOf(id), 'void 必须清理关联边（否则 health-check fatal）').toBe(0);
+
+    const row = fg.query("SELECT properties FROM nodes WHERE name='安全阀甲'");
+    const props = JSON.parse((row[0] as any).properties || '{}');
+    expect(props._judge?.verdict).toBe('noise');
+    expect(props._judge?.autoReclaimed, '高置信已自动回收').toBe(true);
+    expect(props._judge?.reclaimReason).toContain('V50 noise 安全阀');
+    // status 变更必须留痕（_changeHistory 末条指向 void）
+    const hist = props._changeHistory || [];
+    const last = hist[hist.length - 1];
+    expect(last, '_changeHistory 必须留痕（void 是状态变更，可追溯是保留它的前提）').toBeTruthy();
+    // ⚠️ 两种写入方格式不同，都在 _changeHistory 里：
+    //   setEntityStatus（本路径）→ operation / before / after
+    //   applyJudgments promote   → field / oldValue / newValue
+    expect(last.operation || last.field, '审计条目须标识变更类型').toBeTruthy();
+    expect(last.after ?? last.newValue).toBe('void');
+    expect(edgeBefore).toBeGreaterThanOrEqual(0);
+  });
+
+  it('🔴 V50 E2: conf=0.98 同样回收；非 candidate（active）不受影响', async () => {
+    if (!fg) return;
+    await fg.addNode({ id: 'v50-reclaim-98', type: 'person', name: '安全阀乙' });
+    fg.applyJudgments(
+      { promote: [], annotate: [{ name: '安全阀乙', confidence: 0.98, reason: '跨词边界片段，非人名' }] },
+      'dream-judge',
+    );
+    expect(statusOf('安全阀乙')).toBe('void');
+
+    // 真人档：active 节点本就查不到（applyJudgments 只 SELECT candidate），状态必须原样
+    await fg.addNode({ id: 'v50-active-safe', type: 'person', name: '真人保护甲' });
+    fg.run("UPDATE nodes SET status='active' WHERE name='真人保护甲'");
+    const before = statusOf('真人保护甲');
+    fg.applyJudgments(
+      { promote: [], annotate: [{ name: '真人保护甲', confidence: 0.99, reason: '误判也无所谓' }] },
+      'dream-judge',
+    );
+    expect(statusOf('真人保护甲'), 'active 真人绝不进回收分支').toBe(before);
+    expect(before).toBe('active');
   });
 
   // ── ⑦ collectCandidateItems 排除已标注 noise（F5 回归）──
@@ -177,16 +234,19 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
   });
 
   // ── ⑧ F2/A 回归：已判 noise 的 candidate 豁免超期回收 ──
-  it("🔴 已判 noise 的 candidate 即使 40 天无提及也不被回收（用户决策 A）", async () => {
+  it("🔴 已判 noise 的【低置信】candidate 即使 40 天无提及也不被回收（用户决策 A 保留档）", async () => {
     if (!fg) return;
     await fg.addNode({ id: "v27b13-exempt-1", type: "person", name: "豁免甲" });
     expect(statusOf("豁免甲")).toBe("candidate");
     // 先标注为 noise（模拟离线终审）
-    fg.applyJudgments({ promote: [], annotate: [{ name: "豁免甲", confidence: 0.95, reason: "滑窗片段" }] }, "dream-judge");
+    // ⚠️ confidence=0.9（< V50 安全阀阈值 0.95）—— 本条守护 2026-09-20「用户决策 A」的
+    //    低置信保护档；高置信自动回收见下方 V50 E2 新增用例。阈值真源：
+    //    FamilyGraph.ts 的 NOISE_RECLAIM_MIN_CONFIDENCE。
+    fg.applyJudgments({ promote: [], annotate: [{ name: "豁免甲", confidence: 0.9, reason: "滑窗片段" }] }, "dream-judge");
     // 再设为 40 天前
     setMentionedDaysAgo("豁免甲", 40);
     fg.runDailyHouseholdMaintenance();
-    expect(statusOf("豁免甲"), "已判 noise → 豁免自动回收，留批14 人工清单").toBe("candidate");
+    expect(statusOf("豁免甲"), "低置信已判 noise → 豁免自动回收，留批14 人工清单").toBe("candidate");
   });
 
   // ── ⑨ F2 基准：candidate 用 evidence.lastSeen 而非 last_mentioned ──

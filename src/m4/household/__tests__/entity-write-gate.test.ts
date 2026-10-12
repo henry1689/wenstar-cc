@@ -114,15 +114,21 @@ describe('V50 噪音词表 — 42 个观察区噪音词入 ENTITY_BLACKLIST', ()
     expect(checkObjectEntity('安静').allowed).toBe(false);
   });
 
-  it('⚠️ 已知边界：统一入口 checkEntityWrite 在 person 被拒后回退 object → 40/42 仍放行', () => {
-    // 这不是词表失效：object 通道按设计不套用 ENTITY_BLACKLIST（EntityWriteGate.ts:80 防误伤），
-    // 而唯一生产调用方 InductionScheduler.ts:332 走的正是这条统一入口。
-    // 数字是行为快照 —— 若将来把「person 命中 L0 直接拒绝、不回退 object」修掉，此处会亮红灯。
+  it('✅ 统一入口 checkEntityWrite：person 命中 L0 不回退 object（V50 D 段已修）', () => {
+    // 历史：本条先前断言 `toHaveLength(40)` —— 那是 D 段修复**之前**的行为快照
+    //（42 词里 40 个经 person 被拒后回退 object 而放行，唯一生产调用方
+    // InductionScheduler.ts:332 因此完全收不到词表）。D 段在 person 返回 `l0Block`
+    // 时直接拒绝、不再回退 ⇒ 期望值翻转为 0。
+    // grade 1-2（长度/对话残留/弱证据姓）仍回退 object 的语义，由下方用例单独守护。
     const allowedAsObject = NOISE_WORDS.filter(w => {
       const v = checkEntityWrite(w);
       return v.allowed && v.mode === 'object';
     });
-    expect(allowedAsObject).toHaveLength(40);
+    expect(allowedAsObject, 'L0 禁止词不得经统一入口以 object 身份放行').toHaveLength(0);
+    // 逐条确认拒绝原因确实是 L0（而非被别的判据拦下）
+    for (const w of NOISE_WORDS) {
+      expect(checkEntityWrite(w).allowed, w).toBe(false);
+    }
   });
 
   it('真实人名不被误伤 + 已知取舍留痕', () => {

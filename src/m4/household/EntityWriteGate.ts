@@ -43,6 +43,13 @@ export interface GateVerdict {
   allowed: boolean;
   reason: string;
   mode: 'person' | 'object';
+  /**
+   * V50 D 段：是否命中 L0 禁止词（ENTITY_BLACKLIST / FG_EXTRA_BLOCK / grade 0）。
+   * 供统一入口 `checkEntityWrite` 识别 —— L0 是「这词不是实体」的终局判定，
+   * 命中后**不得**回退 object 通道；其余拒绝（长度/对话残留/弱证据姓 grade 1-2）
+   * 仍回退，保持「真名词可作 object」的既有语义。可选字段，既有调用方零适配。
+   */
+  l0Block?: boolean;
 }
 
 /** person 写入闸门: L3 人名/已知实体放行; 称谓/黑名单/句子片段拒绝 */
@@ -54,7 +61,7 @@ export function checkPersonEntity(
   if (!n) return { allowed: false, reason: '空实体名', mode: 'person' };
   if (existingNames.has(n)) return { allowed: true, reason: '已登记已知实体', mode: 'person' };
   if (ENTITY_BLACKLIST.has(n) || FG_EXTRA_BLOCK.has(n)) {
-    return { allowed: false, reason: `黑名单/称谓禁止: ${n}`, mode: 'person' };
+    return { allowed: false, reason: `黑名单/称谓禁止: ${n}`, mode: 'person', l0Block: true };
   }
   // 🔴 person 长度上限: 姓+名 2-5 字(4字民族名可); 超长=句子/描述段被当人名(如"大眼睛又圆又亮"以"大"为姓误判 L3)
   if (n.length > PERSON_MAX_LEN || n.length < 2) {
@@ -65,7 +72,13 @@ export function checkPersonEntity(
   }
   const graded = gradeEntity(n, existingNames);
   if (graded.grade < 3) {
-    return { allowed: false, reason: `L${graded.grade}: ${graded.reason}`, mode: 'person' };
+    // grade 0 是 L0 终局判定（禁止词/无意义名称/句子片段），标记出来供统一入口识别
+    return {
+      allowed: false,
+      reason: `L${graded.grade}: ${graded.reason}`,
+      mode: 'person',
+      ...(graded.grade === 0 ? { l0Block: true } : {}),
+    };
   }
   return { allowed: true, reason: graded.reason, mode: 'person' };
 }
@@ -101,6 +114,12 @@ export function checkEntityWrite(
   if (!n) return { allowed: false, reason: '空实体名', mode: 'object' };
   const person = checkPersonEntity(n, existingNames);
   if (person.allowed) return person;
+  // 🔴 V50 D 段：person 命中 **L0 禁止词**（ENTITY_BLACKLIST / FG_EXTRA_BLOCK / grade 0）
+  //    → 终局拒绝，不再回退 object。原实现无条件回退，实测 42 个噪音词 **40/42** 经此
+  //    放行为 `mode:'object'`，而本函数正是唯一有生产调用方的入口（InductionScheduler.ts:332）
+  //    ⇒ 词表在那条路上完全失效。grade 1-2（长度/对话残留/弱证据姓）仍回退，
+  //    「真名词可作 object」的既有语义不变（见 checkObjectEntity 的 object 注释）。
+  if (person.l0Block) return person;
   return checkObjectEntity(n);
 }
 

@@ -632,6 +632,21 @@ export const CHANGE_HISTORY_LIMIT = 200;
  */
 const CANDIDATE_PROMOTE_SCORE = 3;
 
+/**
+ * V50 E2 噪音安全阀阈值 —— 仅 `verdict='noise' && confidence >= 本值 && status==='candidate'`
+ * 时由 `applyJudgments` 自动转 void（业主 2026-10-12 裁决）。
+ *
+ * 选 0.95 的依据（2026-10-12 实测 45 个 candidate 的 noise 判定）：
+ *   confidence avg=0.956 / max=0.99 / min=0.85；≥0.95 有 **40 个**，≥0.98 有 16 个。
+ *   这 40 个中 **36 个**同时命中 V50 词表（字面 + LLM 语义两条独立证据链），
+ *   另 4 个（关于经/居然连/周末终/于能休）conf=0.98、reason 明确为「跨词边界片段」。
+ *   而 conf<0.95 的 5 个（成真/国美/高潮/安全/安静）继续按 2026-09-20 决策只写标记 ——
+ *   「真人被误 void 的代价远大于噪声多留一阵」这条保护意图在低置信档完整保留。
+ *
+ * 与 `CANDIDATE_PROMOTE_SCORE` 同为观察区状态机的单一阈值真源，勿在别处重复写 0.95。
+ */
+const NOISE_RECLAIM_MIN_CONFIDENCE = 0.95;
+
  /**
  * 批12(P2-6): 称谓动词（弱上下文）—— 需累积 2 次才晋升。
  * 已剔除高频歧义字（和/看/给/让/带/跟/来/走/笑）：候选片段是 rawInput 的连续子串，
@@ -2958,6 +2973,23 @@ export class FamilyGraph implements FamilyGraphInterface {
           [name],
         ) as Array<{ id: string; properties: string }>;
         if (rows.length === 0) continue;
+
+        // 🔴 V50 E1：终审提升补闸门 —— 本分支原先只做 SELECT + UPDATE，**零闸门**，
+        //   而计数晋升路径 `_accumulateCandidateEvidence`（本文件约 :2831）有
+        //   `checkPersonEntity(name)`。同一业务规则两处实现、一处有闸门一处没有（不变量 #7），
+        //   LLM 一旦把噪音名列入 promote 就能直转 active。改为复用**同一实现**，
+        //   闸门异常按 fail-closed 不晋升并告警（与 :2827-2832 的既有处置一致）。
+        let _promoteGateOk = false;
+        try {
+          _promoteGateOk = checkPersonEntity(name).allowed;
+        } catch (_ge) {
+          console.warn('[FG Judge] 提升闸门异常 — 按 fail-closed 不晋升 "' + name + '":', (_ge as Error)?.message);
+        }
+        if (!_promoteGateOk) {
+          console.warn('[FG Judge] 提升被闸门拒绝（L0 禁止词 / 非人名）: "' + name + '"');
+          continue;
+        }
+
         const row = rows[0];
         let props: Record<string, any> = {};
         try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
@@ -2987,7 +3019,18 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
 
-    // ② 标注：noise 只写标记，**不改 status**（保守边界）
+    // ② 标注：noise 分两档 —— 高置信自动回收，低置信只写标记
+    //
+    // 🔴 V50 E2 安全阀（业主 2026-10-12 亲口裁决，覆盖 2026-09-20 的「一律只写标记」）：
+    //    判据 = verdict==='noise' && confidence>=0.95 && 该节点当前 status==='candidate'（本查询
+    //    已限定 candidate，故进得此分支即满足第三条）→ 调 setEntityStatus 转 void。
+    //    **两条保护意图完整保留**：低置信(conf<0.95)仍只写标记不改状态；非 candidate
+    //    （active/dormant 真人）本查询就查不到，一律不动。
+    //    依据：45 个 candidate 中 noise 判定 avg confidence 0.956、≥0.95 有 40 个，
+    //    其中 36 个与 V50 词表**字面+语义双重确认**、另 4 个 conf=0.98 且 reason 明确为
+    //    跨词边界片段；而 _judge.verdict='person' 的 3 个真人全部已是 active，不滞留 candidate。
+    //    走 setEntityStatus 而非直接 UPDATE —— 复用既有 candidate→void 超期回收同一条管线
+    //    （自带 pruneVoidEdges 清边 + _changeHistory 审计 + markDirty 落盘），**不删行**。
     for (const a of outcome.annotate ?? []) {
       try {
         const rows = this.query(
@@ -2998,17 +3041,39 @@ export class FamilyGraph implements FamilyGraphInterface {
         const row = rows[0];
         let props: Record<string, any> = {};
         try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+        const _reclaimable =
+          typeof a.confidence === 'number' && a.confidence >= NOISE_RECLAIM_MIN_CONFIDENCE;
         props._judge = {
           verdict: 'noise',
           confidence: a.confidence,
           reason: a.reason,
           source,
           at: nowIso,
-          // 明确记录：本次未回收，供批14 人工清单
-          autoReclaimed: false,
+          // 高置信本次已回收；低置信维持 2026-09-20 决策，只写标记供批14 人工清单
+          autoReclaimed: _reclaimable,
+          ...(_reclaimable
+            ? { reclaimReason: `V50 noise 安全阀: confidence>=${NOISE_RECLAIM_MIN_CONFIDENCE} && status=candidate` }
+            : {}),
         };
         this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [JSON.stringify(props), nowIso, row.id]);
         annotated++;
+
+        if (_reclaimable) {
+          try {
+            const rec = this.setEntityStatus(
+              a.name,
+              'void',
+              `V50 noise 安全阀: confidence=${a.confidence} >= ${NOISE_RECLAIM_MIN_CONFIDENCE}，终审判定「${a.reason || '非人名'}」（来源:${source}）`,
+            );
+            if (!rec.success) {
+              console.warn('[FG Judge] noise 回收失败(非阻塞): "' + a.name + '" —', rec.error || '未给出原因');
+            } else {
+              console.log('[FG Judge] noise 自动回收 → void: "' + a.name + '" (confidence=' + a.confidence + ')');
+            }
+          } catch (ve) {
+            console.warn('[FG Judge] noise 回收异常(非阻塞): "' + a.name + '" —', (ve as Error)?.message);
+          }
+        }
       } catch (e: any) {
         console.warn('[FG Judge] 标注失败(非阻塞): "' + a.name + '" — ' + (e?.message || e));
       }
