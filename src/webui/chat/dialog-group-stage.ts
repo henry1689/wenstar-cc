@@ -41,6 +41,18 @@ function calciumLevel(score: number): 0 | 1 | 2 | 3 {
  *
  * 守链（对齐《UUID户籍管理法》第五条 会晤写入强制 / 第七条 无户口写入拒绝）：
  *   三层解析 → 会晤实体 UUID → 玉瑶 UUID → 仍为空返回 null，由调用方拒绝写入（宁拒不放）。
+ *
+ * 🔴 2026-10-18 天气窜记忆修复（业主批准B）：归属判据重排 ——
+ *   实测生产 92 个对话组横跨两实体（无 meeting_entry 闭组），32 个锚点归属与组内多数轮次
+ *   矛盾（例：玉瑶组被“提及过阿珍”劫持 → 玉瑶的天气轮以【核心·阿珍】入阿珍记忆）。
+ *   根因两处：① 旧第一优先级 `dg.entities` 是**提及即归属** —— 组内提到谁就把整组（含他人轮次）
+ *   划给谁；② conversations 反查 `LIMIT 1` **无 ORDER BY** —— 取哪一行不确定。
+ *   重排后判据（权威递降）：
+ *     ① conversations 逐轮归属**多数决**（组的真实主人 = 轮次占比最高者；同数取最早轮）——
+ *        逐轮归属由 persistence-stage 权威写入（会晤实体 UUID），是唯一不依赖提及的真源；
+ *     ② dg.entities 人名推断 —— **仅当 conversations 无数据时**才作为兑底（提及降为末位）；
+ *     ③ 会晤实体 UUID / 玉瑶 UUID 守链兑底不变。
+ *   单实体组行为不变（多数决 = 唯一实体，与旧结果一致）；混合组归真实主人。
  */
 export function resolveAnchorOwnership(
   dg: any,
@@ -50,7 +62,25 @@ export function resolveAnchorOwnership(
 ): { uuid: string | null; source: string } {
   let entityUuid: string | null = null;
   try {
-    if (dg?.entities && dg.entities.length > 0) {
+    // ① 权威主判据：conversations 逐轮归属多数决（确定性：GROUP BY 计数 + 同数取最早轮）
+    const seqs = (dg?.rounds || [])
+      .map((r: any) => r?.seqPos)
+      .filter((s: any) => typeof s === 'number' && s > 0)
+      .flatMap((s: number) => [s, s + 1]);
+    if (seqs.length > 0 && typeof sql?.queryAll === 'function') {
+      // SQL 层排除字符串 'null' 脏值（它是真值，能穿过 IS NOT NULL / != ''），
+      // 并在取值处再过一次净化 —— 双保险，避免脏值被当作合法归属写进锚点。
+      const convRows = sql.queryAll(
+        "SELECT belong_entity_uuid, MIN(seq_pos) AS first_seq, COUNT(*) AS cnt FROM conversations " +
+        "WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND belong_entity_uuid != 'null' " +
+        "GROUP BY belong_entity_uuid ORDER BY cnt DESC, first_seq ASC LIMIT 1"
+      ) as any[];
+      if (convRows && convRows.length > 0) {
+        entityUuid = sanitizeBelongUuid(convRows[0]?.belong_entity_uuid) ?? null;
+      }
+    }
+    // ② 提及降为末位兑底：仅当 conversations 无数据（历史组/逐轮回填缺失）才按组内人名推断
+    if (!entityUuid && dg?.entities && dg.entities.length > 0) {
       const personNames = dg.entities.filter((n: string) => n && n !== '我' && n !== '玉瑶');
       for (const name of personNames) {
         const uuid = fg?.getUUIDByName?.(name);
@@ -58,25 +88,6 @@ export function resolveAnchorOwnership(
       }
       if (!entityUuid && fallbacks.characterName) {
         entityUuid = fg?.getUUIDByName?.(fallbacks.characterName) ?? null;
-      }
-    }
-    // V18: FG 解析失败时降级 — 从 conversations 表取该对话组已标注的实体 UUID
-    //      🔧 S4-FIX: 改用 seq_pos 定位（conversations 每轮插入即带 belong_entity_uuid），
-    //      不依赖 dialog_group_id 三段回填时序（回填在本函数尾部才执行，此前恒为 NULL）
-    if (!entityUuid) {
-      const seqs = (dg?.rounds || [])
-        .map((r: any) => r?.seqPos)
-        .filter((s: any) => typeof s === 'number' && s > 0)
-        .flatMap((s: number) => [s, s + 1]);
-      if (seqs.length > 0 && typeof sql?.queryAll === 'function') {
-        // ②-1补漏(2026-09-13): SQL 层排除字符串 'null' 脏值（它是真值，能穿过 IS NOT NULL / != ''），
-        //   并在取值处再过一次净化 —— 双保险，避免脏值被当作合法归属写进锚点。
-        const convRow = sql.queryAll(
-          "SELECT belong_entity_uuid FROM conversations WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND belong_entity_uuid != 'null' LIMIT 1"
-        );
-        if (convRow && (convRow as any[]).length > 0) {
-          entityUuid = sanitizeBelongUuid((convRow[0] as any)?.belong_entity_uuid) ?? null;
-        }
       }
     }
   } catch { /* 解析失败不阻塞 — 交由下方守链处理 */ }

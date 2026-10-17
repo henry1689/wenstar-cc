@@ -2760,8 +2760,13 @@ if (_meetingExited) {
 
       // 闭合原因 —— 按判定顺序取第一个成立的。写入 dialog_groups.block_close_reason，
       // 是「这个块为什么在这里断开」的唯一可追责线索（调闭组规则时先看它）。
+      // 🔴 2026-10-18 天气窜记忆修复（业主批准A）: 补 meeting_entry ——
+      //   原实现只有 meeting_exit，对话组可跨会晤进入横跨两个实体（实测 92 个混合组、
+      //   32 个锚点归属与组内多数矛盾：玉瑶的天气轮随组锚点被劫持给阿珍）。
+      //   进入会晤时旧组必须闭合：组内轮次全部属于进入前的实体，锚点归属无歧义。
       const _dgCloseReason: string | null = !_dg ? null
         : _meetingExited ? 'meeting_exit'
+        : _meetingEntered ? 'meeting_entry'
         : _locusChanged ? 'topic_switch'
         : _dg.rounds.length >= _dgMaxTurns ? 'max_turn'
         : _idleMs > _dgIdleCloseMs ? 'idle_timeout'
@@ -2778,7 +2783,10 @@ if (_meetingExited) {
       }
 
       // 🔴 P1-1: 结束语那轮不新建对话组（对话组已由 _meetingExited 触发 flush 关闭）
-      if (!_dg && !_meetingExited) {
+      // 🔴 2026-10-18 天气窜记忆修复: 进入指令那轮同样不建组不入组（
+      //   "叫阿珍来" 是路由指令且本轮尚处旧实体语境，入组会把指令轮划给新实体）；
+      //   新实体的第一条真实对话在下一轮自然建组。
+      if (!_dg && !_meetingExited && !_meetingEntered) {
         _dg = {
           id: (dna as any).dna_root_id + '_DG_' + String(seqPos).padStart(3, '0'),
           topic: _locusPath,
@@ -2793,6 +2801,7 @@ if (_meetingExited) {
       }
 
       // 🔴 P1-1: 结束语那轮 _dg 已置 null（_meetingExited），跳过本轮加入
+      // 🔴 2026-10-18: 进入指令轮同理（_meetingEntered 置 null 后此处自然跳过）
       _dg?.rounds.push({ q: message, a: reply, seqPos, time: Date.now() });
       _dg?.perceptions.push({ ...p });
       if (_dg && decision.enhanced.calcium_score > _dg.maxCalcium) {
