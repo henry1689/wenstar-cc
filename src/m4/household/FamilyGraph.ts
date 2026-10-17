@@ -43,7 +43,8 @@ import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from '
 //   CHAT_RESIDUE 虚词拦截、PERSON_MAX_LEN 长度上限、ENTITY_BLACKLIST —— 而后者一项都没有。
 //   二者本应对齐（见 EntityWriteGate.ts:18 注释自陈「与 GarbageEntityGuard.FG_EXTRA_BLOCK 对齐」），
 //   本批在**最危险的写入路径**（FG addNode）先串上，判据统一收敛为后续批次。
-import { checkPersonEntity } from './EntityWriteGate.js';
+// 🔴 批1(2026-10-18): 补 checkObjectEntity —— 非 person 通道（object/place）此前完全不走任何判定。
+import { checkPersonEntity, checkObjectEntity } from './EntityWriteGate.js';
 import type {
   FamilyGraph as FamilyGraphInterface,
   GraphNode,
@@ -2015,6 +2016,31 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
   }
 
+  /**
+   * 🔴 批1第三轮(2026-10-18): 日志脱敏 —— 按实体名精确抹除，保留其余诊断信息。
+   *
+   * 为什么不用 `reason.split(':')[0]`：那会把 `L3: 候选姓名(有姓氏)` 这类
+   * **本身不含名**的子类诊断一并削成 `L3`（S4 验收指出，实测 gradeEntity 的全部
+   * reason 都是字面常量、零名字插值）。本方法只抹掉真名本身，诊断完整保留。
+   * FG红线 §16.6：console 不得输出真实人名/关系/年龄组合。
+   */
+  private _maskName(reason: string, name: string): string {
+    const n = String(name ?? '');
+    return n ? String(reason ?? '').split(n).join('▮▮') : String(reason ?? '');
+  }
+
+  /**
+   * 🔴 批1第三轮(2026-10-18): 剔除 addFeatureEdge 传入的内部语义标记。
+   *
+   * `_fgFeatureEdge` 只用于让 _addNodeInner 区分「特征边端点」与「独立 object 实体」，
+   * 是**进程内记号**，不属于节点档案 —— 落库前必须剔除，否则会污染 properties。
+   */
+  private _fgStripFeatureFlag(props: unknown): Record<string, unknown> {
+    const out: Record<string, unknown> = { ...(props as Record<string, unknown> ?? {}) };
+    delete out._fgFeatureEdge;
+    return out;
+  }
+
   private async _addNodeInner(node: GraphNode): Promise<void> {
     // 批12: 初始状态由证据强度决定（默认 active，弱证据改 candidate）
     let initialStatus = 'active';
@@ -2034,7 +2060,13 @@ export class FamilyGraph implements FamilyGraphInterface {
         const allNames = new Set((this.query("SELECT name FROM nodes WHERE type='person' AND (status IS NULL OR status != 'void')") as Array<{name: string}>).map(r => r.name));
         const result = checkEntity(node.name, allNames);
         if (!result.allowed) {
-          console.warn('[FG Guard] 垃圾实体已拦截: "' + node.name + '" — ' + result.reason + ' (L' + result.grade + ')');
+          // 🔴 批1返工(2026-10-18) · FG红线 §16.6：console 不得输出真实人名。
+          //   原实现直接拼 node.name。此处只留类别+计数。
+          //   （result.reason 由 GarbageEntityGuard 产出，其自身是否含名需在批1b 统一核查。）
+          //   改用「按 node.name 精确脱敏」而非 split(':')[0]：后者会把
+          //   `L3: 候选姓名(有姓氏)` 这类**不含名**的子类诊断一并削掉（S4 验收指出），
+          //   而前者只抹掉真名、完整保留诊断信息。
+          console.warn(`[FG Guard] 垃圾实体已拦截: ${this._maskName(result.reason, node.name)} (L${result.grade}, len=${node.name.length})`);
           return;
         }
 
@@ -2047,7 +2079,8 @@ export class FamilyGraph implements FamilyGraphInterface {
         //   故本判据只拦**新写入**，不会误伤库里已有的真人名；存量由后续清理处置。
         const _gate2 = checkPersonEntity(node.name, allNames);
         if (!_gate2.allowed) {
-          console.warn('[FG Guard] 虚词/长度判据拦截: "' + node.name + '" — ' + _gate2.reason);
+          // 🔴 批1返工(2026-10-18) · FG红线 §16.6：同上，不输出真名。
+          console.warn(`[FG Guard] 虚词/长度判据拦截: ${this._maskName(_gate2.reason, node.name)} (len=${node.name.length})`);
           return;
         }
 
@@ -2074,6 +2107,74 @@ export class FamilyGraph implements FamilyGraphInterface {
         console.warn('[FG Guard] 闸门异常 — 按 fail-closed 拒绝写入 "' + node.name + '":', (_guardErr as Error)?.message);
         return;
       }
+    } else if (node.type === 'object' || node.type === 'place') {
+      // ════════════════════════════════════════════════════════════
+      // 🔴 批1(2026-10-18) 结构止血 · 非 person 通道统一闸门
+      // ════════════════════════════════════════════════════════════
+      // 此前 object/place **完全不走任何判定**，直落 initialStatus='active'（本文件 :2020）。
+      // 实测后果（family_graph.db 实测）：active 节点中 object 62 个 + place 2 个，
+      //   而 62 个 object 几乎全是整段外貌描写（"以清瘦为骨、纯白为肤、温顺为性、栀子为魂"…）。
+      // 成因链：chat.ts:542 `addFeatureEdge(_n, _featName, 'appearance')` 把整段描述当特征名传入
+      //   → FGProfileWriteGateway.addFeatureEdge（只做会晤隔离，不判内容）
+      //   → 本类 addFeatureEdge → addNode({type:'object'}) 全程无闸门。
+      // FG红线 §16.2 第⑨项「全部节点有合法 status」查不出这种垃圾 —— 它只校验值域，
+      //   'active' 是合法值，但"内容是散文"不合法，值域检查天然看不见。
+      //
+      // 结构而非补丁：闸门挂在 addNode 内部，对所有现有 + 未来非 person 调用点自动生效。
+      //   补丁式做法（如本文件 :1102 那条只覆盖 type='person' 的存量 UPDATE）只能覆盖当下
+      //   已知类型，以后任何新增 addNode 调用点都会重新漏。
+      //
+      // 设计取舍 —— 为什么 object/place 过闸后保持 active 而不进观察区：
+      //   ① checkObjectEntity 的判据是**确定性**的（≤6字 + 外貌特征尾词 + 对话残留），
+      //      通过即合规名词，不像 person 那样「人名与滑窗噪声字面不可分」需要行为证据；
+      //   ② 观察区晋升扫描（:2910）限定 `type = 'person'`，object/place 若置 candidate
+      //      将**永远没有晋升通道**，语义上等于永久待确认 —— 那是把垃圾换成了滞留。
+      //   ⇒ 正确做法是「闸门拒绝就不进库」，而非「进库后降级」。
+      const _gvObj = checkObjectEntity(node.name);
+      if (!_gvObj.allowed) {
+        // ════════════════════════════════════════════════════════════
+        // 🔴 批1第三轮(2026-10-18) · 两种 object 语义的区分点
+        // ════════════════════════════════════════════════════════════
+        // checkObjectEntity 无法同时服务两种对象：
+        //   ① 「独立 object 实体」——外貌特征词是垃圾，该严拦（防一段描述被逗号切 N 块
+        //      全入库，正是 103886-103897 垃圾的根因）；
+        //   ② 「特征边端点」——外貌特征词恰恰是它的**正当内容**。
+        // EntityWriteGate.ts:27 注释明写这类词「应存 FG dossier 字段 / FG 特征边(addFeatureEdge)」，
+        // 即设计上正确的归宿就是特征边。S4 前轮建议的「统一拦在 addNode」在本点上会把
+        // 这个归宿一并堵死 —— 端到端实测已证实：`马尾` 被拒 ⇒ addFeatureEdge 整个废掉。
+        // 故：带 _fgFeatureEdge 标记的调用方对「外貌/体态特征词」一类放行，
+        //     其余拒绝（超长 / 对话残留 / 称谓）无论哪条路径一律照拦。
+        const _isFeatureEdge = !!((node.properties as Record<string, unknown>)?._fgFeatureEdge);
+        const _appearanceOnly = _gvObj.reason.startsWith('外貌/体态特征词');
+        if (!(_isFeatureEdge && _appearanceOnly)) {
+          // 🔴 FG红线 §16.6 隐私铁律：日志不得输出真实人名/关系/年龄组合。
+          //   checkObjectEntity 的 reason 恒为「类别: 原名…」，故只取冒号前的类别；
+          //   place 可能是真实住址、object 描述可能含个人信息，一律不落盘。
+          //   类别模板写死为「object …」，place 走同一判据会打出「place…: object 超长」
+          //   这种自相矛盾标签（S4 评审指出），故剥掉 object 前缀只留纯判据名。
+          console.warn(`[FG Guard] ${node.type} 闸门拦截: ${_gvObj.reason.split(':')[0].replace(/^object\s*/, '')} (len=${node.name.length})`);
+          return;
+        }
+      }
+      // 通过闸门 = 确定性判据合规名词 → 保持 initialStatus，不进观察区（理由见上）。
+    } else {
+      // ════════════════════════════════════════════════════════════
+      // 🔴 批1返工(2026-10-18) · S4 独立评审 P0-1：fail-closed = **拒绝写入**
+      // ════════════════════════════════════════════════════════════
+      // 首版在此写 `initialStatus = 'candidate'`，与本方法上方 object/place 分支里
+      // 自己写下的设计取舍**直接矛盾**。实测证据（全仓 grep 依赖 nodes.status 的查询）：
+      //   · 晋升扫描 collectCandidateItems  → `type = 'person' AND status = 'candidate'`
+      //   · 噪声安全阀 V50                 → 同上
+      //   · void 回收 runDailyHouseholdMaintenance → `type='person'`
+      //   · 社交摘要 / 档案预加载            → 排除 candidate
+      //   · fgIntegrityGuard 第⑧项          → 只校验 `type='person'` 的 status 合法性
+      // ⇒ 一个 thing / concept / feature / org 的 candidate 节点会**永不晋升、永不回收、
+      //   永久从摘要与预加载消失**，且红线的值域检查天然看不见它。写进去 = 永久僵尸行。
+      //   「进观察区」的前提是有晋升通道，而晋升通道只对 person 存在。
+      // 当前触发条件为零（全仓非 person 的 addNode 只有 object/place，都走上方分支），
+      // 属潜伏缺陷 —— 但 fail-closed 的字面含义就是「无判据则拒绝」，不是「放进无人认领区」。
+      console.warn(`[FG Guard] 未知类型拒绝写入: type=${node.type} (len=${node.name.length})`);
+      return;
     }
 
     // V3.2: person 节点自动分配户籍 UUID
@@ -2127,7 +2228,8 @@ export class FamilyGraph implements FamilyGraphInterface {
         node.type,
         node.name,
         JSON.stringify(aliases),
-        JSON.stringify(node.properties ?? {}),
+        // 🔴 批1第三轮：剔除 _fgFeatureEdge 内部标记，避免进程内记号污染落库档案
+        JSON.stringify(this._fgStripFeatureFlag(node.properties)),
         uuid,
         category,
         1,  // V3.2: security_level 默认 1（公开级）
@@ -2171,6 +2273,25 @@ export class FamilyGraph implements FamilyGraphInterface {
   private async _addEdgeInner(edge: GraphEdge): Promise<void> {
     // 🔴 V3.3 自指边拦截: 禁止 source = target
     if (edge.source_id === edge.target_id) return;
+    // ════════════════════════════════════════════════════════════
+    // 🔴 批1返工(2026-10-18) · S4 独立评审 P1-3：孤儿边的**唯一收口点**
+    // ════════════════════════════════════════════════════════════
+    // 背景：addNode 的写入闸门是**静默 return 不抛异常**。被拦时调用方手里仍握着一个
+    //   刚生成的 uid（节点并未落库），若继续 addEdge，就把边挂到了不存在的节点上 → 孤儿边。
+    // 首版在两处 addNode 调用点各自回查，那是**补丁**：本批在 _addNodeInner 里刚批判过
+    //   「补丁式做法只能覆盖当下已知类型，以后任何新增调用点都会重新漏」，却在边这一侧
+    //   犯了同一个错误。
+    // 结构收口：addEdge 是全仓唯一咽喉（FamilyGraph 之外零调用者，S4 已 grep 验证），
+    //   在此加一条端点存在性检查，一次覆盖全部 10 个建边调用点 —— 包含本批完全未触及的
+    //   8 个 person 路径（integrateFromEntity 用户/亲缘/社交、addFamilyMember、
+    //   integrateSocialRelation、promoteSocialToFamily、addPersonRelation 正反向）。
+    // 且不动 addNode / addEdge 的对外签名，符合 FG红线 §16.4②。
+    // 自愈兜底另有 fgIntegrityGuard 第⑱项（下次启动 DELETE 孤儿边），本条是产生侧防线。
+    if (this.query('SELECT id FROM nodes WHERE id IN (?, ?)', [edge.source_id, edge.target_id]).length < 2) {
+      // 日志脱敏（§16.6）：只输出关系类型与计数，不输出端点 id —— 端点 id 可反查真人名。
+      console.log(`[FG] 拒绝建孤儿边: relation=${edge.relation}`);
+      return;
+    }
     // 🔵 批15(P1-1): 源头阻断 —— void(回收) 实体不得接边。
     // 这是【产生侧】的根本防线：即使某条产边路径用裸名字查询命中了 void 节点，
     // 也不会再产生 void 参与边。与 pruneVoidEdges()（清理侧兜底）互补，
@@ -3112,7 +3233,13 @@ export class FamilyGraph implements FamilyGraphInterface {
     while (idx >= 0) {
       const beforeWin = text.slice(Math.max(0, idx - 6), idx);
       if (NAME_RELATION_BEFORE.some((w) => beforeWin.includes(w))) return true;
-      if (NAME_INTRO_BEFORE.some((w) => beforeWin.endsWith(w))) return true;
+      if (NAME_INTRO_BEFORE.some((w) => beforeWin.endsWith(w))) {
+        // 🔴 结构加固(2026-10-23 用户确认)：裸"叫"介绍句 + 名后紧跟"吧" = 起名建议句
+        //   （"就叫阿珍带吧"/"叫阿珍妈吧"——给未来孩子/宠物起名），非真人身份介绍。
+        //   真实身份介绍（"我叫张三"/"她叫小美"/"名叫X"）不会以"吧"紧跟名字收尾。
+        //   命中起名句式则不算强上下文，转而继续扫描该名字的其他出现位置（下方 idx 递推）。
+        if ((text[idx + name.length] || '') !== '吧') return true;
+      }
       const afterWin = text.slice(idx + name.length, idx + name.length + 6);
       if (NAME_INTRO_AFTER.some((w) => afterWin.startsWith(w))) return true;
       idx = text.indexOf(name, idx + 1);
@@ -3354,6 +3481,11 @@ export class FamilyGraph implements FamilyGraphInterface {
             type: 'place',
             name: place.name,
           });
+          // 🔴 批1第三轮(2026-10-18)：本回查**不承担防护职责**（防护已由 _addEdgeInner 咽喉
+          //   承接），只为本调用点的簿记不失真 —— place 被闸门拒时节点未落库，若不查，
+          //   下方 nodesCreated++ / details / edgesCreated++ / details 四处会照报成功。
+          //   ⚠️ 这与前轮被否掉的「局部回查承担跨调用点防护职责」不是一回事，勿再合并回去。
+          if (this.query('SELECT id FROM nodes WHERE id = ?', [placeId]).length === 0) continue;
           nodesCreated++;
           details.push(`创建地点节点: ${place.name}`);
         } else {
@@ -6305,7 +6437,14 @@ export class FamilyGraph implements FamilyGraphInterface {
       featureId = featureNodes[0].id;
     } else {
       featureId = uid();
-      await this.addNode({ id: featureId, type: 'object', name: featureName });
+      // 🔴 批1第三轮(2026-10-18)：传入语义标记，让 _addNodeInner 知道这里是**特征边端点**
+      //   而非独立 object 实体 —— 详见该处对两种语义的区分注释。
+      //   本标记是内部记号，落库前会被 _fgStripFeatureFlag 剔除，不污染 properties。
+      await this.addNode({
+        id: featureId, type: 'object', name: featureName,
+        properties: { _fgFeatureEdge: true } as any,
+      });
+      // 防孤儿边不在本处做：已收口到 _addEdgeInner 的端点存在性检查（全仓唯一咽喉）。
     }
 
     // 建边
@@ -6318,7 +6457,20 @@ export class FamilyGraph implements FamilyGraphInterface {
     );
     if (existing.length === 0) {
       await this.addEdge({ id: uid(), source_id: personId, target_id: featureId, relation });
-      console.log("[FamilyGraph] 特征建边 [ok]"); // details sanitized
+      // 🔴 批1第三轮(2026-10-18)：addEdge 是**静默拒绝**（咽喉拦孤儿边时不抛异常），
+      //   无条件打 [ok] 会变成**假成功日志** —— 节点被闸门拒 ⇒ 边被咽喉拦 ⇒ 实际没写进去，
+      //   运维看日志却以为成功了。这正落在本批靶心路径（chat.ts:542 传整段外貌描写）。
+      //   FG红线 §16.6 要求日志记录操作类型与**计数**，说谎的日志比没日志更糟。
+      //   故按边表实查，命中才报成功。日志只打 relation 与长度，不打内容。
+      const _built = this.query(
+        'SELECT id FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?',
+        [personId, featureId, relation]
+      );
+      if (_built.length > 0) {
+        console.log(`[FamilyGraph] 特征建边 [ok] relation=${relation} (len=${featureName.length})`);
+      } else {
+        console.log(`[FamilyGraph] 特征建边 [拒绝] relation=${relation} 节点未落库或被咽喉拦截 (len=${featureName.length})`);
+      }
     }
   }
 
