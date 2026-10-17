@@ -12,6 +12,7 @@
  */
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { DreamQueue } from './DreamQueue.js';
+import { isLandmarkWorthy } from '../m2/MemoryLifecycleProtocol.js';
 
 export class ConsolidationQueue {
   private storage: FusionStorageAdapter;
@@ -67,7 +68,12 @@ export class ConsolidationQueue {
 
       let promoted = 0;
       for (const candidate of candidates) {
-        if (candidate.calcium_score >= 0.25 && candidate.effective_strength > 0.2) {
+        // 🔴 2026-10-18 地标闸门（业主批准方案A-①a）：
+        //   原判据 calcium>=0.25 + strength>0.2 过松（95% 记忆钙化<1 ⇒ 全库 80% 被标地标，
+        //   地标稀缺语义名存实亡）。现统一消费 isLandmarkWorthy（LIFECYCLE_RULES 文档契约的
+        //   可执行版：calcium>=0.65 OR reinforcement>=1.5 OR recall>=3 且 strength>0.5）。
+        //   strength>0.2 保留为前置底线（钙化够但已衰减的记忆不进地标）。
+        if (candidate.effective_strength > 0.2 && isLandmarkWorthy(candidate)) {
           const success = sqlite.promoteToLandmark(
             candidate.id,
             candidate.calcium_score >= 0.7 ? '重要时刻' : '日常印记',

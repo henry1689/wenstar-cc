@@ -93,6 +93,41 @@ export const LIFECYCLE_RULES: readonly PromotionRule[] = [
 ] as const;
 
 /**
+ * 地标晋升闸门（2026-10-18，业主批准方案A-①a）
+ * ============================================================
+ * 实测缺陷：全库 8957/11157 = 80% 记忆被标地标（阿珍 614/618 = 99.4%），
+ *   「地标=少数重要记忆」的稀缺语义名存实亡 ——
+ *   `WHERE is_landmark=1 ORDER BY calcium DESC` 的召回路径退化为纯钙化排序，
+ *   而 95% 记忆钙化 < 1 ⇒ 区分度归零。
+ * 根因：实现（ConsolidationQueue calcium>=0.25 / M8 任意 recent[0]）远松于
+ *   本文档规则（LIFECYCLE_RULES gold→landmark）——文档-实现漂移。
+ * 本函数把文档契约变成**可执行判据**（单一真源，所有晋升路径必须消费）：
+ *   ① calcium >= 0.65；或 ② reinforcement >= 1.5；或 ③ recallCount >= 3 且 strength > 0.5。
+ * 不满足者绝不标地标（宁缺勿滥 —— 地标是稀缺信号，不是荣誉勋章）。
+ */
+export const LANDMARK_RULE = {
+  minCalcium: 0.65,
+  minReinforcement: 1.5,
+  minRecallCount: 3,
+  minStrengthForRecallPath: 0.5,
+} as const;
+
+export function isLandmarkWorthy(record: {
+  calcium_score?: number;
+  reinforcement_accumulator?: number;
+  recall_count?: number;
+  effective_strength?: number;
+}): boolean {
+  const calcium = Number(record.calcium_score ?? 0);
+  const reinforcement = Number(record.reinforcement_accumulator ?? 0);
+  const recall = Number(record.recall_count ?? 0);
+  const strength = Number(record.effective_strength ?? 0);
+  return calcium >= LANDMARK_RULE.minCalcium
+    || reinforcement >= LANDMARK_RULE.minReinforcement
+    || (recall >= LANDMARK_RULE.minRecallCount && strength > LANDMARK_RULE.minStrengthForRecallPath);
+}
+
+/**
  * 检查某条记忆当前所处阶段
  */
 export function inferStage(record: {

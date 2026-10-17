@@ -17,6 +17,7 @@ import type {
 import { derivePhysiologicalSnapshot, physiologicalCosineSimilarity, calculateCompositeScore, calculateEntryWeight } from './PhysiologicalDeriver.js';
 
 import { sanitizeBelongUuid } from '../app/vault/belong-uuid.js';
+import { isLandmarkWorthy } from '../m2/MemoryLifecycleProtocol.js';
 
 export class M8FusionAdapter implements M8Engine {
   private storage: FusionStorageAdapter;
@@ -45,12 +46,16 @@ export class M8FusionAdapter implements M8Engine {
 
     const bestMatch = results[0];
     if (bestMatch && bestMatch.composite > 0.3) {
-      // 强化已有地标
-      this.storage.promoteToLandmark(
-        bestMatch.record.id,
-        params.narrative_tag,
-        params.sensory_anchor,
-      );
+      // 🔴 2026-10-18 地标闸门：仅当命中记忆本身够格才标/强化地标
+      //   （原实现无判据 —— 相似命中即标，也是全库 80% 地标化的源头之一）。
+      //   不够格时只返回命中条目（仪式语义保留，不新增地标）。
+      if (isLandmarkWorthy(bestMatch.record)) {
+        this.storage.promoteToLandmark(
+          bestMatch.record.id,
+          params.narrative_tag,
+          params.sensory_anchor,
+        );
+      }
       const ritual = this.pickPhrase(params.narrative_tag);
       return {
         result: { success: true, entry_id: bestMatch.record.id },
@@ -63,15 +68,19 @@ export class M8FusionAdapter implements M8Engine {
       const intensity = Math.abs(params.perception.pleasure) * 0.5 + params.perception.arousal * 0.3 + params.perception.intimacy * 0.2;
       if (intensity > 0.4) {
         // 找一条最近的记忆晋升为地标（让高情感事件有锚点）
+        // 🔴 2026-10-18 地标闸门：原实现在 10 条里取 recent[0] **无条件**标地标
+        //   （最近一条 = 几乎每轮对话都产生新地标 —— 全库 80% 地标化的主要源头）。
+        //   现改为：取最近 10 条中**第一条够格的**；无够格者不标（宁缺勿滥）。
         const sqlite = this.storage.getSQLite();
         const recent = sqlite.findBySeqPosRange(0, 999_999_999, 10);
-        if (recent.length > 0) {
+        const worthy = recent.find((r) => isLandmarkWorthy(r));
+        if (worthy) {
           this.storage.promoteToLandmark(
-            recent[0].id,
+            worthy.id,
             params.narrative_tag || 'auto_anchored',
             params.sensory_anchor || `情感锚点: ${new Date().toISOString().substring(0, 10)}`,
           );
-          return { result: { success: true, entry_id: recent[0].id }, ritual_phrase: '嗯，这个感觉我记住了。' };
+          return { result: { success: true, entry_id: worthy.id }, ritual_phrase: '嗯，这个感觉我记住了。' };
         }
       }
     }
