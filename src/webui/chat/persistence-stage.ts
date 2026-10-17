@@ -36,6 +36,24 @@ export interface PersistInput {
   decision: M3Decision;
   context?: string[];         // 对话历史（用于话题推断）
   dialogGroupId?: string | null;  // 当前对话组ID
+  /** 🔴 P0-2.1: 本条消息是否触发了会晤「进入」（chat.ts 会晤状态机的结构信号） */
+  isMeetingEntry?: boolean;
+  /** 🔴 P0-2.1: 本条消息是否触发了会晤「退出」（同上） */
+  isMeetingExit?: boolean;
+}
+
+/**
+ * P0-2.1 会晤路由指令判据 —— 跳过砂金库（memories）写入，仅保留 conversations 原始留存。
+ *
+ * 为什么需要：会晤唤醒/退出类路由指令被当普通对话写进 memories（实测 145 条污染检索）；
+ * 但 conversations 必须照记（原始对话只增不减，回溯不可丢）。
+ *
+ * 为什么用结构信号而非扫正文：会晤状态机（chat.ts 的 EntityMeeting.detectIntent）
+ * 本就知道本条是否触发了进入/退出；正则猜正文 = V3 任务书明令禁止的旧方案（会漏会误）。
+ * restoreLastMeeting（重启自动恢复）**不置 entry** —— 那是普通对话恰好触发恢复，不是指令。
+ */
+export function shouldSkipMemoryWrite(p: { isMeetingEntry?: boolean; isMeetingExit?: boolean }): boolean {
+  return !!(p.isMeetingEntry || p.isMeetingExit);
 }
 
 /**
@@ -305,6 +323,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   // ── Step 3: 砂金库 memories 表（fusion_memory.db）使用公共 API 写入 ──
+  // 🔴 P0-2.1: 会晤路由指令（进入/退出）不写 memories —— 只写 conversations（下方 Step 2 已记）。
+  //   跳过时 Step 4 写后验证一并跳过（否则会对未写的行报假失败）。
+  const _skipMemWrite = shouldSkipMemoryWrite(input);
   try {
     const sqlite = input.ctx.storage.getSQLite();
     const pJson = buildPerceptionJson(input.p, input.message);
@@ -323,7 +344,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
 
     // 写用户消息 — 改造②：使用 SQLiteAdapter.writeMemory() 公共 API
     const idUser = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    if (!sqlite.writeMemory({
+    if (_skipMemWrite) {
+      console.log(`[Persist] ✂️ P0-2.1 会晤路由指令跳过 memories 写入 (seq=${input.seqPos} entry=${!!input.isMeetingEntry} exit=${!!input.isMeetingExit}): "${input.message.substring(0, 20)}"`);
+    } else if (!sqlite.writeMemory({
       id: idUser, seqPos: input.seqPos, createdAt: now,
       perceptionJson: pJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'user', rawInput: input.message,
@@ -350,11 +373,14 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       hadError = true;
     }
     // V3: 40D — 用户消息写 perception_40d（M3 直接产出的语义维，瑶光客观维异步回填）
-    writePerceptionV40Dual(sqlite, idUser, input.p, input.decision.enhanced.perceptionV40);
+    // 🔴 P0-2.1（S4 评审 P2 收口）: skip 轮不写 40D —— 目标行不存在，UPDATE 必 0 行（无害但纯浪费）。
+    if (!_skipMemWrite) writePerceptionV40Dual(sqlite, idUser, input.p, input.decision.enhanced.perceptionV40);
 
     // 🔴 V22 作品召回: 检测用户消息是否为作品（小说/文章），命中则写入 works 表。
     // 这是"长文召回"的元数据桥——让"那篇小说"这类指称词可被解析。
-    try {
+    // 🔴 P0-2.1（S4 评审 P2 收口）: skip 轮不跑作品检测 —— 否则 works.sourceConversationIds
+    //   会指向未写入的 idUser（悬空引用，作品回溯链断裂）。
+    if (!_skipMemWrite) try {
       const workRepo = new WorkRepository(sqlite);
       // S5-评审: 传 existingWorkId 让 isContinuation 正确（同 dialog_group 已有作品 = 续写）
       const _dgId = (input.dna as any).dialog_group_id ?? null;
@@ -385,7 +411,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     const idAssist = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const cleanReply = input.reply.replace(/（[^）]*）/g, '').trim();
     const asstPJson = buildPerceptionJson(input.p, cleanReply);
-    if (!sqlite.writeMemory({
+    if (!_skipMemWrite && !sqlite.writeMemory({
       id: idAssist, seqPos: input.seqPos + 1, createdAt: now,
       perceptionJson: asstPJson, calciumScore, calciumLevel,
       locusPath, leafZone: 'assistant', rawInput: cleanReply,
@@ -409,11 +435,13 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       hadError = true;
     }
     // V3: 40D — 助理回复写 perception_40d（M3 直接产出的语义维，瑶光客观维异步回填）
-    writePerceptionV40Dual(sqlite, idAssist, input.p, input.decision.enhanced.perceptionV40);
+    if (!_skipMemWrite) writePerceptionV40Dual(sqlite, idAssist, input.p, input.decision.enhanced.perceptionV40);
 
     // ── V3: 瑶光客观维异步回填（fire-and-forget，绝不同步阻塞 chat） ──
     // M3 已直接产出 40D 语义维写入 perception_40d；此处异步补 D01-D08/D21-D32 客观维。
-    try {
+    // 🔴 P0-2.1（S4 评审 P2 收口）: skip 轮不入回填 —— 否则完成日志按 memoryIds.length
+    //   报「回填完成（2 条）」而实为 0 行（假日志，掩盖真实状态）。
+    if (!_skipMemWrite) try {
       const v40Semantic = input.decision.enhanced.perceptionV40 ?? buildFallbackV40(input.p);
       enqueueYaoguangBackfill(input.ctx, {
         dnaRootId: (input.dna as any).dna_root_id ?? input.dna.branch_id ?? '',
@@ -478,7 +506,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   // ── Step 4: 写后读验证（改造③ — 彻底杜绝静默数据丢失） ──
+  // 🔴 P0-2.1: 跳过写入的轮次一并跳过验证（否则对未写行报假失败 → 假 hadError）。
   try {
+    if (!_skipMemWrite) {
     const verifySqlite = input.ctx.storage.getSQLite();
     // 🔴 2026-09-20（批5 副作用修正）：改用 **内容 + zone 核对**。
     //   原先按 seq_pos 核对（`WHERE seq_pos=? AND leaf_zone=?`）—— 而 seq_pos 冲突时适配器会**重新分配**
@@ -495,6 +525,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     }
     if (!asstCheck.length) {
       console.warn(`[Persist] ⚠️ 写后验证：助手轮未落库（seq=${input.seqPos + 1}，不计为错误）`);
+    }
     }
   } catch (e: any) {
     console.error('[Persist] ❌ 写后验证异常:', e?.message);

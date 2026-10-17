@@ -104,7 +104,15 @@ export class FusionStorageAdapter {
 
     // P0-1: 提取FG实体名列表 + V13: 解析归属UUID
     let fgNames: string | undefined;
-    let belongEntityUuid: string | null = null;
+    // 🔴 P0-2D(2026-10-17): 归属解析优先级收口 ——
+    //   ① dna.belong_entity_uuid **权威戳**（chat.ts 在 workingMemory.push 前按
+    //      「会晤实体 UUID > 退出实体 UUID > 玉瑶 UUID」盖章，与 persistence-stage 同源表达式）
+    //   ② FG 人名推断（兜底：人名不在户籍时推断必然失败）
+    //   ③ null（户籍法 fail-closed —— 绝不硬编码兜底实体）
+    // 实测缺陷：此前只走 ② ⇒ 435 条 evt_* 归属恒 NULL 且仍在产生
+    //   （按月 7月10→8月14→9月90→10月477，含当日新增 31 条）；
+    //   同一条消息 mem_* 路（persistence-stage）有权威兜底、evt_* 路没有 —— P0-2 只修了一半。
+    let belongEntityUuid: string | null = dna.belong_entity_uuid ?? null;
     if (this.familyGraph) {
       try {
         const personNames = (dna.entity_genes || [])
@@ -113,7 +121,9 @@ export class FusionStorageAdapter {
         if (personNames.length > 0) {
           // C3(2026-09-11): 序列化格式收口到 EntityNameCodec.formatNames
           fgNames = formatNames(personNames);
-          // V13: 取第一个有UUID的实体作为归属
+        }
+        // V13: 取第一个有UUID的实体作为归属（仅当权威戳缺失时兜底）
+        if (belongEntityUuid == null) {
           for (const name of personNames) {
             try {
               const uuid = this.familyGraph.getUUIDByName(name);

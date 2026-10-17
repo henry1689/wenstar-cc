@@ -690,7 +690,52 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
 
     const seqPos = ctx.storage.reserveNextSeq();
 
-    ctx.workingMemory.push(dna, p, seqPos, decision.primary_emotion, decision.secondary_emotions);
+    // 🔴 P0-2D 盖章①（push 前，覆盖「即时毕业」同步写路径）:
+    //   evt_* 路（WorkingMemory→FusionStorageAdapter.write）此前只按 entity_genes 人名推 FG,
+    //   人名不在户籍（如「妈」）⇒ 归属恒 NULL（实测 435 条且持续产生）。现盖权威戳,
+    //   与 persistence-stage 同源表达式「会晤实体 > 退出实体 > 玉瑶」。
+    //   此刻会晤进/出尚未在本轮处理 ⇒ 进入/退出指令由下方预判拦截（不写 evt）；
+    //   缓冲路径由下方盖章②（会晤状态落定后）重盖修正。
+    //   ⚠ 已知归属漂移（S4 评审 P2-A）：普通消息若触发 restoreLastMeeting 或群聊 switchTo，
+    //   即时毕业条目持旧戳、缓冲条目持新戳 —— 两者均为有效归属（非 NULL），影响面小，如实声明。
+    {
+      const _fgOwnA = ctx.m4?.getFamilyGraph?.();
+      const _stampA = ctx._entityMeeting?.getEntityUUID?.()
+        ?? (ctx as any)._exitEntityUuid
+        ?? _fgOwnA?.getUUIDByName?.('玉瑶')
+        ?? null;
+      if (_stampA) dna.belong_entity_uuid = _stampA;
+    }
+
+    // 🔴 P0-2.1-P1（S4 评审必修项）: evt_* 路同样跳过会晤路由指令 ——
+    //   此前 skip 只覆盖 persistence-stage 的 mem_* 路，本处 push 无条件执行 ⇒ 进入指令
+    //   （如「叫张三来」，人名基因+钙化≥0.25 必即时毕业）仍以 evt_* 行落库 —— 与 mem_* 跳过不对称，
+    //   正是「P0-2 只修了一半」的同构缺陷。
+    //   判据与下方状态机同源：同一 EntityMeeting.detectIntent 纯函数、同一入参（消息/人名池/会晤态/别名表）；
+    //   预判到 entry/exit ⇒ 不 push（本轮不产生 evt_* 行；mem_* 由下方状态机信号在 persistence-stage 跳过）。
+    //   fail-open：判据异常时不跳（宁多写一条也不丢记忆）。
+    let _skipEvtRoute = false;
+    if (ctx._entityMeeting) {
+      try {
+        const _fgR = ctx.m4?.getFamilyGraph?.();
+        const _namesR: string[] = _fgR?.getAllPersonNames?.() || [];
+        const _aliasR: Map<string, string> = _fgR?.getAllPersonNamesWithAliases?.() ?? new Map<string, string>();
+        const _intentR = EntityMeeting.detectIntent(message, _namesR, ctx._entityMeeting.isActive(), _aliasR);
+        if (ctx._entityMeeting.isActive()) {
+          _skipEvtRoute = _intentR.kind === 'exit';
+        } else {
+          const _targetsR = _intentR.kind === 'wake' ? _intentR.targets
+            : (_intentR.kind === 'addParticipant' || _intentR.kind === 'switch') && _intentR.targets.length > 0 ? _intentR.targets
+            : [];
+          _skipEvtRoute = _targetsR.length > 0;
+        }
+      } catch { _skipEvtRoute = false; }
+    }
+    if (_skipEvtRoute) {
+      console.log(`[WM] ✂️ P0-2.1 会晤路由指令跳过 evt_* 写入 (seq=${seqPos}): "${message.substring(0, 20)}"`);
+    } else {
+      ctx.workingMemory.push(dna, p, seqPos, decision.primary_emotion, decision.secondary_emotions);
+    }
 
     ctx.consolidationQueue.recordActivity();
 
@@ -902,6 +947,10 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     //    结束语 → flush 对话组+锚点+清session+回玉瑶；群聊加人/换主发言 → 放行。
     let _meetingDeny: string | null = null;
     let _meetingExited = false;
+    // 🔴 P0-2.1(2026-10-17): 会晤「进入」路由指令信号 —— 与 _meetingExited 对称。
+    //   仅显式 enter/enterMulti 置位；restoreLastMeeting（重启自动恢复）**不置位**
+    //   （那是普通对话恰好触发恢复，不是路由指令，不能跳写记忆）。供 persistence-stage 判据使用。
+    let _meetingEntered = false;
 
     // V4.0 实体会晤：多人会议时记录用户发言
     if (ctx._entityMeeting?.isMultiParty()) {
@@ -930,6 +979,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           // 原 >=3 才 enterMulti → 2 人（如熊梓铭+徐诗雨）被错判为单人会晤。
           if (_enterTargets.length >= 2) {
             _em.enterMulti(_enterTargets);
+            _meetingEntered = true;
             console.log('[EntityMeeting] 多人会晤启动: ' + _enterTargets.join(', '));
           } else {
             // 🆕 编码健康修复: 天界域实体（警幻仙姑）会晤前保存人间会话现场（角色状态），退出后复原
@@ -938,6 +988,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
               console.log('[EntityMeeting] 天界会晤进入: ' + _enterTargets[0] + '，人间现场已保存 (role=' + _currentRole + ')');
             }
             _em.enter(_enterTargets[0]);
+            _meetingEntered = true;
             console.log('[EntityMeeting] 单人会晤启动: ' + _enterTargets[0]);
           }
         } else if (intent.kind === 'normal' || intent.kind === 'exit') {
@@ -1037,6 +1088,18 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     let _meetingEntityName: string | null = null;
     // V12.7(批3): 提升会晤实体 UUID 到顶层 — 供 knowledgeBase.search 补 UUID 门
     const _meetingEntityUuid: string | null = ctx._entityMeeting?.getEntityUUID?.() ?? null;
+    // 🔴 P0-2D 盖章②（会晤状态落定后，覆盖 WorkingMemory 缓冲路径）:
+    //   同一 dna 对象被 buffer 持引用，60s 后 flush 才真正 write —— 此刻重盖可让缓冲条目
+    //   拿到本轮进/出/换后的最终归属（退出→原实体；普通→不变）。
+    //   注：会晤进入指令已由上方预判拦截（不入 buffer），故此处无需处理 entry 轮。
+    {
+      const _fgOwnB = ctx.m4?.getFamilyGraph?.();
+      const _stampB = ctx._entityMeeting?.getEntityUUID?.()
+        ?? (ctx as any)._exitEntityUuid
+        ?? _fgOwnB?.getUUIDByName?.('玉瑶')
+        ?? null;
+      if (_stampB) dna.belong_entity_uuid = _stampB;
+    }
     if (ctx._entityMeeting?.isActive()) {
       try {
         // 🔴 户籍管理法（第九条 搜索闸门·收口）: 会晤激活时设置会话实体 UUID，
@@ -2767,6 +2830,10 @@ if (_meetingExited) {
 	      ctx, message, reply, seqPos, dna, p, decision,
 	      context: ctx.conversationHistory.map(t => t.content).filter(Boolean),
 	      dialogGroupId: _dg?.id || null,
+	      // 🔴 P0-2.1: 会晤路由指令结构信号 —— 判据来自会晤状态机（它本就知道本条触发了进入/退出），
+	      //   不在 persistence-stage 猜正文（正则扫正文 = V3 任务书明令禁止的旧方案）。
+	      isMeetingEntry: _meetingEntered,
+	      isMeetingExit: _meetingExited,
 	    }).catch((_e: any) => console.warn('[Persist] 异步失败:', _e?.message));
 
     // 躯体感知记录（SomaticMemory — 五重铁律协议③）
