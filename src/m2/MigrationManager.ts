@@ -913,6 +913,37 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v21 → v22: 重置「非三层格式」的兜底摘要，交由后台重生成（R011 任务A）
+  {
+    version: 22,
+    description: 'R011 任务A: 重置缺【叙事】的兜底摘要（141 组），后台自动重生成',
+    apply: (db: any) => {
+      // 背景：Phase 1 首次生成时 maxTokens=400 对「JSON+中文」偏紧，20.5% 的组落到了
+      // formatSummary 的兜底文本（可检索，但缺【标签】【叙事】【情感】三层结构）。
+      // BlockSummaryService 已改为 600 tokens + 失败重试 + 最终包裹【叙事】；
+      // 本迁移把存量兜底行清空，让后台按新逻辑重生成。
+      //
+      // 幂等：重生成后 block_summary 必含【叙事】，条件不再命中；重复执行影响 0 行。
+      // 同时清理这些组的旧摘要索引行，避免旧 n-gram 残留（重生成会重新写入）。
+      try {
+        const _before = Number(
+          db.exec("SELECT COUNT(*) FROM dialog_groups WHERE block_summary IS NOT NULL AND block_summary NOT LIKE '%【叙事】%'")?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        db.run(
+          "UPDATE dialog_groups SET block_summary = NULL, summary_state = NULL " +
+          "WHERE block_summary IS NOT NULL AND block_summary NOT LIKE '%【叙事】%'",
+        );
+        db.run(
+          "DELETE FROM search_index WHERE source_type = 'dialog_group' AND source_id IN (" +
+          'SELECT dialog_group_id FROM dialog_groups WHERE block_summary IS NULL AND summary_state IS NULL)',
+        );
+        console.log(`[Migration] v22 ✅ 兜底格式摘要重置: ${_before} 组（后台将自动重生成）`);
+      } catch (e) {
+        console.warn('[Migration] v22 重置兜底摘要失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

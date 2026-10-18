@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
 
 const TSC_CLI = path.join(__dirname, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
@@ -105,6 +105,38 @@ const failed = prestartResults.filter(r => !r.ok);
 if (failed.length > 0) {
   console.warn('[Start] ' + failed.length + ' 个启动前脚本跳过（不影响启动）:');
   for (const f of failed) console.warn('  - ' + f.label + ': ' + (f.reason || 'unknown'));
+}
+
+// ── I005: 启动前清理孤儿 server 进程 ──
+// 背景（2026-10-19 实测）：pm2 restart 后可能残留旧的 tsx/server 进程链。旧进程持有
+// 旧内存库副本并定时 export() 落盘，会**整库覆盖**新实例的写入 —— 现象是「日志显示成功、
+// 库里仍是 NULL」（摘要组反复回 NULL 的真实原因）。sql.js 是整库导出覆盖磁盘，后落盘者胜。
+// 执行条件：win32 且端口未被占用（端口占用说明有正常实例，交给上面的跳过逻辑，不误杀）。
+// 只匹配 `src/webui/server.ts`（真正写库的进程），不碰 start/tsx 自身。
+if (process.platform === 'win32' && !_portBusy) {
+  try {
+    const _ps = "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | " +
+      "Where-Object { $_.CommandLine -like '*webui*server.ts*' } | " +
+      'ForEach-Object { $_.ProcessId }';
+    const out = execFileSync('powershell', ['-NoProfile', '-Command', _ps], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    }).toString();
+    const pids = out.split(/\s+/).map((s) => Number(s))
+      .filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid);
+    for (const pid of pids) {
+      try {
+        process.kill(pid);
+        console.warn('[Start] 已清理孤儿 server 进程: PID ' + pid + '（I005 单实例保护）');
+      } catch (e) {
+        console.warn('[Start] 清理孤儿进程失败 PID ' + pid + ': ' + (e && e.message));
+      }
+    }
+  } catch (e) {
+    // 检查失败不影响启动；ServerLock 仍是最终防线
+    console.warn('[Start] 孤儿进程检查跳过:', String((e && e.message) || e).split('\n')[0]);
+  }
 }
 
 // 启动 server.ts

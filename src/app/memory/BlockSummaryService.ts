@@ -125,8 +125,8 @@ export class BlockSummaryService {
     let failed = 0;
     let scanned = 0;
     try {
-      const rows = sql.queryAll<{ dialog_group_id: string }>(
-        "SELECT dialog_group_id FROM dialog_groups " +
+      const rows = sql.queryAll<{ dialog_group_id: string; block_close_reason: string | null }>(
+        "SELECT dialog_group_id, block_close_reason FROM dialog_groups " +
         "WHERE block_summary IS NULL AND (summary_state IS NULL OR summary_state = '') " +
         "ORDER BY first_ts ASC LIMIT ?",
         [this.batchSize],
@@ -136,7 +136,7 @@ export class BlockSummaryService {
       for (const row of rows) {
         const dgId = String(row.dialog_group_id);
         try {
-          const outcome = await this.generateOne(sql, dgId);
+          const outcome = await this.generateOne(sql, dgId, row.block_close_reason ?? '');
           if (outcome === 'done') done++;
           else skipped++;
         } catch (e) {
@@ -166,7 +166,14 @@ export class BlockSummaryService {
 
   // ── 内部 ──────────────────────────────────────────────────────────────
 
-  private async generateOne(sql: SQLiteAdapter, dgId: string): Promise<'done' | 'skipped'> {
+  private async generateOne(sql: SQLiteAdapter, dgId: string, closeReason: string): Promise<'done' | 'skipped'> {
+    // R011 任务A(4)：meeting_entry 是「叫 XX 聊聊」这类会晤入口指令，无实质对话内容，
+    // 生成摘要也是废话，直接标 skipped，不消耗 LLM。
+    if (closeReason === 'meeting_entry') {
+      this.markState(sql, dgId, 'skipped');
+      return 'skipped';
+    }
+
     const convs = sql.queryAll<{ role: string; content: string }>(
       'SELECT role, content FROM conversations ' +
       'WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0) ' +
@@ -188,25 +195,18 @@ export class BlockSummaryService {
       return 'skipped';
     }
 
-    const raw = await this.opts.rawCall(
-      [
-        {
-          role: 'system',
-          content: '你是记忆索引助手。把一段对话压缩成便于日后检索的摘要；只输出 JSON，不解释、不扮演角色、不编造未出现的信息。',
-        },
-        {
-          role: 'user',
-          content:
-            '请输出 JSON：{"tags":["5-10个检索关键词"],"narrative":"2-3句话概括这段对话讲了什么","emotion":"主情绪与情感走向"}\n\n' +
-            `对话原文：\n${transcript}`,
-        },
-      ],
-      400,
-      0.2,
-    );
-
-    const summary = this.formatSummary(raw);
+    // R011 任务A(1)(2)(3)：maxTokens 400→600（400 对「JSON+中文摘要」偏紧，实测 20.5% 被截断）；
+    // 解析失败用更严格的提示重试一次；仍失败则包裹为【叙事】，保证三层格式契约。
+    let summary = this.formatSummary(await this.callLLM(transcript, false));
+    if (!summary || !this.isStructured(summary)) {
+      const retry = this.formatSummary(await this.callLLM(transcript, true));
+      if (retry) summary = retry;
+    }
     if (!summary) throw new Error('LLM 返回内容为空或过短');
+    if (!this.isStructured(summary)) {
+      // 兜底：至少满足「含【叙事】」的格式契约，且仍可被 n-gram 检索
+      summary = `【叙事】${summary}`.slice(0, MAX_SUMMARY_CHARS);
+    }
 
     const meta = sql.queryAll<{ belong_entity_uuid: string | null }>(
       'SELECT belong_entity_uuid FROM dialog_groups WHERE dialog_group_id = ?',
@@ -221,6 +221,35 @@ export class BlockSummaryService {
     this.indexSummary(sql, dgId, summary, uuid);
     this.attempts.delete(dgId);
     return 'done';
+  }
+
+  /**
+   * 调用 LLM 生成摘要。strict=true 用于「第一次未按 JSON 返回」后的重试：
+   * 只允许输出 JSON，禁止解释 / Markdown 代码块 / 前后缀。
+   */
+  private async callLLM(transcript: string, strict: boolean): Promise<string> {
+    const system = strict
+      ? '只输出一个 JSON 对象。禁止输出任何解释、Markdown 代码块、前后缀或额外文字。'
+      : '你是记忆索引助手。把一段对话压缩成便于日后检索的摘要；只输出 JSON，不解释、不扮演角色、不编造未出现的信息。';
+    const user = strict
+      ? '严格输出 JSON（不要代码块）：{"tags":["5-10个检索关键词"],"narrative":"2-3句话概括","emotion":"主情绪与情感走向"}\n\n' +
+        `对话原文：\n${transcript}`
+      : '请输出 JSON：{"tags":["5-10个检索关键词"],"narrative":"2-3句话概括这段对话讲了什么","emotion":"主情绪与情感走向"}\n\n' +
+        `对话原文：\n${transcript}`;
+    // R011 任务A(1)：400 → 600，避免截断
+    return this.opts.rawCall(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      600,
+      0.2,
+    );
+  }
+
+  /** 是否满足三层格式契约（至少含【叙事】） */
+  private isStructured(summary: string): boolean {
+    return String(summary || '').includes('【叙事】');
   }
 
   /** 解析 LLM 输出为三层摘要；解析失败时兜底保留可检索文本 */
