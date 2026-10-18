@@ -838,6 +838,81 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v20 → v21: 混合组归属按「conversations 多数决」重写（I003/I004，2026-10-19）
+  {
+    version: 21,
+    description: 'I003/I004: dialog_groups 与摘要索引归属按 conversations 多数决重写',
+    apply: (db: any) => {
+      // 🔴 背景（I004 取证）：
+      //   旧闭组逻辑「提及即归属」留下了约 179 个归属错误的对话组；
+      //   已修复的 resolveAnchorOwnership 用「conversations 逐轮归属多数决 + 同数取最早轮」作权威判据，
+      //   本迁移把存量数据一次性对齐到同一判据（含 is_test 过滤）。
+      //
+      //   ⚠️ 本迁移**不处理 memories 里的 *_ANCHOR**：
+      //     `_rebuildMemoryAnchors()` 在 initialize 末尾（本迁移之后）会 DELETE 全部锚点并按
+      //     (dialog_group_id, belong_entity_uuid) 重建 —— 混合组会写同一个 id、后写覆盖先写，
+      //     最终归属由 UUID 字典序决定。故锚点归属必须等重建器修复（I004 第二步，PI 的 3b），
+      //     在这里改任何锚点都会被随后的重建覆盖（这正是 I003 的真相）。
+      //
+      //   本迁移只改重建器**不会覆盖**的两处：dialog_groups 归属 + 摘要索引归属。
+      //
+      // 幂等：只更新与多数决不等的行；重复执行影响行数为 0。
+      const MAJORITY = `(
+        SELECT c.belong_entity_uuid FROM conversations c
+        WHERE c.dialog_group_id = dialog_groups.dialog_group_id
+          AND c.belong_entity_uuid IS NOT NULL AND c.belong_entity_uuid != 'null'
+          AND (c.is_test IS NULL OR c.is_test = 0)
+        GROUP BY c.belong_entity_uuid
+        ORDER BY COUNT(*) DESC, MIN(c.seq_pos) ASC LIMIT 1
+      )`;
+
+      try {
+        const _before = Number(
+          db.exec(`SELECT COUNT(*) FROM dialog_groups WHERE belong_entity_uuid != ${MAJORITY}`)?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        db.run(`UPDATE dialog_groups SET belong_entity_uuid = ${MAJORITY}
+                WHERE belong_entity_uuid != ${MAJORITY}`);
+        const _after = Number(
+          db.exec(`SELECT COUNT(*) FROM dialog_groups WHERE belong_entity_uuid != ${MAJORITY}`)?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        console.log(`[Migration] v21 ✅ 混合组归属重写: ${_before} 行 → 残留 ${_after}`);
+      } catch (e) {
+        console.warn('[Migration] v21 对话组归属重写失败（非致命）:', (e as Error)?.message);
+      }
+
+      // 摘要索引归属同步：search_index.belong_entity_uuid 是生成摘要时从 dialog_groups 抄的，
+      // 组归属改正后必须一并同步，否则户籍过滤（UUIDPoliceFilter）会继续用旧归属放行/拦截。
+      try {
+        const _idxBefore = Number(
+          db.exec(
+            `SELECT COUNT(*) FROM search_index s
+             JOIN dialog_groups dg ON dg.dialog_group_id = s.source_id
+             WHERE s.source_type = 'dialog_group'
+               AND dg.belong_entity_uuid IS NOT NULL
+               AND (s.belong_entity_uuid IS NULL OR s.belong_entity_uuid != dg.belong_entity_uuid)`,
+          )?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        db.run(
+          `UPDATE search_index SET belong_entity_uuid = (
+             SELECT dg.belong_entity_uuid FROM dialog_groups dg
+             WHERE dg.dialog_group_id = search_index.source_id
+           )
+           WHERE source_type = 'dialog_group'
+             AND EXISTS (
+               SELECT 1 FROM dialog_groups dg
+               WHERE dg.dialog_group_id = search_index.source_id
+                 AND dg.belong_entity_uuid IS NOT NULL
+                 AND (search_index.belong_entity_uuid IS NULL
+                      OR search_index.belong_entity_uuid != dg.belong_entity_uuid)
+             )`,
+        );
+        console.log(`[Migration] v21 ✅ 摘要索引归属同步: ${_idxBefore} 行`);
+      } catch (e) {
+        console.warn('[Migration] v21 摘要索引归属同步失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════
