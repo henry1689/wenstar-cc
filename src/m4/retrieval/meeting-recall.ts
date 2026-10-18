@@ -290,6 +290,45 @@ export function keywordRecallMemories(
 }
 
 /**
+ * 回忆问句·锚点事件召回（2026-10-18，业主批准结构化改善）
+ * ============================================================
+ * 实测缺陷（阿珍压测）：问"还记得我俩的第一次吗"→ 她只敢说日期，细节靠用户提示才说出。
+ * 根因：回忆问句的兑底通道取**最早 6 条**（时间轴头），而事件发生在记忆流**中段**
+ *   （10-16 的"第一次"，实体记忆始于 8 月）——头尾两头都够不到；
+ *   历史槽 1-3 天片 284 条按钙化序取 2，事件锚点（钙化 0.4-0.86）进不了前二。
+ * ⇒ 事件的浓缩载体（闭组 ANCHOR 锚点，含完整 Q+A 语境）在回忆问句时**结构性缺席**。
+ *
+ * 本通道补上这个洞：回忆问句时按**问句关键词**直取锚点行（不看钙化、不看时间片），
+ *   与近期槽/历史槽/关键词路并列成为第四召回通道。锚点是闭组时浓缩的事件摘要，
+ *   正是"回忆过去"场景最需要的素材形态。
+ * 判据单一源：触发由调用方用 RECALL_TRIGGER_RE 判定（与另三通道同源），本函数只管取数。
+ */
+export function anchorRecallByKeywords(
+  src: RecallSource,
+  entityUuid: string,
+  keywords: string[],
+  limit = 4,
+): RecallMemoryRow[] {
+  const out: RecallMemoryRow[] = [];
+  if (!keywords.length) return out;
+  for (const kw of keywords) {
+    if (out.length >= limit) break;
+    const rows = (
+      src.queryAll(
+        `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
+         WHERE belong_entity_uuid = ? AND id LIKE '%\\_ANCHOR' ESCAPE '\\' AND raw_input LIKE ?
+         ORDER BY calcium_score DESC, created_at DESC LIMIT 1`,
+        [entityUuid, `%${kw}%`],
+      ) || []
+    ) as RecallMemoryRow[];
+    for (const r of rows) {
+      if (!out.some((o) => o.id === r.id)) out.push(r);
+    }
+  }
+  return out;
+}
+
+/**
  * 压缩原文取回（核心修复）：从 conversations 表检索实体对话**原文**，
  * 刻意**不**带 is_compacted = 0 过滤 —— 压缩仅是维护期对内存窗口的标记，原始对话
  * 遵循只增不删永久留存，召回侧必须能原文直取，否则"压缩 = 永久失忆"。

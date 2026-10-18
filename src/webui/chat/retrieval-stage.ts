@@ -25,6 +25,11 @@ import {
   //   与 meeting-recall 完全相同的 SQL —— 同一规则两份实现。现统一从真源调用。
   recentCalciumRows,
   historyCalciumRows,
+  // 🔴 2026-10-18 回忆问句·锚点事件召回（业主批准结构化改善）：
+  //   实测「还记得第一次吗」只敢说日期——事件锚点（闭组 ANCHOR）在回忆问句时结构性缺席
+  //   （兑底取最早 6 条 = 时间轴头，事件在中段；历史槽按钙化序取 2 够不到）。
+  //   补为第四召回通道，真源在 meeting-recall.ts（与另三通道同源）。
+  anchorRecallByKeywords,
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
@@ -289,6 +294,15 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             [_entityUuid]
           ) || [];
           _entityMems = [..._entityMems, ..._earlyRows];
+          // 🔴 2026-10-18 锚点事件召回（第四通道）：时间轴兜底只够头，事件在中段 ——
+          //   按问句关键词直取闭组 ANCHOR（事件浓缩载体，含完整 Q+A 语境），
+          //   补上「还记得X吗」结构性取不到事件素材的洞（阿珍压测实锤）。
+          const _anchorKws = extractTopicKeywords(message, [], 4);
+          const _anchorRows = anchorRecallByKeywords(_sqlite, _entityUuid, _anchorKws, 4);
+          if (_anchorRows.length > 0) {
+            _entityMems = [..._anchorRows, ..._entityMems];
+            console.log(`[EntityMem·回忆锚点] 关键词 ${_anchorKws.join('/')} 召回 ${_anchorRows.length} 条事件锚点前置注入`);
+          }
         }
         // 去重
         const _seenMId = new Set<string>();
@@ -557,30 +571,21 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           }
         } catch (_sbErr) { /* 砂金库兜底失败不阻塞对话 */ }
         // 🔴 V10.14 隐私隔离: 过滤会晤实体记忆中的他人私密内容
-        // 世界规则：每个人的聊天记录通过 UUID 绝对隔离，绝不互通。
-        // 徐诗雨的记忆即使提到熊梓铭/玉瑶，涉及私人情感的也要剔除。
-        if (_meetingEntityName && memoryFragments.length > 0) {
-          try {
-            const { isIntimateAboutOthers } = await import('../../m4/household/EntityPrivacyFilter.js');
-            const _fg2 = ctx.m4?.getFamilyGraph?.();
-            const _allNames = _fg2?.getAllPersonNames?.() || [];
-            const _otherEntities = _allNames.filter((n: string) => n && n !== _meetingEntityName);
-            const _before = memoryFragments.length;
-            // memoryFragments 是函数参数（const），原地过滤
-            for (let _fi = memoryFragments.length - 1; _fi >= 0; _fi--) {
-              const _f = memoryFragments[_fi];
-              // 只过滤"会晤实体记忆/对话"类（【徐诗雨的记忆】/【金库记忆】/【对话·徐诗雨】）
-              if (!_f.includes('记忆') && !_f.includes('对话·') && !_f.includes('重要记忆')) continue;
-              const _body = _f.replace(/^【[^】]*】/, '');  // 去掉前缀标签
-              if (isIntimateAboutOthers(_body, _meetingEntityName, _otherEntities)) {
-                memoryFragments.splice(_fi, 1);
-              }
-            }
-            if (memoryFragments.length < _before) {
-              console.log(`[PrivacyFilter] ${_meetingEntityName}会晤记忆过滤: ${_before}→${memoryFragments.length} 条（剔除他人私密）`);
-            }
-          } catch (_pfErr) { /* 过滤失败不阻塞 */ }
-        }
+        // 🔴 2026-10-18 隐私判据结构退役（业主批准）：
+        //   原实现在此处对【记忆】类碎片跑 isIntimateAboutOthers **文字模式**过滤
+        //   （实测一次杀 11 条：阿珍自己的三人场景记忆被当"他人私密"误杀 ⇒
+        //   「知道但不敢说」——记忆在库、被查出、又被文字层杀掉）。
+        //   结构判定：文字模式判据（V1.0，2026-08-07）设计于 UUID 权威隔离（V13/V18）之前，
+        //   是 UUID 机制的**前朝兑底**。当下层查询已按 belong_entity_uuid=当前实体收敛时，
+        //   文字层只能做两件事：误杀当前实体自己的亲身经历（实锤），或重复 UUID 已保证的事。
+        //   依据《世界规则》原意（私密绝不外泄）的**权威实现是 UUID 隔离**，不是关键词表：
+        //   - 会晤实体自有记忆（recentCalciumRows/historyCalciumRows/keywordRecall/anchorRecall
+        //     全部带 belong_entity_uuid = 对手方）→ 无可外泄面，直接兑底当前实体自己的经历；
+        //   - 金库/砂金库/长文直取 → 同样按 UUID 收敛；
+        //   - filterPrivateConversations（UUID+来源+ACL deny-by-default）继续作为对话类数据的
+        //     权威隐私闸门，不在本层重复。
+        //   结论：本层文字过滤整体退役。若未来出现"无 UUID 的对话数据源"，应在**数据源层**
+        //   补 UUID 标注，而不是复活关键词猜测（写入侧归属已由 P0-2D 权威戳 + 多数决收口）。
         // V5.3: 记忆不足时降级检索 conversations
         if (memoryFragments.length < 5) {
           try {
