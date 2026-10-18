@@ -16,6 +16,8 @@
  * - 升级免疫：修改 PAE 代码必须通过 integrity guard 前后对比
  */
 
+// 🔴 C 止血(2026-10-18): source 存证据哈希而非原文，需要 sha256
+import { createHash } from 'node:crypto';
 import { PAE_CONFIG, PAE_INTEGRITY_CHECKS, REGISTRATION_FIELD_MAP, PRIORITY_THRESHOLDS, FORMAT_VALIDATORS, resolveRegistrationDef, getPAETimeoutMs, hasProfileSignal } from '../../config/profile-acquisition-guard.js';
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 // 🆕 P1 降级链: LLM 提取失败/超时时用正则保底提取基础字段
@@ -721,7 +723,18 @@ export class ProfileAcquisitionEngine {
           }
         } else {
           // 写入 pendingItems（不經 gateway，因为 pendingItems 是用户主动录入）
-          const source = `${options.source || 'conversation'} | ${field.evidence.substring(0, 80)}`;
+          // ════════════════════════════════════════════════════════════
+          // 🔴 C 止血(2026-10-18) · source 不再存对话原文
+          // ════════════════════════════════════════════════════════════
+          // 实测：1789 条 pendingItems 中 57% 的 source 含对话原文（含私密内容），
+          //   原实现直接把 field.evidence 前 80 字拼进 source，完全绕过 _isValidPendingValue
+          //   （该函数只收 value，不收 source）。
+          // 方案 a（业主 2026-10-18 定案）：存「来源标识 + ISO 时间 + 证据哈希」。
+          //   追溯路径：原文完整存于 conversations 表，用哈希 + 时间回查，不复制原文。
+          //   注意 field.evidence 本身**保留**——它是置信度评分的三因子之一
+          //   （evidenceScore，见 :540-544），删了会改变评分行为。
+          const _evHash = createHash('sha256').update(String(field.evidence || '')).digest('hex').slice(0, 8);
+          const source = `${options.source || 'conversation'} | ${new Date().toISOString()} | ev:${_evHash}`;
           const valueStr = typeof field.value === 'string' ? field.value : JSON.stringify(field.value);
           await this.familyGraph.addPendingItem(personName, writePath, valueStr, source);
           committed = true;

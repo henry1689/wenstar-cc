@@ -583,13 +583,59 @@ interface KinshipTerm {
 interface ConflictItem { field: string; oldValue: string; newValue: string; timestamp: string; resolved?: boolean; }
 interface ConflictReport { hasConflict: boolean; items: ConflictItem[]; }
 
-/** 🏛️ §12.2: 拦截LLM生成的对话文本混入pendingItems */
-function _isValidPendingValue(value: string): boolean {
+/**
+ * 🏛️ §12.2: 拦截 LLM 生成的对话文本混入 pendingItems。
+ *
+ * 🔴 C 止血(2026-10-18) 补强两处（业主批准，方案 a）：
+ *   ① **source 通道**：原签名只收 value，source 完全不验 —— 实测 1789 条
+ *      pendingItems 中 **57% 的 source 含对话原文**（含私密内容），全从这条缝漏进档案库。
+ *   ② **语义判据**：原判据全是格式特征（开头字符/括号/换行/纯数字），实测
+ *      **16% 的 value 仍是整段对话**，因为它们不符合那些格式特征。
+ *      改为识别对话原文的语义形态：角色名前缀、轮次标记、【】标签、长括号动作描写、
+ *      角色交替出现。
+ */
+function _isValidPendingValue(value: string, source?: string): boolean {
   if (!value || typeof value !== 'string') return false;
   if (/^\s*[\n\r：:玉]/.test(value)) return false;
   if (/（.*?）/.test(value) && value.length < 20) return false;
   if (/^\d+$/.test(value) && parseInt(value) > 120) return false;
   if (/\n玉瑶|\n我|\n用户/.test(value)) return false;
+
+  // ── 语义判据：识别「这是不是一段对话原文」──
+  if (/^(用户|玉瑶|我|她|他|助理)\s*[:：]/.test(value)) return false;
+  if (/第\s*\d+\s*轮/.test(value)) return false;
+  if (/【[^】]{2,}】/.test(value)) return false;
+  if (/（[^）]{10,}）|\([^)]{10,}\)/.test(value)) return false;
+  if (/用户[\s\S]{1,80}玉瑶|玉瑶[\s\S]{1,80}用户/.test(value)) return false;
+
+  // ── 文体判据：档案字段值应是「名词短语」，不是「句子/叙述」──
+  //   实测漏网案例：一段 50 字的私密对话原文，既无角色名前缀也无轮次标记，
+  //   但它是**完整叙述句** —— 多句读 + 高口语词密度。名词短语不会有这些特征。
+  //   判据只要满足其一即拒：
+  //     ① 句读 ≥2 且含人称代词（"她低头笑了笑，然后转过身"）
+  //     ② 口语/助词密度 >15%（"的了着吗呢吧啊呀得"在长文本里高频出现）
+  //   正常档案值不受影响：地址（无句读无口语词）、职业（短）、性格（短名词）。
+  const _punctCount = (value.match(/[，。！？；、]/g) || []).length;
+  // ① 任一句读 + 人称代词 ⇒ 句子形态（实测漏网："她低头笑了笑，然后转过身看着窗外"）
+  if (_punctCount >= 1 && /[我你她他]/.test(value)) return false;
+  // ② 口语/助词密度 >15% ⇒ 叙述文体
+  if (value.length > 20) {
+    const _oralCount = (value.match(/[我你她他了的着吗呢吧啊呀得]/g) || []).length;
+    if (_oralCount / value.length > 0.15) return false;
+  }
+  // ③ 长度硬上限 40 字 —— 档案字段值是名词短语；实测漏网的整段对话约 50 字
+  //    且无代词、句读分散，只能靠长度兜底。长文本应走 dossier 结构化字段。
+  if (value.length > 40) return false;
+
+  // ── source 通道：来源元数据不得是对话原文 ──
+  //   （新写入的 source 已是「标识 | ISO时间 | ev:哈希」，正常不会命中；
+  //    此校验是为了拦住任何仍按旧方式传原文的调用方，以及存量回填脚本）
+  if (source) {
+    if (/^(用户|玉瑶|我|她|他)\s*[:：]/.test(source)) return false;
+    if (/用户[\s\S]{1,80}玉瑶|玉瑶[\s\S]{1,80}用户/.test(source)) return false;
+    if (/\n/.test(source)) return false;
+  }
+
   return value.trim().length >= 2 && value.trim().length <= 100;
 }
 
@@ -1179,7 +1225,7 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /** V4.0: 脏名称清洗 + 占位升级（每日维护挂钩） */
-  runDailyHouseholdMaintenance(): { dirtyNames: number; placeholders: number; lifecycle: number } {
+  runDailyHouseholdMaintenance(): { dirtyNames: number; placeholders: number; lifecycle: number; pendingExpired: number } {
     const dirtyResult = this.cleanDirtyNames();
     const placeholderResult = this.promotePlaceholders();
     let lifecycleResult = 0;
@@ -1218,7 +1264,47 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
       }
     } catch { /* ignore */ }
-    return { dirtyNames: dirtyResult.cleaned, placeholders: placeholderResult.upgraded, lifecycle: lifecycleResult };
+
+    // ════════════════════════════════════════════════════════════
+    // 🔴 C 止血(2026-10-18) · 缓存区生命周期：未确认超 30 天淘汰
+    // ════════════════════════════════════════════════════════════
+    // 实测：1789 条 pendingItems，**已确认 0 条**，只进不出（有人积压 633/744 条）。
+    // 设计意图是「低置信度先放着，攒够证据再晋升」，实际成了永久堆积。
+    // 法规未规定淘汰期限，**业主 2026-10-18 定 N=30 天**。
+    // 保守规则：无时间戳或解析失败的条目**不淘汰**（宁可留着，不误删）。
+    let pendingExpired = 0;
+    try {
+      const PENDING_TTL_DAYS = 30;
+      const cutoff = Date.now() - PENDING_TTL_DAYS * 86_400_000;
+      const rows = this.query("SELECT id, properties FROM nodes WHERE type = 'person'") as Array<{ id: string; properties: string }>;
+      for (const row of rows) {
+        let props: Record<string, unknown>;
+        try { props = JSON.parse(row.properties || '{}'); } catch { continue; }
+        const items = Array.isArray((props as any).pendingItems) ? (props as any).pendingItems as any[] : [];
+        if (items.length === 0) continue;
+        const kept = items.filter((it: any) => {
+          if (it?.confirmed) return true;                      // 已确认的不淘汰
+          const ts = Date.parse(String(it?.timestamp || it?.createdAt || ''));
+          if (!Number.isFinite(ts)) return true;               // 无时间戳 → 保守保留
+          return ts >= cutoff;
+        });
+        if (kept.length !== items.length) {
+          (props as any).pendingItems = kept;
+          this.run(
+            'UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
+            [JSON.stringify(props), new Date().toISOString(), row.id],
+          );
+          pendingExpired += items.length - kept.length;
+        }
+      }
+      if (pendingExpired > 0) {
+        console.log(`[FG Pending] 缓存区淘汰 ${pendingExpired} 条（未确认超 ${PENDING_TTL_DAYS} 天）`);
+      }
+    } catch (e) {
+      console.warn('[FG Pending] 缓存区淘汰异常:', (e as Error)?.message);
+    }
+
+    return { dirtyNames: dirtyResult.cleaned, placeholders: placeholderResult.upgraded, lifecycle: lifecycleResult, pendingExpired };
   }
 
   /**
@@ -4857,7 +4943,9 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (!node) return;
 
     // 🏛️ §12.2: 入库前过滤 — 拦截LLM生成的场景文本
-    if (!_isValidPendingValue(value)) return;
+    // 🔴 C 止血(2026-10-18): 同时校验 source —— 它此前完全不参与校验，
+    //   是 57% 对话原文漏进 pendingItems 的通道。
+    if (!_isValidPendingValue(value, source)) return;
 
     const parsed = node.properties ? JSON.parse(node.properties) : {};
     const pending: PendingItem = {
