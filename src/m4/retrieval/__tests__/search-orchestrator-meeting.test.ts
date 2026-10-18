@@ -21,7 +21,9 @@ function makeSource(rows: any[]) {
     queryAll: vi.fn((sql: string, params?: any[]) => {
       if (sql.includes('julianday') && sql.includes('< 1')) return rows.filter(r => r.recent);
       if (sql.includes('julianday') && sql.includes('>= 1')) return rows.filter(r => !r.recent);
-      if (sql.includes('ORDER BY seq_pos')) return rows.slice(0, 6);
+      // 🔴 2026-10-18 契约更新：最早槽改用真时间序（created_at ASC + seq_pos>0 排除锚点行）——
+      //   旧形状 `ORDER BY seq_pos` 会把负 seq 的锚点（本轮讨论回声）排最前 = 自我污染，已废弃。
+      if (sql.includes('seq_pos > 0') && sql.includes('ORDER BY created_at ASC')) return rows.slice(0, 6);
       return [];
     }),
   };
@@ -80,8 +82,13 @@ describe('MeetingWallAdapter — 会晤隔离墙三槽位', () => {
     // 回忆问句
     const ctx = makeCtx({ query: '你还记得上次我们聊过什么吗' });
     const hits = await adapter.search(ctx);
-    // 最早槽查询应被调用（ORDER BY seq_pos）
-    expect(source.queryAll.mock.calls.some(c => String(c[0]).includes('ORDER BY seq_pos'))).toBe(true);
+    // 最早槽查询应被调用（真时间序：created_at ASC + seq_pos>0 排除锚点回声）
+    expect(source.queryAll.mock.calls.some(c => {
+      const s = String(c[0]);
+      return s.includes('ORDER BY created_at ASC') && s.includes('seq_pos > 0');
+    })).toBe(true);
+    // 不得回退到旧的 seq_pos 序（负 seq 锚点排最前 = 本轮讨论回声污染）
+    expect(source.queryAll.mock.calls.some(c => String(c[0]).includes('ORDER BY seq_pos ASC'))).toBe(false);
     expect(hits.length).toBeGreaterThan(0);
   });
 

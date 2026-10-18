@@ -27,6 +27,7 @@ import {
   recentCalciumRows,
   historyCalciumRows,
   dedupeRowsById,
+  earliestMemoriesByTime,
 } from '../meeting-recall.js';
 import type { RecallMemoryRow } from '../meeting-recall.js';
 
@@ -70,12 +71,10 @@ export class MeetingWallAdapter implements RetrievalAdapter {
     }
 
     // ── 回忆/续聊触发 → 最早槽（共享统一触发正则，含续聊引导） ──
+    // 🔴 2026-10-18 修正：原内联 `ORDER BY seq_pos ASC` 取到的是本轮讨论锚点
+    //   （锚点 seq 为负排最前 = 自我污染回声）；收编到真源 earliestMemoriesByTime。
     if (RECALL_TRIGGER_RE.test(ctx.query)) {
-      const earlyRows = this.source.queryAll<any>(
-        `SELECT id, raw_input, calcium_score, effective_strength, created_at FROM memories
-         WHERE belong_entity_uuid = ? ORDER BY seq_pos ASC LIMIT 6`,
-        [entityUuids[0]],
-      ) || [];
+      const earlyRows = earliestMemoriesByTime(this.source, entityUuids[0], 6) || [];
       entityMems = [...entityMems, ...earlyRows];
     }
 

@@ -30,6 +30,8 @@ import {
   //   （兑底取最早 6 条 = 时间轴头，事件在中段；历史槽按钙化序取 2 够不到）。
   //   补为第四召回通道，真源在 meeting-recall.ts（与另三通道同源）。
   anchorRecallByKeywords,
+  // 🔴 2026-10-18 真·最早记忆（时间轴兜底修正，同上单源原则）。
+  earliestMemoriesByTime,
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
@@ -287,12 +289,10 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         let _entityMems = [..._recentRows, ..._histRows];
         if (_isRecallQuestion) {
           // 回忆问句: 追加最早 6 条（时间轴兜底，早期低钙化记忆此时才可被召回）
-          const _earlyRows = _sqlite.queryAll(
-            `SELECT id, raw_input, calcium_score, effective_strength, perception_40d FROM memories
-             WHERE belong_entity_uuid = ?
-             ORDER BY seq_pos ASC LIMIT 6`,
-            [_entityUuid]
-          ) || [];
+          // 🔴 2026-10-18 修正：原内联 `ORDER BY seq_pos ASC` 实际取到本轮讨论锚点
+          //   （锚点 seq 为负排最前 = 自我污染回声）；收编到真源 earliestMemoriesByTime
+          //   （created_at ASC + seq_pos>0 排除锚点），与锚点通道远端语义统一。
+          const _earlyRows = earliestMemoriesByTime(_sqlite, _entityUuid, 6) || [];
           _entityMems = [..._entityMems, ..._earlyRows];
           // 🔴 锚点事件召回（第四通道）已移至下方 _topicKw 打分之后统一接线 ——
           //   生抽前4 会被句首噪声词（我们/们能/能在/在一）挤掉事件词（第一/一次），

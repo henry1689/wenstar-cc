@@ -144,10 +144,30 @@ describe('S3/S4 — 隐私权威与自信回忆铁律（能力断言）', () => 
     expect(fnBody).not.toMatch(/calcium_score DESC/);
   });
 
-  it('S6: 时间注入必须带语义护栏（过去时间从记忆答，不得报当前时间）——core-rules 与会晤路径成对', () => {
+  it('S6: 时间注入必须是环境元数据定性（非对话内容/禁复述）——core-rules/会晤路径/chat.ts 三处成对', () => {
     const crSrc = readFileSync(join(REPO, 'src', 'm5', 'prompts', 'core-rules.ts'), 'utf8');
-    expect(crSrc).toMatch(/不得把此时间当答案报出/);
-    // 会晤路径（EntityContextBuilder）同源护栏
-    expect(ecbSrc).toMatch(/绝不能把这行时间当答案报出去/);
+    // 轮4根治：陈述句（现在是X）→ 元数据字段（元数据≠素材，禁复述）+ 正面替代（当下问句可答/过去从记忆答）
+    //   轮3实锤：负面禁令敌不过"现在是X"陈述句的模式匹配（问什么时候开始叫妈 → 答手机时间）
+    expect(crSrc).toMatch(/非对话内容，禁复述此行/);
+    // 会晤路径（EntityContextBuilder）同源定性（轮4报时实际发生路径）
+    expect(ecbSrc).toMatch(/非对话内容，禁复述/);
+    expect(ecbSrc).toMatch(/问\*\*过去\*\*的日期\/时间/);
+    // chat.ts timeGuard 第三处同源
+    expect(chatSrc).toMatch(/环境数据·当前时间（非对话内容，禁复述）/);
+  });
+
+  it('S7: 时间轴兑底必须用真时间序且排除锚点行（锚点 seq 为负，seq ASC = 本轮讨论回声）', () => {
+    const mrSrc = readFileSync(join(REPO, 'src', 'm4', 'retrieval', 'meeting-recall.ts'), 'utf8');
+    // 真源函数：created_at ASC + seq_pos > 0（排除负 seq 锚点）
+    expect(mrSrc).toMatch(/export function earliestMemoriesByTime/);
+    const fnStart = mrSrc.indexOf('export function earliestMemoriesByTime');
+    const fnBody = mrSrc.substring(fnStart, fnStart + 800);
+    expect(fnBody).toMatch(/seq_pos > 0/);
+    expect(fnBody).toMatch(/created_at ASC LIMIT \?/);
+    // 两处调用方必须收编到真源（不得再内联 seq_pos ASC）
+    expect(retrievalSrc).toMatch(/earliestMemoriesByTime\(_sqlite, _entityUuid, 6\)/);
+    expect(wallSrc).toMatch(/earliestMemoriesByTime\(this\.source, entityUuids\[0\], 6\)/);
+    expect(retrievalSrc).not.toMatch(/ORDER BY seq_pos ASC LIMIT 6/);
+    expect(wallSrc).not.toMatch(/ORDER BY seq_pos ASC LIMIT 6/);
   });
 });

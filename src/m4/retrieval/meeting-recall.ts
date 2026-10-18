@@ -290,6 +290,32 @@ export function keywordRecallMemories(
 }
 
 /**
+ * 回忆问句·真·最早记忆（时间轴兑底，2026-10-18 修正）
+ * ============================================================
+ * 实测缺陷（阿珍压测轮4）：原兑底 `ORDER BY seq_pos ASC LIMIT 6` 取到的是
+ *   **本轮对话自己的 5 条讨论锚点**（锚点 seq_pos 为负数 —— ADR-010 设计：锚点 seq = -首轮seq，
+ *   负数在 ASC 序中排最前）—— 所谓"最早"实际是"最新讨论回声"，自我污染回路的第二条通道；
+ *   且 legacy 行 seq 是 epoch-ms（1785990288000），seq 序 ≠ 时间序。
+ * 修正：按**真实时间序**（created_at ASC）+ 排除锚点行（seq_pos > 0）——
+ *   与 anchorRecallByKeywords 远端（ASC 原始事件）语义统一：时间轴兑底只供过去，不供当前对话回声。
+ * 单源原则：retrieval-stage 与 MeetingWallAdapter 共用本函数（防同构分叉）。
+ */
+export function earliestMemoriesByTime(
+  src: RecallSource,
+  entityUuid: string,
+  limit = 6,
+): RecallMemoryRow[] {
+  return (
+    src.queryAll(
+      `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
+       WHERE belong_entity_uuid = ? AND seq_pos > 0
+       ORDER BY created_at ASC LIMIT ?`,
+      [entityUuid, limit],
+    ) || []
+  ) as RecallMemoryRow[];
+}
+
+/**
  * 回忆问句·锚点事件召回（2026-10-18，业主批准结构化改善）
  * ============================================================
  * 实测缺陷（阿珍压测）：问"还记得我俩的第一次吗"→ 她只敢说日期，细节靠用户提示才说出。

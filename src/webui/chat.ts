@@ -1671,7 +1671,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
       console.log(`[PromptDepth] depth=${_depth} meeting=${!!_meetingEntityName} topicShift=${isTopicShift} casual=${isCasualChat} factual=${isFactualRecallQuery}`);
     }
 
-    const timeGuard = `[当前时间] ${beijingTime}（北京时间）${lunarDate ? ' 农历' + lunarDate : ''}——回答**当下**时间、日期、节气、节日问题必须以此为准，不能编造。鸿艺若问**过去**的日期/时间（如"什么时候开始的""哪天"），从记忆里答，不得把此时间当答案报出。`;
+    const timeGuard = `[环境数据·当前时间（非对话内容，禁复述）] ${beijingTime}${lunarDate ? ' 农历' + lunarDate : ''}——行动/昼夜/季节、回答**当下**时间日期节气节日以此为准。鸿艺问**过去**的日期/时间（如"什么时候开始的""哪天"）→ 从记忆里答，不得复述本行。`;
 
     // 通用幻觉防护：禁止编造过去事件、日期、用户生活细节
     // 🔴 S2-M1: 系统级铁律 — "共同过去"法定分界线，对所有实体/所有模式生效。
