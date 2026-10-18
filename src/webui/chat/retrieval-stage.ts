@@ -294,15 +294,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             [_entityUuid]
           ) || [];
           _entityMems = [..._entityMems, ..._earlyRows];
-          // 🔴 2026-10-18 锚点事件召回（第四通道）：时间轴兜底只够头，事件在中段 ——
-          //   按问句关键词直取闭组 ANCHOR（事件浓缩载体，含完整 Q+A 语境），
-          //   补上「还记得X吗」结构性取不到事件素材的洞（阿珍压测实锤）。
-          const _anchorKws = extractTopicKeywords(message, [], 4);
-          const _anchorRows = anchorRecallByKeywords(_sqlite, _entityUuid, _anchorKws, 4);
-          if (_anchorRows.length > 0) {
-            _entityMems = [..._anchorRows, ..._entityMems];
-            console.log(`[EntityMem·回忆锚点] 关键词 ${_anchorKws.join('/')} 召回 ${_anchorRows.length} 条事件锚点前置注入`);
-          }
+          // 🔴 锚点事件召回（第四通道）已移至下方 _topicKw 打分之后统一接线 ——
+          //   生抽前4 会被句首噪声词（我们/们能/能在/在一）挤掉事件词（第一/一次），
+          //   必须消费打分后的关键词（候选20 → 对库验证 → 取有命中的前4）。
         }
         // 去重
         const _seenMId = new Set<string>();
@@ -411,6 +405,20 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             ' → 采用 [' + _topicKw.join('/') + ']');
         } catch (_kw2e) { /* 校验失败→回退原前4 */ }
         if (_topicKw.length > 0) {
+          // 🔴 2026-10-18 锚点事件召回（第四通道，统一接线在打分词之后）：
+          //   与 keywordRecallMemories 消费**同一份打分词**（候选20 → 对库验证 → 取有命中的前4），
+          //   确保「还记得第一次吗」中的「第一/一次」不被句首噪声词挤掉。
+          //   压测实锤：生抽前4=[我们/们能/能在/在一] 零命中；打分后=[你还/在一/第一/一次] 命中事件锚点。
+          //   时间轴兜底只够头、事件在中段 —— 闭组 ANCHOR（事件浓缩载体）是回忆问句的正确素材形态。
+          if (_isRecallQuestion) {
+            try {
+              const _anchorRows = anchorRecallByKeywords(_sqlite, _entityUuid, _topicKw, 4);
+              if (_anchorRows.length > 0) {
+                _entityMems = [..._anchorRows, ..._entityMems];
+                console.log(`[EntityMem·回忆锚点] 关键词 ${_topicKw.join('/')} 召回 ${_anchorRows.length} 条事件锚点前置注入`);
+              }
+            } catch (_ake) { /* 锚点通道失败不阻塞主召回 */ }
+          }
           try {
             // 🔴 P0-1：关键词路的时间窗与砂金库兜底同源（原来是硬编码当日 <1 天，
             //   隔天提起话题时够不到 —— 与"四条通道都不覆盖 1 天以上"是同一个洞）
