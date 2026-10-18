@@ -350,7 +350,68 @@ CREATE INDEX IF NOT EXISTS idx_dg_hash     ON dialog_groups(scene_anchor_hash);
 
 ---
 
-## 十一、留待后续（不在本 ADR 范围）
+## 十一、T002 Phase 1 增补：block_summary 与摘要索引（2026-10-18）
+
+### 12.1 背景
+
+本 ADR §一 的决策是「块 = 它那些 conversations 的聚合 ⇒ 同一份索引换个 GROUP BY 即可」，
+因此**没有**为 `dialog_group` 单独建索引。该结论对「块正文」成立，但对**摘要**不成立：
+
+- 摘要是 LLM 从对话中提炼出的**新增内容**，不是 conversations 的任何一行；
+- 若只把摘要写进 `block_summary`、不建索引，则「原文无字面命中、只有摘要能命中」的查询
+  （例：用户问「上次想去哪玩」，原文只有地名、没有「玩」字）永远召不回该组；
+- 这样 B 链路就只剩「展示」功能，失去召回意义。
+
+### 12.2 决策
+
+1. **摘要单独建 n-gram 索引**：`search_index.source_type = 'dialog_group'`，
+   `source_id = dialog_group_id`。索引文本 = `BlockSummaryService` 生成的三层摘要。
+2. **双通道召回**：`DialogGroupAdapter` 的候选集 = conversations 原文命中 ∪ 摘要命中。
+3. **排序权重**（业主确认，2026-10-18）：
+   `score = convDensity×0.40 + summaryDensity×0.30 + bothChannels×0.15 + calcium×0.15`
+   - `convDensity = min(1, 原文命中轮数 / turn_count)`
+   - `summaryDensity = min(1, 摘要命中 n-gram 条数 / 10)`
+   - `bothChannels = 原文与摘要同时命中的共振加分`
+   - 纯原文最高 0.55，纯摘要最高 0.45 —— 摘要命中略低于原文，但足以进入候选集。
+4. **注入**：命中块的 `hit.text` 前置 `【摘要】…`，`payload.summary` 同时暴露结构化字段。
+
+### 12.3 Schema 变更（migration v20）
+
+`dialog_groups` 新增 `summary_state TEXT`：
+
+| 值 | 含义 |
+|---|---|
+| `NULL` / `''` | 待生成（后台扫描条件） |
+| `done` | 已生成，`block_summary` 非空 |
+| `skipped` | 组文本 < 120 字符，不值得消耗 token；仍可走原文通道召回 |
+| `failed` | 连续失败达 3 次；仍可走原文通道召回 |
+
+**不复用 `block_summary` 做占位符**：否则检索侧会把 `__GENERATING__` 之类的哨兵当正文注入。
+
+### 12.4 生成时机与成本
+
+- 闭组热路径**只写 NULL**，零阻塞（`dialog-group-stage.ts` 不变）。
+- `BlockSummaryService` 后台每 5 分钟扫描一批（默认 50 组），无待处理组时**零 LLM 调用**
+  （合「Harness 零 LLM 监控」铁律）。
+- 断点续传靠数据库扫描条件，不依赖内存队列；进程重启自动接着跑。
+- 实测规模：680 组、平均 2.15 轮/组、组均约 1006 字符 ⇒ 总输入约 50 万 token 量级。
+
+### 12.5 索引体积
+
+摘要约 80~150 字/组，`buildNgrams` 去重后约 60~120 条/组 ⇒ 680 组约 **4~8 万行**，
+相对现有 `search_index` 191.6 万行增量约 **2~4%**（业主评估：可接受）。
+n-gram 查询是 O(命中数)，总行数增加不线性拖慢查询。
+
+### 12.6 验收
+
+- `tsc --noEmit` exit 0；
+- 抽样 **≥30 组**，且覆盖全部五类闭组原因：
+  `topic_switch`(626) / `meeting_exit`(30) / `idle_timeout`(16) / `unknown`(5) / `meeting_entry`(3)；
+- 构造「摘要命中但原文不命中」的查询，验证该组能进入候选集。
+
+---
+
+## 十二、留待后续（不在本 ADR 范围）
 
 | 项 | 说明 |
 |---|---|

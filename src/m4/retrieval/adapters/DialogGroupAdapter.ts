@@ -42,18 +42,29 @@ const MAX_TERMS = 40;
 const TEXT_ROUNDS = 6;
 /** hit.text 截断长度（与 ConversationAdapter 的 150 对齐） */
 const TEXT_MAX = 300;
+/**
+ * 摘要通道命中归一化基准（T002 Phase 1）。
+ * 摘要命中数的是 n-gram 条数（一个几十字的摘要可命中十几条），与原文通道的「命中轮数」量纲不同。
+ * 命中 10 条即视为满分相关 —— 取 10 的依据：摘要约 80~150 字，buildNgrams 去重后通常 60~120 条，
+ * 查询词能命中 10 条已属强相关。
+ */
+const SUMMARY_HIT_NORM = 10;
 
 /** 块候选行（内层聚合结果） */
 export interface DialogGroupCandidateRow {
   dg_id: string;
   uuid: string | null;
   matched_rows: number;
+  /** 摘要通道命中的 n-gram 条数（0 = 原文通道命中 / 无摘要） */
+  summary_matched: number | null;
   last_ts: string | null;
   calcium: number | null;
   tag: string | null;
   hash: string | null;
   turns: number | null;
   reason: string | null;
+  /** block_summary（三层摘要），可能为 NULL（未生成/跳过/失败） */
+  summary: string | null;
 }
 
 /** 块正文行 */
@@ -85,16 +96,27 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       const limit = Number(ctx.limit) > 0 ? Math.floor(Number(ctx.limit)) : 3;
       const phs = terms.map(() => '?').join(',');
 
-      // ── ① 块候选：内层只暴露 conversations（police 在此作用，无歧义）──
+      // ── ① 块候选：双通道 = 原文命中 ∪ 摘要命中（T002 Phase 1）──
+      //   通道① conversations 原文命中（police 在此作用，无歧义）。
+      //   通道② search_index 里 source_type='dialog_group' 的摘要命中。
+      //   🔴 这是 B 链路的核心价值：原文没有字面命中、只有摘要能命中时，该组也必须进候选；
+      //      否则「上次聊过想去哪玩」这类问法永远召不回那一组。
+      //   police 在通道②作用于 dialog_groups（别名 g2）—— search_index 本身也有同名列
+      //   belong_entity_uuid，故先把 search_index 投影成只含 (term, source_id) 的子查询，
+      //   避免 ambiguous column 错误（与文件头「户籍过滤放在子查询」同一姿势）。
       const cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
-        `SELECT sub.dg_id AS dg_id, sub.uuid AS uuid, sub.matched_rows AS matched_rows,
-                sub.last_ts AS last_ts, g.block_calcium_score AS calcium,
-                g.narrative_tag AS tag, g.scene_anchor_hash AS hash,
-                g.turn_count AS turns, g.block_close_reason AS reason
+        `SELECT u.dg_id AS dg_id, MAX(u.uuid) AS uuid,
+                SUM(u.matched_rows) AS matched_rows,
+                SUM(u.summary_matched) AS summary_matched,
+                MAX(u.last_ts) AS last_ts,
+                g.block_calcium_score AS calcium, g.narrative_tag AS tag,
+                g.scene_anchor_hash AS hash, g.turn_count AS turns,
+                g.block_close_reason AS reason, g.block_summary AS summary
          FROM (
            SELECT dialog_group_id AS dg_id,
                   MAX(belong_entity_uuid) AS uuid,
                   COUNT(*) AS matched_rows,
+                  0 AS summary_matched,
                   MAX(timestamp) AS last_ts
            FROM conversations
            WHERE dialog_group_id IS NOT NULL
@@ -104,11 +126,26 @@ export class DialogGroupAdapter implements RetrievalAdapter {
                WHERE source_type = 'conversation' AND term IN (${phs})
              )${police.clause}
            GROUP BY dialog_group_id
-         ) sub
-         LEFT JOIN dialog_groups g ON g.dialog_group_id = sub.dg_id
-         ORDER BY sub.matched_rows DESC, COALESCE(g.block_calcium_score, 0) DESC
+           UNION ALL
+           SELECT g2.dialog_group_id AS dg_id,
+                  g2.belong_entity_uuid AS uuid,
+                  0 AS matched_rows,
+                  COUNT(*) AS summary_matched,
+                  g2.last_ts AS last_ts
+           FROM dialog_groups g2
+           JOIN (
+             SELECT term, source_id FROM search_index
+             WHERE source_type = 'dialog_group'
+           ) s ON s.source_id = g2.dialog_group_id
+           WHERE s.term IN (${phs})${police.clause}
+           GROUP BY g2.dialog_group_id
+         ) u
+         LEFT JOIN dialog_groups g ON g.dialog_group_id = u.dg_id
+         GROUP BY u.dg_id
+         ORDER BY SUM(u.matched_rows) DESC, SUM(u.summary_matched) DESC,
+                  COALESCE(g.block_calcium_score, 0) DESC
          LIMIT ?`,
-        [...terms, ...police.params, limit],
+        [...terms, ...police.params, ...terms, ...police.params, limit],
       );
       if (cands.length === 0) return Promise.resolve([]);
 
@@ -131,18 +168,34 @@ export class DialogGroupAdapter implements RetrievalAdapter {
 
       const hits: SearchHit[] = cands.map((c) => {
         const dgId = String(c.dg_id);
-        const body = (textMap.get(dgId) || []).join(' ').replace(/\s+/g, ' ').trim().substring(0, TEXT_MAX);
+        const summary = String(c.summary || '').trim();
+        const bodyRaw = (textMap.get(dgId) || []).join(' ').replace(/\s+/g, ' ').trim();
+        // 注入：摘要前置到正文，模型先看到「这段对话讲什么」，再看原文细节
+        const body = (summary ? `【摘要】${summary} ${bodyRaw}` : bodyRaw).substring(0, TEXT_MAX);
+
         const matched = Number(c.matched_rows) || 0;
+        const summaryMatched = Number(c.summary_matched) || 0;
         const turns = Number(c.turns) || 0;
-        // 路内分：命中轮次占比（块内多少轮与查询相关）× 块钙分归一。
-        // RRF 只看排名，此处分数只用于路内排序的可解释性。
-        const density = turns > 0 ? Math.min(1, matched / turns) : 0;
+
+        // 双通道打分（业主 2026-10-18 确认）：
+        //   原文密度 0.40 / 摘要密度 0.30 / 双通道共振 0.15 / 钙分 0.15 = 1.00（天然归一化）。
+        //   单通道时：纯原文最高 0.55，纯摘要最高 0.45 —— 摘要命中略低于原文命中，
+        //   但足以让「只有摘要能命中」的组进入候选集（这正是 B 链路存在的意义）。
+        //   RRF 只看排名，此分数用于路内排序的可解释性。
+        const convDensity = turns > 0 ? Math.min(1, matched / turns) : 0;
+        const summaryDensity = Math.min(1, summaryMatched / SUMMARY_HIT_NORM);
+        const bothChannels = matched > 0 && summaryMatched > 0 ? 1 : 0;
         const calcium = Math.min(1, (Number(c.calcium) || 0) / 10);
+        const score =
+          Math.round(
+            (convDensity * 0.40 + summaryDensity * 0.30 + bothChannels * 0.15 + calcium * 0.15) * 1000,
+          ) / 1000;
+
         return {
           id: dgId,
           domain: 'dialog_group' as const,
           text: body,
-          score: Math.round((density * 0.6 + calcium * 0.4) * 1000) / 1000,
+          score,
           route: 'dialog_group' as const,
           entityUuid: c.uuid ?? null,
           calciumScore: Number(c.calcium) || 0,
@@ -153,6 +206,8 @@ export class DialogGroupAdapter implements RetrievalAdapter {
             turnCount: turns,
             blockCloseReason: c.reason ?? null,
             matchedRows: matched,
+            summaryMatchedRows: summaryMatched,
+            summary: summary || null,
           },
           backref: { table: 'dialog_groups', id: dgId },
         };

@@ -752,6 +752,92 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v18 → v19: 业主 2026-10-15 批准 A+C —— 清理 idx_si_term 存量（schema.sql 断根的配套半边）
+  {
+    version: 19,
+    description: 'C 索引瘦身: 删除 search_index.term 冗余索引存量（schema.sql 已同步断根）',
+    apply: (db: any) => {
+      // 🔴 为什么 v15 删过一次还要再删（2026-10-15 S1 实测）：
+      //   `SQLiteAdapter` 启动顺序是 **先跑 schema.sql DDL（每次都跑）→ 再跑 migrateSchema（每版本一次）**。
+      //   v15 于 2026-09-25 02:25:34 执行成功、idx_search_* 已永久消失，**但 idx_si_term 至今仍在库里** ——
+      //   对照证明重建路径就是 `schema.sql:282` 的 `CREATE INDEX IF NOT EXISTS idx_si_term`。
+      //   实测该索引占 48MB / 全库 329MB = 14.7%；主键最左前缀 term 已等效覆盖（v15 副本实测召回计划等效）。
+      //   本次两处同改：schema.sql 删定义（断根）+ 本迁移删存量（清债）。
+      //
+      // 🔴 只删索引、绝不删业务数据：DROP INDEX 不触碰 search_index 行，n-gram 召回主查询
+      //   (idx_si_source / 主键前缀) 全部保留 ⇒ 与「有用信息只增不删」红线无冲突（删的是结构开销）。
+      //
+      // 幂等：`DROP INDEX IF EXISTS` 可重复执行；schema_version 已到 19 时本步整体跳过。
+      const _drop = (name: string): void => {
+        try {
+          db.run(`DROP INDEX IF EXISTS ${name}`);
+          console.log(`[Migration] v19 ✅ 已删除冗余索引 ${name}`);
+        } catch (e) {
+          console.warn(`[Migration] v19 删除 ${name} 失败（非致命，留存检查）:`, (e as Error)?.message);
+        }
+      };
+      const _has = (name: string): boolean => {
+        try { return db.exec(`SELECT 1 FROM sqlite_master WHERE type='index' AND name='${name}'`).length > 0; }
+        catch { return false; }
+      };
+      // 保留守卫：idx_si_source 承担 (source_type, source_id) 查找路径，任何情况下不删
+      if (!_has('idx_si_source')) {
+        console.warn('[Migration] v19 ⚠️ idx_si_source 不存在 —— 不删除任何索引（防丢失 source_id 查找路径）');
+        return;
+      }
+      if (_has('idx_si_term')) {
+        _drop('idx_si_term');
+        // 索引 48MB 需要整库重排才真正归还磁盘；sql.js 的 db.export() 每次落盘都全量重建文件，
+        // 故下一次 save() 即生效（无需显式 VACUUM，也避免 VACUUM 在 329MB 库上卡住启动）。
+        try {
+          const pages = db.exec('PRAGMA page_count');
+          console.log(`[Migration] v19 page_count=${pages?.[0]?.values?.[0]?.[0] ?? '?'}（索引已删，落盘后归还空间）`);
+        } catch { /* 仅观测，不阻断 */ }
+      } else {
+        console.log('[Migration] v19 idx_si_term 不存在（已清理），无需处理');
+      }
+      // 历史同族冗余索引一并兜底（schema.sql 从未定义，但老库可能残留）
+      _drop('idx_search_term');
+    },
+  },
+
+  // v19 → v20: T002 Phase 1 —— 对话组摘要生成状态（B 链路）
+  {
+    version: 20,
+    description: 'T002 Phase1: dialog_groups 增加 summary_state（NULL=待生成 / done / skipped / failed）',
+    apply: (db: any) => {
+      // 🔴 独立状态列，不复用 block_summary 占位：
+      //   若用 '__GENERATING__' 之类的哨兵写进 block_summary，检索侧会把占位符当正文注入。
+      //   summary_state 只表达「生成进度」，block_summary 只存真实摘要，两者职责不重叠。
+      //
+      // 值域：
+      //   NULL/''  待生成（后台 BlockSummaryService 的扫描条件）
+      //   done     已生成（block_summary 非空）
+      //   skipped  组内文本过短，不值得消耗 token；仍可通过原文通道召回
+      //   failed   连续失败达上限；仍可通过原文通道召回
+      //
+      // 幂等：sql.js 对重复 ADD COLUMN 会抛错，先查 PRAGMA 再决定。
+      let existed = false;
+      try {
+        const cols = db.exec('PRAGMA table_info(dialog_groups)') as Array<{ values?: unknown[][] }>;
+        existed = !!cols?.[0]?.values?.some((r) => String(r?.[1]) === 'summary_state');
+      } catch { /* 表尚未建立时走下面的 ADD 分支 */ }
+
+      if (existed) {
+        console.log('[Migration] v20 summary_state 已存在，跳过');
+        return;
+      }
+      try {
+        db.run('ALTER TABLE dialog_groups ADD COLUMN summary_state TEXT');
+        // 后台扫描条件是 block_summary IS NULL AND summary_state 为空，索引帮助定位待生成组
+        db.run('CREATE INDEX IF NOT EXISTS idx_dg_summary_state ON dialog_groups(summary_state)');
+        console.log('[Migration] v20 ✅ dialog_groups.summary_state 已添加');
+      } catch (e) {
+        console.warn('[Migration] v20 添加 summary_state 失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

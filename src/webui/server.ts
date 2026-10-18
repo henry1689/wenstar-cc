@@ -769,6 +769,24 @@ async function initPipeline(): Promise<void> {
     pae = undefined;
   }
 
+  // ── T002 Phase 1: B 链路对话组摘要后台生成 ──
+  // 闭组热路径仍只写 NULL；本服务后台扫描待生成组，空闲时零 LLM 调用。
+  // 装配失败不影响主链路（摘要缺失只让 B 链路少一条召回通道，原文通道照常工作）。
+  try {
+    const { BlockSummaryService } = await import('../app/memory/BlockSummaryService.js');
+    const blockSummarySvc = new BlockSummaryService({
+      getSql: () => storage?.getSQLite?.() ?? null,
+      rawCall: async (messages, maxTokens, temperature) => {
+        if (!llmProvider?.rawCall) throw new Error('SUMMARY_LLM_UNAVAILABLE（LLM 未就绪）');
+        return llmProvider.rawCall(messages as any, maxTokens ?? 400, temperature ?? 0.2);
+      },
+    });
+    blockSummarySvc.start();
+    console.log('  对话组摘要 (BlockSummaryService) 已装配 ✓  (后台异步，空闲零调用)');
+  } catch (e: any) {
+    console.warn('  ⚠️ 对话组摘要装配失败（不影响主链路）:', e?.message || e);
+  }
+
   // 🔴 2026-08-24 LLM识别方案: FG 关系 LLM 提取（24h 节流，读最近对话批量提取一次；不用对话热路径防耗 token）
   try {
     const { FGRelationExtractor } = await import('../app/fg/FGRelationExtractor.js');
@@ -1660,13 +1678,16 @@ async function handleUserMessage(message: string, clientMsgId?: string | null, t
 /** SSE 客户端上限 */
 const MAX_SSE_CLIENTS = 100;
 
-/** 🛡️ 音频文件自动清理: 保留最近 500 个（S4 P2-8：长文分段播报单条回复可达 ~12 个 mp3），其余删除 */
+/** 🛡️ 音频文件自动清理: 保留最近 500 个（S4 P2-8：长文分段播报单条回复可达 ~12 个音频段），其余删除。
+ *   V26: 引擎产出格式随引擎而定（edge→.mp3 / sapi→.wav），故按扩展名集合过滤，
+ *        否则非 .mp3 的产物会永久堆积、并把成功记录挤出「最近 500 个」窗口。 */
+const TTS_AUDIO_EXTS = ['.mp3', '.wav'];
 function cleanupOldAudioFiles(): void {
   try {
     const audioDir = path.join(DATA_DIR, 'audio');
     if (!existsSync(audioDir)) return;
     const files = readdirSync(audioDir)
-      .filter((f: string) => f.startsWith('tts_') && f.endsWith('.mp3'))
+      .filter((f: string) => f.startsWith('tts_') && TTS_AUDIO_EXTS.some((e) => f.endsWith(e)))
       .sort()
       .reverse(); // 最新在前
     if (files.length <= 500) return;
