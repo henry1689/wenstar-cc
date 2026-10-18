@@ -170,4 +170,27 @@ describe('S3/S4 — 隐私权威与自信回忆铁律（能力断言）', () => 
     expect(retrievalSrc).not.toMatch(/ORDER BY seq_pos ASC LIMIT 6/);
     expect(wallSrc).not.toMatch(/ORDER BY seq_pos ASC LIMIT 6/);
   });
+
+  it('S8: 记忆注入必须携带时间坐标（数据层时间 100% 在库，注入层不得再剥除）——T003扩容', () => {
+    // 单源格式化函数存在：当年 `·MM-DD`，跨年 `·YYYY-MM-DD`，无时间回退旧标签
+    expect(retrievalSrc).toMatch(/function memFragWithTime\(label: string, body: string, createdAt/);
+    // 主通道（近期/历史/锚点/最早槽汇流）必须接时间标注
+    expect(retrievalSrc).toMatch(/memFragWithTime\(_meetingEntityName \+ '的记忆', _t, _em\.created_at\)/);
+    // 砂金重要记忆 SQL 必须带出 created_at（否则该通道无时间可用）
+    expect(retrievalSrc).toMatch(/SELECT raw_input, calcium_level, created_at FROM memories WHERE belong_entity_uuid = \? AND calcium_level >= 2/);
+    // 金库通道接线
+    expect(retrievalSrc).toMatch(/memFragWithTime\('金库记忆', _t, _gr\.created_at\)/);
+    // fail-open：无时间回退旧标签（防坏数据阻塞注入）
+    expect(retrievalSrc).toMatch(/if \(!d \|\| isNaN\(d\.getTime\(\)\)\) return `【\$\{label\}】\$\{body\}`/);
+  });
+
+  it('S8: 未接时间坐标的注入点必须只剩带内生时间语义的（时间检索/长文/作品/反编造指令）', () => {
+    // 【时间检索】自带"昨天/上周"语义；【对话原文】【作品】是长内容（时间坐标价值低、预算敏感）；
+    // 【反编造铁律】是指令非记忆。其余记忆类注入必须全部经 memFragWithTime。
+    const legacyLabelPushes = retrievalSrc.match(/memoryFragments\.push\('【[^']*' \+/g) ?? [];
+    // 允许的遗留（非记忆/带内生时间）：时间检索、对话原文、作品、反编造
+    for (const m of legacyLabelPushes) {
+      expect(m).toMatch(/时间检索|对话原文|作品|反编造/);
+    }
+  });
 });

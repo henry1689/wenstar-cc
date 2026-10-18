@@ -44,6 +44,27 @@ const SANDBOX_RECALL_WINDOW_DAYS = (() => {
   const v = Number(MEMORY_CONFIG.compaction.sandboxRecallWindowDays);
   return Number.isFinite(v) && v > 0 ? v : 7;
 })();
+/**
+ * 记忆片段时间坐标标注（2026-10-18，业主批准 T003 扩容）
+ * ============================================================
+ * 铁律（业主）：对话写入时必须 UUID+40D+DNA 标注 —— 实测执行正常（阿珍 888/888 UUID、
+ *   created_at 100%），但**注入层此前把时间坐标全部剥除**：片段只有【X的记忆】正文，
+ *   模型手里没有任何时间 ⇒ 被问"什么时候"时，prompt 里唯一存在的时间=环境当下时间 ⇒ 只能报当下
+ *   （报时症状的第四层根因 —— 前三轮修措辞/定性/门控都是治标，这层才是"她手里根本没有日期"）。
+ * 修法：注入时带上记忆自身的时间坐标（数据在库、全部召回通道 SQL 已 SELECT，零新增查询）。
+ * 格式：当年 `【X·10-16】`；跨年 `【X·2025-12-31】`；无合法时间回退旧标签（fail-open 不阻塞）。
+ * 预算：每条约 +6 字符，主通道 15 条封顶 ≈ +90 字符，在 V35-C 记忆预算内。
+ */
+function memFragWithTime(label: string, body: string, createdAt?: string | null): string {
+  const d = createdAt ? new Date(createdAt) : null;
+  if (!d || isNaN(d.getTime())) return `【${label}】${body}`;
+  const now = new Date();
+  const mmdd = String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  // 注：createdAt 为 UTC ISO，此处按服务器本地时区（北京）呈现人类日期
+  const tag = d.getFullYear() === now.getFullYear() ? mmdd : d.getFullYear() + '-' + mmdd;
+  return `【${label}·${tag}】${body}`;
+}
+
 /** 砂金库时间窗召回：单次注入条数上限 */
 const SANDBOX_RECALL_LIMIT = (() => {
   const v = Number(MEMORY_CONFIG.compaction.sandboxRecallLimit);
@@ -364,7 +385,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               const _t = String(_oh.text || '').substring(0, 250);
               if (_t.length > 4 && !_orSeen.has(_t.substring(0, 20))) {
                 _orSeen.add(_t.substring(0, 20));
-                memoryFragments.push('【' + _meetingEntityName + '的记忆】' + _t);
+                memoryFragments.push(memFragWithTime(_meetingEntityName + '的记忆', _t, _oh.createdAt));
                 _orInjected++;
               }
               if (_orInjected >= 10) break;
@@ -428,7 +449,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             for (const _kr of _kwRows) {
               const _krt = (_kr.raw_input || '').substring(0, 250);
               if (_krt.length > 4 && !memoryFragments.some((f: string) => f.includes(_krt.substring(0, 20)))) {
-                memoryFragments.push('【' + _meetingEntityName + '的记忆·相关】' + _krt);
+                memoryFragments.push(memFragWithTime(_meetingEntityName + '的记忆·相关', _krt, _kr.created_at));
               }
             }
             if (_kwRows.length > 0) console.log(`[EntityMem·内容相关] 关键词 ${_topicKw.join('/')} 召回 ${_kwRows.length} 条 → 前置注入`);
@@ -467,7 +488,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           const _t = (_em.raw_input || '').substring(0, 250);
           if (_t.length <= 4) continue;
           if (_isLowValueMem(_t)) { _junkSkipped++; continue; }
-          memoryFragments.push('【' + _meetingEntityName + '的记忆】' + _t);
+          memoryFragments.push(memFragWithTime(_meetingEntityName + '的记忆', _t, _em.created_at));
           _injectedMems++;
         }
         if (_junkSkipped > 0) console.log('[EntityMem] 低价值记忆拦截: ' + _junkSkipped + ' 条（注入 ' + _injectedMems + ' 条）');
@@ -504,12 +525,12 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           if (_t.length < 12) continue;
           if (_isLowValueMem(_t)) { _goldSkipped++; continue; }
           if (memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); })) continue;
-          memoryFragments.push('【金库记忆】' + _t);
+          memoryFragments.push(memFragWithTime('金库记忆', _t, _gr.created_at));
           _goldInjected++;
         }
         console.log('[EntityMem] 金库: 候选 ' + _goldRows.length + ' → 注入 ' + _goldInjected + ' 条（拦截低价值 ' + _goldSkipped + '）');
         const _sandRows = _sqlite.queryAll(
-          "SELECT raw_input, calcium_level FROM memories WHERE belong_entity_uuid = ? AND calcium_level >= 2 ORDER BY calcium_score DESC LIMIT 15",
+          "SELECT raw_input, calcium_level, created_at FROM memories WHERE belong_entity_uuid = ? AND calcium_level >= 2 ORDER BY calcium_score DESC LIMIT 15",
           [_entityUuid]
         ) || [];
         let _sandInjected = 0;
@@ -518,8 +539,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           // 🔴 P0-3 修复: 会晤重要记忆截断 80 → 250
           const _t = (_sr.raw_input || '').substring(0, 250);
           if (_t.length > 4 && !_isLowValueMem(_t) && !memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); })) {
-            const _tag = _sr.calcium_level >= 3 ? '💎' : '📌';
-            memoryFragments.push('【' + _tag + '重要记忆】' + _t);
+            const _tag = _sr.calcium_level >= 3 ? '💎重要记忆' : '📌重要记忆';
+            memoryFragments.push(memFragWithTime(_tag, _t, _sr.created_at));
             _sandInjected++;
           }
         }
@@ -569,7 +590,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             if (_sb.length <= 4) continue;
             if (_sandboxUsed + _sb.length > _sandboxBudget) break;   // 子预算封顶
             if (!memoryFragments.some((f: string) => f.includes(_sb.substring(0, 20)))) {
-              memoryFragments.push('【对话·' + _meetingEntityName + '·更早原文】' + _sb);
+              memoryFragments.push(memFragWithTime('对话·' + _meetingEntityName + '·更早原文', _sb, _sh.timestamp));
               _sandboxUsed += _sb.length;
             }
           }
@@ -608,7 +629,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               _seenGroups[_convRows[_ci].dialog_group_id] = true;
               const _t = (_convRows[_ci].content || '').substring(0, 100);
               if (_t.length > 4 && !memoryFragments.some(function(f) { return f.includes(_t.substring(0, 20)); }))
-                _convTopics.push('【对话·' + _meetingEntityName + '】' + _t);
+                _convTopics.push(memFragWithTime('对话·' + _meetingEntityName, _t, _convRows[_ci].timestamp));
             }
             for (let _ti = 0; _ti < _convTopics.length; _ti++) {
               memoryFragments.push(_convTopics[_ti]);
@@ -834,7 +855,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           && (m.record.calcium_level || 0) >= 1
         ).slice(0, _memFinalLimit + 2);
         if (emotionalMemories.length > 0) {
-          memoryFragments.push('【用户曾提到】"' + emotionalMemories[0].record.raw_input?.substring(0, 60) + '"');
+          memoryFragments.push(memFragWithTime('用户曾提到', '"' + (emotionalMemories[0].record.raw_input?.substring(0, 60) ?? '') + '"', emotionalMemories[0].record.created_at));
         }
       } else {
         // 🆕 V8.0: 空实体快速路径 — entity_genes=[] 时跳过复杂多跳，直接用钙化分扫描
@@ -851,7 +872,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             .slice(0, _memFinalLimit);
           if (emotionalMemories.length > 0) {
             const _top = emotionalMemories[0];
-            memoryFragments.push('【回忆】' + (_top.record.raw_input || '').substring(0, 80));
+            memoryFragments.push(memFragWithTime('回忆', (_top.record.raw_input || '').substring(0, 80), (_top.record as any).created_at));
           }
         } else {
         // P1-3: 多跳检索（1度→不足3条升2度）
@@ -942,7 +963,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       if (finalMemories.length > 0) {
         const top = finalMemories[0];
         const userSaid = top.record.raw_input.substring(0, 60);
-        memoryFragments.push('【用户曾提到】"' + userSaid + '"——这是用户以前说的，不记得就说"不太记得了"');
+        memoryFragments.push(memFragWithTime('用户曾提到', '"' + userSaid + '"——这是用户以前说的，不记得就说"不太记得了"', (top.record as any).created_at));
       }
   } catch (err) { console.warn('[EmotionContagion] 检索失败:', err); }
 
@@ -1128,17 +1149,17 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       if (_hasPerson) {
         const _names = dna.entity_genes.filter((g: any) => g.name && g.name.length > 1).map((g: any) => g.name);
         for (const _n of _names.slice(0, 3)) {
-          const _r = _sqlite.queryAll("SELECT detail, content_md FROM vault_log WHERE (detail LIKE ? OR content_md LIKE ?) AND operation='promote'" + _goldUuidFilter + " ORDER BY created_at DESC LIMIT 2", ['%' + _n + '%', '%' + _n + '%', ..._goldUuidParams]);
+          const _r = _sqlite.queryAll("SELECT detail, content_md, created_at FROM vault_log WHERE (detail LIKE ? OR content_md LIKE ?) AND operation='promote'" + _goldUuidFilter + " ORDER BY created_at DESC LIMIT 2", ['%' + _n + '%', '%' + _n + '%', ..._goldUuidParams]);
           _goldRows.push(..._r);
         }
       }
       if (_goldRows.length === 0) {
-        _goldRows = _sqlite.queryAll("SELECT detail, content_md FROM vault_log WHERE content_md IS NOT NULL OR detail IS NOT NULL" + _goldUuidFilter + " ORDER BY created_at DESC LIMIT 5", _goldUuidParams) || [];
+        _goldRows = _sqlite.queryAll("SELECT detail, content_md, created_at FROM vault_log WHERE content_md IS NOT NULL OR detail IS NOT NULL" + _goldUuidFilter + " ORDER BY created_at DESC LIMIT 5", _goldUuidParams) || [];
       }
       for (const _gr of _goldRows.slice(0, _glLimit)) {
         const _t = (_gr.content_md || _gr.detail || '').substring(0, 100);
         if (_t.length > 4 && !memoryFragments.some(f => f.includes(_t.substring(0, 20)))) {
-          memoryFragments.push('【金库记忆】' + _t);
+          memoryFragments.push(memFragWithTime('金库记忆', _t, (_gr as any).created_at));
         }
       }
       if (_goldRows.length > 0) console.log(`[GoldVault] 金库命中 ${Math.min(_goldRows.length, _glLimit)} 条`);
