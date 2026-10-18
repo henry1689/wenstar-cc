@@ -317,7 +317,7 @@ export function anchorRecallByKeywords(
       src.queryAll(
         `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
          WHERE belong_entity_uuid = ? AND id LIKE '%\\_ANCHOR' ESCAPE '\\' AND raw_input LIKE ?
-         ORDER BY calcium_score DESC, created_at DESC LIMIT 1`,
+         ORDER BY calcium_score DESC, created_at DESC LIMIT 3`,
         [entityUuid, `%${kw}%`],
       ) || []
     ) as RecallMemoryRow[];
@@ -325,6 +325,11 @@ export function anchorRecallByKeywords(
       if (!out.some((o) => o.id === r.id)) out.push(r);
     }
   }
+  // 🔴 2026-10-18 压测修正：每关键词 LIMIT 1→3（覆盖优先于排序）——
+  //   原实现四个关键词（是想/第一/一次/第一次）全被同一个高钙锚点（0.86）垄断，
+  //   含日期的低钙事件锚点（0.2）在每个关键词下都排第二 ⇒ 永远进不了注入集（实测）。
+  //   事件召回通道的职责是**把事件素材带回来**，不是再排一次重要性序（那是钙化槽的职责）——
+  //   每词取 3 保证覆盖多样性，总量仍由 limit 封顶（去重循环已保证），不膨胀注入预算。
   return out;
 }
 

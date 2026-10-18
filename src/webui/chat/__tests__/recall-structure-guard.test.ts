@@ -127,4 +127,21 @@ describe('S3/S4 — 隐私权威与自信回忆铁律（能力断言）', () => 
     // 此处只断言其召回仍走共享真源（防再次内联分叉）
     expect(wallSrc).toMatch(/from '\.\.\/meeting-recall\.js'/);
   });
+
+  it('S5: 锚点通道每关键词取 3（覆盖优先，防高钙锚点垄断关键词槽）+ 总量仍由 limit 封顶', () => {
+    const mrSrc = readFileSync(join(REPO, 'src', 'm4', 'retrieval', 'meeting-recall.ts'), 'utf8');
+    // anchorRecallByKeywords 内的 SQL 必须 LIMIT 3（非 1）——压测实锤：四词全被同一 0.86 锚点垄断，
+    // 含日期的 0.2 低钙锚点在每词下都排第二永不可达
+    const fnBody = mrSrc.substring(mrSrc.indexOf('export function anchorRecallByKeywords'));
+    expect(fnBody.substring(0, fnBody.indexOf('export function') > 0 ? fnBody.indexOf('export function') : 1500)).toMatch(/created_at DESC LIMIT 3/);
+    // 去重循环 + out.length >= limit 短路仍在（总量封顶不变）
+    expect(fnBody.substring(0, 1500)).toMatch(/if \(out\.length >= limit\) break;/);
+  });
+
+  it('S6: 时间注入必须带语义护栏（过去时间从记忆答，不得报当前时间）——core-rules 与会晤路径成对', () => {
+    const crSrc = readFileSync(join(REPO, 'src', 'm5', 'prompts', 'core-rules.ts'), 'utf8');
+    expect(crSrc).toMatch(/不得把此时间当答案报出/);
+    // 会晤路径（EntityContextBuilder）同源护栏
+    expect(ecbSrc).toMatch(/绝不能把这行时间当答案报出去/);
+  });
 });
