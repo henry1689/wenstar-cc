@@ -308,28 +308,54 @@ export function anchorRecallByKeywords(
   entityUuid: string,
   keywords: string[],
   limit = 4,
+  settleMinutes = 30,
 ): RecallMemoryRow[] {
   const out: RecallMemoryRow[] = [];
   if (!keywords.length) return out;
+  const settleDays = (Number.isFinite(settleMinutes) && settleMinutes > 0 ? settleMinutes : 30) / 1440;
   for (const kw of keywords) {
     if (out.length >= limit) break;
+    // 🔴 时间分层双端取数（与 P0-1 历史槽分层同款设计语言）：
+    //   近端（沉淀窗后 DESC ×2）：最近的已沉淀讲述；
+    //   远端（ASC ×2）：**原始事件记录**（事件发生当时的闭组锚点，细节最全）。
+    //   中段的近期讨论锚点被刻意排除 —— 它们是"关于回忆的讨论"而非事件本身，
+    //   注入只会强化"记不着"叙事（压测实锤：top3 全是讨论回声，原始事件锚点反而不可达）。
     const rows = (
       src.queryAll(
         `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
          WHERE belong_entity_uuid = ? AND id LIKE '%\\_ANCHOR' ESCAPE '\\' AND raw_input LIKE ?
-         ORDER BY calcium_score DESC, created_at DESC LIMIT 3`,
+           AND julianday('now') - julianday(created_at) > ?
+         ORDER BY created_at DESC LIMIT 2`,
+        [entityUuid, `%${kw}%`, settleDays],
+      ) || []
+    ) as RecallMemoryRow[];
+    const oldRows = (
+      src.queryAll(
+        `SELECT id, raw_input, calcium_score, effective_strength, created_at, perception_40d FROM memories
+         WHERE belong_entity_uuid = ? AND id LIKE '%\\_ANCHOR' ESCAPE '\\' AND raw_input LIKE ?
+         ORDER BY created_at ASC LIMIT 2`,
         [entityUuid, `%${kw}%`],
       ) || []
     ) as RecallMemoryRow[];
-    for (const r of rows) {
+    for (const r of [...rows, ...oldRows]) {
       if (!out.some((o) => o.id === r.id)) out.push(r);
     }
   }
-  // 🔴 2026-10-18 压测修正：每关键词 LIMIT 1→3（覆盖优先于排序）——
-  //   原实现四个关键词（是想/第一/一次/第一次）全被同一个高钙锚点（0.86）垄断，
-  //   含日期的低钙事件锚点（0.2）在每个关键词下都排第二 ⇒ 永远进不了注入集（实测）。
-  //   事件召回通道的职责是**把事件素材带回来**，不是再排一次重要性序（那是钙化槽的职责）——
-  //   每词取 3 保证覆盖多样性，总量仍由 limit 封顶（去重循环已保证），不膨胀注入预算。
+  // 🔴 2026-10-18 压测修正（两轮迭代）：
+  //   第一轮：每关键词 LIMIT 1→3 —— 四词全被同一高钙锚点垄断（覆盖优先于排序）。
+  //   第二轮实测：即使 LIMIT 3，含"第一次"的 10 条锚点全部钙化>0.2，
+  //   日期锚点（0.2）在 calcium DESC 序下排名 11/10 永久不可达。
+  //   根因不是 LIMIT 大小是**排序依据**：事件召回通道的职责是**覆盖**（把事件素材带回来），
+  //   钙化排序是钙化槽的职责 —— 在本通道复用钙化序 = 低钙事件锚点结构性死亡。
+  //   改 ORDER BY created_at DESC：最近讲述优先（最新讲述通常含最全信息，且低钙可达），
+  //   总量仍由 limit 封顶 + 去重循环短路，不膨胀注入预算。
+  // 🔴 2026-10-18 压测第三层根因（沉淀窗）：时间倒序后 top3 全是**本轮压测自己刚产生的
+  //   "记不着"讨论锚点**（压测间隔几分钟内闭组）——原始事件锚点（含日期）仍被挤出，
+  //   且形成自我污染回路：她每说一次"记不着"就生成新锚点，下次召回又强化"记不着"叙事。
+  //   结构本质：记忆通道在供给**当前对话自己的回声**——刚闭组的锚点就是这段对话的摘要，
+  //   已在对话历史里，不该由记忆通道重复注入（重复注入=自我叙事强化）。
+  //   结构判据 = **沉淀窗**（锚点年龄，非内容词表）：记忆通道只供给"过去的沉淀"，
+  //   默认排除 30 分钟内的锚点（与对话组 idle timeout 同尺度）。
   return out;
 }
 

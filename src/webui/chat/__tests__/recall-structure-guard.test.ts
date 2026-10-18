@@ -128,14 +128,20 @@ describe('S3/S4 — 隐私权威与自信回忆铁律（能力断言）', () => 
     expect(wallSrc).toMatch(/from '\.\.\/meeting-recall\.js'/);
   });
 
-  it('S5: 锚点通道每关键词取 3（覆盖优先，防高钙锚点垄断关键词槽）+ 总量仍由 limit 封顶', () => {
+  it('S5: 锚点通道时间分层双端取数（近端沉淀窗后 DESC×2 + 远端 ASC×2 原始事件），总量仍由 limit 封顶', () => {
     const mrSrc = readFileSync(join(REPO, 'src', 'm4', 'retrieval', 'meeting-recall.ts'), 'utf8');
-    // anchorRecallByKeywords 内的 SQL 必须 LIMIT 3（非 1）——压测实锤：四词全被同一 0.86 锚点垄断，
-    // 含日期的 0.2 低钙锚点在每词下都排第二永不可达
-    const fnBody = mrSrc.substring(mrSrc.indexOf('export function anchorRecallByKeywords'));
-    expect(fnBody.substring(0, fnBody.indexOf('export function') > 0 ? fnBody.indexOf('export function') : 1500)).toMatch(/created_at DESC LIMIT 3/);
-    // 去重循环 + out.length >= limit 短路仍在（总量封顶不变）
-    expect(fnBody.substring(0, 1500)).toMatch(/if \(out\.length >= limit\) break;/);
+    const fnStart = mrSrc.indexOf('export function anchorRecallByKeywords');
+    const fnNext = mrSrc.indexOf('\nexport ', fnStart + 10);
+    const fnBody = mrSrc.substring(fnStart, fnNext > 0 ? fnNext : fnStart + 2500);
+    // 近端：沉淀窗排除当前对话回声 + DESC×2
+    expect(fnBody).toMatch(/julianday\('now'\) - julianday\(created_at\) > \?/);
+    expect(fnBody).toMatch(/created_at DESC LIMIT 2/);
+    // 远端：原始事件记录（时间轴最老端）
+    expect(fnBody).toMatch(/created_at ASC LIMIT 2/);
+    // 总量封顶 + 去重短路仍在
+    expect(fnBody).toMatch(/if \(out\.length >= limit\) break;/);
+    // 钙化序必须不在本通道（事件通道职责=覆盖，排序归钙化槽）——防回退
+    expect(fnBody).not.toMatch(/calcium_score DESC/);
   });
 
   it('S6: 时间注入必须带语义护栏（过去时间从记忆答，不得报当前时间）——core-rules 与会晤路径成对', () => {

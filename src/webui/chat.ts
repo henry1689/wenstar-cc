@@ -228,7 +228,10 @@ function _lazyTemporalFire(message: string, ctx: any): void {
   const now = Date.now();
 
   // 🕐 时间查询
-  if (/几点了|时间|几点|现在.*时间|今天.*几号|星期几|什么时候/.test(message)) {
+  // 🔴 2026-10-18 判据结构修正：裸「什么时候」是**事件时间点疑问**（"是什么时候的事"="哪天发生"），
+  //   不是当前时间查询 —— 旧正则把它误判打点，与报时症状同根（把过去时疑问当钟表问题）。
+  //   当前时间查询的形态是「现在什么时候/现在几点」——"什么时候"必须与"现在"同现才成立。
+  if (/几点了|时间|几点|现在.*时间|今天.*几号|星期几|现在什么时候/.test(message)) {
     const deltaMs = now - state.lastQueryTs;
     const deltaStr = deltaMs > 3600000
       ? `（距上次时间查询已过 ${Math.round(deltaMs / 3600000)} 小时 ${Math.round((deltaMs % 3600000) / 60000)} 分钟）`
@@ -1642,7 +1645,9 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     }
 
     // ⏰ 强制注入当前系统时间
-
+    // 🔴 2026-10-18 报时症状根因（压测三轮实锤）：timeGuard 原文「回答时间、日期…必须以此为准」
+    //   对**过去时疑问**是反向引导 —— 问"是什么时候的事/什么时候开始叫妈"（问事件时间点），
+    //   模型按"回答时间问题以此为准"报了当前钟表时间。与 core-rules【时间现实】护栏同源声明语义边界。
     const now = new Date();
 
     const beijingTime = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
@@ -1666,7 +1671,7 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
       console.log(`[PromptDepth] depth=${_depth} meeting=${!!_meetingEntityName} topicShift=${isTopicShift} casual=${isCasualChat} factual=${isFactualRecallQuery}`);
     }
 
-    const timeGuard = `[当前时间] ${beijingTime}（北京时间）${lunarDate ? ' 农历' + lunarDate : ''}——回答时间、日期、节气、节日问题必须以此为准，不能编造。`;
+    const timeGuard = `[当前时间] ${beijingTime}（北京时间）${lunarDate ? ' 农历' + lunarDate : ''}——回答**当下**时间、日期、节气、节日问题必须以此为准，不能编造。鸿艺若问**过去**的日期/时间（如"什么时候开始的""哪天"），从记忆里答，不得把此时间当答案报出。`;
 
     // 通用幻觉防护：禁止编造过去事件、日期、用户生活细节
     // 🔴 S2-M1: 系统级铁律 — "共同过去"法定分界线，对所有实体/所有模式生效。
