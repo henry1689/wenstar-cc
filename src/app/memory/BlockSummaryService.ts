@@ -98,7 +98,9 @@ export class BlockSummaryService {
     (this.timer as unknown as { unref?: () => void }).unref?.();
 
     this.initialTimer = setTimeout(() => {
-      void this.runBatch().catch((e) => console.warn('[BlockSummary] 首轮异常:', (e as Error)?.message));
+      void this.runBatch()
+        .then(() => this.selfCheck())
+        .catch((e) => console.warn('[BlockSummary] 首轮异常:', (e as Error)?.message));
     }, this.initialDelayMs);
     (this.initialTimer as unknown as { unref?: () => void }).unref?.();
     console.log(`[BlockSummary] 已启动（每 ${Math.round(this.intervalMs / 60000)} 分钟一批 ${this.batchSize} 组）`);
@@ -153,10 +155,16 @@ export class BlockSummaryService {
       }
 
       const pending = this.countPending(sql);
+      // R012 铁律2：运行时自检 —— 每批结束检查格式契约违例，>0 必须可见
+      const violations = this.countContractViolations(sql);
       if (scanned > 0) {
         console.log(
-          `[BlockSummary] 批完成: 扫描${scanned} 成功${done} 跳过${skipped} 失败${failed} 待处理${pending}`,
+          `[BlockSummary] 批完成: 扫描${scanned} 成功${done} 跳过${skipped} 失败${failed} 待处理${pending}` +
+          (violations > 0 ? ` ⚠️契约违例${violations}` : ''),
         );
+        if (violations > 0) {
+          console.warn(`[BlockSummary] ⚠️ 格式契约违例 ${violations} 组（done 中缺【标签】/【叙事】/【情感】任一层）`);
+        }
       }
       return { scanned, done, skipped, failed, pending };
     } finally {
@@ -170,7 +178,7 @@ export class BlockSummaryService {
     // R011 任务A(4)：meeting_entry 是「叫 XX 聊聊」这类会晤入口指令，无实质对话内容，
     // 生成摘要也是废话，直接标 skipped，不消耗 LLM。
     if (closeReason === 'meeting_entry') {
-      this.markState(sql, dgId, 'skipped');
+      this.markState(sql, dgId, 'skipped', 'meeting_entry_no_llm');
       return 'skipped';
     }
 
@@ -195,18 +203,22 @@ export class BlockSummaryService {
       return 'skipped';
     }
 
-    // R011 任务A(1)(2)(3)：maxTokens 400→600（400 对「JSON+中文摘要」偏紧，实测 20.5% 被截断）；
-    // 解析失败用更严格的提示重试一次；仍失败则包裹为【叙事】，保证三层格式契约。
-    let summary = this.formatSummary(await this.callLLM(transcript, false));
-    if (!summary || !this.isStructured(summary)) {
+    // 🔴 R012 铁律2 / R013-A2(1)：格式契约必须是【标签】【叙事】【情感】三层齐全。
+    //   解析失败 → 用更严格提示重试一次；仍不完整 → 标 skipped 并记录原因，
+    //   **不再把原始文本包成【叙事】伪造契约**（那是现象级兜底，掩盖问题）。
+    let parsed = this.formatSummary(await this.callLLM(transcript, false));
+    if (!parsed.complete) {
       const retry = this.formatSummary(await this.callLLM(transcript, true));
-      if (retry) summary = retry;
+      if (retry.complete) parsed = retry;
+      else if (!parsed.text && retry.text) parsed = retry;
     }
-    if (!summary) throw new Error('LLM 返回内容为空或过短');
-    if (!this.isStructured(summary)) {
-      // 兜底：至少满足「含【叙事】」的格式契约，且仍可被 n-gram 检索
-      summary = `【叙事】${summary}`.slice(0, MAX_SUMMARY_CHARS);
+    if (!parsed.complete) {
+      const reason = parsed.text ? 'llm_unstructured_after_retry' : 'llm_empty';
+      this.markState(sql, dgId, 'skipped', reason);
+      console.warn(`[BlockSummary] ${dgId} 三层契约未达成（${reason}），已标 skipped`);
+      return 'skipped';
     }
+    const summary = parsed.text;
 
     const meta = sql.queryAll<{ belong_entity_uuid: string | null }>(
       'SELECT belong_entity_uuid FROM dialog_groups WHERE dialog_group_id = ?',
@@ -247,15 +259,19 @@ export class BlockSummaryService {
     );
   }
 
-  /** 是否满足三层格式契约（至少含【叙事】） */
+  /** 是否满足三层格式契约（【标签】【叙事】【情感】全部存在） */
   private isStructured(summary: string): boolean {
-    return String(summary || '').includes('【叙事】');
+    const s = String(summary || '');
+    return s.includes('【标签】') && s.includes('【叙事】') && s.includes('【情感】');
   }
 
-  /** 解析 LLM 输出为三层摘要；解析失败时兜底保留可检索文本 */
-  private formatSummary(raw: string): string {
+  /**
+   * 解析 LLM 输出为三层摘要。
+   * 返回 complete=false 表示三层不齐（调用方据此标 skipped，不伪造格式）。
+   */
+  private formatSummary(raw: string): { text: string; complete: boolean } {
     const text = String(raw || '').trim();
-    if (!text) return '';
+    if (!text) return { text: '', complete: false };
     const cleaned = text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
 
     let parsed: Record<string, unknown> | null = null;
@@ -278,10 +294,12 @@ export class BlockSummaryService {
       if (emotion) out += `【情感】${emotion}`;
       out = out.trim();
     }
-    if (!out) out = cleaned; // 兜底：未按 JSON 返回时保留原文，至少还能被 n-gram 检索到
+    // 解析失败时保留原文仅为「可诊断」；complete=false ⇒ 调用方标 skipped，不会写库
+    if (!out) out = cleaned;
 
-    if (out.replace(/\s/g, '').length < 10) return '';
-    return out.slice(0, MAX_SUMMARY_CHARS);
+    if (out.replace(/\s/g, '').length < 10) return { text: '', complete: false };
+    const bounded = out.slice(0, MAX_SUMMARY_CHARS);
+    return { text: bounded, complete: this.isStructured(bounded) };
   }
 
   /**
@@ -300,14 +318,54 @@ export class BlockSummaryService {
     }
   }
 
-  private markState(sql: SQLiteAdapter, dgId: string, state: 'failed' | 'skipped'): void {
+  private markState(sql: SQLiteAdapter, dgId: string, state: 'failed' | 'skipped', error?: string): void {
     try {
       sql.writeRaw(
-        'UPDATE dialog_groups SET summary_state = ?, updated_at = ? WHERE dialog_group_id = ?',
-        state, new Date().toISOString(), dgId,
+        'UPDATE dialog_groups SET summary_state = ?, summary_error = ?, updated_at = ? WHERE dialog_group_id = ?',
+        state, error ?? null, new Date().toISOString(), dgId,
       );
     } catch (e) {
       console.warn('[BlockSummary] 状态写入失败:', (e as Error)?.message);
+    }
+  }
+
+  /** done 组中三层不齐的数量（应为 0） */
+  private countContractViolations(sql: SQLiteAdapter): number {
+    const rows = sql.queryAll<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM dialog_groups WHERE summary_state='done' AND (" +
+      "block_summary IS NULL OR block_summary NOT LIKE '%【标签】%' " +
+      "OR block_summary NOT LIKE '%【叙事】%' OR block_summary NOT LIKE '%【情感】%')",
+    );
+    return Number(rows[0]?.n) || 0;
+  }
+
+  /**
+   * 启动自检（R012 铁律2）：输出摘要格式契约合规率与 skipped/pending 规模。
+   * 只读，不修改任何数据；异常静默（自检失败不影响主流程）。
+   */
+  selfCheck(): void {
+    try {
+      const sql = this.opts.getSql();
+      if (!sql) return;
+      const row = sql.queryAll<{ done: number; bad: number; skipped: number; pending: number }>(
+        "SELECT " +
+        "SUM(CASE WHEN summary_state='done' THEN 1 ELSE 0 END) AS done, " +
+        "SUM(CASE WHEN summary_state='done' AND (block_summary IS NULL " +
+        "  OR block_summary NOT LIKE '%【标签】%' OR block_summary NOT LIKE '%【叙事】%' " +
+        "  OR block_summary NOT LIKE '%【情感】%') THEN 1 ELSE 0 END) AS bad, " +
+        "SUM(CASE WHEN summary_state='skipped' THEN 1 ELSE 0 END) AS skipped, " +
+        "SUM(CASE WHEN summary_state IS NULL OR summary_state='' THEN 1 ELSE 0 END) AS pending " +
+        'FROM dialog_groups',
+      )[0];
+      const done = Number(row?.done) || 0;
+      const bad = Number(row?.bad) || 0;
+      const rate = done > 0 ? (((done - bad) / done) * 100).toFixed(1) : '100.0';
+      const msg = `[BlockSummary] 启动自检: done=${done} 合规=${done - bad}(${rate}%) 违例=${bad} ` +
+        `skipped=${Number(row?.skipped) || 0} pending=${Number(row?.pending) || 0}`;
+      if (bad > 0) console.warn('⚠️ ' + msg);
+      else console.log(msg);
+    } catch (e) {
+      console.warn('[BlockSummary] 启动自检跳过:', (e as Error)?.message);
     }
   }
 

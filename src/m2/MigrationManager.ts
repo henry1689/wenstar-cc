@@ -944,6 +944,69 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v22 → v23: 摘要失败原因列 + meeting_entry 全量 skipped + 重置缺层摘要（R013-A2）
+  {
+    version: 23,
+    description: 'R013-A2: summary_error 列；meeting_entry 全量 skipped；重置三层不齐的 done 摘要',
+    apply: (db: any) => {
+      // 1) summary_error：失败原因可追溯（R012 铁律2：失败不能静默）
+      let hasErr = false;
+      try {
+        const cols = db.exec('PRAGMA table_info(dialog_groups)') as Array<{ values?: unknown[][] }>;
+        hasErr = !!cols?.[0]?.values?.some((r) => String(r?.[1]) === 'summary_error');
+      } catch { /* 表不存在时忽略 */ }
+      if (!hasErr) {
+        try {
+          db.run('ALTER TABLE dialog_groups ADD COLUMN summary_error TEXT');
+          console.log('[Migration] v23 ✅ dialog_groups.summary_error 已添加');
+        } catch (e) {
+          console.warn('[Migration] v23 添加 summary_error 失败（非致命）:', (e as Error)?.message);
+        }
+      }
+
+      // 2) meeting_entry：会晤入口指令无实质内容（R006 裁决：不调 LLM）
+      try {
+        const m = Number(
+          db.exec("SELECT COUNT(*) FROM dialog_groups WHERE block_close_reason='meeting_entry' AND (summary_state IS NULL OR summary_state != 'skipped' OR block_summary IS NOT NULL)")?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        db.run(
+          "UPDATE dialog_groups SET summary_state='skipped', summary_error='meeting_entry_no_llm', " +
+          "block_summary=NULL, updated_at=? WHERE block_close_reason='meeting_entry'",
+          [new Date().toISOString()],
+        );
+        console.log(`[Migration] v23 ✅ meeting_entry 标 skipped: ${m} 组`);
+      } catch (e) {
+        console.warn('[Migration] v23 meeting_entry 处理失败（非致命）:', (e as Error)?.message);
+      }
+
+      // 3) done 但三层不齐 → 重置待重生成（新逻辑要么生成完整三层，要么标 skipped）
+      try {
+        const r = Number(
+          db.exec(
+            "SELECT COUNT(*) FROM dialog_groups WHERE summary_state='done' AND (block_summary IS NULL " +
+            "OR block_summary NOT LIKE '%【标签】%' OR block_summary NOT LIKE '%【叙事】%' " +
+            "OR block_summary NOT LIKE '%【情感】%')",
+          )?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        db.run(
+          "UPDATE dialog_groups SET block_summary=NULL, summary_state=NULL, summary_error=NULL, updated_at=? " +
+          "WHERE summary_state='done' AND (block_summary IS NULL " +
+          "OR block_summary NOT LIKE '%【标签】%' OR block_summary NOT LIKE '%【叙事】%' " +
+          "OR block_summary NOT LIKE '%【情感】%')",
+          [new Date().toISOString()],
+        );
+        // 清理这些组的旧索引行（重生成会重新写入）
+        db.run(
+          "DELETE FROM search_index WHERE source_type='dialog_group' AND source_id IN (" +
+          'SELECT dialog_group_id FROM dialog_groups WHERE block_summary IS NULL)',
+        );
+        console.log(`[Migration] v23 ✅ 三层不齐摘要重置: ${r} 组`);
+      } catch (e) {
+        console.warn('[Migration] v23 重置缺层摘要失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

@@ -86,8 +86,15 @@ try {
   const out = execSync(`netstat -ano | findstr ":${PORT}.*LISTENING"`, { encoding: 'utf8', timeout: 5000, shell: 'cmd', windowsHide: true }).toString().trim();
   _portBusy = out.length > 0;
 } catch { _portBusy = false; }
+// 🔴 R013-A2(5) 根因修复：端口被占用时**拒绝启动**，不再继续 spawn。
+//   原实现只打一条 WARN 就继续 spawn：新 server 绑不上端口，但依然会 initPipeline
+//   并定时整库 export() → 两个进程各持一份内存库，后落盘者覆盖前者
+//   （实测：摘要组反复回 NULL、v21 结果被回退）。这是 I005 的真根因。
 if (_portBusy) {
-  console.warn(`[Start] ⚠️ 端口 ${PORT} 已被占用，跳过 ${prestartScripts.length} 个写库脚本（防 DB 损坏）。`);
+  console.error(`[Start] ❌ 端口 ${PORT} 已被占用：拒绝启动第二实例（防双写覆盖）。`);
+  console.error(`[Start]    现有实例 → http://localhost:${PORT}/api/health`);
+  console.error('[Start]    如需重启：pm2 stop wenstar-webui，确认端口释放后再 start。');
+  process.exit(1);
 }
 
 for (const s of prestartScripts) {
@@ -107,14 +114,14 @@ if (failed.length > 0) {
   for (const f of failed) console.warn('  - ' + f.label + ': ' + (f.reason || 'unknown'));
 }
 
-// ── I005: 启动前清理孤儿 server 进程 ──
+// ── I005 / R013-A2(5): 启动前清理孤儿 server 进程 ──
 // 背景（2026-10-19 实测）：pm2 restart 后可能残留旧的 tsx/server 进程链。旧进程持有
 // 旧内存库副本并定时 export() 落盘，会**整库覆盖**新实例的写入 —— 现象是「日志显示成功、
 // 库里仍是 NULL」（摘要组反复回 NULL 的真实原因）。sql.js 是整库导出覆盖磁盘，后落盘者胜。
-// 执行条件：win32 且端口未被占用（端口占用说明有正常实例，交给上面的跳过逻辑，不误杀）。
+// 端口占用的情况已在上面直接拒绝启动；这里只处理「端口已释放但进程还在」的孤儿。
 // 只匹配 `src/webui/server.ts`（真正写库的进程），不碰 start/tsx 自身。
-if (process.platform === 'win32' && !_portBusy) {
-  try {
+if (process.platform === 'win32') {
+  const _listServers = () => {
     const _ps = "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | " +
       "Where-Object { $_.CommandLine -like '*webui*server.ts*' } | " +
       'ForEach-Object { $_.ProcessId }';
@@ -123,8 +130,30 @@ if (process.platform === 'win32' && !_portBusy) {
       timeout: 8000,
       windowsHide: true,
     }).toString();
-    const pids = out.split(/\s+/).map((s) => Number(s))
+    return out.split(/\s+/).map((s) => Number(s))
       .filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid);
+  };
+
+  try {
+    let pids = _listServers();
+
+    // 🔴 若锁仍被某个存活 server 持有，说明它正在优雅关停（shutdownFlush 可能较慢）。
+    //   先等它自己退出（最长 45s），**不要打断落盘**；超时才强杀。
+    let lockPid = null;
+    try { lockPid = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')).pid; } catch { /* 无锁 */ }
+    if (lockPid && pids.includes(lockPid)) {
+      console.log('[Start] 旧实例持锁优雅关停中，等待退出 (PID ' + lockPid + ')...');
+      const deadline = Date.now() + 45000;
+      while (Date.now() < deadline) {
+        let alive = false;
+        try { process.kill(lockPid, 0); alive = true; }
+        catch (e) { alive = !!(e && e.code === 'EPERM'); }
+        if (!alive) break;
+        try { execSync('ping -n 2 127.0.0.1 >nul', { timeout: 3000, windowsHide: true, shell: 'cmd' }); } catch { /* 忽略 */ }
+      }
+      pids = _listServers();
+    }
+
     for (const pid of pids) {
       try {
         process.kill(pid);
