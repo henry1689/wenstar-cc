@@ -32,6 +32,10 @@ import {
   anchorRecallByKeywords,
   // 🔴 2026-10-18 真·最早记忆（时间轴兜底修正，同上单源原则）。
   earliestMemoriesByTime,
+  // 🔴 Phase 2.2 (B1 / T004): 会晤「高钙对话组」独立通道（A 链路块级钙化召回）。
+  //   召回本体走 HighCalciumGroupAdapter（其内部复用本模块的 highCalciumGroups 真源，不写第二份 SQL）；
+  //   这里只需自检观测函数。
+  countHighCalciumGroups,
 } from '../../m4/retrieval/meeting-recall.js';
 // 🔴 V34(2026-09-25): 砂金库时间窗召回的配置单一事实源（meeting-recall 声明零 import，由调用方传入）
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
@@ -382,6 +386,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             const _orSeen = new Set(memoryFragments.map((f: string) => f.substring(0, 20)));
             let _orInjected = 0;
             for (const _oh of _orRes.hits) {
+              // 🔴 Phase 2.2 (B1): 高钙对话组由下方**独立配额**通道注入（任务书明令不占 memories 名额）。
+              //   此处跳过，避免同一组被通用循环以「记忆」标签重复注入一次。
+              if (_oh.route === 'high_calcium_group') continue;
               const _t = String(_oh.text || '').substring(0, 250);
               if (_t.length > 4 && !_orSeen.has(_t.substring(0, 20))) {
                 _orSeen.add(_t.substring(0, 20));
@@ -454,6 +461,49 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
             if (_kwRows.length > 0) console.log(`[EntityMem·内容相关] 关键词 ${_topicKw.join('/')} 召回 ${_kwRows.length} 条 → 前置注入`);
           } catch (_kwcErr) { /* 内容相关召回失败不阻塞，保持纯钙化序 */ }
+        }
+        // 🔴 Phase 2.2 (B1 / T004): 会晤「高钙对话组」独立通道 —— A 链路块级钙化召回
+        //   与 memories 五路槽位（近期8/历史6/关键词4/最早6/锚点4）**互不占用名额**（任务书明令）。
+        //   候选只看 `dialog_groups.block_calcium_score` + 沉淀窗，**不需要字面命中**；
+        //   注入形态是组级三层摘要（Phase 1 契约），带时间坐标（T003）。
+        //   召回本体 = HighCalciumGroupAdapter（内部复用 meeting-recall.highCalciumGroups 真源，防漂移）。
+        //   🔴 为什么**不**注册进 AdapterRegistry：注册表是 `Map<SearchDomain, adapter>`（一域一适配器），
+        //      高钙路与块路同属 `dialog_groups` 存储域 ⇒ 注册即把 B 链路的 DialogGroupAdapter 覆盖掉
+        //      （实测：注册表里块路直接消失）。2.3 统一编排若要纳入 RRF，需先支持「一域多适配器」。
+        try {
+          const _hcCfg = getRetrievalFusionConfig()?.budget;
+          const _hcLimit = Math.max(1, Math.floor(Number(_hcCfg?.high_calcium_group_limit) || 3));
+          const { HighCalciumGroupAdapter } =
+            await import('../../m4/retrieval/adapters/HighCalciumGroupAdapter.js');
+          const _hcHits = await new HighCalciumGroupAdapter(_sqlite as any).search({
+            query: message,
+            entityUuids: [_entityUuid],
+            policy: { enforce: false } as any,
+            mode: 'balanced',
+            nowMs: Date.now(),
+            limit: _hcLimit,
+          } as any);
+          // 运行时自检（D002 维护维度）：打印「可召 / 本轮注入 / 相关命中」，通道是否真生效一眼可见
+          const _hcTotal = countHighCalciumGroups(_sqlite, _entityUuid);
+          const _hcSeen = new Set(memoryFragments.map((f: string) => f.substring(0, 20)));
+          let _hcInjected = 0;
+          let _hcRelevant = 0;
+          for (const _hh of _hcHits) {
+            const _txt = String(_hh.text || '').trim().substring(0, 250);
+            if (_txt.length < 8) continue;
+            const _key = _txt.substring(0, 20);
+            if (_hcSeen.has(_key)) continue;   // 其他通道已注入 ⇒ 不重复
+            _hcSeen.add(_key);
+            if ((_hh.payload as { relevant?: boolean })?.relevant) _hcRelevant++;
+            memoryFragments.push(memFragWithTime(_meetingEntityName + '的对话组·高钙', _txt, _hh.createdAt));
+            _hcInjected++;
+          }
+          console.log(`[HighCalciumGroup] 候选 ${_hcHits.length} 注入 ${_hcInjected}/${_hcLimit}` +
+            ` · 该实体可召高钙组 ${_hcTotal} 组 · 相关命中 ${_hcRelevant}` +
+            ` · 阈值 floor=${_hcCfg?.high_calcium_floor} 沉淀窗=${_hcCfg?.high_calcium_settle_minutes}min`);
+        } catch (_hce) {
+          // 高钙组通道失败不得阻塞会晤主召回（与锚点/关键词通道同一兜底策略）
+          console.warn('[HighCalciumGroup] 通道失败（不阻塞会晤召回）:', String((_hce as Error)?.message));
         }
         // 🔴 注入质量闸门（2026-09-12 MEMPROBE 生产实测）:
         //   近期槽 `ORDER BY calcium_score DESC` 在钙化值接近时退化为“最新优先”，

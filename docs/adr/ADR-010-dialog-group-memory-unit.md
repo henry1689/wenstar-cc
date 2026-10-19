@@ -421,6 +421,58 @@ n-gram 查询是 O(命中数)，总行数增加不线性拖慢查询。
 
 ---
 
+## 十三、Phase 2.2 增补（B1 · T004，2026-10-19）：钙分接入召回 + 高钙组独立通道
+
+### 13.1 块路排序：钙分从「第 3 键」升为「参与打分」
+
+改造前 `DialogGroupAdapter` 的候选排序是 `ORDER BY 原文命中 DESC, 摘要命中 DESC, block_calcium_score DESC`
+—— 钙分只在**命中数打平**时才起作用，任务书要的「高钙组排名高于低钙组」并不成立。
+
+改造后：
+- SQL 只取**候选池**（`limit × POOL_FACTOR(5)`），最终打分在 **JS 一处**计算
+  （`0.40 原文密度 + 0.30 摘要密度 + 0.15 双通道共振 + 0.15 钙分`）—— 消灭 SQL/JS 两套判据（P0-1 教训）
+- **钙分归一基准 `/10` → `/5`**（高钙阈值即满分）：生产实测 max 7.72 / avg 3.85，
+  除以 10 时高钙与 2~5 分段在 0.15 权重下只差 0.075，区分度结构性不足
+
+### 13.2 高钙组通道（A 链路）：独立配额、无需字面命中
+
+- 真源：`meeting-recall.highCalciumGroups()`（与会晤五路召回同文件，唯一实现）
+- 准入：`belong_entity_uuid` + `block_calcium_score >= floor(5)` + `summary_state='done'` + 有三层摘要
+  + **沉淀窗**（闭组 > `settle_minutes(30)`，业主 2026-10-18 裁决）
+- 排序：相关性 → 时间近因 → 钙分；**无关键词判据时不做相关性门**、
+  **有判据但无人命中时保底 1 条**（否则高钙组只在字面命中时可达 = 结构性失忆）
+- 注入：`【对话组·高钙·MM-DD】<三层摘要>`，**独立计数**（`high_calcium_group_limit=3`），不占 memories 槽位
+
+### 13.3 🔴 注册表约束（实测踩坑，写进类型注释）
+
+`AdapterRegistry` 是 `Map<SearchDomain, RetrievalAdapter>` —— **一域一适配器**。
+高钙路与块路同属 `dialog_groups` 存储域，若按同 domain 注册会把 **DialogGroupAdapter 静默覆盖**
+（实测：注册表里块路直接消失）。因此高钙路**不进注册表**，由会晤链路直接调用适配器做独立配额。
+2.3 统一编排若要把它纳入 RRF，需先支持「一域多适配器」或给它独立 domain（届时须同步补
+`backref.BACKREF_TABLE` 的穷举映射）。
+
+### 13.4 兜底与自检
+
+- **兜底**（D002 兜底4）：双通道候选 SQL 抛错 ⇒ 降级为 `dialog_groups` 单表按 `last_ts DESC` 取块，
+  而不是整路返回空（返回空 = 该组永远召不回且对调用方完全静默）
+- **自检**（D002 维护维度）：每次会晤注入后打印
+  `[HighCalciumGroup] 候选 N 注入 x/limit · 可召高钙组 M · 相关命中 K · 阈值 floor/沉淀窗`
+
+### 13.5 配置（`config/retrieval-fusion.config.yaml`，唯一事实源）
+
+| 键 | 值 | 含义 |
+|---|---|---|
+| `foundation_rrf_domain_weight.high_calcium_group` | 0.30 | 高钙路 RRF 权重（⚠️ 须在 `fusion.ts` 同步映射，否则 `?? 0.05` 静默降档） |
+| `budget.high_calcium_group_limit` | **5** | 独立配额（不占 memories 名额）。A/B 实测（70 组/实体 recall@3）：配额 3=51.4%（未达 ≥60% 验收线）→ **配额 5=67.1%** → 配额 8=77.1%，故取 5 |
+| `budget.high_calcium_floor` | 5 | 钙分阈值（与 2.1 consolidating 同源） |
+| `budget.high_calcium_settle_minutes` | 30 | 沉淀窗 |
+
+### 13.6 回归测试
+
+`src/m4/retrieval/__tests__/high-calcium-group.test.ts`（12 例：准入谓词 / 独立配额 / 相关性门与保底 /
+组级 UUID 隔离 / 幂等 / 适配器契约）+ `dialog-group-adapter.test.ts` 新增 4 例（钙分区分度 /
+候选池裁回 limit / 降级时间序 / 注册表不被覆盖）。
+
 ## 附：诊断证据
 
 - 只读脚本：`D:/tmp/v36-storage-granularity-probe.cjs`、`v36-dialoggroup-probe.cjs`、`v36-probe3.cjs`、`v36-probe4.cjs`、`v36-probe5.cjs`

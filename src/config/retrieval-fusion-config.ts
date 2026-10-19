@@ -48,6 +48,16 @@ export interface BudgetConfig {
    *   实测修复前记忆 8836 字符 vs 历史 4740 字符（1.9×），模型注意力被"过去的素材"带走。
    */
   memory_max_ratio_of_history: number;
+  /**
+   * 🔴 Phase 2.2 (B1 / T004): 会晤**高钙对话组**通道的独立配额 —— 每轮最多注入几组。
+   *   与 memories 槽位（近期8 / 历史6 / 关键词4 / 最早6 / 锚点4）**互不占用**：
+   *   这是组级（A 链路）的名额，不是单条记忆的名额 —— 高钙组挤占记忆槽 = 任务书明令禁止。
+   */
+  high_calcium_group_limit: number;
+  /** 高钙阈值：`block_calcium_score >= 该值` 才进候选（与 2.1 lifecycle consolidating 同源阈值 5） */
+  high_calcium_floor: number;
+  /** 沉淀窗（分钟）：闭组不足该时长不参与召回（业主 2026-10-18 裁决） */
+  high_calcium_settle_minutes: number;
 }
 export interface FilterConfig {
   min_similarity: number;
@@ -112,9 +122,9 @@ export interface RetrievalFusionConfig {
 const DEFAULTS: RetrievalFusionConfig = {
   inject_priority: { archive_tag: 0.95, black_diamond: 0.9, vault: 0.7, memory_normal: 0.6 },
   timeline_weight: { base: 0.3, scale: 0.2, cap: 0.9, min_val: 0.6 },
-  foundation_rrf_domain_weight: { black_diamond: 0.25, vault: 0.12, knowledge: 0.15, sand_memory: 0.1 },
+  foundation_rrf_domain_weight: { black_diamond: 0.25, vault: 0.12, knowledge: 0.15, sand_memory: 0.1, high_calcium_group: 0.30 },
   v13_rrf_weights: { spine: 0.35, keyword: 0.3, work: 0.25, entity: 0.2, emotion: 0.1, locus: 0.05, multi_hit_bonus: 1.2 },
-  budget: { mem_ratio_normal: 0.6, kb_ratio_normal: 0.4, mem_ratio_longtext: 0.3, kb_ratio_longtext: 0.15, longtext_max_ratio: 0.8, work_max_chars: 4000, hard_max_chars: 8000, sandbox_fallback_limit: 2, sandbox_max_ratio_of_memory: 0.3, memory_max_ratio_of_history: 1.0 },
+  budget: { mem_ratio_normal: 0.6, kb_ratio_normal: 0.4, mem_ratio_longtext: 0.3, kb_ratio_longtext: 0.15, longtext_max_ratio: 0.8, work_max_chars: 4000, hard_max_chars: 8000, sandbox_fallback_limit: 2, sandbox_max_ratio_of_memory: 0.3, memory_max_ratio_of_history: 1.0, high_calcium_group_limit: 5, high_calcium_floor: 5, high_calcium_settle_minutes: 30 },
   filter: { min_similarity: 0.6, max_fusion_items: 16 },
   speed_filter: { second_filter_threshold: 0.15, max_normal_memory_count: 10, meeting_max_normal_memory_count: 20, prompt_depth_enabled: true },
   p1_speed: {

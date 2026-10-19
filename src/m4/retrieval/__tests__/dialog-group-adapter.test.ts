@@ -205,4 +205,57 @@ describe('[ADR-010 P1-C1] 架构不变量：复用索引 + 开关可控', () => 
     expect(domains, 'dialog_group 应进入默认注册（当前 yaml enable_dialog_group_memory=true）')
       .toContain('dialog_group');
   });
+
+  it('🔴 dialog_group 域注册的必须是块路本身（防高钙路把 B 链路覆盖掉）', () => {
+    const reg = createDefaultRegistry({ sqlite: { queryAll: () => [] } } as any);
+    const ad = reg.get('dialog_group' as any);
+    expect(ad, '块路必须仍在注册表里').toBeTruthy();
+    // AdapterRegistry 是 Map<SearchDomain, adapter>（一域一适配器）——
+    // 若有人把 HighCalciumGroupAdapter 也按 dialog_group 注册，这条会立刻红。
+    expect(Array.from(ad!.routes), '高钙路不得占用 dialog_group 域（会静默覆盖块路）')
+      .toEqual(['dialog_group']);
+  });
+});
+
+describe('[Phase 2.2 B1] 钙分真正参与排序 + 候选池 + 降级', () => {
+  it('🔴 同命中数下**高钙组排在低钙组之前**（钙分归一 /5 生效）', async () => {
+    const db = await buildDb();
+    seedBlock(db, 'DG_LOW', UUID_A, [['user', '杭州的机票订了吗']], { calcium: 2, turns: 2 });
+    seedBlock(db, 'DG_HIGH', UUID_A, [['user', '杭州的机票订了吗']], { calcium: 6, turns: 2 });
+
+    const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db));
+    expect(hits.length, '两个块都应进候选').toBe(2);
+    expect(hits[0].id, '命中密度相同时由钙分决定次序').toBe('DG_HIGH');
+    expect(hits[0].score).toBeGreaterThan(hits[1].score);
+    // 归一基准是 5：6 分 → min(1, 6/5)=1（拿满 0.15），2 分 → 0.4（0.06）
+    expect(hits[0].calciumScore).toBe(6);
+    expect(hits[1].calciumScore).toBe(2);
+  });
+
+  it('候选池扩大（×POOL_FACTOR）后仍只返回 limit 条', async () => {
+    const db = await buildDb();
+    for (let i = 1; i <= 4; i++) {
+      seedBlock(db, 'DG' + i, UUID_A, [['user', '杭州的机票订了吗']], { calcium: 7 - i, turns: 2 });
+    }
+    const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db, { limit: 2 }));
+    expect(hits.length, '候选池扩大不得泄漏到返回集').toBe(2);
+    expect(hits[0].id).toBe('DG1');   // 钙分最高
+    expect(hits[1].id).toBe('DG2');
+  });
+
+  it('🔴 候选查询失败 ⇒ **降级为时间序取块**（不返回空、不阻塞）', async () => {
+    const db = await buildDb();
+    seedBlock(db, 'DG1', UUID_A, [['user', '杭州的机票订了吗']], { calcium: 6 });
+    const base = srcOf(db);
+    const degrade = {
+      queryAll: <T>(sql: string, params?: unknown[]): T[] => {
+        if (sql.includes('UNION ALL')) throw new Error('index missing');  // 只让双通道候选查询失败
+        return base.queryAll<T>(sql, params);
+      },
+    };
+
+    const hits = await new DialogGroupAdapter(degrade as any).search(ctxOf(db));
+    expect(hits.length, '降级后仍须返回块（时间序），而不是整路返回空').toBe(1);
+    expect(hits[0].id).toBe('DG1');
+  });
 });

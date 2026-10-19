@@ -49,6 +49,22 @@ const TEXT_MAX = 300;
  * 查询词能命中 10 条已属强相关。
  */
 const SUMMARY_HIT_NORM = 10;
+/**
+ * 🔴 Phase 2.2 (B1 / T004): 候选池倍数 —— SQL 先多取几倍，最终排序在 JS 做。
+ *
+ * 为什么必须这样：钙分在原 SQL 里是**第 3 个 ORDER BY 键**（前两个是原文命中数、摘要命中数），
+ * 也就是说「高钙组排名高于低钙组」在命中数不同时根本不成立（R016/R017 指出的真缺口）。
+ * 要让钙分真正参与排序，就必须由**唯一一处**打分逻辑决定最终次序 —— 而打分公式在 JS（0.40/0.30/0.15/0.15）。
+ */
+const POOL_FACTOR = 5;
+/**
+ * 钙分归一基准：**高钙阈值即满分**（5 分 → 1.0）。
+ *
+ * 原为 `/10`：生产实测 `block_calcium_score` max 7.72、avg 3.85 ⇒ 归一后 0.77/0.39，
+ * 高钙(≥5)与 2~5 分段在 0.15 权重下只差 **0.075**，区分度结构性不足（P012 §二.3）。
+ * 改 `/5` 后高钙拿满 0.15、2~5 分段最多 0.13，配合候选池扩大即可让同命中数下高钙稳定排前。
+ */
+const CALCIUM_NORM_DENOM = 5;
 
 /** 块候选行（内层聚合结果） */
 export interface DialogGroupCandidateRow {
@@ -104,7 +120,9 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       //   police 在通道②作用于 dialog_groups（别名 g2）—— search_index 本身也有同名列
       //   belong_entity_uuid，故先把 search_index 投影成只含 (term, source_id) 的子查询，
       //   避免 ambiguous column 错误（与文件头「户籍过滤放在子查询」同一姿势）。
-      const cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
+      let cands: DialogGroupCandidateRow[];
+      try {
+        cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
         `SELECT u.dg_id AS dg_id, MAX(u.uuid) AS uuid,
                 SUM(u.matched_rows) AS matched_rows,
                 SUM(u.summary_matched) AS summary_matched,
@@ -142,11 +160,35 @@ export class DialogGroupAdapter implements RetrievalAdapter {
          ) u
          LEFT JOIN dialog_groups g ON g.dialog_group_id = u.dg_id
          GROUP BY u.dg_id
+         -- 🔴 Phase 2.2 (B1): SQL 只负责**取候选池**（limit×POOL_FACTOR），不负责最终排序。
+         --   最终打分 0.40/0.30/0.15/0.15 在 JS 一处计算（下面 search()），避免 SQL 与 JS
+         --   两套判据漂移（P0-1「同规则两份实现」的教训）。钙分在这里仅作**同命中数下的粗排**。
          ORDER BY SUM(u.matched_rows) DESC, SUM(u.summary_matched) DESC,
-                  COALESCE(g.block_calcium_score, 0) DESC
+                  COALESCE(g.block_calcium_score, 0) DESC, MAX(u.last_ts) DESC
          LIMIT ?`,
-        [...terms, ...police.params, ...terms, ...police.params, limit],
-      );
+        [...terms, ...police.params, ...terms, ...police.params,
+         Math.max(limit, Math.floor(limit * POOL_FACTOR))],
+        );
+      } catch (qe) {
+        // 🔴 D002 兜底4「钙化排序失败降级时间序」——这里才是真正可能失败的点：
+        //   双通道候选 SQL 一旦抛错（索引缺失/列变更/表锁），**降级为单表按 last_ts 取块**，
+        //   而不是整路返回空（返回空 = 该组永远召不回，且对调用方完全静默）。
+        //   降级查询只依赖 dialog_groups 单表，与双通道 SQL 的失败点解耦。
+        console.warn('[DialogGroupAdapter] 双通道候选查询失败，降级为时间序（last_ts DESC）:',
+          (qe as Error)?.message);
+        cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
+          `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid,
+                  0 AS matched_rows, 0 AS summary_matched, last_ts,
+                  block_calcium_score AS calcium, narrative_tag AS tag,
+                  scene_anchor_hash AS hash, turn_count AS turns,
+                  block_close_reason AS reason, block_summary AS summary
+           FROM dialog_groups
+           WHERE 1=1${police.clause}
+           ORDER BY last_ts DESC
+           LIMIT ?`,
+          [...police.params, limit],
+        ) || [];
+      }
       if (cands.length === 0) return Promise.resolve([]);
 
       // ── ② 块正文：只为已选中的 ≤limit 个块取，查询量有界 ──
@@ -166,7 +208,7 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         textMap.set(k, arr);
       }
 
-      const hits: SearchHit[] = cands.map((c) => {
+      const scored = cands.map((c) => {
         const dgId = String(c.dg_id);
         const summary = String(c.summary || '').trim();
         const bodyRaw = (textMap.get(dgId) || []).join(' ').replace(/\s+/g, ' ').trim();
@@ -185,13 +227,12 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         const convDensity = turns > 0 ? Math.min(1, matched / turns) : 0;
         const summaryDensity = Math.min(1, summaryMatched / SUMMARY_HIT_NORM);
         const bothChannels = matched > 0 && summaryMatched > 0 ? 1 : 0;
-        const calcium = Math.min(1, (Number(c.calcium) || 0) / 10);
-        const score =
-          Math.round(
-            (convDensity * 0.40 + summaryDensity * 0.30 + bothChannels * 0.15 + calcium * 0.15) * 1000,
-          ) / 1000;
+        const calcium = Math.min(1, (Number(c.calcium) || 0) / CALCIUM_NORM_DENOM);
+        const rawScore =
+          convDensity * 0.40 + summaryDensity * 0.30 + bothChannels * 0.15 + calcium * 0.15;
+        const score = Number.isFinite(rawScore) ? Math.round(rawScore * 1000) / 1000 : 0;
 
-        return {
+        const hit: SearchHit = {
           id: dgId,
           domain: 'dialog_group' as const,
           text: body,
@@ -211,8 +252,20 @@ export class DialogGroupAdapter implements RetrievalAdapter {
           },
           backref: { table: 'dialog_groups', id: dgId },
         };
+        return { hit, score, finite: Number.isFinite(rawScore), ts: Date.parse(String(c.last_ts || '')) || 0 };
       });
-      return Promise.resolve(hits);
+
+      // 🔴 Phase 2.2 (B1)：**唯一排序点** —— 候选池按完整公式排序后裁回 limit。
+      //   兜底（D002 兜底4）：任一分数非有限 ⇒ 本批**降级为时间序**（last_ts DESC），
+      //   既不丢候选也不抛错（异常仍由外层 catch 兜住）。
+      const allFinite = scored.every((s) => s.finite);
+      if (!allFinite) {
+        console.warn('[DialogGroupAdapter] 打分出现非有限值，本批降级为时间序（last_ts DESC）');
+      }
+      scored.sort((a, b) => (allFinite
+        ? (b.score - a.score) || (b.ts - a.ts)
+        : (b.ts - a.ts) || (b.score - a.score)));
+      return Promise.resolve(scored.slice(0, limit).map((s) => s.hit));
     } catch (e) {
       // 单域异常不得阻塞其他检索路（与既有 5 个适配器同策略；runAdapter 另有兜底 catch）
       console.error('[DialogGroupAdapter]', (e as Error)?.message);

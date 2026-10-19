@@ -68,6 +68,12 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
     try { _dgOn = getRetrievalFusionConfig().enable_dialog_group_memory !== false; }
     catch { /* 配置读取失败 → 保持默认开（块检索是本期交付的能力，失败不应静默降级） */ }
     if (_dgOn) reg.register(new DialogGroupAdapter(deps.sqlite));
+    // 🔴 Phase 2.2 (B1/T004): **高钙对话组路故意不在这里注册**。
+    //   AdapterRegistry 是 `Map<SearchDomain, adapter>`（一域一适配器），而 HighCalciumGroupAdapter
+    //   与块路同属 `dialog_groups` 存储域 —— 注册它会把 DialogGroupAdapter **静默覆盖**，
+    //   等于用 A 链路换掉 B 链路（本仓已有一次实测踩坑）。
+    //   会晤链路改由 retrieval-stage 直接调用该适配器做**独立配额**注入。
+    //   2.3 统一编排若要把它纳入 RRF，需先让注册表支持「一域多适配器」或给它独立 domain。
   }
 
   return reg;

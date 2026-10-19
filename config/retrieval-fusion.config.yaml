@@ -30,6 +30,12 @@ foundation_rrf_domain_weight:
   # ⚠️ 该值必须同时在 src/m4/retrieval/fusion.ts 的 FOUNDATION_DEFAULT_WEIGHTS 里映射，
   #    否则 RRFFusion 的 `weights[route] ?? 0.05` 兜底会把块静默降到最低档。
   dialog_group:  0.28
+  # Phase 2.2 (B1/T004): 会晤「高钙对话组」通道（A 链路块级钙化召回）。
+  # 高于普通块(0.28)：这是**不需要字面命中**也能被召回的重要对话组（地标语义），
+  # 低于黑钻 —— 它仍是原始块素材而非已提炼结论。
+  # ⚠️ 同样必须在 src/m4/retrieval/fusion.ts 的 FOUNDATION_DEFAULT_WEIGHTS 里映射，
+  #    否则 RRFFusion 的 `weights[route] ?? 0.05` 会把它静默降到最低档（与 dialog_group 同一个坑）。
+  high_calcium_group: 0.30
 
 # ── V13 七层管线 RRF 权重（RRFFusion.ts）──
 v13_rrf_weights:
@@ -50,6 +56,12 @@ budget:
   longtext_max_ratio: 0.80
   work_max_chars:     4000
   hard_max_chars:     8000
+  # Phase 2.2 (B1/T004): 会晤高钙对话组独立配额（**不占** memories 槽位名额）
+  # 实测 A/B（2026-10-20，70 组/实体 recall@3）：配额3=51.4%（未达≥60%验收线）→
+  #   配额5=**67.1%**（达标）→ 配额8=77.1%。故取 5：达标且注入增量可控（3 条三层摘要 ≈ 300-500 token）。
+  high_calcium_group_limit: 5
+  high_calcium_floor: 5            # block_calcium_score >= 5 才进候选（与 2.1 consolidating 同源阈值）
+  high_calcium_settle_minutes: 30  # 沉淀窗：闭组不足 30 分钟不参与召回（业主 2026-10-18 裁决）
 
 # ── 过滤阈值 ──
 filter:

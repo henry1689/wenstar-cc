@@ -40,6 +40,19 @@ export type SearchDomain =
    * 差异只在聚合粒度，不在索引。
    */
   | 'dialog_group';
+  /**
+   * Phase 2.2 (B1/T004) 备注：会晤「高钙对话组」路**故意不进 `AdapterRegistry`**。
+   *
+   * 原因：注册表是 `Map<SearchDomain, RetrievalAdapter>` —— **一域一适配器**。
+   *   HighCalciumGroupAdapter 的存储域就是 `dialog_groups`（与块路同表同 PK），
+   *   用同 domain 注册会把 B 链路的 DialogGroupAdapter **静默覆盖**（实测：注册表里块路直接消失，
+   *   等于用 A 链路换掉 B 链路）。若要新增 domain，还得同步补 `backref.BACKREF_TABLE`
+   *   的穷举映射，代价与收益不成比例。
+   *
+   * 现行做法：会晤链路在 `retrieval-stage` 里**直接调用该适配器**做独立配额注入
+   *   （与 MeetingWallAdapter 之外的五路槽位同一层级，名额互不占用）。
+   *   2.3 统一编排若要把高钙路纳入 RRF，需先让注册表支持「一域多适配器」或给它一个独立 domain。
+   */
 
 /** 召回路标识 — 一条命中从哪条检索路进来，融合阶段按此取 RRF 权重 */
 export type RetrievalRoute =
@@ -47,7 +60,8 @@ export type RetrievalRoute =
   | 'diamond' | 'knowledge' | 'vault' | 'note' | 'profile'          // 新增域路由
   | 'conversation' | 'default'
   | 'meeting'                                                       // 会晤隔离墙（MeetingWallAdapter）
-  | 'dialog_group';                                                 // ADR-010 P1-C1: 对话块路
+  | 'dialog_group'                                                  // ADR-010 P1-C1: 对话块路（B 链路，字面命中驱动）
+  | 'high_calcium_group';                                           // Phase 2.2 B1: 高钙对话组路（A 链路，钙分驱动、无需字面命中）
 
 /**
  * 统一命中 — 多路并行检索的原子单位。

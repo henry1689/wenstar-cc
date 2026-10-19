@@ -44,6 +44,11 @@ export const FOUNDATION_DEFAULT_WEIGHTS: Record<string, number> = (() => {
     //   0.28 的定位：高于单条对话/记事（块是中期记忆的主要承载者），
     //   低于黑钻（块是原始素材，黑钻是已提炼的结论）。
     dialog_group: fw.dialog_group ?? 0.28,
+    // 🔴 Phase 2.2 (B1/T004): 会晤高钙对话组路 —— A 链路块级钙化召回。
+    //   与 dialog_group **必须是两条路**：RRF 按 route 取权重、按 dedupeKey 折叠，
+    //   并进 dialog_group 就会与"字面命中的块"抢同一名额 ⇒ 无字面命中的高钙组仍不可达（等于没做）。
+    //   映射缺失的后果与 dialog_group 当时一样：`weights[route] ?? 0.05` 静默压到最低档。
+    high_calcium_group: fw.high_calcium_group ?? 0.30,
   };
 })();
 

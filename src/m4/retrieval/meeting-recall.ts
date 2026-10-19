@@ -28,6 +28,8 @@
 
 // 🔴 V34: 切词与写入 search_index 时**同源**（同层复用，非反向依赖）。口径漂移 = 索引查不到。
 import { buildNgrams } from '../SearchIndexBuilder.js';
+// Phase 2.2 (B1): 高钙阈值 / 沉淀窗从配置单一事实源读取（不硬编码魔法数字）
+import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 
 /** 最小 sqlite 查询源（SQLiteAdapter.queryAll 兼容形状: 返回行数组） */
 export interface RecallSource {
@@ -616,4 +618,248 @@ export function dedupeRowsById<T extends { id: string }>(rows: T[]): T[] {
     out.push(r);
   }
   return out;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 2.2 (B1 / T004): 高钙对话组通道 —— A 链路块级钙化召回的**唯一真源**
+// ══════════════════════════════════════════════════════════════════════════
+// 为什么要有这条通道（S1 摸底实测，见 P012）：
+//   会晤召回此前五路（近期/历史/关键词/最早/锚点）**全部基于单条 memories**，
+//   `dialog_groups.block_calcium_score` 虽已算好（avg 3.85、257 组高钙）却零引用。
+//   结果是「重要的那段对话」只有在字面命中时才可能被捞回 —— 与「重要对话不该被忘」相反。
+// 设计要点（R016 §三 任务B / R017 §二）：
+//   ① **独立配额**：候选池只按钙分 + 沉淀窗取，不与 memories 槽位抢名额（调用方独立计数）；
+//   ② **沉淀窗**：闭组不足 N 分钟不参与（业主 2026-10-18 裁决），避免把"正在进行的对话"当记忆注入；
+//   ③ **相关性门**：候选先用本轮打分词校验（摘要命中优先、组内原文命中次之），
+//      有命中者按时间近因注入；**无命中时按近因保底 1 条** —— 否则高钙组只在字面命中时可达，
+//      等于结构性永久失忆（那正是本通道要修的病）；
+//   ④ 只取结构字段，不读取、不打印任何对话内容。
+
+/** 高钙对话组候选行（相关性字段由本模块补齐） */
+export interface HighCalciumGroupRow {
+  dg_id: string;
+  uuid: string | null;
+  calcium: number;
+  last_ts: string | null;
+  summary: string | null;
+  turns: number | null;
+  reason: string | null;
+  /** 本轮查询与该组相关（关键词命中摘要或组内原文） */
+  relevant: boolean;
+  /** 命中的关键词（仅诊断用；不含任何对话内容） */
+  matched_terms: string[];
+  /**
+   * 命中强度 = Σ 命中词长度（相关者之间排序用）。
+   *
+   * 只按时间近因排相关者时，"聊过同一件事但更早的组"会被更近的同词组挤掉 ——
+   * 离线实测 recall@3 因此停在 48.6%。命中强度先于近因 ⇒ 词越对得上越靠前。
+   */
+  match_score: number;
+}
+
+export interface HighCalciumGroupOptions {
+  /** retrieval-stage 已做过对库校验的打分词（优先使用） */
+  keywords?: string[];
+  /** keywords 缺失时用它抽词 —— 避免"没抽到词就没有相关性判断" */
+  query?: string;
+  /** 钙分下限，默认读 config budget.high_calcium_floor（5） */
+  floor?: number;
+  /** 沉淀窗分钟数，默认读 config budget.high_calcium_settle_minutes（30） */
+  settleMinutes?: number;
+  /** 当前时间（可注入 → 纯函数可测） */
+  nowMs?: number;
+  /** 相关性筛选前的候选池倍数（默认 5，避免"最近但不相关"挤掉"更早但相关"） */
+  poolFactor?: number;
+  /** 相关性校验最多用几个关键词（控 SQL 次数，默认 6） */
+  maxTermsForCheck?: number;
+}
+
+/** 池内原始行（相关性两字段尚未补齐） */
+type HighCalciumPoolRow = Omit<HighCalciumGroupRow, 'relevant' | 'matched_terms'>;
+
+/**
+ * 高钙对话组召回（真源）。返回**已按（相关性 → 时间近因 → 钙分）排序**的候选，长度 ≤ limit。
+ *
+ * @param entityUuid 会晤实体 UUID（组级归属过滤，绝不跨实体串档）
+ * @param limit      独立配额（调用方自己再裁；本函数保证不超过）
+ */
+export function highCalciumGroups(
+  src: RecallSource,
+  entityUuid: string,
+  limit = 3,
+  opts: HighCalciumGroupOptions = {},
+): HighCalciumGroupRow[] {
+  if (!entityUuid || !(limit > 0)) return [];
+
+  const cfg = getRetrievalFusionConfig();
+  const floor = Number.isFinite(opts.floor)
+    ? (opts.floor as number)
+    : (Number(cfg.budget.high_calcium_floor) || 5);
+  const settleMin = Number.isFinite(opts.settleMinutes)
+    ? (opts.settleMinutes as number)
+    : (Number(cfg.budget.high_calcium_settle_minutes) || 30);
+  const nowMs = Number.isFinite(opts.nowMs) ? (opts.nowMs as number) : Date.now();
+  const poolLimit = Math.max(limit, Math.ceil(limit * (opts.poolFactor ?? 5)));
+
+  const pool = (src.queryAll(
+    `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid, block_calcium_score AS calcium,
+            last_ts, block_summary AS summary, turn_count AS turns, block_close_reason AS reason
+     FROM dialog_groups
+     WHERE belong_entity_uuid = ?
+       AND COALESCE(block_calcium_score, 0) >= ?
+       AND summary_state = 'done'
+       AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
+       AND last_ts IS NOT NULL
+       AND last_ts <= ?
+     ORDER BY last_ts DESC, block_calcium_score DESC
+     LIMIT ?`,
+    [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString(), poolLimit],
+  ) || []) as HighCalciumPoolRow[];
+  if (pool.length === 0) return [];
+
+  // ── 相关性门：摘要命中优先，摘要没命中的再查组内原文 ──
+  const matched = new Map<string, string[]>();
+  const rawKw = (opts.keywords && opts.keywords.length > 0)
+    ? opts.keywords
+    : (opts.query ? extractTopicKeywords(opts.query) : []);
+  const terms = rawKw
+    .map((w) => String(w || '').trim())
+    .filter((w) => w.length > 0)
+    .slice(0, opts.maxTermsForCheck ?? 6);
+
+  if (terms.length > 0) {
+    for (const g of pool) {
+      const s = String(g.summary || '');
+      const hit = terms.filter((t) => s.indexOf(t) >= 0);
+      if (hit.length > 0) matched.set(String(g.dg_id), hit);
+    }
+    const missIds = pool.filter((g) => !matched.has(String(g.dg_id))).map((g) => String(g.dg_id));
+    if (missIds.length > 0) {
+      const phs = missIds.map(() => '?').join(',');
+      for (const t of terms) {
+        try {
+          const rows = src.queryAll<{ dg_id: string }>(
+            `SELECT DISTINCT dialog_group_id AS dg_id FROM conversations
+             WHERE dialog_group_id IN (${phs})
+               AND (is_test IS NULL OR is_test = 0) AND content LIKE ?`,
+            [...missIds, `%${t}%`],
+          ) || [];
+          for (const r of rows) {
+            const id = String(r.dg_id);
+            const arr = matched.get(id) || [];
+            if (arr.indexOf(t) < 0) arr.push(t);
+            matched.set(id, arr);
+          }
+        } catch {
+          // 原文相关性校验失败 → 该组按"不相关"处理，不阻塞整条通道
+        }
+      }
+    }
+  }
+
+  // ── 相关性驱动补选（B1 实测发现的结构性缺口）──
+  //   近期池只取 `limit × 5` 条，且按时间近因取 ⇒「重要但更早」的高钙组**根本进不了池子**，
+  //   相关性门在池外无从谈起（离线实测 recall@3 仅 41.4%，玉瑶 66.7% / 0007 仅 25%）。
+  //   这里在**全部**高钙组上按摘要命中补选，补够 limit 条为止；只在有关键词判据时进行。
+  if (terms.length > 0 && matched.size < limit) {
+    const seen = new Set(pool.map((g) => String(g.dg_id)));
+    const likePhs = terms.map(() => 'block_summary LIKE ?').join(' OR ');
+    try {
+      const extra = (src.queryAll(
+        `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid, block_calcium_score AS calcium,
+                last_ts, block_summary AS summary, turn_count AS turns, block_close_reason AS reason
+         FROM dialog_groups
+         WHERE belong_entity_uuid = ?
+           AND COALESCE(block_calcium_score, 0) >= ?
+           AND summary_state = 'done'
+           AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
+           AND last_ts IS NOT NULL AND last_ts <= ?
+           AND (${likePhs})
+         ORDER BY last_ts DESC, block_calcium_score DESC
+         LIMIT ?`,
+        [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString(),
+         ...terms.map((t) => `%${t}%`), poolLimit],
+      ) || []) as HighCalciumPoolRow[];
+      for (const g of extra) {
+        const id = String(g.dg_id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const s = String(g.summary || '');
+        matched.set(id, terms.filter((t) => s.indexOf(t) >= 0));
+        pool.push(g);
+      }
+    } catch {
+      // 补选失败不影响近期池结果（通道仍有近期池 + 保底）
+    }
+  }
+
+  const tsOf = (lastTs: string | null): number => {
+    const t = Date.parse(String(lastTs || ''));
+    return isNaN(t) ? 0 : t;
+  };
+  const sortRows = (arr: HighCalciumGroupRow[]): HighCalciumGroupRow[] =>
+    arr.sort((a, b) => (tsOf(b.last_ts) - tsOf(a.last_ts)) || (b.calcium - a.calcium));
+
+  const rows: HighCalciumGroupRow[] = pool.map((g) => ({
+    dg_id: String(g.dg_id),
+    uuid: g.uuid ?? null,
+    calcium: Number(g.calcium) || 0,
+    last_ts: g.last_ts ?? null,
+    summary: g.summary ?? null,
+    turns: g.turns ?? null,
+    reason: g.reason ?? null,
+    relevant: matched.has(String(g.dg_id)),
+    matched_terms: matched.get(String(g.dg_id)) || [],
+    match_score: (matched.get(String(g.dg_id)) || []).reduce((a, t) => a + String(t).length, 0),
+  }));
+
+  // 三种情形（缺一不可，测试已锁）：
+  //   ① 没有判据（既无 keywords 也抽不出 query 词）⇒ **不做相关性门**，按时间近因取满 limit；
+  //      把这种情况也压成 1 条，等于"无判据就自我阉割"，会丢掉本该召回的高钙组。
+  //   ② 有判据且有人命中 ⇒ 只注入命中者（按时间近因 + 钙分）；
+  //   ③ 有判据但无人命中 ⇒ 按时间近因**保底 1 条**（设计要点 ③，防结构性失忆）。
+  const byMatchThenRecency = (arr: HighCalciumGroupRow[]): HighCalciumGroupRow[] =>
+    arr.sort((a, b) => (b.match_score - a.match_score)
+      || (tsOf(b.last_ts) - tsOf(a.last_ts))
+      || (b.calcium - a.calcium));
+
+  if (terms.length === 0) return sortRows(rows).slice(0, limit);
+  const relevant = rows.filter((r) => r.relevant);
+  //   ② 相关者之间：**命中强度优先**（词越对得上越靠前），再时间近因、再钙分
+  if (relevant.length > 0) return byMatchThenRecency(relevant).slice(0, limit);
+  return sortRows(rows).slice(0, Math.min(1, limit));
+}
+
+/**
+ * 自检观测：该实体**当前可被召回**的高钙组总数（与 `highCalciumGroups` 同一组谓词）。
+ * 只读、不排序、不做相关性校验 —— 供启动自检与调用方日志打印「可召 / 总量」。
+ */
+export function countHighCalciumGroups(
+  src: RecallSource,
+  entityUuid: string,
+  opts: Pick<HighCalciumGroupOptions, 'floor' | 'settleMinutes' | 'nowMs'> = {},
+): number {
+  if (!entityUuid) return 0;
+  const cfg = getRetrievalFusionConfig();
+  const floor = Number.isFinite(opts.floor)
+    ? (opts.floor as number)
+    : (Number(cfg.budget.high_calcium_floor) || 5);
+  const settleMin = Number.isFinite(opts.settleMinutes)
+    ? (opts.settleMinutes as number)
+    : (Number(cfg.budget.high_calcium_settle_minutes) || 30);
+  const nowMs = Number.isFinite(opts.nowMs) ? (opts.nowMs as number) : Date.now();
+  try {
+    const rows = src.queryAll<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM dialog_groups
+       WHERE belong_entity_uuid = ?
+         AND COALESCE(block_calcium_score, 0) >= ?
+         AND summary_state = 'done'
+         AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
+         AND last_ts IS NOT NULL AND last_ts <= ?`,
+      [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString()],
+    ) || [];
+    return Number(rows[0]?.n) || 0;
+  } catch {
+    return 0;
+  }
 }
