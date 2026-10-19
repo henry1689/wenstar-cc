@@ -517,7 +517,9 @@ export class SQLiteAdapter {
       // 🔴 修复后立即强制落盘：repairDataIntegrity 直接操作 sql.js db.run()，绕过了 _dirtyCount 计数
       // flushNow() 依赖 _dirtyCount>0 才执行 export，所以这里直接 export+write
       // 🔴 批次1(2026-09-11): 新派生段（entity_genes）也需触发落盘，否则内存派生不持久
-      if (repairResult.entityUuid > 0 || repairResult.globalUid > 0 || repairResult.entityGenes > 0) {
+      // 🔴 A2(2026-10-19): 批次6（组级生命周期流转）同样绕过脏计数 —— 历史实测：仅流转发生时
+      //   本条件不满足 → 不落盘 → 状态只在内存，下次启动又重流转（幂等失效）。补 dialogGroups。
+      if (repairResult.entityUuid > 0 || repairResult.globalUid > 0 || repairResult.entityGenes > 0 || (repairResult.dialogGroups ?? 0) > 0) {
         try {
           const data = (this.db as any).export();
           if (this._safeWriteDbFile(data, 'repairDataIntegrity')) {

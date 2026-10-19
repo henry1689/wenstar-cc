@@ -61,7 +61,12 @@ describe('computeDialogGroupLifecycle — 纯函数规则', () => {
   });
 });
 
-/** 夹具：最小 dialog_groups 表 + run/exec 适配层（把 better-sqlite3 包装成生产 sql.js 同形接口） */
+/**
+ * 夹具：最小 dialog_groups 表 + **严格 sql.js 约定**适配层。
+ * 🔴 run 必须收数组参数（sql.js Database.run(sql, BindParams)），传变参直接抛错 ——
+ *   生产曾因 variadic 被 better-sqlite3 宽松夹具掩盖（静默错绑、状态不落库），
+ *   本夹具从类型/运行时双重封死该 bug 类。
+ */
 function makeFixtureDb(): any {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE dialog_groups (
@@ -69,7 +74,12 @@ function makeFixtureDb(): any {
     created_at TEXT, lifecycle_state TEXT, updated_at TEXT)`);
   return {
     _raw: db,
-    run: (sql: string, ...params: any[]) => { db.prepare(sql).run(...params); },
+    run: (sql: string, params?: any[]) => {
+      if (params !== undefined && !Array.isArray(params)) {
+        throw new Error('sql.js 约定：params 必须是数组（曾因 variadic 静默错绑）: ' + sql);
+      }
+      db.prepare(sql).run(...(params ?? []));
+    },
     exec: (sql: string) => {
       const rows = db.prepare(sql).raw(true).all();
       return rows.length ? [{ columns: [], values: rows }] : [];

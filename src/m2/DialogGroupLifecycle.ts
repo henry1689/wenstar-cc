@@ -78,11 +78,12 @@ export interface DgLifecycleAdvanceResult {
  * - 沉淀窗内的组不动；
  * - 重复执行零变化（重启幂等，验收项）。
  *
- * @param db 具备 run/exec 的 SQLite 适配层（sql.js / better-sqlite3 均可）
+ * @param db 具备 run/exec 的 SQLite 适配层 —— **必须是 sql.js 约定**：
+ *   run(sql, params数组) / exec(sql) 返回 [{values: rows}]。传 better-sqlite3 裸对象不兼容（变参与数组绑参数不同）。
  * @param now 可注入时钟（测试用）
  */
 export function advanceDialogGroupLifecycle(
-  db: { run: (sql: string, ...params: any[]) => void; exec: (sql: string) => any },
+  db: { run: (sql: string, params: any[]) => void; exec: (sql: string) => any },
   now: Date = new Date(),
 ): DgLifecycleAdvanceResult {
   const rows = db.exec(
@@ -106,9 +107,12 @@ export function advanceDialogGroupLifecycle(
       continue;
     }
     if (target !== currentState) {
+      // 🔴 参数必须是**数组**（sql.js Database.run(sql, BindParams) 约定，与 repairDataIntegrity
+      //   批次1-5 同风格）。曾写成 variadic 被测试夹具（better-sqlite3 原生 variadic）掩盖，
+      //   生产 sql.js 静默错绑（WHERE 匹配 0 行、不抛错）→ 状态永不落库、每次重启重流转。
       db.run(
         'UPDATE dialog_groups SET lifecycle_state = ?, updated_at = ? WHERE dialog_group_id = ?',
-        target, now.toISOString(), String(dgId),
+        [target, now.toISOString(), String(dgId)],
       );
       transitions += 1;
     }
