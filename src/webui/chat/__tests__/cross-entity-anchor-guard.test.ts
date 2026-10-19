@@ -14,7 +14,7 @@
  * 本测试锁定（C 层）：
  *   X1. 闭组必须含 meeting_entry（能力断言 —— 防对话组再次跨实体）；
  *   X2. 锚点归属主判据 = conversations 逐轮归属**多数决**（提及降为末位）——行为断言；
- *   X3. 确定性：同数归属取最早轮（GROUP BY ORDER BY cnt DESC, first_seq ASC）——行为断言；
+ *   X3. 确定性：同数归属取最早轮，全等票数按 MIN(timestamp)→belong 字母序兑底（A1）——行为断言；
  *   X4. 单实体组行为不变（多数决 = 唯一实体）；脏值 'null' 不入锚点；
  *   X5. 防回退：resolveAnchorOwnership 源码中提及路径不得再是第一优先级。
  */
@@ -133,8 +133,12 @@ describe('X1/X5 — 闭组与判据次序（能力断言）', () => {
     expect(chatSrc).toMatch(/if \(!_dg && !_meetingExited && !_meetingEntered\) \{/);
   });
 
-  it('X5: 归属查询必须是多数决形态（GROUP BY + cnt DESC），且提及路径在 conversations 之后', () => {
-    expect(src).toMatch(/GROUP BY belong_entity_uuid ORDER BY cnt DESC, first_seq ASC LIMIT 1/);
+  it('X5: 归属查询必须是多数决形态（GROUP BY + cnt DESC + 确定性 tie-break），且提及路径在 conversations 之后', () => {
+    // A1（2026-10-19，R016）能力断言升级：多数决 + 同数取最早轮 + 全等票数确定性 tie-break
+    //（MIN(timestamp) → belong 字母序，与 ANCHOR_REBUILD_GROUPS_SQL 三处同源）。
+    // 不断言完整字面串——层数演进不应打破守卫，只断言能力存在。
+    expect(src).toMatch(/GROUP BY belong_entity_uuid ORDER BY cnt DESC, first_seq ASC/);
+    expect(src).toMatch(/first_ts ASC, belong_entity_uuid ASC LIMIT 1/); // A1 确定性兑底
     const convIdx = src.indexOf('多数决');
     const mentionIdx = src.indexOf('提及降为末位');
     expect(convIdx).toBeGreaterThan(-1);

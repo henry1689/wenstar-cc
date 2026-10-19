@@ -63,6 +63,9 @@ export function resolveAnchorOwnership(
   let entityUuid: string | null = null;
   try {
     // ① 权威主判据：conversations 逐轮归属多数决（确定性：GROUP BY 计数 + 同数取最早轮）
+    // 🔴 A1（2026-10-19，R016）：补第三/四层确定性 tie-break（MIN(timestamp) → belong 字母序）——
+    //   与 ANCHOR_REBUILD_GROUPS_SQL / 启动自检 SQL 三处同源。P010 实测 7 组全等票数
+    //   （COUNT 与 MIN(seq_pos) 均相等）在原两层判据下欠定（靠扫描顺序侥幸稳定）。
     const seqs = (dg?.rounds || [])
       .map((r: any) => r?.seqPos)
       .filter((s: any) => typeof s === 'number' && s > 0)
@@ -71,9 +74,9 @@ export function resolveAnchorOwnership(
       // SQL 层排除字符串 'null' 脏值（它是真值，能穿过 IS NOT NULL / != ''），
       // 并在取值处再过一次净化 —— 双保险，避免脏值被当作合法归属写进锚点。
       const convRows = sql.queryAll(
-        "SELECT belong_entity_uuid, MIN(seq_pos) AS first_seq, COUNT(*) AS cnt FROM conversations " +
+        "SELECT belong_entity_uuid, MIN(seq_pos) AS first_seq, MIN(timestamp) AS first_ts, COUNT(*) AS cnt FROM conversations " +
         "WHERE seq_pos IN (" + seqs.join(',') + ") AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND belong_entity_uuid != 'null' " +
-        "GROUP BY belong_entity_uuid ORDER BY cnt DESC, first_seq ASC LIMIT 1"
+        "GROUP BY belong_entity_uuid ORDER BY cnt DESC, first_seq ASC, first_ts ASC, belong_entity_uuid ASC LIMIT 1"
       ) as any[];
       if (convRows && convRows.length > 0) {
         entityUuid = sanitizeBelongUuid(convRows[0]?.belong_entity_uuid) ?? null;

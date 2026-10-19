@@ -63,6 +63,37 @@ describe('3a — ANCHOR_REBUILD_GROUPS_SQL 多数决分组（生产同源）', (
     db.close(); db2.close();
   });
 
+  it('A1 全等票数（COUNT+MIN(seq_pos) 均相等）：第三层 MIN(timestamp) 定归属（P010 §四的 7 组场景）', () => {
+    // 两实体各 2 轮，且 MIN(seq_pos) 相同（P010 实测形态：如双方都有 seq 1104）——
+    // 原两层判据欠定（靠扫描顺序）；补 timestamp 后确定性取时间早者
+    const db = makeFixtureDb();
+    ins(db, 'DG_FULLTIE', 'TXS-000000019', 5, { ts: '2026-10-05T10:00:00Z' });
+    ins(db, 'DG_FULLTIE', 'TXS-000000019', 7, { ts: '2026-10-05T12:00:00Z' });
+    ins(db, 'DG_FULLTIE', 'TXS-000000011', 5, { ts: '2026-10-05T09:00:00Z' }); // 同 seq 5 但时间更早
+    ins(db, 'DG_FULLTIE', 'TXS-000000011', 8, { ts: '2026-10-05T13:00:00Z' });
+    const rows = db.prepare(ANCHOR_REBUILD_GROUPS_SQL).all() as any[];
+    expect(rows.length).toBe(1);
+    // 字母序 19>11，但 11 时间更早 → 时间层先于字母序决胜
+    expect(rows[0].belong_entity_uuid).toBe('TXS-000000011');
+    db.close();
+  });
+
+  it('A1 完全全等（连 MIN(timestamp) 也相等）：末位字母序兑底，与扫描顺序无关', () => {
+    const db = makeFixtureDb();
+    const ts = '2026-10-05T10:00:00Z';
+    ins(db, 'DG_ABSTIE', 'TXS-000000019', 5, { ts });
+    ins(db, 'DG_ABSTIE', 'TXS-000000011', 5, { ts });
+    const rows = db.prepare(ANCHOR_REBUILD_GROUPS_SQL).all() as any[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].belong_entity_uuid).toBe('TXS-000000011'); // 字母序小者恒胜
+    // 逆序插入再跑一遍，结果必须一致（与行序/扫描序无关）
+    const db2 = makeFixtureDb();
+    ins(db2, 'DG_ABSTIE', 'TXS-000000011', 5, { ts });
+    ins(db2, 'DG_ABSTIE', 'TXS-000000019', 5, { ts });
+    expect((db2.prepare(ANCHOR_REBUILD_GROUPS_SQL).all() as any[])[0].belong_entity_uuid).toBe('TXS-000000011');
+    db.close(); db2.close();
+  });
+
   it('单一组：正常返回（行为不变性）', () => {
     const db = makeFixtureDb();
     ins(db, 'DG_SINGLE', 'TXS-000000003', 1); ins(db, 'DG_SINGLE', 'TXS-000000003', 2);
@@ -113,7 +144,7 @@ describe('3a — ANCHOR_REBUILD_GROUPS_SQL 多数决分组（生产同源）', (
     db.close();
   });
 
-  it('生产函数引用该导出常量（防内联回退）', () => {
+  it('生产函数引用该导出常量（防内联回退）+ 自检 SQL 同源带 tie-break', () => {
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '..', 'SQLiteAdapter.ts'), 'utf8');
     const fnStart = src.indexOf('private _rebuildMemoryAnchors');
@@ -124,6 +155,14 @@ describe('3a — ANCHOR_REBUILD_GROUPS_SQL 多数决分组（生产同源）', (
     expect(fnBody).toMatch(/this\.db\.exec\(ANCHOR_REBUILD_GROUPS_SQL\)/);
     // 不得再内联旧的多行同主键分组查询
     expect(fnBody).not.toMatch(/GROUP BY dialog_group_id, belong_entity_uuid\)/);
+    // A1 防漂移：启动自检 SQL 必须与导出常量带同一套 tie-break（三处同源之二）
+    expect(fnBody).toMatch(/MIN\(c2\.timestamp\) ASC, c2\.belong_entity_uuid ASC LIMIT 1/);
+  });
+
+  it('A1 三处同源：resolveAnchorOwnership（dialog-group-stage.ts）带同一套 tie-break', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', '..', 'webui', 'chat', 'dialog-group-stage.ts'), 'utf8');
+    expect(src).toMatch(/cnt DESC, first_seq ASC, first_ts ASC, belong_entity_uuid ASC LIMIT 1/);
   });
 });
 

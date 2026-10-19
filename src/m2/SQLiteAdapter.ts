@@ -91,6 +91,11 @@ export function computeAnchorRestoreColumns(tableColumns: readonly string[]): st
  * 判据与 resolveAnchorOwnership（dialog-group-stage.ts）**完全同源**：
  *   GROUP BY belong ORDER BY COUNT(*) DESC, MIN(seq_pos) ASC LIMIT 1（多数决 + 同数取最早轮）；
  *   is_test 过滤与外层聚合口径对齐（I004 §5 版本）。
+ * 🔴 A1（2026-10-19，R016 任务A1 / P010 §四）：补第三/四层确定性 tie-break ——
+ *   P010 交叉验证发现 7/2088 组是**全等票数**（两实体 COUNT 相等且 MIN(seq_pos) 也相等），
+ *   原两层判据下归属欠定（靠 SQLite 分组扫描顺序侥幸稳定）。补 `MIN(c2.timestamp) ASC`（同轮取时间早）
+ *   与 `c2.belong_entity_uuid ASC`（最后字母序兑底）后，重建结果与扫描顺序完全无关。
+ *   两处（本常量 + 启动自检 SQL）与 resolveAnchorOwnership 三处同源同步，防判据漂移。
  * 提取为模块级导出：生产（_rebuildMemoryAnchors）与单测（混合/单一/空/新建组夹具）共用同一字符串，
  *   防止判据在两处漂移（与 computeAnchorRestoreColumns 同一设计理由）。
  */
@@ -111,7 +116,7 @@ export const ANCHOR_REBUILD_GROUPS_SQL =
   "AND c2.belong_entity_uuid IS NOT NULL AND c2.belong_entity_uuid != '' " +
   "AND (c2.is_test IS NULL OR c2.is_test = 0) " +
   "GROUP BY c2.belong_entity_uuid " +
-  "ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC LIMIT 1) " +
+  "ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC, MIN(c2.timestamp) ASC, c2.belong_entity_uuid ASC LIMIT 1) " +
   "ORDER BY dg.belong_entity_uuid, dg.first_ts";
 import type { Perception24D } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
@@ -2884,7 +2889,7 @@ export class SQLiteAdapter {
         "  SELECT c2.belong_entity_uuid FROM conversations c2 " +
         "  WHERE c2.dialog_group_id = substr(a.id, 1, length(a.id) - 7) " +
         "    AND c2.belong_entity_uuid IS NOT NULL AND c2.belong_entity_uuid != '' AND (c2.is_test IS NULL OR c2.is_test = 0) " +
-        "  GROUP BY c2.belong_entity_uuid ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC LIMIT 1)"
+        "  GROUP BY c2.belong_entity_uuid ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC, MIN(c2.timestamp) ASC, c2.belong_entity_uuid ASC LIMIT 1)"
       );
       const _mmCount = (_mm.length && _mm[0]?.values?.[0]?.[0]) ? Number(_mm[0].values[0][0]) : 0;
       if (_mmCount > 0) {
