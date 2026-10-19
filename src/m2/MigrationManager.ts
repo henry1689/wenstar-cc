@@ -1213,8 +1213,8 @@ export async function loadFgPersonEntries(
   return out;
 }
 
-export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number; entityGenes: number; memoryEntities?: number }> {
-  const result: any = { globalUid: 0, entityUuid: 0, nullVectors: 0, entityGenes: 0, memoryEntities: 0 };
+export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{ globalUid: number; entityUuid: number; nullVectors: number; entityGenes: number; memoryEntities?: number; dialogGroups?: number }> {
+  const result: any = { globalUid: 0, entityUuid: 0, nullVectors: 0, entityGenes: 0, memoryEntities: 0, dialogGroups: 0 };
   const t0 = Date.now();
 
   // 1. global_uid 回填
