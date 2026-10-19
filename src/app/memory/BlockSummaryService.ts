@@ -189,7 +189,7 @@ export class BlockSummaryService {
       [dgId],
     );
     if (convs.length === 0) {
-      this.markState(sql, dgId, 'skipped');
+      this.markState(sql, dgId, 'skipped', 'no_conversations');
       return 'skipped';
     }
 
@@ -199,7 +199,7 @@ export class BlockSummaryService {
       .join('\n');
 
     if (transcript.replace(/\s/g, '').length < this.minChars) {
-      this.markState(sql, dgId, 'skipped');
+      this.markState(sql, dgId, 'skipped', 'text_too_short');
       return 'skipped';
     }
 

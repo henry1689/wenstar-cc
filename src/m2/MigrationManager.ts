@@ -1007,6 +1007,53 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v23 → v24: 回填历史 skipped 组的失败原因（R013-A2 补遗）
+  //   背景：summary_error 列在 v23 才出现，此前 skip 静默记 NULL —— R012 要求
+  //   「skipped 组有明确失败原因」，存量 40 组不回填就永远达不成该验收项。
+  //   判定口径必须与 BlockSummaryService.generateOne 逐条一致：
+  //     meeting_entry → meeting_entry_no_llm
+  //     组内非测试对话为 0 → no_conversations
+  //     去空白后的转录长度 < 120 → text_too_short
+  //     以上皆否 → legacy_skip_unclassified（口径漂移留痕，不编造原因）
+  {
+    version: 24,
+    description: 'R013-A2补遗: skipped 组回填 summary_error（与 generateOne 判定口径一致）',
+    apply: (db: any) => {
+      try {
+        const total = Number(
+          db.exec("SELECT COUNT(*) FROM dialog_groups WHERE summary_state='skipped' AND COALESCE(summary_error,'')=''")?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        if (total <= 0) {
+          console.log('[Migration] v24 ✅ skipped 原因回填: 无需处理');
+          return;
+        }
+        // 转录长度：role 前缀 + 截断 500 字 + 去 9/10/13/32（对应 JS 的 replace(/\s/g,'')）
+        const transcriptLen =
+          'SELECT COALESCE(SUM(LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(' +
+          "SUBSTR((CASE WHEN c.role='user' THEN '用户' ELSE '玉瑶' END) || ': ' || COALESCE(c.content,''), 1, 500), " +
+          "char(9),''), char(10),''), char(13),''), char(32),''))), 0) " +
+          'FROM conversations c WHERE c.dialog_group_id = dialog_groups.dialog_group_id ' +
+          'AND (c.is_test IS NULL OR c.is_test = 0)';
+        db.run(
+          'UPDATE dialog_groups SET summary_error = (CASE ' +
+          "WHEN block_close_reason='meeting_entry' THEN 'meeting_entry_no_llm' " +
+          'WHEN (SELECT COUNT(*) FROM conversations c WHERE c.dialog_group_id = dialog_groups.dialog_group_id ' +
+          'AND (c.is_test IS NULL OR c.is_test = 0)) = 0 THEN \'no_conversations\' ' +
+          `WHEN (${transcriptLen}) < 120 THEN 'text_too_short' ` +
+          "ELSE 'legacy_skip_unclassified' END), updated_at = ? " +
+          "WHERE summary_state='skipped' AND COALESCE(summary_error,'')=''",
+          [new Date().toISOString()],
+        );
+        const left = Number(
+          db.exec("SELECT COUNT(*) FROM dialog_groups WHERE summary_state='skipped' AND COALESCE(summary_error,'')=''")?.[0]?.values?.[0]?.[0] ?? 0,
+        );
+        console.log(`[Migration] v24 ✅ skipped 原因回填: ${total} 组（剩余无原因 ${left}）`);
+      } catch (e) {
+        console.warn('[Migration] v24 回填失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

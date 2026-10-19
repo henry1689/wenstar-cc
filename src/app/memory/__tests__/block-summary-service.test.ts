@@ -160,6 +160,34 @@ describe('BlockSummaryService 三层契约', () => {
     expect(row.summary_error).toBe('meeting_entry_no_llm');
   });
 
+  it('组内无对话 → skipped + no_conversations', async () => {
+    db.run(
+      `INSERT INTO dialog_groups (dialog_group_id, belong_entity_uuid, block_close_reason, block_summary, summary_state, summary_error, first_ts, updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      ['DG_EMPTY', 'UUID-A', 'topic_switch', null, null, null, '2026-10-19T00:00:00Z', null],
+    );
+    const svc = makeService(async () => VALID_JSON);
+    const r = await svc.runBatch();
+
+    expect(r.skipped).toBe(1);
+    const row = groupRow('DG_EMPTY');
+    expect(row.summary_state).toBe('skipped');
+    expect(row.summary_error).toBe('no_conversations');
+  });
+
+  it('文本过短 → skipped + text_too_short，不调用 LLM', async () => {
+    addGroup('DG_SHORT', 'topic_switch', { content: '用户：在吗？\n玉瑶：在的。' });
+    let calls = 0;
+    const svc = makeService(async () => { calls++; return VALID_JSON; });
+    const r = await svc.runBatch();
+
+    expect(calls).toBe(0);
+    expect(r.skipped).toBe(1);
+    const row = groupRow('DG_SHORT');
+    expect(row.summary_state).toBe('skipped');
+    expect(row.summary_error).toBe('text_too_short');
+  });
+
   it('幂等：已生成的组不会被再次扫描', async () => {
     addGroup('DG_IDEM', 'topic_switch');
     let calls = 0;
