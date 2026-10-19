@@ -54,7 +54,12 @@ function checkEntityWriteObj(name: string): { allowed: boolean; reason: string }
 
 /** 重建时主动重算的列（不接受快照回填，否则旧值会覆盖新算值） */
 export const ANCHOR_REBUILD_DERIVED_COLUMNS: ReadonlySet<string> = new Set([
-  'id', 'seq_pos', 'created_at', 'perception_40d', 'calcium_score', 'calcium_level',
+  'id', 'seq_pos', 'created_at', 'calcium_score', 'calcium_level',
+  // 🔴 3b(b)（2026-10-19，D003授权）：perception_40d **移出派生列** ——
+  //   它不是由其他列计算出来的，而是运行期闭组时从峰值感知真实编码的 40D 向量。
+  //   原分类错误导致重建时恒写 encodeEmptyPerceptionV40()（全零）且快照回填不恢复它，
+  //   实测：10-16 原始事件锚点的 40D 被全零覆盖（108 条/阿珍一个实体）。
+  //   现归位为「快照回填列」：旧行非零向量由 _restoreSnap 恢复；仅新建组（无快照）落全零默认。
   'locus_path', 'leaf_zone', 'raw_input', 'memory_kind', 'lifecycle_state',
   'confidence_score', 'stability_score', 'thread_id', 'effective_strength',
   'strength_updated_at', 'is_landmark', 'primary_emotion', 'memory_type',
@@ -76,6 +81,38 @@ export function computeAnchorRestoreColumns(tableColumns: readonly string[]): st
     c => !ANCHOR_REBUILD_DERIVED_COLUMNS.has(c) && /^[a-z_][a-z0-9_]*$/i.test(c),
   );
 }
+
+/**
+ * 3b(a)（2026-10-19，D003授权 / I004第二步）：锚点重建分组查询——每组只返回**多数决归属**行。
+ *
+ * 原缺陷：按 (dialog_group_id, belong_entity_uuid) 分组，混合组产生多行，而循环内所有行共用
+ *   同一主键 `id = dg + '_ANCHOR'` + INSERT OR REPLACE ⇒ 最终归属 = 字典序最大的 UUID
+ *   （与多数决无关），每次重启都错写一遍（I003/I004 实锤：天气窜记忆的存量错配来源）。
+ * 判据与 resolveAnchorOwnership（dialog-group-stage.ts）**完全同源**：
+ *   GROUP BY belong ORDER BY COUNT(*) DESC, MIN(seq_pos) ASC LIMIT 1（多数决 + 同数取最早轮）；
+ *   is_test 过滤与外层聚合口径对齐（I004 §5 版本）。
+ * 提取为模块级导出：生产（_rebuildMemoryAnchors）与单测（混合/单一/空/新建组夹具）共用同一字符串，
+ *   防止判据在两处漂移（与 computeAnchorRestoreColumns 同一设计理由）。
+ */
+export const ANCHOR_REBUILD_GROUPS_SQL =
+  "SELECT dg.dialog_group_id, dg.belong_entity_uuid, dg.tc, dg.first_ts, dg.last_ts, dg.avg_ca, dg.max_ca, dg.topic " +
+  "FROM (SELECT dialog_group_id, belong_entity_uuid, COUNT(*) as tc, MIN(timestamp) as first_ts, " +
+  "MAX(timestamp) as last_ts, AVG(COALESCE(calcium_score,0.5)) as avg_ca, " +
+  "MAX(COALESCE(calcium_score,0.5)) as max_ca, " +
+  "(SELECT t2.topic FROM conversations t2 WHERE t2.dialog_group_id = conversations.dialog_group_id " +
+  "AND t2.topic IS NOT NULL AND t2.topic != '' ORDER BY t2.timestamp LIMIT 1) as topic FROM conversations " +
+  "WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND dialog_group_id IS NOT NULL " +
+  "AND (is_test IS NULL OR is_test = 0) " +
+  "GROUP BY dialog_group_id, belong_entity_uuid) dg " +
+  // 🔴 每组只保留多数决归属行（判据与 resolveAnchorOwnership 同源：COUNT DESC, MIN(seq_pos) ASC LIMIT 1）
+  "WHERE dg.belong_entity_uuid = (" +
+  "SELECT c2.belong_entity_uuid FROM conversations c2 " +
+  "WHERE c2.dialog_group_id = dg.dialog_group_id " +
+  "AND c2.belong_entity_uuid IS NOT NULL AND c2.belong_entity_uuid != '' " +
+  "AND (c2.is_test IS NULL OR c2.is_test = 0) " +
+  "GROUP BY c2.belong_entity_uuid " +
+  "ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC LIMIT 1) " +
+  "ORDER BY dg.belong_entity_uuid, dg.first_ts";
 import type { Perception24D } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
 import type {
@@ -2683,18 +2720,11 @@ export class SQLiteAdapter {
     // 按对话组聚合
     // 🔴 2026-09-12 隔离区过滤: 不得从被隔离的对话（is_test=1，已标记的洩漏污染型回复）重生成锚点记忆，
     //   否则污染会通过“删除旧锚点→从 conversations 重建”这条路径**回流**进 memories。
-    const groups = this.db.exec(
-      "SELECT dg.dialog_group_id, dg.belong_entity_uuid, dg.tc, dg.first_ts, dg.last_ts, dg.avg_ca, dg.max_ca, dg.topic " +
-      "FROM (SELECT dialog_group_id, belong_entity_uuid, COUNT(*) as tc, MIN(timestamp) as first_ts, " +
-      "MAX(timestamp) as last_ts, AVG(COALESCE(calcium_score,0.5)) as avg_ca, " +
-      "MAX(COALESCE(calcium_score,0.5)) as max_ca, " +
-      // V22: 话题标签来源 —— conversations.topic（原重建器完全不写 topic_label，实测 918/926 被清零）
-      "(SELECT t2.topic FROM conversations t2 WHERE t2.dialog_group_id = conversations.dialog_group_id " +
-      "AND t2.topic IS NOT NULL AND t2.topic != '' ORDER BY t2.timestamp LIMIT 1) as topic FROM conversations " +
-      "WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != '' AND dialog_group_id IS NOT NULL " +
-      "AND (is_test IS NULL OR is_test = 0) " +
-      "GROUP BY dialog_group_id, belong_entity_uuid) dg ORDER BY dg.belong_entity_uuid, dg.first_ts"
-    );
+    // 🔴 3b(a)（2026-10-19，D003授权 / I004第二步）：分组 SQL 收编为模块级导出常量
+    //   ANCHOR_REBUILD_GROUPS_SQL —— 生产与单测共用同一判据字符串（多数决归属，防漂移）。
+    //   原内联版按 (dialog_group_id, belong_entity_uuid) 分组，混合组多行同主键覆盖写，
+    //   最终归属 = 字典序最大 UUID（I003/I004 实锤）。
+    const groups = this.db.exec(ANCHOR_REBUILD_GROUPS_SQL);
     if (!groups.length || !groups[0]?.values?.length) return 0;
 
     // entity UUID → name
@@ -2787,6 +2817,8 @@ export class SQLiteAdapter {
       try {
         // V12.4 阶段B 根除24D: 锚点不再写 perception_json；默认 40D v2 全零
         //   （S4 P1-2: 与 encodeEmptyPerceptionV40/flushDialogGroup 空默认一致，对话组摘要不参与情感余弦）
+        // 🔴 3b(b)（2026-10-19）：此全零仅是**新建组的默认** —— 旧行非零向量随后由 _restoreSnap 恢复
+        //   （perception_40d 已移出 ANCHOR_REBUILD_DERIVED_COLUMNS，见该常量注释）。
         this.db!.run(
           "INSERT OR REPLACE INTO memories (id,seq_pos,created_at,perception_40d,calcium_score,calcium_level," +
           "locus_path,leaf_zone,raw_input,memory_kind,lifecycle_state,confidence_score,stability_score," +
@@ -2829,10 +2861,45 @@ export class SQLiteAdapter {
       } catch (e) { console.warn('[SQLiteAdapter] memories锚点落盘失败:', (e as Error)?.message); }
       // 落盘后验证
       try {
-        const vfy = this.db.exec("SELECT COUNT(*) FROM memories WHERE id LIKE '%_ANCHOR' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
+        const vfy = this.db.exec("SELECT COUNT(*) FROM memories WHERE id LIKE '%\_ANCHOR' ESCAPE '\\' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
         const vfyCount = (vfy.length && vfy[0]?.values?.[0]?.[0]) ? Number(vfy[0].values[0][0]) : 0;
         if (vfyCount < n * 0.8) console.warn(`[SQLiteAdapter] ⚠️ 锚点自检异常: 写入${n}条 查询到${vfyCount}条有UUID`);
       } catch {}
+    }
+    // ══════════════════════════════════════════════════════════════
+    // 🔴 3b 运行时自检（2026-10-19，R012 铁律2-3）：启动即校验锚点归属
+    //   与 conversations 多数决一致 —— 重建器任何回归（含主键覆盖/字典序问题复发）
+    //   都会在启动日志打出 ERROR，而不是静默错归属（I003/I004 教训：静默 = 数天后才被发现）。
+    //   判据与 3a 分组查询、resolveAnchorOwnership 完全同源（多数决+同数取最早轮+is_test）。
+    //   附带观测：非零 40D 锚点计数（3b(b) 效果的直接指标，供重启幂等验证读取）。
+    // ══════════════════════════════════════════════════════════════
+    try {
+      const _mm = this.db.exec(
+        "SELECT COUNT(*) FROM memories a " +
+        "WHERE a.id LIKE '%\\_ANCHOR' ESCAPE '\\' " +
+        "AND a.belong_entity_uuid IS NOT NULL AND a.belong_entity_uuid != '' " +
+        "AND EXISTS (SELECT 1 FROM conversations c WHERE c.dialog_group_id = substr(a.id, 1, length(a.id) - 7) " +
+        "  AND c.belong_entity_uuid IS NOT NULL AND c.belong_entity_uuid != '' AND (c.is_test IS NULL OR c.is_test = 0)) " +
+        "AND a.belong_entity_uuid <> (" +
+        "  SELECT c2.belong_entity_uuid FROM conversations c2 " +
+        "  WHERE c2.dialog_group_id = substr(a.id, 1, length(a.id) - 7) " +
+        "    AND c2.belong_entity_uuid IS NOT NULL AND c2.belong_entity_uuid != '' AND (c2.is_test IS NULL OR c2.is_test = 0) " +
+        "  GROUP BY c2.belong_entity_uuid ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC LIMIT 1)"
+      );
+      const _mmCount = (_mm.length && _mm[0]?.values?.[0]?.[0]) ? Number(_mm[0].values[0][0]) : 0;
+      if (_mmCount > 0) {
+        // 错配必须 ERROR（不是 warn）：这是归属正确性的硬指标，静默错归属即 I003/I004 级事故
+        console.error(`[SQLiteAdapter] 🔴 锚点归属自检失败: ${_mmCount} 条锚点归属 ≠ conversations 多数决 —— 重建器判据疑似回归，须立即排查（判据真源：dialog-group-stage.resolveAnchorOwnership）`);
+      } else {
+        console.log('[SQLiteAdapter] 锚点归属自检: 全部锚点归属 == conversations 多数决 ✅');
+      }
+      const _nz = this.db.exec(
+        "SELECT COUNT(*) FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\' AND COALESCE(l2_norm, 0) > 0"
+      );
+      const _nzCount = (_nz.length && _nz[0]?.values?.[0]?.[0]) ? Number(_nz[0].values[0][0]) : 0;
+      console.log(`[SQLiteAdapter] 锚点40D观测: 非零向量锚点 ${_nzCount} 条（3b(b) 快照回填效果指标）`);
+    } catch (e) {
+      console.warn('[SQLiteAdapter] 锚点归属自检查询失败（不阻塞启动）:', (e as Error)?.message);
     }
     return n;
   }
