@@ -10,6 +10,8 @@
  * - 最小侵入：迁移在 SQLiteAdapter.initialize() 中触发，不阻塞启动
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+// A2/Phase2.1（2026-10-19，R016任务A2）：对话组生命周期规则单一真源
+import { advanceDialogGroupLifecycle } from './DialogGroupLifecycle.js';
 // C3(2026-09-11): 实体名解析收口到 EntityNameCodec（唯一事实源）
 import { hasSurname } from '../config/app-identity.js';
 import { join, dirname } from 'node:path';
@@ -1054,6 +1056,29 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+
+  // v24 → v25: dialog_groups 组级生命周期存量初始化（A2/Phase2.1，R016 任务A2）
+  //   状态机 active → consolidating → archived，规则单一真源在 DialogGroupLifecycle.ts
+  //   （钙分>=5 → consolidating；创建>30天且钙分<2 → archived；沉淀窗30分钟内不动）。
+  //   只 UPDATE 不 DELETE（只增不减，archived 仅是降优先级信号）。
+  //   同一函数也被 repairDataIntegrity 每次启动调用（幂等），本迁移仅作存量初始化的审计留痕。
+  {
+    version: 25,
+    description: 'Phase2.1: dialog_groups 组级生命周期存量初始化（active/consolidating/archived）',
+    apply: (db: any) => {
+      try {
+        const r = advanceDialogGroupLifecycle(db);
+        const d = r.distribution;
+        console.log(
+          `[Migration] v25 ✅ 组级生命周期初始化: 扫描${r.scanned}组 流转${r.transitions}组 ` +
+          `分布 active=${d.active} consolidating=${d.consolidating} archived=${d.archived}` +
+          `(沉淀窗内${r.skippedSettling}组不动)`,
+        );
+      } catch (e) {
+        console.warn('[Migration] v25 生命周期初始化失败（非致命）:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════
@@ -1393,6 +1418,19 @@ export async function repairDataIntegrity(db: any, fgDbPath?: string): Promise<{
       }
     }
   } catch (e) { console.warn('[Repair] 批次2 memory_entities 重建失败:', e); }
+
+  // 6. dialog_groups 组级生命周期幂等流转（A2/Phase2.1，2026-10-19）
+  //    每次启动把全表收敛到 computeDialogGroupLifecycle 输出（纯函数单一真源）：
+  //    钙分>=5 → consolidating；创建>30天且钙分<2 → archived；沉淀窗30分钟内不动。
+  //    只 UPDATE 不 DELETE；重复执行零变化（重启幂等，R016 验收项）。
+  //    （钙分在闭组时定格，目标状态一经确定不再变；组龄跨过边界由下次启动收敛。）
+  try {
+    const dg = advanceDialogGroupLifecycle(db);
+    result.dialogGroups = dg.transitions;
+    if (dg.transitions > 0) {
+      console.log(`[Repair] 批次6 组级生命周期流转: ${dg.transitions} 组（分布 active=${dg.distribution.active} consolidating=${dg.distribution.consolidating} archived=${dg.distribution.archived}）`);
+    }
+  } catch (e) { console.warn('[Repair] 批次6 组级生命周期流转失败:', e); }
 
   const elapsed = Date.now() - t0;
   const totalFilled = result.globalUid + result.entityUuid + result.nullVectors + result.entityGenes + (result.memoryEntities ?? 0);
