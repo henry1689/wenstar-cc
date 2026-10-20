@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+// 🔴 Phase 2.3 (F / T005): 配额段的类型定义真源在纯函数模块（零运行时依赖，type-only 引用不产生循环）
+import type { RecallQuotaConfig } from '../m4/retrieval/recall-quota.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, '..', '..', 'config', 'retrieval-fusion.config.yaml');
@@ -107,6 +109,13 @@ export interface RetrievalFusionConfig {
   speed_filter: SpeedFilterConfig;
   p1_speed: P1SpeedConfig;
   /**
+   * 🔴 Phase 2.3 (F / T005): A/B 链路统一召回配额。
+   * 真源代码 src/m4/retrieval/recall-quota.ts（纯函数），接线在 webui/chat/retrieval-stage.ts。
+   * 开关语义：`enabled=false` = **不裁剪**（回到 2.3 之前的行为）——
+   * 与 `budget.high_calcium_group_limit`（注册级：关掉即高钙整路不存在）是**两件事**，勿混淆。
+   */
+  recall_quota: RecallQuotaConfig;
+  /**
    * 🔴 ADR-010 P1-C1: 对话块记忆总开关。
    *
    * 关 = 不注册 DialogGroupAdapter ⇒ 检索链路完全回到「单条消息」旧行为，可一键回退。
@@ -135,6 +144,13 @@ const DEFAULTS: RetrievalFusionConfig = {
       kb_route_rule: true, bionic_health_shortcircuit: true, bionic_timeout_ms: 2500,
     },
   },
+  // Phase 2.3 (F / T005): A/B 链路统一召回配额 —— yaml 缺失时按业主裁决的比例兜底
+  recall_quota: {
+    enabled: true, release_empty_class_quota: true, generic_query_min_hits: 1,
+    meeting: { high_calcium_group: 0.4, block_summary: 0.4, recent_memory: 0.2 },
+    normal: { block_summary: 0.6, high_calcium_group: 0.4 },
+    generic_query_high_calcium: 0.15,
+  },
   // ADR-010 P1-C1: 对话块记忆。yaml 缺失时默认开（块检索是本期交付的能力）
   enable_dialog_group_memory: true,
 };
@@ -147,6 +163,8 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
   try {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     const parsed = YAML.parse(raw) as Partial<RetrievalFusionConfig>;
+    // Phase 2.3 (F): 配额段的原始值（YAML 里可能只写一部分字段，故按 Partial 处理）
+    const _rqRaw: Partial<RecallQuotaConfig> = parsed.recall_quota || {};
     // 深合并默认值
     _cache = {
       inject_priority: { ...DEFAULTS.inject_priority, ...(parsed.inject_priority || {}) },
@@ -159,6 +177,14 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
       p1_speed: {
         streaming: { ...DEFAULTS.p1_speed.streaming, ...(parsed.p1_speed?.streaming || {}) },
         llm_reduction: { ...DEFAULTS.p1_speed.llm_reduction, ...(parsed.p1_speed?.llm_reduction || {}) },
+      },
+      // Phase 2.3 (F): 配额段**逐层**合并 —— yaml 只写一段也只会覆盖该段，
+      // 不会让另一个场景（meeting/normal）整体变 undefined（浅合并会踩这个坑）
+      recall_quota: {
+        ...DEFAULTS.recall_quota,
+        ..._rqRaw,
+        meeting: { ...DEFAULTS.recall_quota.meeting, ...(_rqRaw.meeting || {}) },
+        normal: { ...DEFAULTS.recall_quota.normal, ...(_rqRaw.normal || {}) },
       },
       // 布尔开关不能走 `?? ` 之外的隐式转换：显式判 undefined，避免 yaml 写 false 被当成缺失
       enable_dialog_group_memory: parsed.enable_dialog_group_memory === undefined

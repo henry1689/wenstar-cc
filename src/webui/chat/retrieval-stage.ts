@@ -12,7 +12,7 @@ import { rerank } from '../../m4/Reranker.js';
 import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
 import { resolveReferent } from '../../app/works/ReferentResolver.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
-import { passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
+import { passes as policePasses, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
 //   与 MeetingWallAdapter 共用本模块，杜绝同构漂移（模块零 import，无 M 层反向依赖）。
 import {
@@ -42,6 +42,14 @@ import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 // 🔴 V35-C(2026-10-05): 砂金库兜底的条数封顶与子预算 —— 与既有一整套预算体系统一放在
 //   retrieval-fusion.config（mem_ratio_normal / hard_max_chars 等），不另起第二套数字。
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
+// 🔴 Phase 2.3 (F / T005): A/B 链路统一召回配额 —— 纯函数真源在 m4 层，本文件只负责
+//   ① 打标签（标签后缀与分类判据共用 TAG 常量，杜绝两份实现）② 传入预算 ③ 出口调用。
+import {
+  applyRecallQuota,
+  extractDialogGroupId,
+  TAG,
+  type ApplyRecallQuotaResult,
+} from '../../m4/retrieval/recall-quota.js';
 
 /** 砂金库时间窗召回：天数（近 N 天聊过的可被召回） */
 const SANDBOX_RECALL_WINDOW_DAYS = (() => {
@@ -67,6 +75,78 @@ function memFragWithTime(label: string, body: string, createdAt?: string | null)
   // 注：createdAt 为 UTC ISO，此处按服务器本地时区（北京）呈现人类日期
   const tag = d.getFullYear() === now.getFullYear() ? mmdd : d.getFullYear() + '-' + mmdd;
   return `【${label}·${tag}】${body}`;
+}
+
+/**
+ * Phase 2.3 (F / T005): 记忆预算 C —— 与 chat.ts 注入点**同一公式、同一输入**（enrichedHistory）。
+ * Q4 裁决（R020）：不抽共享 helper，避免零高风险改动范围外的重构；此处现场算，
+ * 两侧输入相同（`_histChars` 用的就是传进 runRetrieval 的同一个 enrichedHistory），结果一致。
+ *   C = clamp(历史字符 × memory_max_ratio_of_history, 200, hard_max_chars)
+ */
+function recallBudgetFromHistory(
+  enrichedHistory: Array<{ content: string; timestamp?: string }>,
+): number {
+  const bud = getRetrievalFusionConfig()?.budget;
+  const hard = Number(bud?.hard_max_chars) || 8000;
+  const ratio = Number(bud?.memory_max_ratio_of_history);
+  const histChars = (enrichedHistory || []).reduce(
+    (s: number, t) => s + String(t?.content || '').length, 0,
+  );
+  const byHist = histChars > 0 && Number.isFinite(ratio) && ratio > 0
+    ? Math.floor(histChars * ratio)
+    : hard;
+  return Math.max(200, Math.min(hard, byHist));
+}
+
+/**
+ * Phase 2.3 (F / T005): A/B 链路统一召回配额 —— **出口闸门**。
+ *
+ * 位置：runRetrieval 的两个 return 之前各调一次（会晤分支 / 普通分支），
+ *   因为配额必须覆盖**所有**注入路径（统一中枢 / 高钙通道 / 关键词 / 三槽位 /
+ *   金库 / 砂金库 / Foundation 多路），放在末尾一次裁剪即可全分类覆盖（P018 方案 F）。
+ * 行为：**原地**改写 memoryFragments（chat.ts 持有该数组引用，不可替换）。
+ * 兜底：任何异常 → 打印告警后保持原片段，绝不阻断召回（fail-open）。
+ */
+function applyRecallQuotaAtExit(
+  memoryFragments: string[],
+  scenario: 'meeting' | 'normal',
+  enrichedHistory: Array<{ content: string; timestamp?: string }>,
+  genericQuery: boolean,
+): void {
+  let res: ApplyRecallQuotaResult | null = null;
+  const _rqT0 = Date.now();
+  try {
+    const cfg = getRetrievalFusionConfig()?.recall_quota;
+    const budget = recallBudgetFromHistory(enrichedHistory);
+    res = applyRecallQuota(memoryFragments, { scenario, budget, cfg, genericQuery });
+    if (res.applied) {
+      // 原地替换：保留同一数组引用（chat.ts / UUIDPolice 等下游持有的是引用）。
+      // 🔴 逐条 push 而非 `push(...kept)`（S4 评审）：spread 超过 V8 参数上限会
+      //   **先清空数组再抛 RangeError**，被外层 catch 吞掉后 memoryFragments 已是空数组，
+      //   fail-open 在这一处不成立（整块记忆静默丢失）。
+      memoryFragments.length = 0;
+      for (const _kept of res.kept) memoryFragments.push(_kept);
+    }
+  } catch (e) {
+    console.warn('[RecallQuota] 配额失败（保持原片段，不阻断召回）:', String((e as Error)?.message));
+    return;
+  }
+  if (!res) return;
+  const c = res.classes;
+  const q = (k: keyof typeof c) => `${c[k].keptChars}/${c[k].quotaChars}`;
+  // 非会晤 B 与近期记忆是**同一个额度池**，两个数字相同是预期，标注避免被读成两份额度
+  const samePool = scenario === 'normal' ? '（B与近期同池）' : '';
+  // 🔴 M 层管线节点的埋点（module_entry/exit + 耗时）由**唯一调用点**统一承担：
+  //   recall-quota.ts 是纯函数（零副作用是它能被 29 例单测覆盖的前提），
+  //   在它内部写 Hook 日志会破坏该约束；此处的自检行同时承担「节点事件 + 耗时」的可观测性。
+  console.log(
+    `[RecallQuota] 场景=${scenario} 预算=${res.budget}` +
+    ` A=${q('high_calcium_group')} B=${q('block_summary')} 近期=${q('recent_memory')}${samePool}` +
+    ` 溢出=${res.dropped} 泛词=${genericQuery ? '是' : '否'}` +
+    ` 其他=${res.other.total}条/${res.other.chars}字（不占配额）` +
+    ` 耗时=${Date.now() - _rqT0}ms` +
+    `${res.applied ? '' : ' [未启用/预算非法→未裁剪]'}`,
+  );
 }
 
 /** 砂金库时间窗召回：单次注入条数上限 */
@@ -368,6 +448,32 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         // 🆕 统一检索中枢接入：会晤场景也走 SearchOrchestrator 多路并行 + RRF 融合
         //   现有三槽位（MeetingWallAdapter）+ Foundation 额外域（黑钻/金库/记事）并行检索，
         //   融合结果优先注入（更相关的在前），三槽位原有逻辑保留为兜底去重。
+        // 🔴 Phase 2.3 (F / T005) F3: **同组去重集合**（本会晤分支内跨链路共享）——
+        //   同一个组可能同时被 B 链路（块路摘要，字面命中驱动）与 A 链路（高钙通道，钙化驱动）
+        //   命中；E1 的 dedupeKey 折叠只发生在 RRF 融合层，而这两条路径是**分别注入**的，
+        //   必须在注入侧用组 id 再拦一次，否则同一组的摘要会被注入两遍。
+        // 🔴 S4 评审结论：**2.3 的结构性改动（标签分层 / 同组去重）与配额裁剪共用同一个开关**。
+        //   `recall_quota.enabled=false` 时：标签回到 2.3 之前（`X的记忆` / `X的对话组·高钙`）、
+        //   不做组 id 去重、不裁剪 ⇒ 开关关闭后片段形态与召回集合与改动前逐字一致。
+        // 🔴🔴 I007 串档根因（P0，2026-10-20）：此处原先传 `policy: { enforce: false }`，
+        //   而统一中枢注册表里的五个适配器（DialogGroup / Vault / BlackDiamond / Note / Conversation）
+        //   **只**靠 `buildSqlClause(ctx.policy)` 做 UUID 过滤 —— `enforce:false` 让子句变成空串
+        //   ⇒ **全库召回**：王全芬会晤时把阿珍的对话组当自己的记忆注入了
+        //   （且下方注入时统一打上「会晤实体名」标签，串档内容被伪装成会晤实体自己的记忆，
+        //     模型无法察觉 —— 这比单纯泄漏更糟）。
+        //   `enforce` 的注释明确写着「false 仅供离线巡检探针用」，这里不是探针。
+        // 修法：会晤场景的检索主体**唯一真源 = 会晤实体 UUID**，据此构造 deny-by-default 策略：
+        //   visibleUuids = {会晤实体}、allowUnowned = false（无归属记录一律拒）、searchScope = 'strict'。
+        //   ⚠️ 刻意**不**并入 `_gatekeeper.getEffectiveWhitelist()`：那份白名单可能被残留的
+        //     sessionEntities 污染（本文件下方注释记录过「冻结在上一个会晤实体」的实测泄漏链），
+        //     而检索主体的真源是 EntityMeeting，不是会话层。
+        const _meetingPolicy: PolicePolicy = {
+          visibleUuids: new Set<string>([_entityUuid]),
+          allowUnowned: false,
+          searchScope: 'strict',
+        };
+        const _rqOn = getRetrievalFusionConfig()?.recall_quota?.enabled === true;
+        const _injectedGroupIds = new Set<string>();
         try {
           const { MeetingWallAdapter } = await import('../../m4/retrieval/adapters/MeetingWallAdapter.js');
           const { createDefaultRegistry } = await import('../../m4/retrieval/index.js');
@@ -378,7 +484,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           const _orRes = await _orchestrator.runSearch(_reg, {
             query: message,
             entityUuids: [_entityUuid],
-            policy: { enforce: false } as any,
+            // 🔴 I007 修复：deny-by-default 的会晤策略（原为 enforce:false ⇒ 五路适配器全库召回）
+            policy: _meetingPolicy,
             mode: 'balanced',
             nowMs: Date.now(),
           });
@@ -389,15 +496,37 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               // 🔴 Phase 2.2 (B1): 高钙对话组由下方**独立配额**通道注入（任务书明令不占 memories 名额）。
               //   此处跳过，避免同一组被通用循环以「记忆」标签重复注入一次。
               if (_oh.route === 'high_calcium_group') continue;
+              // 🔴 F0 标签分层（配额分类的前置，R020 已批；受 _rqOn 门控）：块路（B 链路·
+              //   字面命中驱动）此前与单条记忆共用【X的记忆·MM-DD】标签 ⇒ 配额分不出
+              //   B 的 40% 与近期记忆的 20%。启用时按路由分标签（**标签含「记忆」**，见
+              //   recall-quota.TAG 注释：MemoryInjector 按 `includes('记忆')` 定优先级，
+              //   缺它会把组片段从 0.85 降到 0.60，被注入层二次截断挤出）；
+              //   关闭时回到 2.3 之前的 `X的记忆`（优先级同为 0.85，形态逐字一致）。
+              const _isGroupRoute = _oh.route === 'dialog_group' || _oh.domain === 'dialog_group';
               const _t = String(_oh.text || '').substring(0, 250);
               if (_t.length > 4 && !_orSeen.has(_t.substring(0, 20))) {
                 _orSeen.add(_t.substring(0, 20));
-                memoryFragments.push(memFragWithTime(_meetingEntityName + '的记忆', _t, _oh.createdAt));
+                memoryFragments.push(memFragWithTime(
+                  _meetingEntityName + (_rqOn && _isGroupRoute ? TAG.dialogGroupMemory : TAG.memory),
+                  _t,
+                  _oh.createdAt,
+                ));
                 _orInjected++;
+                // F3: 记入已注入组，供下方高钙通道跳过同一组（仅启用配额时生效）
+                if (_rqOn && _isGroupRoute) {
+                  const _gid = extractDialogGroupId(_oh);
+                  if (_gid) _injectedGroupIds.add(_gid);
+                }
               }
               if (_orInjected >= 10) break;
             }
-            console.log(`[MeetingOrchestrator] 统一中枢注入: ${_orInjected} 条 (routes=${JSON.stringify(_orRes.routeStats)})`);
+            // 🔴 I007 自检（**结果侧**指标）：命中里出现的归属 UUID 种类数，会晤场景必须恒为 1。
+            //   ⚠️ 不能用 `retrieval_log.entity_count` 判串档：那一列写的是
+            //   **查询侧**实体数（DNA entity_genes 全表，本例 5），与结果跨度无关 ——
+            //   按它"修"会把正常查询误判成串档。
+            const _orEntities = new Set(_orRes.hits.map((h: { entityUuid?: string | null }) => h.entityUuid || '').filter(Boolean));
+            console.log(`[MeetingOrchestrator] 统一中枢注入: ${_orInjected} 条 (routes=${JSON.stringify(_orRes.routeStats)})`
+              + ` · 命中实体数=${_orEntities.size}（会晤应=1，白名单=${_meetingPolicy.visibleUuids.size}）`);
           }
         } catch (_orErr) { /* 统一中枢失败不阻塞，降级现有三槽位 */ }
         // 🔴 2026-09-09 会晤失忆修复(A): 内容相关召回并入 — 关键词命中的当日记忆排到钙化序之前。
@@ -416,6 +545,11 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         //   改为：候选放宽到 20 → **数据校验**（必须在实体自有记忆中真实出现）→ 按 (命中数, 词长) 排序取前 4。
         const _topicKwRaw = extractTopicKeywords(message, _exclKwNames, 20, _topicPrefer);
         let _topicKw: string[] = _topicKwRaw.slice(0, 4);
+        // 🔴 Phase 2.3 (F / T005) F5: 泛词判据的**数据侧**输入 ——
+        //   经「必须在本实体记忆中真实出现」校验后仍有命中的关键词数。
+        //   0 = 生抽出的全是噪声滑窗词（实测"你怎/么什/么都/都不"）＝ 这一轮其实没有具体话题词。
+        //   判据（是否 < generic_query_min_hits）在配额模块，这里只如实上报命中数。
+        let _kwValidHits = 0;
         try {
           const _scored = _topicKwRaw
             .map(function (w) {
@@ -428,6 +562,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             })
             .filter(function (x) { return x.n > 0; })
             .sort(function (a, b) { return (b.n - a.n) || (b.w.length - a.w.length); });
+          _kwValidHits = _scored.length;
           if (_scored.length > 0) _topicKw = _scored.slice(0, 4).map(function (x) { return x.w; });
           console.log('[EntityMem·抽词校验] 候选 ' + _topicKwRaw.length + ' → 命中 ' + _scored.length +
             ' → 采用 [' + _topicKw.join('/') + ']');
@@ -478,7 +613,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           const _hcHits = await new HighCalciumGroupAdapter(_sqlite as any).search({
             query: message,
             entityUuids: [_entityUuid],
-            policy: { enforce: false } as any,
+            // 🔴 I007 修复：同上（该适配器目前用 entityUuids 过滤、暂不读 policy，
+            //   但仍传正确策略 —— 它一旦开始读 policy 就不该再踩同一个坑）
+            policy: _meetingPolicy,
             mode: 'balanced',
             nowMs: Date.now(),
             limit: _hcLimit,
@@ -488,18 +625,31 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           const _hcSeen = new Set(memoryFragments.map((f: string) => f.substring(0, 20)));
           let _hcInjected = 0;
           let _hcRelevant = 0;
+          let _hcDupSkipped = 0;  // F3: 已由 B 链路注入的同一组
           for (const _hh of _hcHits) {
+            // 🔴 F3 同组去重：该组若已由上面的块路（B 链路）注入，此处直接跳过 ——
+            //   文本前缀去重（下方 _hcSeen）抓不到这种情况：块路给的是摘要正文、
+            //   高钙路给的是 `【摘要】…` 前缀形态，前 20 字未必相同。
+            const _hcGid = extractDialogGroupId(_hh);
+            if (_rqOn && _hcGid && _injectedGroupIds.has(_hcGid)) { _hcDupSkipped++; continue; }
             const _txt = String(_hh.text || '').trim().substring(0, 250);
             if (_txt.length < 8) continue;
             const _key = _txt.substring(0, 20);
             if (_hcSeen.has(_key)) continue;   // 其他通道已注入 ⇒ 不重复
             _hcSeen.add(_key);
             if ((_hh.payload as { relevant?: boolean })?.relevant) _hcRelevant++;
-            memoryFragments.push(memFragWithTime(_meetingEntityName + '的对话组·高钙', _txt, _hh.createdAt));
+            // 标签同 F-0：启用时带「记忆」保 0.85 优先级；关闭时回到 2.3 之前的形态
+            memoryFragments.push(memFragWithTime(
+              _meetingEntityName + (_rqOn ? TAG.highCalciumGroupMemory : TAG.highCalciumGroup),
+              _txt,
+              _hh.createdAt,
+            ));
             _hcInjected++;
+            if (_rqOn && _hcGid) _injectedGroupIds.add(_hcGid);
           }
           console.log(`[HighCalciumGroup] 候选 ${_hcHits.length} 注入 ${_hcInjected}/${_hcLimit}` +
             ` · 该实体可召高钙组 ${_hcTotal} 组 · 相关命中 ${_hcRelevant}` +
+            ` · 同组重复拦截 ${_hcDupSkipped}` +
             ` · 阈值 floor=${_hcCfg?.high_calcium_floor} 沉淀窗=${_hcCfg?.high_calcium_settle_minutes}min`);
         } catch (_hce) {
           // 高钙组通道失败不得阻塞会晤主召回（与锚点/关键词通道同一兜底策略）
@@ -743,6 +893,14 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
           } catch (_pkErr) { /* 兜底挑选失败不阻塞 — 保持原候选 */ }
         }
+
+        // 🔴 Phase 2.3 (F / T005) F1+F5: 会晤场景 A/B/近期记忆 配额裁剪 —— **出口闸门**。
+        //   放在本分支最后（LLMPicker 之后），才能覆盖上方全部注入路径：
+        //   统一中枢 / 关键词 / 三槽位 / 高钙组 / 金库 / 砂金库 / 长文（长文属 OTHER 不受配额约束）。
+        //   泛词判据用**真实数据校验后的关键词命中数**（_kwValidHits），不猜措辞。
+        const _rqGeneric = _topicKw.length === 0
+          || _kwValidHits < (Number(getRetrievalFusionConfig()?.recall_quota?.generic_query_min_hits) || 0);
+        applyRecallQuotaAtExit(memoryFragments, 'meeting', enrichedHistory, _rqGeneric);
       }
     } catch (_e) { /* non-critical */ }
     return {
@@ -1251,15 +1409,62 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     const _fResult = await _foundationPromise;
     if (_fResult) {
       if (WS_FOUNDATION_ROUTES) {
-        for (const _f of _fResult.fragments) {
-          if (!memoryFragments.some(f => f.includes(_f.substring(0, 20)))) memoryFragments.push(_f);
+        // 🔴 Phase 2.3 (F / T005) F0+F3（非会晤侧，受 _rqOn 门控）：
+        //   formatHit 对 dialog_group / high_calcium_group 走 default 分支输出 `💭 …`，
+        //   **无标签 ⇒ 配额分类会判成 OTHER**（OTHER 不占配额）⇒ F2 的 60/40 形同虚设。
+        //   这里按命中域补标签（后缀取 recall-quota 的 TAG 单源，非会晤无单一实体名可挂，用裸形态）。
+        //   开关关闭 ⇒ `_isGroupHit` 恒假 ⇒ 本循环退化为 2.3 之前的原样注入。
+        const _rqOn = getRetrievalFusionConfig()?.recall_quota?.enabled === true;
+        const _fHits = (_fResult.hits || []) as Array<{ id?: string | number; domain?: string; createdAt?: string }>;
+        const _fGroupIds = new Set<string>();
+        let _fGroupTagged = 0;
+        for (let _fi = 0; _fi < _fResult.fragments.length; _fi++) {
+          const _f = _fResult.fragments[_fi];
+          const _hit = _fHits[_fi];
+          const _isGroupHit = _rqOn && !!_hit
+            && (_hit.domain === 'dialog_group' || _hit.domain === 'high_calcium_group');
+          let _out = _f;
+          if (_isGroupHit) {
+            const _body = _f.replace(/^\s*💭\s*/, '').replace(/^【摘要】/, '');
+            const _gkey = _body.substring(0, 20);
+            // 🔴 去重键只与**组级片段**比对（S4 评审）：正文前 20 字若与任意片段比对，
+            //   会被逐字重合的单条记忆误命中 ⇒ 整组被静默跳过。非组片段保持原判据。
+            if (_gkey.length > 0 && memoryFragments.some((f: string) => {
+              const _ri = f.indexOf('】');
+              return _ri > 0 && f.slice(0, _ri + 1).includes('对话组') && f.includes(_gkey);
+            })) continue;
+            _out = memFragWithTime(
+              _hit!.domain === 'high_calcium_group' ? TAG.highCalciumGroupMemoryBare : TAG.dialogGroupMemoryBare,
+              _body,
+              _hit!.createdAt,
+            );
+            _fGroupTagged++;
+          } else if (_f.substring(0, 20).length > 0 && memoryFragments.some((f: string) => f.includes(_f.substring(0, 20)))) {
+            continue;
+          }
+          memoryFragments.push(_out);
+          if (_isGroupHit) {
+            const _fGid = extractDialogGroupId(_hit!);
+            if (_fGid) _fGroupIds.add(_fGid);
+          }
         }
-        console.log(`[FoundationRoutes] 适配器统一路由 → ${_fResult.fragments.length} 片段 (executed=${_fResult.executed})`);
+        console.log(`[FoundationRoutes] 适配器统一路由 → ${_fResult.fragments.length} 片段 (executed=${_fResult.executed})` +
+          ` · 组级补标 ${_fGroupTagged} · 组去重键 ${_fGroupIds.size}`);
       } else {
         console.log(`[FoundationRoutes-shadow] 影子比对 → ${_fResult.fragments.length} 片段 (executed=${_fResult.executed}, latency=${JSON.stringify(_fResult.latency)})`);
       }
     }
   } catch (_fErr) { console.warn('[FoundationRoutes] 影子/注入失败:', (_fErr as Error)?.message); }
+
+  // 🔴 Phase 2.3 (F / T005) F2: 非会晤场景 B60% / A40% 配额 —— **出口闸门**。
+  //   覆盖上方全部注入路径（情感记忆 / V13 / V11 / 长文 / 砂金 / Foundation 多路）。
+  //   近期记忆并入 B 侧同一池（R020 Q2）；铁律/金库/作品/长文属 OTHER，不受配额约束。
+  //   泛词判据在非会晤侧是**保守代理**（抽词长度，不做对库校验，避免每轮多 N 次 COUNT）——
+  //   F5 的数据支撑（P015 泛词 recall@3 仅 33%）来自会晤场景，故非会晤侧极少触发。
+  applyRecallQuotaAtExit(
+    memoryFragments, 'normal', enrichedHistory,
+    extractTopicKeywords(message, [], 8).length === 0,
+  );
 
   return {
     isTopicShift,
