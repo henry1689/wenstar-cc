@@ -39,20 +39,17 @@ export type SearchDomain =
    * `search_index`（块不另建索引，见 ADR-010 P1-C1 细化 4）——
    * 差异只在聚合粒度，不在索引。
    */
-  | 'dialog_group';
+  | 'dialog_group'
   /**
-   * Phase 2.2 (B1/T004) 备注：会晤「高钙对话组」路**故意不进 `AdapterRegistry`**。
+   * Phase 2.3 (E1/T005): 高钙对话组路的**独立 domain**（存储仍在 dialog_groups 表）。
    *
-   * 原因：注册表是 `Map<SearchDomain, RetrievalAdapter>` —— **一域一适配器**。
-   *   HighCalciumGroupAdapter 的存储域就是 `dialog_groups`（与块路同表同 PK），
-   *   用同 domain 注册会把 B 链路的 DialogGroupAdapter **静默覆盖**（实测：注册表里块路直接消失，
-   *   等于用 A 链路换掉 B 链路）。若要新增 domain，还得同步补 `backref.BACKREF_TABLE`
-   *   的穷举映射，代价与收益不成比例。
-   *
-   * 现行做法：会晤链路在 `retrieval-stage` 里**直接调用该适配器**做独立配额注入
-   *   （与 MeetingWallAdapter 之外的五路槽位同一层级，名额互不占用）。
-   *   2.3 统一编排若要把高钙路纳入 RRF，需先让注册表支持「一域多适配器」或给它一个独立 domain。
+   * 历史（Phase 2.2 B1）：因注册表一域一适配器，同 domain 注册会静默覆盖 B 链路块适配器，
+   *   当时选择不注册、由会晤链路直调。E1 按 T005 许可方案落地：给高钙路**独立 domain**
+   *   + 补 `backref.BACKREF_TABLE` 穷举映射（本条即），两路可同时注册互不覆盖。
+   * 与 dialog_group 共用存储表但**语义路由不同**：块路=字面命中驱动，高钙路=钙分驱动（无需命中）。
+   * 去重靠显式 `dedupeKey: dialog_group:<id>`（跨 domain 共享，同组两路命中融合层只留一条）。
    */
+  | 'high_calcium_group';
 
 /** 召回路标识 — 一条命中从哪条检索路进来，融合阶段按此取 RRF 权重 */
 export type RetrievalRoute =

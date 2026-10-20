@@ -65,6 +65,12 @@ const POOL_FACTOR = 5;
  * 改 `/5` 后高钙拿满 0.15、2~5 分段最多 0.13，配合候选池扩大即可让同命中数下高钙稳定排前。
  */
 const CALCIUM_NORM_DENOM = 5;
+/**
+ * 🔴 Phase 2.3 (E2/T005): archived 组排序降权系数。
+ * 归档组**不排除**（仍可关键词命中，只增不减铁律），但排序权重乘此系数使其低于 active/consolidating。
+ * 取 0.5：够低以让同命中数的 active 组稳定排前，又不至于把 archived 挤到完全不可见（保留兜底可达性）。
+ */
+const ARCHIVED_DECAY = 0.5;
 
 /** 块候选行（内层聚合结果） */
 export interface DialogGroupCandidateRow {
@@ -81,6 +87,8 @@ export interface DialogGroupCandidateRow {
   reason: string | null;
   /** block_summary（三层摘要），可能为 NULL（未生成/跳过/失败） */
   summary: string | null;
+  /** 生命周期状态（Phase 2.3 E2 降权消费）：active/consolidating/archived，可能为 NULL */
+  lifecycle_state: string | null;
 }
 
 /** 块正文行 */
@@ -129,7 +137,8 @@ export class DialogGroupAdapter implements RetrievalAdapter {
                 MAX(u.last_ts) AS last_ts,
                 g.block_calcium_score AS calcium, g.narrative_tag AS tag,
                 g.scene_anchor_hash AS hash, g.turn_count AS turns,
-                g.block_close_reason AS reason, g.block_summary AS summary
+                g.block_close_reason AS reason, g.block_summary AS summary,
+                g.lifecycle_state AS lifecycle_state
          FROM (
            SELECT dialog_group_id AS dg_id,
                   MAX(belong_entity_uuid) AS uuid,
@@ -181,7 +190,8 @@ export class DialogGroupAdapter implements RetrievalAdapter {
                   0 AS matched_rows, 0 AS summary_matched, last_ts,
                   block_calcium_score AS calcium, narrative_tag AS tag,
                   scene_anchor_hash AS hash, turn_count AS turns,
-                  block_close_reason AS reason, block_summary AS summary
+                  block_close_reason AS reason, block_summary AS summary,
+                  lifecycle_state AS lifecycle_state
            FROM dialog_groups
            WHERE 1=1${police.clause}
            ORDER BY last_ts DESC
@@ -228,8 +238,14 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         const summaryDensity = Math.min(1, summaryMatched / SUMMARY_HIT_NORM);
         const bothChannels = matched > 0 && summaryMatched > 0 ? 1 : 0;
         const calcium = Math.min(1, (Number(c.calcium) || 0) / CALCIUM_NORM_DENOM);
-        const rawScore =
+        const rawScoreBase =
           convDensity * 0.40 + summaryDensity * 0.30 + bothChannels * 0.15 + calcium * 0.15;
+        // 🔴 Phase 2.3 (E2/T005): lifecycle_state 降权 —— archived 组**不排除**（仍可关键词命中，
+        //   只增不减），但排序权重降低（乘 ARCHIVED_DECAY）。active/consolidating 不变（decay=1）。
+        //   规则源：DialogGroupLifecycle.ts（>30天且钙<2 → archived）。高钙路（钙≥5）永不为 archived，
+        //   故只影响块路（DialogGroupAdapter）的排序，不影响高钙召回。
+        const decay = String(c.lifecycle_state || 'active') === 'archived' ? ARCHIVED_DECAY : 1;
+        const rawScore = rawScoreBase * decay;
         const score = Number.isFinite(rawScore) ? Math.round(rawScore * 1000) / 1000 : 0;
 
         const hit: SearchHit = {
@@ -248,6 +264,7 @@ export class DialogGroupAdapter implements RetrievalAdapter {
             blockCloseReason: c.reason ?? null,
             matchedRows: matched,
             summaryMatchedRows: summaryMatched,
+            lifecycleState: c.lifecycle_state ?? null,
             summary: summary || null,
           },
           backref: { table: 'dialog_groups', id: dgId },

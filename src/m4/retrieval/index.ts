@@ -22,6 +22,8 @@ import { FamilyGraphAdapter, type FamilyGraphSource } from './adapters/FamilyGra
 import { MemoryAdapter, type MemoryRetrieverSource } from './adapters/MemoryAdapter.js';
 // 🔴 ADR-010 P1-C1: 对话块域（块 = 一段连贯场景，多轮聚合）
 import { DialogGroupAdapter } from './adapters/DialogGroupAdapter.js';
+// 🔴 Phase 2.3 (E1/T005): 高钙对话组路 —— 独立 domain 注册，与块路共存
+import { HighCalciumGroupAdapter } from './adapters/HighCalciumGroupAdapter.js';
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 
 /** 数据源依赖（与 SQLiteAdapter 兼容的最小形状） */
@@ -68,12 +70,18 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
     try { _dgOn = getRetrievalFusionConfig().enable_dialog_group_memory !== false; }
     catch { /* 配置读取失败 → 保持默认开（块检索是本期交付的能力，失败不应静默降级） */ }
     if (_dgOn) reg.register(new DialogGroupAdapter(deps.sqlite));
-    // 🔴 Phase 2.2 (B1/T004): **高钙对话组路故意不在这里注册**。
-    //   AdapterRegistry 是 `Map<SearchDomain, adapter>`（一域一适配器），而 HighCalciumGroupAdapter
-    //   与块路同属 `dialog_groups` 存储域 —— 注册它会把 DialogGroupAdapter **静默覆盖**，
-    //   等于用 A 链路换掉 B 链路（本仓已有一次实测踩坑）。
-    //   会晤链路改由 retrieval-stage 直接调用该适配器做**独立配额**注入。
-    //   2.3 统一编排若要把它纳入 RRF，需先让注册表支持「一域多适配器」或给它独立 domain。
+    // 🔴 Phase 2.3 (E1/T005): 高钙对话组路注册 —— 独立 domain 'high_calcium_group'。
+    //   Phase 2.2 时一域一适配器限制下故意不注册（同 domain 会静默覆盖块路）；E1 落地
+    //   独立 domain + BACKREF_TABLE 映射后，两路同时注册互不覆盖（回归测试锁定）。
+    //   跨路去重：高钙路显式 dedupeKey `dialog_group:<id>` 与块路 domain:id 同串，融合层折叠。
+    //   配置门：budget.high_calcium_group_limit > 0 才注册（默认 5；设 0 即整路关闭，
+    //   回退语义与块路的 enable_dialog_group_memory 同姿势——注册级开关，关了即整条路不存在）。
+    let _hcOn = false;
+    try {
+      const _b = getRetrievalFusionConfig().budget;
+      _hcOn = Number(_b?.high_calcium_group_limit ?? 0) > 0;
+    } catch { _hcOn = false; /* 配置读取失败 → 不注册（与块路相反：高钙路是可选增强，失败静默回退现有路） */ }
+    if (_hcOn) reg.register(new HighCalciumGroupAdapter(deps.sqlite));
   }
 
   return reg;

@@ -35,10 +35,11 @@ const RECENCY_W = 0.4;
 const RECENCY_WINDOW_DAYS = 7;
 
 export class HighCalciumGroupAdapter implements RetrievalAdapter {
-  // 🔴 本适配器**不注册进 AdapterRegistry**：注册表按 domain 作 key（一域一适配器），
-  //    而本路与块路同属 `dialog_groups` 存储域 ⇒ 注册即覆盖 B 链路（实测已踩）。
-  //    现行接法是 retrieval-stage 会晤分支**直接调用**它做独立配额注入（详见 types.SearchDomain 备注）。
-  readonly domain = 'dialog_group' as const;
+  // 🔴 Phase 2.3 (E1/T005): 本路已以**独立 domain** 注册进 AdapterRegistry。
+  //    Phase 2.2 时因一域一适配器限制暂不注册（同 domain 会覆盖块路）；E1 落地后
+  //    注册键 = 'high_calcium_group'（存储仍 dialog_groups 表），与块路互不覆盖；
+  //    跨路去重靠显式 `dedupeKey: dialog_group:<id>`（与块路 domain:id 同串，融合层折叠）。
+  readonly domain = 'high_calcium_group' as const;
   readonly routes = ['high_calcium_group'] as const;
 
   constructor(private sqlite: RecallSource) {}
@@ -77,7 +78,7 @@ export class HighCalciumGroupAdapter implements RetrievalAdapter {
 
       const hit: SearchHit = {
         id: r.dg_id,
-        domain: 'dialog_group',
+        domain: 'high_calcium_group',
         // 摘要前置、与 DialogGroupAdapter 同形（`【摘要】`），便于下游统一去重与注入
         text: `【摘要】${String(r.summary || '').trim()}`.substring(0, TEXT_MAX),
         score,

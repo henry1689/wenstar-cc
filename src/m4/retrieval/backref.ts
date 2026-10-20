@@ -32,6 +32,9 @@ export const BACKREF_TABLE: Record<SearchDomain, { table: string; idCol: string 
   //   回源键指向 dialog_groups 才能校验「这个块真的存在且归这个户口」。
   //   缺此条 = TS2741 编译失败（SearchDomain 是联合类型，穷举映射必须同步补齐）。
   dialog_group:    { table: 'dialog_groups',  idCol: 'dialog_group_id' },
+  // 🔴 Phase 2.3 (E1/T005): 高钙路独立 domain（存储仍 dialog_groups 表同 PK）——
+  //   回源校验与块路同表同列；两路同时注册互不覆盖（见 types.ts SearchDomain 注释）。
+  high_calcium_group: { table: 'dialog_groups', idCol: 'dialog_group_id' },
 };
 
 /** 校验单条命中回源键真实存在（sqlite.queryAll 兼容任意带该方法的数据源） */

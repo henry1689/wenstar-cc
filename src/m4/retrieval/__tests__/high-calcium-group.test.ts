@@ -234,10 +234,11 @@ describe('⑤ 适配器契约（独立 route / 去重键 / 回源键 / 摘要前
     expect(hits.length).toBe(1);
     const h = hits[0];
     expect(h.route).toBe('high_calcium_group');
-    // 存储域与块路相同（同一张 dialog_groups），但**不注册进注册表**（一域一适配器会互相覆盖）
-    expect(h.domain).toBe('dialog_group');
+    // Phase 2.3 (E1/T005): 高钙路改为**独立 domain** 注册（与块路同表但不同路由键，
+    //   两路可同时注册互不覆盖）。Phase 2.2 时曾用 dialog_group domain（不注册，直调）。
+    expect(h.domain).toBe('high_calcium_group');
     expect(h.id).toBe('DG_HC');
-    // 与块路共用 domain 级去重键 ⇒ 同一组两条路都命中时融合层只留一条
+    // 跨域去重键仍与块路同串（`dialog_group:DG_HC`）⇒ 同一组两条路都命中时融合层折叠为一条
     expect(h.dedupeKey).toBe('dialog_group:DG_HC');
     expect(h.backref).toEqual({ table: 'dialog_groups', id: 'DG_HC' });
     expect(h.text).toContain('【摘要】');
