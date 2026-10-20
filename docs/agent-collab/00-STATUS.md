@@ -26,13 +26,44 @@ updated: 2026-10-20
 
 ---
 
-## 🔴 当前待办：Phase 2.3 统一编排进行中（T005 已批准）
+## 🔴 P0 紧急：会晤模式 UUID 过滤关闭导致跨实体串档（I007，暂停2.3任务F先修此bug）
+
+**根因已定位**：retrieval-stage.ts 第456行（DialogGroupAdapter）和575行（HighCalciumGroupAdapter）传了 policy: { enforce: false }，UUIDPoliceFilter 在 enforce:false 时返回空子句，**不过滤UUID，召回所有实体的对话组**。
+
+**现象**：王全芬（0005）会晤时引用了阿珍（0008）的"办公室等诗雨"内容。retrieval_log 显示 entity_count=5（应=1）。
+
+**任务**：
+1. ✅ **Claude 已完成**（P021，`done_waiting_review`）：两处 `enforce:false` → deny-by-default
+   会晤策略（`visibleUuids={会晤实体}` / `allowUnowned=false` / `searchScope=strict`）。
+   独立探针实测：修复前 `buildSqlClause` 为空串、**命中实体数=2**（含他人 DG-OTHER）；
+   修复后子句 `belong_entity_uuid IN (?)`、**命中实体数=1**（会晤实体自己的金库仍可召）。
+   tsc=0、280 测试全绿。
+   🔴 **指标澄清**：`retrieval_log.entity_count` 是**查询侧**实体数（DNA entity_genes 全表，本例 5），
+   与结果跨度无关 —— 判串档要看出侧指标；已在中枢日志补 `命中实体数=N`。
+2. **PI**：交叉验证多实体会晤不串档，写 P022
+3. **豆包**：验收后恢复2.3任务F（F 的代码与本修复同在 `retrieval-stage.ts`，共用一次 flow/令牌提交）
+
+详见：active/I007-20261020-会晤模式UUID过滤关闭导致跨实体串档.md
+
+---
+
+## 当前待办：Phase 2.3 统一编排进行中（T005 已批准，任务F暂停等I007修复）
 
 **Phase 2.1（A2组级生命周期）+ 2.2（B1钙化接入召回）已双向交叉验证通过（R019）。**
 
 **当前任务**：
 1. **PI**：✅ **任务E 全部完成**（E3 `88ee264` + E1/E2 `983b983`，P017）——E3 红测试收口（能力+次序断言，9/9）；E1 高钙路独立domain注册（SearchDomain+BACKREF+配置门，与块路共存互不覆盖，跨域去重键折叠）；E2 lifecycle降权（archived×0.5不排除，payload.lifecycleState可观测）。验证：tsc=0、m4/retrieval 128/128、线上重启通道活跃。**接下来：任务G 交叉验证 Claude 的 F**。
-2. **Claude**：F1会晤配额编排（40%A+40%B+20%近期）→ F2非会晤配额（60%B+40%A）→ F3去重冲突 → F4配置化
+2. **Claude**：✅ **G1 已完成**（P019，`done_waiting_review`）——独立验证 PI 的任务 E 四项全过
+   （注册表两域并存且块路未被覆盖、配置门 limit=0 整路关闭、跨域去重 2→1 折叠、
+   archived 降权**精确 ×0.5 且仍被返回**、E3 红测试收口 137/137 绿）；并给出两条 2.4 预警建议。
+   🚀 **任务F 已落码，卡在人工裁决任务单**：F-0 标签分层 → F1/F2 配额 → F5 泛词降权 → F3 同组去重 →
+   F4 配置化 → 29 例回归 → ADR §14 已写完。S4 独立评审发现 **2 处阻塞**（组标签缺「记忆」致
+   MemoryInjector 把 B 链路降权 0.85→0.60；`enabled=false` 未覆盖结构性改动）——**均已修**并补测。
+   flow 已跑 2 轮（确认键补齐），现停在 `manual_verification_required`：
+   **任务单 `ck_3a0eb19f9583e878` 待业主签**，签完重跑 flow 取令牌 → 提交 → 重启 → 自检 → 写 P020
+   ✅ **P0 的 I007 串档也已插队修完**（P021，探针实测命中实体数 2→1）——与 F 同在一个文件，
+   共用同一批文件的 flow/令牌，**一次提交同时落两者**（F 的验收仍按 G2 独立走）
+   → 另发现 **I008**（两项存量红测试 + T003 标签正则失效，非本次引入）
 3. **两人协作**：G回归测试 + 交叉验证（PI验F，Claude验E——Claude验E可随时开始，E已交付）
 4. **豆包**：验收2.3 → 2.4垃圾数据物理清除（需停服窗口）
 
@@ -45,16 +76,28 @@ updated: 2026-10-20
 
 | 编号 | 标题 | 状态 | 负责 |
 |---|---|---|---|
-| T005 | Phase 2.3 A/B链路统一召回编排 | 🚀 执行中（业主已批准配额/分工） | PI+Claude协作 |
+| T005 | Phase 2.3 A/B链路统一召回编排 | 🚀 执行中（E已完成待验，F方案已确认执行中） | PI+Claude协作 |
+| P017 | PI 任务E完成（E3+E1+E2） | ✅ **G1 已通过**（见 P019） | PI |
+| P019 | Claude G1 交叉验证 PI 的任务E | 🆕 **done_waiting_review**（四项全过：两域并存/配置门/去重折叠/降权精确×0.5） | Claude |
+| P018 | Claude 任务F S1摸底+方案 | ✅ 方案已确认（R020），**代码已落地**（S4 评审 2 阻塞已修，待签 ck_3a0eb19f9583e878） | Claude |
+| I007 | 会晤 UUID 过滤关闭导致跨实体串档 | ✅ **已修复**（见 P021），待 PI 交叉验证 | Claude→PI |
+| P021 | Claude I007 串档修复报告 | 🆕 **done_waiting_review**（探针：命中实体数 2→1） | Claude |
+| I008 | 存量红测试两项 + T003 标签正则失效 | 🆕 **open**（非本次引入，交 owner/PI 处置） | Claude→owner |
+| R020 | 任务E验收+任务F方案确认 | ✅ Q1-Q5全认可，交叉验证已安排 | 豆包 |
 
 ---
 
 ## 📌 给所有Agent的待办
 
 ### Claude Code
-- 🚀 **任务F**：retrieval-stage统一编排（会晤40%A+40%B+20%近期 / 非会晤60%B+40%A）→ 去重冲突 → 配额配置化
-- 完成后写报告到 active/，标记 [DONE:WAITING_REVIEW]
-- 交叉验证PI的任务E
+- ✅ **G1 交叉验证 PI 的任务E** → `active/P019`（done_waiting_review）
+- ✅ **I007 会晤串档修复** → `active/P021`（done_waiting_review，独立探针：实体数 2→1）
+- ✅ **任务F 已落码**（S4 独立评审 2 处阻塞已修 + 补测）→ `active/I008` 记了两项存量红测试
+- 🔴 **等业主签任务单 `ck_3a0eb19f9583e878`**（S4.5 三项：连续未过人工裁决 / 改动范围核对 / 静态质量门槛）
+  - 证据：`tsc --noEmit`=0；`vitest` 23 文件 280 测试全绿；改动范围仅 5 个本任务文件 + ADR
+  - 签完重跑 flow 取令牌 → 提交（F + I007 同批，同在 `retrieval-stage.ts`）→ 重启 → 看
+    `[MeetingOrchestrator] 命中实体数=1` 与 `[RecallQuota]` 自检 → 写 `active/P020`（标记 done_waiting_review）
+- 完成后等 PI 做 G2（验 F）与 P022（验 I007）
 
 ### Agent PI
 - 🚀 **E3前置**：收口 memory-write-value-guard.test.ts 红测试（P016 §三发现，非A2引入，在途去重闸门所致）
