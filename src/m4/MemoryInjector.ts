@@ -149,7 +149,10 @@ export function injectMemories(opts: InjectOptions): string {
     const kind: MemoryKind = isDiamond ? 'diamond' : isVault ? 'vault' :
       frag.startsWith('📖') ? 'knowledge' :
       /^【对话·/.test(frag) ? 'conversation' :
-      /^(【用户曾提到】|【用户状态】|【时间检索】|【回忆】|【.+的记忆】)/.test(frag) ? 'context' : 'sand';
+      // 🔴 I008 正则2（2026-10-20）：T003 时间坐标后缀（`【X的记忆·10-20】`）使 `记忆】` 不再紧邻，
+      //   `【.+的记忆】` 静默不匹配 ⇒ 本应归 context（豁免相关性精筛与条数上限）的记忆被判 sand。
+      //   这里容忍可选时间后缀；其余四个固定标签（用户曾提到/状态/时间检索/回忆）不经 memFragWithTime，保持原样。
+      /^(【用户曾提到】|【用户状态】|【时间检索】|【回忆】|【.+的记忆(?:·\d{4}-\d{2}-\d{2}|·\d{2}-\d{2})?】)/.test(frag) ? 'context' : 'sand';
     let priority = PRI.memory_normal;
     if (isDiamond) priority = PRI.black_diamond;
     else if (frag.includes('档案') || preservedLabel.includes('档案')) priority = PRI.archive_tag;

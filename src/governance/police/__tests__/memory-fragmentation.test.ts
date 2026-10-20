@@ -115,7 +115,9 @@ describe('meeting-recall SQL 参数对齐回归（column index out of range 修�
       },
     };
     keywordRecallMemories(src, 'U', ['诗韵'], 4);
-    expect(capturedParams.length).toBe(2);  // [uuid, %kw%]
+    // I008 红测试A（2026-10-20）：P0-1 收编给关键词路加了时间窗第三参 [uuid, days, %kw%]，
+    //   上方「占位符数==参数数」已断言一致（3==3），此处旧写死 2 为过时口径，改 3。
+    expect(capturedParams.length).toBe(3);  // [uuid, days, %kw%]
   });
 
   it('recallOriginalConversations SQL 参数一致（LIMIT 硬编码不再多余传参）', () => {

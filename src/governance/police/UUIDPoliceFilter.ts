@@ -253,7 +253,10 @@ export function screenContext(
   let filteredCount = 0;
   for (const line of lines) {
     // 只处理带实体名的标签片段（【XX的记忆】/【对话·XX】/【XX的档案】等）
-    const tagMatch = line.match(/^【([^】]*?)的?(?:记忆|对话·|档案|金库|珍藏|重要记忆|知识|简介|资料)】/);
+    // 🔴 I008 正则1（2026-10-20）：T003 给所有标签加了时间坐标后缀（`【X的记忆·10-20】`/跨年 `·2025-12-31】`），
+    //   原正则要求关键词**紧邻** `】` ⇒ 几乎所有记忆片段都不再匹配，本兕底闸门**静默空转**（filteredCount 恒 0）。
+    //   这里容忍可选时间后缀，使闸门对时间后缀标签重新生效（下层查询已按 UUID 收敛，此处是兕底）。
+    const tagMatch = line.match(/^【([^】]*?)的?(?:记忆|对话·|档案|金库|珍藏|重要记忆|知识|简介|资料)(?:·\d{4}-\d{2}-\d{2}|·\d{2}-\d{2})?】/);
     if (tagMatch && entityNameToUuid) {
       // 解析标签中的实体名：如 "徐诗雨的记忆" → 徐诗雨；"对话·徐诗雨" → 徐诗雨
       const rawName = tagMatch[1] || '';
