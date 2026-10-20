@@ -105,6 +105,7 @@ updated: 2026-10-20
 | I007 | 会晤 UUID 过滤关闭导致跨实体串档 | ✅ **已修复**（见 P021），待 PI 交叉验证 | Claude→PI |
 | P021 | Claude I007 串档修复报告 | 🆕 **done_waiting_review**（探针：命中实体数 2→1） | Claude |
 | I008 | 存量红测试两项 + T003 标签正则失效 | 🆕 **open**（非本次引入，交 owner/PI 处置） | Claude→owner |
+| I009 | harness-mcp 实跑 server.ts（第二服务器链） | 🆕 **open**（2.4 停服窗口前必须处置；见 R022 §三） | Claude→业主 |
 | R020 | 任务E验收+任务F方案确认 | ✅ Q1-Q5全认可，交叉验证已安排 | 豆包 |
 
 ---
