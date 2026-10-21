@@ -787,6 +787,13 @@ async function initPipeline(): Promise<void> {
     console.warn('  ⚠️ 对话组摘要装配失败（不影响主链路）:', e?.message || e);
   }
 
+  // 🔴 T011 Phase 1 · 启动断言：FG 关系字典完整性（fail-fast，违例即阻断启动）
+  //   三项：reverse悬空 / 缺中文label / 关系名格式。不放 try 里 —— 必须阻断，不是警告。
+  {
+    const { assertRelationTypeDefsIntegrity } = await import('../app/fg/RelationshipTypes.js');
+    assertRelationTypeDefsIntegrity();
+  }
+
   // 🔴 2026-08-24 LLM识别方案: FG 关系 LLM 提取（24h 节流，读最近对话批量提取一次；不用对话热路径防耗 token）
   try {
     const { FGRelationExtractor } = await import('../app/fg/FGRelationExtractor.js');

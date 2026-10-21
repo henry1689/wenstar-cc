@@ -59,6 +59,8 @@ import type {
   NodeType,
 } from '../types/graph.js';
 import { DEFAULT_BASE_INTIMACY } from '../types/graph.js';
+// T011 Phase 1：关系类型单一真源 —— 边写入拒收 ∉DEFS 的 relation（先例：EntityWriteGate import app/entity）
+import { getRelationType } from '../../app/fg/RelationshipTypes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2359,6 +2361,13 @@ export class FamilyGraph implements FamilyGraphInterface {
   private async _addEdgeInner(edge: GraphEdge): Promise<void> {
     // 🔴 V3.3 自指边拦截: 禁止 source = target
     if (edge.source_id === edge.target_id) return;
+    // 🔴 T011 Phase 1：关系类型单一真源写入闸门 —— addEdge 是全仓唯一建边咽喉，
+    //   在此拒收 relation ∉ RELATION_TYPE_DEFS 的边，一次覆盖全部建边调用点（含未来新增）。
+    //   空/未定义 relation 一律拒（宁缺勿滥，防词表分裂与幻觉关系类型入库）。
+    if (edge.relation && !getRelationType(edge.relation)) {
+      console.warn(`[FG] 拒写非法关系类型: ${edge.relation} (不在 RELATION_TYPE_DEFS)`);
+      return;
+    }
     // ════════════════════════════════════════════════════════════
     // 🔴 批1返工(2026-10-18) · S4 独立评审 P1-3：孤儿边的**唯一收口点**
     // ════════════════════════════════════════════════════════════

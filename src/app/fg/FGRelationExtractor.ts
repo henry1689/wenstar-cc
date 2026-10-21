@@ -6,6 +6,7 @@
  * 通过 FamilyGraph 私有 query/run 访问底层 SQL（sql.js 实例无 query 方法）。
  */
 import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
+import { RELATION_TYPE_DEFS } from './RelationshipTypes.js';
 
 export interface RelationExtractionResult {
   valid: boolean;
@@ -196,7 +197,10 @@ ${context?.speaker ? `说话人：${context.speaker}` : ''}
    */
   applyRelations(result: RelationExtractionResult): { applied: number; skipped: string[] } {
     if (!result.valid) return { applied: 0, skipped: [] };
-    const WHITELIST = new Set(['child_of','parent_of','elder_sister_of','younger_sister_of','spouse_of','colleague_of','friend_of','acquaintance_of']);
+    // 🔴 T011 Phase 1：白名单派生自 RELATION_TYPE_DEFS（单一真源），删除硬编码8类。
+    //   修 T008 P0-1：原白名单含 elder_sister_of/younger_sister_of 而 DEFS 无此项 → 写出的边
+    //   category undefined/reverse 自反。现直接用 DEFS 键集，新增关系类型自动生效。
+    const WHITELIST = new Set(Object.keys(RELATION_TYPE_DEFS));
     const skipped: string[] = [];
     let applied = 0;
     const now = new Date().toISOString();
