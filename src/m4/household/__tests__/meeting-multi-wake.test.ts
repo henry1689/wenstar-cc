@@ -50,6 +50,24 @@ describe('T012 P0-5 · 反例不误判', () => {
   });
 });
 
+describe('T012 P1-3 · 会晤中点名切换（WeChat 风格）', () => {
+  const di = (m: string) => EntityMeeting.detectIntent(m, NAMES, true, ALIAS);
+  it('称呼点名某参会者 → 切主发言到该人', () => {
+    expect(di('阿珍，你在干嘛')).toEqual({ kind: 'switch', targets: ['阿珍'] });
+    expect(di('阿芬，你到家了吗')).toEqual({ kind: 'switch', targets: ['王全芬'] }); // 别名
+  });
+  it('@某人 → 切主发言（不被 wake 抢先）', () => {
+    expect(di('@阿珍 在吗')).toEqual({ kind: 'switch', targets: ['阿珍'] });
+  });
+  it('纯提及（无紧跟分隔符）不误切', () => {
+    expect(di('阿珍和徐诗雨都是好人').kind).toBe('normal');
+  });
+  it('非会晤态称呼仍是唤醒（不回归）', () => {
+    const r = EntityMeeting.detectIntent('阿珍，聊聊', NAMES, false, ALIAS);
+    expect(r.kind).toBe('wake');
+  });
+});
+
 describe('T012 P0-5 · 会晤中严格模式仍不误切（不回归）', () => {
   it('会晤中寒暄含名字不触发切换', () => {
     // inMeeting=true 严格模式：单人前缀/纯名不触发；但明确多人集合仍可加人

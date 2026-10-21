@@ -547,6 +547,25 @@ export class EntityMeeting {
       if (name) return { kind: 'switch', targets: [name] };
     }
 
+    // 3b. 🔴 T012 P1-3（WeChat 风格点名切换）：会晤中称呼/@某参会者 → 切主发言到该人。
+    //   "阿珍，你在干嘛" / "@阿珍 在吗" → 切到阿珍回应（点名谁谁说话）。
+    //   仅会晤中生效；非会晤态走下面 wake（进入单人会晤）。当前发言者被点名 → switchTo同人=无害空转。
+    //   区别于纯提及（"阿珍和徐诗雨都是好人"无紧跟分隔符 → 不算点名，不误切）。
+    if (inMeeting) {
+      // @某人 直接点名（必须先于下面 wake 的 atMatch，否则多人下被当成 wake 遭门卫拒）
+      const atVoc = msg.match(/^@\s*([一-龥\w]{1,8})/);
+      if (atVoc) {
+        const name = EntityMeeting._fuzzyFindName(atVoc[1], sorted, aliasMap);
+        if (name) return { kind: 'switch', targets: [name] };
+      }
+      // 称呼点名 "阿珍，…" / "阿珍: …"
+      const vocMatch = msg.match(/^\s*([一-龥]{2,8})\s*[：:，,、]/);
+      if (vocMatch) {
+        const name = EntityMeeting._fuzzyFindName(vocMatch[1], sorted, aliasMap);
+        if (name) return { kind: 'switch', targets: [name] };
+      }
+    }
+
     // 4. 唤醒/开会（wake）
     // 🔴 P2-2: 会晤中(inMeeting)用严格模式——只认明确切换句式，跳过确认/寒暄/兜底
     //   （"全芬你还是那么丰满"→normal，不再误判为唤醒王全芬触发门卫拒绝）
