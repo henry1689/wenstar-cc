@@ -1,5 +1,26 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { applyMeetingUuidFilter, meetingSpeakerUuid, verifyMeetingHits } from '../meetingIsolation.js';
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+/**
+ * T013 R6 防回归 —— 会晤检索路径不得出现 enforce:false（I007 根因）
+ * 户主钥匙（adapter.ts master-key，无白名单）合法 enforce:false 除外。
+ */
+describe('T013 R6 · grep enforce:false 零命中（会晤路径防回归）', () => {
+  it('retrieval-stage / meeting-recall 无 enforce:false', () => {
+    for (const rel of ['src/webui/chat/retrieval-stage.ts', 'src/m4/retrieval/meeting-recall.ts', 'src/webui/chat/meeting-recall.ts']) {
+      let src = '';
+      try { src = readFileSync(join(REPO, rel), 'utf8'); } catch { continue; }
+      // 剥离注释行后搜索（避免历史注释误报）
+      const code = src.split('\n').filter(l => !/^\s*\/\//.test(l) && !/^\s*\*/.test(l)).join('\n');
+      expect(code, `${rel} 不得含 enforce:false`).not.toMatch(/enforce:\s*false/);
+    }
+  });
+});
 
 /**
  * T013 R6 守卫 —— 会晤 UUID 过滤咽喉（deny-by-default，防 I007 复发）
