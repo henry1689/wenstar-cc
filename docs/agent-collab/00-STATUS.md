@@ -145,6 +145,7 @@ updated: 2026-10-20
 | T005 | Phase 2.3 A/B链路统一召回编排 | 🚀 执行中（E已完成待验，F方案已确认执行中） | PI+Claude协作 |
 | T008 | FG 规范审计（写入/读取字段对照） | 🆕 **两侧完成，待验收**（Claude P031 读取侧 / PI P031 写入侧） | PI+Claude协作 |
 | T009 | FG 统一架构收口（6 Phase） | 🚀 **Phase 0 两侧盘点完成，待验收**（Claude P032 / PI P032） | PI+Claude协作 |
+| T012 | 对话模式全面排查与修复 | 🚀 **P0-1 根因已定位待确认**（Claude P037）· PI P0-5/P0-6 已修（P038 `80d64bc`+`a07b132`） | PI+Claude协作 |
 | P017 | PI 任务E完成（E3+E1+E2） | ✅ **G1 已通过**（见 P019） | PI |
 | P019 | Claude G1 交叉验证 PI 的任务E | 🆕 **done_waiting_review**（四项全过：两域并存/配置门/去重折叠/降权精确×0.5） | Claude |
 | P018 | Claude 任务F S1摸底+方案 | ✅ 方案已确认（R020），**代码已落地**（S4 评审 2 阻塞已修，待签 ck_3a0eb19f9583e878） | Claude |
@@ -172,6 +173,9 @@ updated: 2026-10-20
   （只审计未改代码；7 项 P0 已列证据与行号，§九 已合并 PI 写入侧并交叉修正两处）
 - ✅ **T009 Phase 0 结构侧盘点完成** → `active/P032-20261021-Claude-T009Phase0盘点.md`
   （只盘点未改码；词表演进/ dossier 空壳化/ 状态机/ 基因圈层密级/ 死清单；含与 PI 的交叉核对）
+- 🆕 **T012 P0-1 身份泄漏根因定位** → `active/P037-20261021-Claude-T012P0-1身份泄漏根因.md`
+  （三缺陷叠加：角色路由早于会晤状态机 314 行 / 角色 prompt 隔离只覆盖 recaller /
+  出口清洗只洗 KB 不洗 system prompt。离线探针三步闭环实证。**未改代码，等业主确认方案 A+B**）
 
 ### Agent PI
 - 🚀 **E3前置**：收口 memory-write-value-guard.test.ts 红测试（P016 §三发现，非A2引入，在途去重闸门所致）
@@ -231,6 +235,13 @@ updated: 2026-10-20
 
 ## 更新记录
 
+- 2026-10-21 **T012 P0-1 根因定位（Claude P037）+ PI P0-5/P0-6 已修（P038）**：
+  压测「和徐诗雨会晤中回复者突变玉瑶」根因为三缺陷叠加 ——
+  ① `chat.ts:494` 角色路由早于 `:808` 会晤状态机 **314 行**，唤醒/加人/换人轮一律被分类成 `secretary`；
+  ② `RoleProfiles.buildRoleSystemPrompt` 的会晤隔离**只覆盖 recaller**，其余 4 角色硬编码「你的名字叫玉瑶」；
+  ③ `sanitizeMeetingPrompt` 唯一调用点在 `chat.ts:2469`，**只洗 `finalKnowledgeText`，不洗 system prompt**。
+  探针实证同一 system prompt 内「你的名字叫玉瑶」@45 与「你不是玉瑶」@701 正面冲突。
+  已排除：`_meeting` 意外丢失（exit 仅 1 处）、三份 role 副本不同步；`_effectiveRole≤15` 属潜伏地雷（当前无触发源）。
 - 2026-10-21 **T009 Phase 0 双侧盘点提交**：Claude P032（5 项结构侧）+ PI P032（`2986af8`，6 项链路侧）。核心新发现：关系词表实为 **5 套代码词表 + DB 实际值 + 状态枚举**（未定义类型 20+）；观察区 **992 candidate / 23 active**，近 10 天新增 1003 节点；V6 selfProfile 替代**无迁移器**。
 - 2026-10-21 **T008 FG 规范审计双侧提交**：Claude 读取侧 P031（7×P0 / 12×P1 / 7×P2，全部带行号与只读实测）+ PI 写入侧 P031（`f62870e`），交叉核对见 Claude P031 §九。只审计未改码。
 - 2026-10-20 **协作区结构优化**：active/单一活跃区 + 完成即归档 + 09-archive/50个历史文件。T005在active/执行中。
