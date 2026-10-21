@@ -146,7 +146,7 @@ updated: 2026-10-20
 | T008 | FG 规范审计（写入/读取字段对照） | 🆕 **两侧完成，待验收**（Claude P031 读取侧 / PI P031 写入侧） | PI+Claude协作 |
 | T009 | FG 统一架构收口（6 Phase） | 🚀 **Phase 0 两侧盘点完成，待验收**（Claude P032 / PI P032） | PI+Claude协作 |
 | T012 | 对话模式全面排查与修复 | ⏸️ **业主裁决：不再单独修复，摸底成果转 T013 输入**（P041）· 已交付 P037 根因 + P039 十缺陷 + PI P038 双修 + PI P1-3/发言人推断 | PI+Claude协作 |
-| T013 | 统一群聊模式架构重构（七层隔离+加人减人+数据保护） | 🚀 **Phase 1 设计中**：PI 已交 R1-R10 + 数据层设计；**Claude 已交架构层设计 P042**（含对 R1/R2/R3 的回应）→ 合并 ADR-013 | PI+Claude协作 |
+| T013 | 统一群聊模式架构重构（七层隔离+加人减人+数据保护） | 🚀 **Phase 2 进行中**：`ADR-013` 已批准。**Claude 第 0 步已完成**（`7a9c30c`，P043：`resolveIdentity` 纯函数 + 清洗窗口全量扫描 + 14 编目行号校准，tsc=0、15/15 全绿）。⏳ 下一步 = PI 第1 项（R6 UUID 收口 + R1 单写者） | PI+Claude协作 |
 | P017 | PI 任务E完成（E3+E1+E2） | ✅ **G1 已通过**（见 P019） | PI |
 | P019 | Claude G1 交叉验证 PI 的任务E | 🆕 **done_waiting_review**（四项全过：两域并存/配置门/去重折叠/降权精确×0.5） | Claude |
 | P018 | Claude 任务F S1摸底+方案 | ✅ 方案已确认（R020），**代码已落地**（S4 评审 2 阻塞已修，待签 ck_3a0eb19f9583e878） | Claude |
@@ -186,7 +186,14 @@ updated: 2026-10-20
 - 🆕 **T013 Phase 1 架构层设计建议** → `active/P042-20261021-Claude-T013Phase1架构层设计建议.md`
   （单一 `SessionState` + reducer `dispatch` / 身份纯函数化消灭三份 role 副本 /
   `ContextSlot` 压栈替代 reset / 结构化合并生成默认 +0 LLM / `WS_GROUP_V2` 回滚开关；
-  已逐条回应 PI 的 R1·R2·R3。**⏳ 等 PI 数据层设计合并成 ADR-013 → 业主确认后进 Phase 2**）
+  已逐条回应 PI 的 R1·R2·R3。~~等 PI 数据层设计合并成 ADR-013~~ → ADR-013 已批准）
+- ✅ **T013 Phase 2 第 0 步完成** → `active/P043-20261022-Claude-T013Phase2第0步完成.md`（`7a9c30c`）
+  A 清洗窗口 2000→Infinity + `isMention` 提及保护 + 硬人设优先判据 ·
+  B `resolveIdentity` 纯函数（新建）+ M5Orchestrator/Provider/chat.ts 三处接入 +
+  删 `_effectiveRole` 地雷 + `MEETING_PROP_POINTS` 14 行号校准。
+  **含两处自我修正**：① P037 缺陷①被 `M5Orchestrator:88` 兜住，非线上真因；
+  ② 生产实证污染源**精确到 1 条**（`mem_mtxo7ng6_kehqno`，归属 TXS-000000007，4966 字符）。
+  tsc=0 · 15/15 全绿 · 数据零改动 · 未推送
 
 ### Agent PI
 - 🚀 **E3前置**：收口 memory-write-value-guard.test.ts 红测试（P016 §三发现，非A2引入，在途去重闸门所致）
@@ -246,6 +253,17 @@ updated: 2026-10-20
 
 ## 更新记录
 
+- 2026-10-22 **T013 Phase 2 第 0 步完成（Claude `7a9c30c` / P043）**：
+  A 会晤清洗窗口 2000→**Infinity**（段级全量）+ `isMention` 提及保护 + 硬人设特征串最高优先级；
+  B `resolveIdentity` 纯函数（role 与 isMeeting 由同一分支产生）+ 三处接入 +
+  删除 `_effectiveRole`（回复长度覆盖身份的地雷）+ `MEETING_PROP_POINTS` 14 行号校准（原全部偏移）。
+  🔴 **两处自我修正**：① P037「角色路由早于状态机」**不是线上真因**（被 `M5Orchestrator:88` 强制 recaller 兜住）；
+  ② 生产库 `data/webui/fusion_memory.db` 实测含玉瑶身份标记的记忆**仅 2 条**，其中会召回的只有 1 条
+  （`mem_mtxo7ng6_kehqno`，归属 TXS-000000007，**4966 字符**，被 memoryBlock 标为"事实"）——
+  这才是「突变玉瑶、口吻仍是实体」的实证污染源。
+  🔴 **三条流程教训**：① 令牌只接受绑定时状态的**一次**修改，之后回滚（本轮耗 3 个 token 才落地）；
+  ② `prompt-sanitizer.ts` 会被主动设**只读**（EPERM 根因是 attrib R，非文件锁）；
+  ③ 保护性判据的关键词必须比被保护文本**更窄**（`'你说'` 误护人设块导致 3 条 V27 回归挂）。
 - 2026-10-21 **T012 Claude 侧摸底完毕（P039）**：P0-2/3/4 + P1-1 共 **10 项缺陷**，
   九疑点 A–I 全部给出结论（F 排除、G 反向确认、A/E 已由 PI 处置）。
   最重三条 —— ① `saveLastMeeting` 仅 `enter():200` 一处调用 ⇒ **多人会晤重启永不恢复**；
