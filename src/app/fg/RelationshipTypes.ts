@@ -109,7 +109,7 @@ export const RELATION_TYPE_DEFS: Record<string, RelationTypeDef> = {
   'child_in_law_of':   { category: RELATION_CATEGORY.FAMILY, label: '儿媳/女婿', reverse: 'mother_in_law_of' },
   'fan_of':            { category: RELATION_CATEGORY.SOCIAL, label: '粉丝', reverse: 'idol_of' },
   // A-1 恋人（正式身份口径，业主 2026-10-06）
-  'lover_of':          { category: RELATION_CATEGORY.SOCIAL, label: '恋人', reverse: 'lover_of' },
+  'lover_of':          { category: RELATION_CATEGORY.SOCIAL, label: '情人', reverse: 'lover_of' },
   // A-1 居住/位置
   'lives_in':          { category: RELATION_CATEGORY.OTHER, label: '居住于', reverse: 'residence_of' },
   'residence_of':      { category: RELATION_CATEGORY.OTHER, label: '居民', reverse: 'lives_in' },

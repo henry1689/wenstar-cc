@@ -3,10 +3,12 @@
  * ======================================================
  * 从实体 dossier + edges 构建 LLM 上下文。
  * V10.0: 家庭+社交双区块，acquaintance_of 传递闭包，去重+方向修正
+ * T011 Phase1: 词表派生化，SOCIAL_LABELS 改为从 RELATION_TYPE_DEFS 按 category 派生
  */
 import type { FamilyGraph, PersonProfile, PersonDossier } from './FamilyGraph.js';
 import { getRelationLabel, getCorrectedRelation } from './shared/RelationLabels.js';
 import { buildGreetingProtocol } from './EntityGreetingProtocol.js';
+import { RELATION_TYPE_DEFS, RELATION_CATEGORY } from '../../app/fg/RelationshipTypes.js';
 
 export interface EntityContextOptions {
   entityName: string; appearance?: boolean; feminineDetails?: boolean;
@@ -24,12 +26,17 @@ export interface EntityContextResult {
 const GARBAGE_NAMES = new Set(['我','妹妹','妈妈','老婆','爸爸','姐姐','哥哥','弟弟','叔叔','公司','学生','小说','开心','时候你','纪实小','计划吗','那你','加班','爸爸','妈妈','姑姑','上司','小龙','老邱','老大','焦虑','方案','无聊','徐茜','徐敏','什么名字','那你说','那继续','快乐','老家','那你再']);
 const EXCLUDE_RELS = new Set(['grandchild_of','grandmother_of','grandfather_of','grandparent_of','lives_in','residence_of','has_appearance','has_feature','其他','认识的人']);
 
-const SOCIAL_LABELS: Record<string,string> = {
-  'colleague_of':'同事','boss_of':'上司','subordinate_of':'下属',
-  'friend_of':'朋友','classmate_of':'同学','partner_of':'合伙人',
-  'client_of':'客户','neighbor_of':'邻居','teacher_of':'老师',
-  'spouse_of':'配偶','acquaintance_of':'认识的人',
-};
+// 🔴 T011 Phase1: SOCIAL_LABELS 派生自 RELATION_TYPE_DEFS（COLLEAGUE + SOCIAL 大类）
+//    保留 spouse_of 特例（属 FAMILY 大类但在社交区块显示）
+const SOCIAL_LABELS: Record<string,string> = Object.entries(RELATION_TYPE_DEFS)
+  .filter(([rel, def]) =>
+    (def.category === RELATION_CATEGORY.COLLEAGUE || def.category === RELATION_CATEGORY.SOCIAL) ||
+    rel === 'spouse_of'
+  )
+  .reduce((acc, [rel, def]) => {
+    acc[rel] = def.label;
+    return acc;
+  }, {} as Record<string,string>);
 
 export function buildEntityContext(familyGraph: FamilyGraph, options: EntityContextOptions): EntityContextResult {
   const { entityName, appearance=true, feminineDetails=false, recentHistoryCount=5, isFirstTurn=false, userName='鸿艺', recentConversations } = options;

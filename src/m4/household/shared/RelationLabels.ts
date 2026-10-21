@@ -1,82 +1,39 @@
 /**
- * RelationLabels — 关系边→中文展示标签映射表
+ * RelationLabels — 关系边→中文展示标签（T011 Phase1 派生自 RELATION_TYPE_DEFS）
  *
- * household/ 下 FamilyGraph._getEdgeDisplayLabel 和 EntityContextBuilder.DIRECTED_LABEL
- * 各自维护了一份相同的关系→中文映射。本模块提供唯一实现。
+ * 🎯 单一真源：RELATION_TYPE_DEFS（74 项）是唯一关系类型定义。
+ *    本模块不再维护独立词表，改为从 DEFS 派生正向/反向标签。
  *
  * 使用方：
  *   - FamilyGraph._getEdgeDisplayLabel → getRelationLabel()
  *   - EntityContextBuilder._getRelatedEdges → getRelationLabel()
  */
 
-/** 方向感知标签：[正向标签, 反向标签] */
-type DirectedPair = [string, string];
-
-const DIRECTED_FAMILY_LABEL: Record<string, DirectedPair> = {
-  'mother_of':             ['母亲',       '子女'],
-  'father_of':             ['父亲',       '子女'],
-  'child_of':              ['子女',       '父母'],
-  'parent_of':             ['父母',       '子女'],
-  'spouse_of':             ['配偶',       '配偶'],
-  'sibling_of':            ['兄弟姐妹',   '兄弟姐妹'],
-  'elder_sister_of':       ['姐姐',       '妹妹'],
-  'younger_sister_of':     ['妹妹',       '姐姐'],
-  'elder_brother_of':      ['哥哥',       '弟弟'],
-  'younger_brother_of':    ['弟弟',       '哥哥'],
-  'grandparent_of':        ['祖辈',       '孙辈'],
-  'grandfather_of':        ['祖父',       '孙辈'],
-  'grandmother_of':        ['祖母',       '孙辈'],
-  'grandchild_of':         ['孙辈',       '祖辈'],
-  'aunt_of':               ['姑姑/姨',   '侄甥辈'],
-  'uncle_of':              ['叔叔/舅',   '侄甥辈'],
-  'niece_of':              ['侄甥辈',     '姑姑/姨'],
-  'nephew_of':             ['侄甥辈',     '叔叔/舅'],
-  'cousin_of':             ['表亲',       '表亲'],
-};
-
-const SOCIAL_LABEL: Record<string, string> = {
-  // 🔴 A2（2026-10-06）：`lover_of` 此前无标签，getRelationLabel 会 fallback 成裸串「lover_of」。
-  //    业主 2026-10-06 定口径：徐诗雨与鸿艺的正式关系 =「同事、情人」，情人是**正式身份**而非情趣称呼。
-  'lover_of':         '情人',
-  'colleague_of':     '同事',
-  'boss_of':          '上级',
-  'subordinate_of':   '下属',
-  'classmate_of':     '同学',
-  'roommate_of':      '室友',
-  'friend_of':        '朋友',
-  'partner_of':       '合伙人',
-  'neighbor_of':      '邻居',
-  'teacher_of':       '老师',
-  'student_of':       '学生',
-  'client_of':        '客户',
-  'comrade_of':       '战友',
-  'fellow_of':        '会友',
-  'competitor_of':    '竞争对手',
-  'doctor_of':        '医生',
-  'consultant_of':    '顾问',
-  'server_of':        '服务方',
-  'vendor_of':        '供应商',
-  'employer_of':      '雇主',
-  'employee_of':      '雇员',
-  'investor_of':      '投资人',
-  'supplier_of':      '供应商',
-  'stranger_of':      '陌生人',
-  'acquaintance_of':  '认识的人',
-};
+import { RELATION_TYPE_DEFS } from '../../../app/fg/RelationshipTypes.js';
 
 /**
- * 根据边类型和方向返回中文展示标签。
+ * 根据边类型和方向返回中文展示标签（派生自 RELATION_TYPE_DEFS）。
  *
  * @param relation - 边类型 (如 "mother_of")
  * @param isOutgoing - 是否正向（true=source→target 方向，false=target→source 方向）
  * @returns 中文标签，如 "母亲"、"姐姐"、"同事"
  */
 export function getRelationLabel(relation: string, isOutgoing: boolean): string {
-  const entry = DIRECTED_FAMILY_LABEL[relation];
-  if (entry) return isOutgoing ? entry[0] : entry[1];
-  const social = SOCIAL_LABEL[relation];
-  if (social) return social;
-  return relation; // fallback: 直接返回原始边类型名
+  const def = RELATION_TYPE_DEFS[relation];
+  if (!def) return relation; // fallback: 直接返回原始边类型名
+
+  // 正向标签：直接用 DEFS 中定义的 label
+  if (isOutgoing) return def.label;
+
+  // 反向标签：查找 reverse 指向的类型的 label
+  // 如果 reverse === relation（对称关系如 spouse_of），返回相同标签
+  if (def.reverse === relation) return def.label;
+
+  const reverseDef = RELATION_TYPE_DEFS[def.reverse];
+  if (reverseDef) return reverseDef.label;
+
+  // reverse 指向的类型不存在于 DEFS，返回当前类型的 label（降级）
+  return def.label;
 }
 
 /**

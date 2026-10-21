@@ -351,9 +351,15 @@ interface UpdatePersonProfileOptions {
   countMention?: boolean;
 }
 
-// ─── 亲属称谓 → 关系映射（自动推断核心词表）───
-// Ref: M4-design-v1.md §3.5
-const KINSHIP_MAP: Record<string, string> = {
+// ─── T011 Phase1: 关系词表派生自 RELATION_TYPE_DEFS（单一真源） ───
+// 🔴 旧的 KINSHIP_MAP / SOCIAL_REVERSE / SOCIAL_LABEL_CN / REVERSE_RELATION / ALL_REVERSE
+//    已删除，改为从 RelationshipTypes.ts 的 RELATION_TYPE_DEFS 派生。
+//    避免多处维护导致词表漂移（2026-08-25 教训）。
+
+import { RELATION_TYPE_DEFS, RELATION_CATEGORY } from '../../app/fg/RelationshipTypes.js';
+
+/** 亲属称谓关键词表（用于文本提取，非关系元数据） */
+const KINSHIP_KEYWORDS: Record<string, string> = {
   '妈妈': 'mother_of', '妈': 'mother_of', '母亲': 'mother_of',
   '爸爸': 'father_of', '爸': 'father_of', '父亲': 'father_of',
   '老公': 'spouse_of', '老婆': 'spouse_of',
@@ -362,14 +368,12 @@ const KINSHIP_MAP: Record<string, string> = {
   '姐姐': 'sibling_of', '妹妹': 'sibling_of',
   '爷爷': 'grandfather_of', '奶奶': 'grandmother_of',
   '外公': 'grandfather_of', '外婆': 'grandmother_of',
-  // FIX-2: 补充缺失的亲属称谓
   '儿子': 'child_of', '女儿': 'child_of', '孩子': 'child_of', '子女': 'child_of',
   '孙子': 'grandchild_of', '孙女': 'grandchild_of',
 };
 
-// ─── 社交关系 → 关系映射（与 KINSHIP_MAP 互补——同一人可同时拥有家族边和社交边）───
-// Ref: STRATEGIC_BLUEPRINT.md — 人际关系图谱
-const SOCIAL_MAP: Record<string, string> = {
+/** 社交关系关键词表（用于文本提取） */
+const SOCIAL_KEYWORDS: Record<string, string> = {
   '同事': 'colleague_of', '同学': 'classmate_of', '室友': 'roommate_of',
   '老板': 'boss_of', '上司': 'boss_of', '领导': 'boss_of',
   '下属': 'subordinate_of', '部下': 'subordinate_of', '手下': 'subordinate_of',
@@ -383,51 +387,34 @@ const SOCIAL_MAP: Record<string, string> = {
   '顾问': 'consultant_of',
 };
 
-const SOCIAL_REVERSE: Record<string, string> = {
-  colleague_of: 'colleague_of', classmate_of: 'classmate_of', roommate_of: 'roommate_of',
-  boss_of: 'subordinate_of', subordinate_of: 'boss_of',
-  client_of: 'server_of', friend_of: 'friend_of',
-  partner_of: 'partner_of', neighbor_of: 'neighbor_of',
-  teacher_of: 'student_of', student_of: 'teacher_of',
-  doctor_of: 'patient_of', consultant_of: 'client_of',
-  server_of: 'client_of', acquaintance_of: 'acquaintance_of',
-  comrade_of: 'comrade_of', fellow_of: 'fellow_of',
-  vendor_of: 'vendor_of', competitor_of: 'competitor_of',
-  stranger_of: 'stranger_of',
-};
+// 🎯 派生自 RELATION_TYPE_DEFS：反向关系映射
+const REVERSE_MAP: Record<string, string> = Object.entries(RELATION_TYPE_DEFS)
+  .reduce((acc, [rel, def]) => {
+    if (def.reverse && def.reverse !== rel) {
+      acc[rel] = def.reverse;
+    }
+    return acc;
+  }, {} as Record<string, string>);
 
-/** 🏛️ 社会关系 → 中文称谓 */
-const SOCIAL_LABEL_CN: Record<string, string> = {
-  colleague_of: '同事', classmate_of: '同学', roommate_of: '室友',
-  boss_of: '上级', subordinate_of: '下属', client_of: '客户',
-  friend_of: '朋友', partner_of: '合伙人', neighbor_of: '邻居',
-  teacher_of: '老师', student_of: '学生', doctor_of: '医生',
-  consultant_of: '顾问', server_of: '服务方', acquaintance_of: '认识的人',
-  comrade_of: '战友', fellow_of: '会友', vendor_of: '供应商',
-  competitor_of: '竞争对手', stranger_of: '陌生人',
-  employer_of: '雇主', employee_of: '雇员',
-  investor_of: '投资人', supplier_of: '供应商',
-  _reverse_boss_of: '下属', _reverse_subordinate_of: '上级',
-  _reverse_client_of: '服务方', _reverse_server_of: '客户',
-  _reverse_teacher_of: '学生', _reverse_student_of: '老师',
-  _reverse_acquaintance_of: '认识的人', _reverse_friend_of: '朋友',
-  _reverse_colleague_of: '同事', _reverse_classmate_of: '同学',
-};
+// 🎯 派生自 RELATION_TYPE_DEFS：中文标签（含反向标签）
+const LABEL_CN_MAP: Record<string, string> = Object.entries(RELATION_TYPE_DEFS)
+  .reduce((acc, [rel, def]) => {
+    acc[rel] = def.label;
+    if (def.reverse && def.reverse !== rel) {
+      const revDef = RELATION_TYPE_DEFS[def.reverse];
+      if (revDef) acc[def.reverse] = revDef.label;
+    }
+    return acc;
+  }, {} as Record<string, string>);
 
-const REVERSE_RELATION: Record<string, string> = {
-  parent_of: 'child_of',
-  mother_of: 'child_of', father_of: 'child_of',
-  spouse_of: 'spouse_of',
-  sibling_of: 'sibling_of',
-  grandfather_of: 'grandchild_of', grandmother_of: 'grandchild_of',
-  child_of: 'parent_of',
-  grandchild_of: 'grandfather_of',
-  lives_in: 'residence_of',
-  close_to: 'close_to',
-};
-
-/** 🏛️ §十五: 统一反向映射表（家族+社交，同等对待） */const ALL_REVERSE: Record<string, string> = { ...REVERSE_RELATION, ...SOCIAL_REVERSE };
-const KINSHIP_TERMS = Object.keys(KINSHIP_MAP).sort((a, b) => b.length - a.length);
+// 保持向后兼容（内部使用）
+const REVERSE_RELATION = REVERSE_MAP;
+const ALL_REVERSE = REVERSE_MAP;
+const SOCIAL_REVERSE = Object.entries(RELATION_TYPE_DEFS)
+  .filter(([_, def]) => def.category === RELATION_CATEGORY.SOCIAL || def.category === RELATION_CATEGORY.COLLEAGUE)
+  .reduce((acc, [rel, def]) => { acc[rel] = def.reverse; return acc; }, {} as Record<string, string>);
+const SOCIAL_LABEL_CN = LABEL_CN_MAP;
+const KINSHIP_TERMS = Object.keys(KINSHIP_KEYWORDS).sort((a, b) => b.length - a.length);
 /** V10.1: _auto_fix 全员双向认识 24h 冷却时间戳（模块级；配合 500 条批量上限兜底，防止每次启动全量补边） */
 let _lastFullAcqFixTs = 0;
 const PENDING_PROMOTION_THRESHOLD = 3;
@@ -3425,7 +3412,7 @@ export class FamilyGraph implements FamilyGraphInterface {
         KINSHIP_TERMS.find((kw) => _personNames.includes(kw))
         ?? [...namedKinship.entries()].find(([, nm]) => _personNames.includes(nm))?.[0];
       if (kinshipWord) {
-        const relation = KINSHIP_MAP[kinshipWord];
+        const relation = KINSHIP_KEYWORDS[kinshipWord];
         const isSenior = SENIOR_KINSHIP.has(kinshipWord);
         const canonicalName = namedKinship.get(kinshipWord) || person.name;
         const aliasCandidates = canonicalName === person.name ? [] : [...new Set([person.name, kinshipWord].filter(Boolean))];
@@ -3955,7 +3942,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     // 🔵 批12(P2-10): candidate(观察区) 不参与摘要 —— 落实「可检索但不自动注入」，
     // 避免 L3 滑窗噪声经摘要进入 M4Orchestrator 每轮上下文。
     const nodes = this.query("SELECT * FROM nodes WHERE (status IS NULL OR status NOT IN ('void','candidate'))");
-    const socialTypes = new Set([...Object.values(SOCIAL_MAP), 'acquaintance_of']);
+    const socialTypes = new Set([...Object.values(SOCIAL_KEYWORDS), 'acquaintance_of']);
 
     for (const node of nodes) {
       if (node.type === 'person' && node.name !== '我') {
