@@ -68,6 +68,44 @@ describe('T012 P1-3 · 会晤中点名切换（WeChat 风格）', () => {
   });
 });
 
+describe('T012 发言人推断 inferSpeaker（多人·自然聊天）', () => {
+  const stubFG: any = {
+    getUUIDByName: (n: string) => ({ 徐诗雨: 'TXS-1', 阿珍: 'TXS-2', 王全芬: 'TXS-3' } as any)[n] || null,
+    getEntityByUUID: () => ({ category: 'G' }),
+    saveLastMeeting: () => {},
+    _saveMeetingSnapshot: () => {},
+  };
+  const mk = () => { const em = new EntityMeeting(stubFG); em.enterMulti(['徐诗雨', '阿珍']); return em; };
+
+  it('内容提及一人 → 该人接（层②，无LLM）', async () => {
+    const em = mk();
+    expect(await em.inferSpeaker('今天阿珍心情怎么样')).toBe('阿珍');
+  });
+  it('别名提及归一后命中（提及非当前参会者）', async () => {
+    // 令阿珍为主发言人(当前)，徐诗雨为另一参会者 → 点别名"诗雨"应切到徐诗雨
+    const em = new EntityMeeting(stubFG); em.enterMulti(['阿珍', '徐诗雨']);
+    expect(await em.inferSpeaker('诗雨你作业写完没', new Map([['诗雨', '徐诗雨']]))).toBe('徐诗雨');
+  });
+  it('提及当前主发言人 → null（维持，不误切）', async () => {
+    const em = mk(); // 当前=徐诗雨
+    expect(await em.inferSpeaker('徐诗雨你说呢', new Map([['诗雨', '徐诗雨']]))).toBeNull();
+  });
+  it('零提及 + LLM 判断 → 返回 LLM 所指（层③方案A）', async () => {
+    const em = mk();
+    const llm: any = { rawCall: async () => '阿珍' };
+    expect(await em.inferSpeaker('上次说的那个方案，跟进下', undefined, llm)).toBe('阿珍');
+  });
+  it('零提及 + 无LLM → null（默认当前发言人）', async () => {
+    const em = mk();
+    expect(await em.inferSpeaker('嗯，行吧', undefined, undefined)).toBeNull();
+  });
+  it('LLM 失败 → null（降级默认，不抛错）', async () => {
+    const em = mk();
+    const llm: any = { rawCall: async () => { throw new Error('402'); } };
+    expect(await em.inferSpeaker('那个事怎么样了', undefined, llm)).toBeNull();
+  });
+});
+
 describe('T012 P0-5 · 会晤中严格模式仍不误切（不回归）', () => {
   it('会晤中寒暄含名字不触发切换', () => {
     // inMeeting=true 严格模式：单人前缀/纯名不触发；但明确多人集合仍可加人

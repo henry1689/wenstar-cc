@@ -386,6 +386,48 @@ export class EntityMeeting {
     return [...this._multiParticipants];
   }
 
+  /**
+   * T012 发言人推断（多人群聊/会议·自然聊天）：无显式点名时判断"这句话最该谁接"。
+   * ①内容提及某参会者（别名归一）→其接；②LLM 判断待办/话题归属（方案A）→其接；③默认当前发言人。
+   * 返回 null = 维持当前发言人（默认）。
+   */
+  async inferSpeaker(
+    message: string,
+    aliasMap?: Map<string, string>,
+    llm?: { rawCall?: (msgs: any[], maxTokens: number, temp: number) => Promise<string> },
+  ): Promise<string | null> {
+    if (!this._meeting?.isMulti) return null;
+    const current = this._meeting.entityName || null;
+    const others = this._multiParticipants.map(p => p.name).filter(n => n && n !== current);
+    if (others.length === 0) return null;
+    const msg = String(message || '').trim();
+    if (!msg) return null;
+
+    // ① 内容提及（别名归一后子串匹配）：明确提及一人 → 其接
+    let nmsg = msg;
+    if (aliasMap && aliasMap.size > 0) {
+      const entries = [...aliasMap.entries()]
+        .filter(([, m]) => m && m.length >= 2)
+        .sort((a, b) => b[0].length - a[0].length);
+      for (const [alias, main] of entries) if (nmsg.includes(alias)) nmsg = nmsg.split(alias).join(main);
+    }
+    const mentioned = others.filter(o => nmsg.includes(o));
+    if (mentioned.length === 1) return mentioned[0];
+
+    // ② LLM 判断待办/话题归属（方案A）：提及多人或零提及时，问 LLM 最该谁接
+    if (llm?.rawCall) {
+      const recent = this._multiTurns.slice(-8)
+        .map(t => `${t.speaker}: ${String(t.content || '').substring(0, 80)}`).join('\n');
+      const list = others.join('、');
+      const prompt = `多人聊天，参会者：${list}。当前发言人：${current || '无'}。\n最近对话：\n${recent}\n用户刚说：「${msg}」\n判断这句话最该谁接（聊到谁负责的事/在说谁/问谁）？只回一个名字（${list}之一），无法判断回"默认"。`;
+      try {
+        const out = ((await llm.rawCall([{ role: 'user', content: prompt }], 20, 0.1)) || '').trim();
+        for (const o of others) if (out.includes(o)) return o;
+      } catch { /* LLM 失败 → 默认当前发言人 */ }
+    }
+    return null; // ③ 默认当前发言人
+  }
+
   getState(): MeetingState | null {
     return this._meeting ? { ...this._meeting } : null;
   }

@@ -917,6 +917,19 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         console.log('[EntityMeeting] 门卫拒绝: ' + intent.kind + ' targets=' + intent.targets.join(',') + ' → ' + _meetingDeny);
       }
       // normal → 放行
+
+      // ── T012 发言人推断（多人群聊/会议·自然聊天）──
+      // 无显式点名/换人时，判断"这句话最该谁接"：内容提及→其接 / LLM待办归属(方案A)→其接 / 默认当前发言人。
+      // 微信群聊/语音自然聊天通用：点名谁谁说话（P1-3），聊到谁负责的事谁接（本段）。
+      if (_isMulti && _isActive && intent.kind === 'normal') {
+        try {
+          const _inferred = await _em.inferSpeaker(message, aliasMap, ctx.llmProvider);
+          if (_inferred && _inferred !== _em.getEntityName()) {
+            await _em.switchTo(_inferred);
+            console.log('[EntityMeeting] 发言人推断: → ' + _inferred);
+          }
+        } catch { /* 推断失败保持当前发言人 */ }
+      }
     }
 
     // 🆕 V4.0: 会晤知识库缓存 — 首轮搜到的 KB 内容持续注入后续轮次
