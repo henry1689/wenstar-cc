@@ -6386,7 +6386,9 @@ export class FamilyGraph implements FamilyGraphInterface {
    * P0-3: 获取所有已知人员姓名（用于幻觉校验）
    */
   getAllPersonNames(): string[] {
-    const rows = this.query('SELECT name FROM nodes WHERE type = ? AND status != ?', ['person', 'void']);
+    // 🔴 T012 P0-6：只返 active/dormant（已确认真人），排除 candidate（多为语音识别垃圾节点）。
+    //   实测 1068 person 中 1008 是 candidate 垃圾，混入唤醒/意图名单会致误匹配（疑点A）。主角均 active，不受影响。
+    const rows = this.query("SELECT name FROM nodes WHERE type = ? AND status IN ('active','dormant')", ['person']);
     // 🛡️ V10.0: 系统级过滤 — 排除泛称词和垃圾节点名
     // 🆕 V10.11: 与 EntityContextBuilder.GARBAGE_NAMES 保持同步
     const DIRTY_WORDS = new Set(['老公','老婆','爸爸','妈妈','爷爷','奶奶','外公','外婆',
@@ -6415,7 +6417,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       '姑姑','小龙','老邱','老大','焦虑','方案','无聊','徐茜','徐敏','上司',
       '加班','什么名字','那你说','那继续','快乐','老家','那你再']);
     try {
-      const rows = this.query('SELECT name, aliases FROM nodes WHERE type = ? AND status != ?', ['person', 'void']);
+      // 🔴 T012 P0-6：同 getAllPersonNames —— 只返 active/dormant，排除 candidate 垃圾。
+      const rows = this.query("SELECT name, aliases FROM nodes WHERE type = ? AND status IN ('active','dormant')", ['person']);
       for (const r of (rows as any[])) {
         const name = String(r.name || '');
         if (!name || name.length < 2 || DIRTY_WORDS.has(name)) continue;
