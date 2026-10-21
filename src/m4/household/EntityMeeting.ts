@@ -454,6 +454,22 @@ export class EntityMeeting {
     return null;
   }
 
+  /**
+   * T012 P0-5：别名归一 —— 把消息中的别名替换为主名（长别名优先，防重叠），
+   * 使后续主名裸子串匹配对别名也生效（"诗雨"→"徐诗雨"）。仅替换完整别名出现处。
+   */
+  private static _normalizeAliases(msg: string, aliasMap?: Map<string, string>): string {
+    if (!aliasMap || aliasMap.size === 0) return msg;
+    let out = msg;
+    const entries = [...aliasMap.entries()]
+      .filter(([a, m]) => a && a.length >= 1 && m && m.length >= 2)
+      .sort((a, b) => b[0].length - a[0].length); // 长别名优先，防 "阿芬" 抢在 "芬芬阿" 前
+    for (const [alias, main] of entries) {
+      if (out.includes(alias)) out = out.split(alias).join(main);
+    }
+    return out;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // 🆕 P1-1: 意图前置校验门卫 — 统一五类指令分类
   // ═══════════════════════════════════════════════════════════════
@@ -553,52 +569,23 @@ export class EntityMeeting {
       .sort((a, b) => b.length - a.length);
     const msg = message.trim();
 
-    // 🆕 V6.0: "A、B，都来" / "A B C 都过来一起"
-    const duMatch = msg.match(/^(.+?)[，,、\s]*(?:都来|都过来|都过来一下|都来一下|都聊聊|都一起)\s*$/);
-    if (duMatch) {
-      const found: string[] = [];
-      for (const name of sorted) {
-        if (duMatch[1].includes(name)) found.push(name);
-      }
-      if (found.length >= 2) return found;
+    // ── 多人模式检测（T012 P0-5 修复：别名感知 + 语序鲁棒）──
+    // 原实现每个句式用「主名裸子串 .includes(主名)」且要求集合动词在名字前：
+    //   ① 别名失效——"找诗雨和阿珍"中"诗雨"是别名(主名徐诗雨)，裸子串匹配不到 → 多人退化单人；
+    //   ② 把字句/无分隔/多语序失效——"把X和Y叫过来"动词在名后、"徐诗雨阿珍过来"无分隔 → 漏召。
+    // 修复：先把别名归一为主名(_normalizeAliases)，再收集消息中**全部**被提及的已知实体，
+    //   配「集合线索」判据（过来/都来/一起/开会/聊… 或 祈使动词+来），与动词位置解耦。
+    // 疑问句守卫："X和Y都来了吗"不算唤醒（末尾疑问词且无祈使动词），防误入会晤。
+    const nmsg = EntityMeeting._normalizeAliases(msg, aliasMap);
+    const mentioned = new Set<string>();
+    for (const name of sorted) {
+      if (name.length >= 2 && nmsg.includes(name)) mentioned.add(name);
     }
-
-    // ── 多人模式检测 ──
-
-    // "叫上 A 和 B" / "叫 A、B、C 一起"
-    const multiMatch = msg.match(/[叫喊让找]\s*(?:上\s*)?(.+?)\s*(?:一起|都来|过来|开会|聊聊|讨论|聚一聚|碰个头)/);
-    if (multiMatch) {
-      const found: string[] = [];
-      for (const name of sorted) {
-        if (multiMatch[1].includes(name)) found.push(name);
-      }
-      if (found.length >= 2) return found;
-    }
-
-    // "开个会，A B C" / "小组讨论，A B C 参加"
-    const meetingMatch = msg.match(/(?:开会|小组讨论|群聊|多人|会议)\s*[,，]?\s*(.+?)(?:\s*参加|\s*参与|\s*一起|\s*都|$)/);
-    if (meetingMatch) {
-      const found: string[] = [];
-      for (const name of sorted) {
-        if (meetingMatch[1].includes(name)) found.push(name);
-      }
-      if (found.length >= 2) return found;
-    }
-
-    // "A 和 B 和 C" 模式
-    const andMatch = msg.match(/([一-龥]{2,4})(?:\s*(?:和|跟|与|、)\s*([一-龥]{2,4}))+/);
-    if (andMatch) {
-      const allNames = new Set<string>();
-      const namePattern = /[一-龥]{2,4}/g;
-      let m: RegExpExecArray | null;
-      const msgStart = andMatch[0];
-      while ((m = namePattern.exec(msgStart)) !== null) {
-        const name = EntityMeeting._fuzzyFindName(m![0], sorted, aliasMap);
-        if (name) allNames.add(name);
-      }
-      if (allNames.size >= 2 && /一起|都|开会|聊|讨论|聚/.test(msg)) {
-        return [...allNames];
-      }
+    if (mentioned.size >= 2) {
+      const _gatherCue = /过来|都来|都过来|一起(?:来)?|开会|讨论|聚一聚|碰头|参加|聊聊|谈一谈/.test(nmsg)
+        || /(叫|找|让|喊|把|请)[^?？！!]{0,15}(?:来|参加|加入|进来)/.test(nmsg);
+      const _isQuestion = /[吗么呢？?]\s*$/.test(msg) && !/(叫|找|让|喊|把|请)/.test(msg);
+      if (_gatherCue && !_isQuestion) return [...mentioned];
     }
 
     // ── 单人模式检测 ──
