@@ -77,6 +77,14 @@ updated: 2026-10-20
    - 交叉核对：memoryAnchors/boundDocuments 更正为「有消费方、无产出」；
      词表分裂实测扩大到 **5 套 + DB 值 + 状态枚举（未定义类型 20+）**
    - ⏳ Phase 1（规范制定）待豆包验收 Phase 0 后启动
+8. **任务T011（Phase 1：DEFS补齐与词表统一）**：✅ **两侧均已完成（2026-10-21）**
+   - PI：`active/P035-20261021-PI-T011Phase1完成.md`（commit `1d53e91`）
+     DEFS 44→74 项 + 启动断言 + addEdge 拒收 + FGRelationExtractor 白名单派生
+   - Claude：`active/P036-20261021-Claude-T011Phase1词表派生化.md`（commit `8b2358d`）
+     RelationLabels/EntityContextBuilder/FamilyGraph 词表派生化，5 套词表统一读 DEFS
+   - 验证：tsc=0；household+fg 15 文件 141 测试全绿；user-relation-anchor 8/8 通过
+   - Harness：PI 用 run_mvhtba34_jz7x；Claude 用 run_mvhwtvva_lx13（arch_structural 三轮复审）
+   - ⏳ 等豆包验收；Phase 2/3 待 Phase 1 验收后启动
 
 **任务H任务书**：active/T006-20261020-Phase2.4-任务H-I007运行时验证.md
 
