@@ -1697,7 +1697,11 @@ export class DeepSeekLLMProvider implements LLMProvider {
       : new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 
     const _role = params.role || DeepSeekLLMProvider._currentRole;
-    const _effectiveRole = (_strategyMaxLen > 0 && _strategyMaxLen <= 15) ? 'secretary' : _role;
+    // 🔴 T013 Phase2-0: 原 `_strategyMaxLen <= 15 ? 'secretary' : _role` 已删除 ——
+    //   一个与身份无关的参数（回复长度）不得覆盖发言者身份，否则会在会晤态把
+    //   recaller 打回 secretary，向 system prompt 注入「你的名字叫玉瑶」。
+    //   角色一律以上游传入的 role 为准（由 chat.ts 的 resolveIdentity 单一决定）。
+    const _effectiveRole = _role;
     const _kb = params.knowledgeBase || '';
     // 🆕 V4.0: 从上游显式接收实体会晤标志（不再依赖文本前缀检测——PFC会改变前缀）
     const _isEntityMeeting = params.isEntityMeeting === true;

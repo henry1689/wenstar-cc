@@ -72,11 +72,44 @@ describe('[V27] sanitizeMeetingPrompt — 出口清洗器', () => {
   });
 
   it('头部窗口外的标记不剥离（避免误删正文合法提及）', () => {
-    const filler = '档案内容。'.repeat(400); // 远超默认 headLimit=2000
+    const filler = '档案内容。'.repeat(400); // 远超原 headLimit=2000
     const text = `${ENTITY_PROFILE_BLOCK}\n\n${filler}\n\n用户原话："你以为你是玉瑶吗？"`;
     const r = sanitizeMeetingPrompt(text);
     expect(r.stripped).toBe(false);
     expect(r.text).toBe(text);
+  });
+
+  it('🔴 T013 Phase2-0: 窗口外（档案之后）的人设段必须被剥离', () => {
+    // 生产形态：实体档案在前数千字符（chat.ts S2-R2），含玉瑶人设的记忆段在后。
+    // 原 headLimit=2000 下该段落在窗口外 → stripped=false 静默漏网（P039 缺陷⑨）。
+    const dossier = ENTITY_PROFILE_BLOCK + '\n\n' + '身份档案。环境数据。家人。基本信息。社会身份。性格。你认识的人。'.repeat(80);
+    expect(dossier.length).toBeGreaterThan(2000); // 前置条件：档案本身已超窗口
+    const memoryWithYuyao = '【情感背景·过往记忆】\n你是玉瑶 · 灵魂伴侣，鸿艺的私人秘书兼情人，18岁。';
+    const text = `${dossier}\n\n${memoryWithYuyao}\n\n${ENTITY_PROFILE_BLOCK}`;
+
+    const r = sanitizeMeetingPrompt(text);
+    expect(r.stripped, '窗口外人设段应被剥离').toBe(true);
+    for (const mk of YUYAO_IDENTITY_MARKERS) {
+      expect(r.text.includes(mk), `残留标记: ${mk}`).toBe(false);
+    }
+    // 实体档案锚点必须完好
+    expect(r.text).toContain('## 你的身份');
+    expect(r.reverted).toBe(false);
+  });
+
+  it('🔴 提及式保护：正文里的合法提及不被误删', () => {
+    const cases = [
+      '用户原话："你以为你是玉瑶吗？"',
+      '他反问：你是不是玉瑶?',
+      '这里写着「你是玉瑶」，是用户自己说的',
+      '你说你是玉瑶，还引用了原话',
+    ];
+    for (const c of cases) {
+      const text = `${ENTITY_PROFILE_BLOCK}\n\n${c}`;
+      const r = sanitizeMeetingPrompt(text);
+      expect(r.stripped, `提及被误删: ${c}`).toBe(false);
+      expect(r.text).toBe(text);
+    }
   });
 
   it('剥离结果不残留半段（所有段均为完整保留或完整删除）', () => {

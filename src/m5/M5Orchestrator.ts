@@ -12,6 +12,7 @@ import { buildContextPrompt, updateAfterReply, resetContext } from './ContextMem
 import { extractAnchor, buildAnchorConstraint, validateAgainstAnchor, resetAnchor } from './SceneAnchor.js';
 import { resetMockSession } from './MockLLMProvider.js';
 import { classify, type RoleType, type RoleDecision } from '../app/role/RoleClassifier.js';
+import { type ResolvedIdentity } from './identity/resolveIdentity.js';
 import { isIntimate } from '../common/utils/is-intimate.js';
 import { evaluateTransition, createInitialState, type TransitionState } from '../app/role/TransitionManager.js';
 
@@ -37,7 +38,12 @@ export class M5Orchestrator {
    * @param knowledgeBase 知识库内容
    * @param userMessage 用户当前消息（用于场景记忆更新）
    */
-  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, isEntityMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<string> {
+  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, legacyMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }, identity?: ResolvedIdentity): Promise<string> {
+    // 🔴 T013 Phase2-0（ADR-013 §2.1）: 身份由上游 resolveIdentity 单一决定。
+    //   未传 identity 时完全沿用旧参数（legacyMeeting/currentRole）—— 保证
+    //   cli/sandbox.ts:93 与 m1/DualCorePipeline.ts:143 两个既有调用方行为不变。
+    const _isMeeting = identity ? identity.isMeeting : !!legacyMeeting;
+    const _roleIn = identity ? identity.role : currentRole;
     // P0-1: 提取最近一条 timeline 的 dna_root_id 完成全链路闭环
     const dnaRootId = m4ctx.memory_summary.timeline
       .slice(-1)
@@ -59,7 +65,7 @@ export class M5Orchestrator {
 
     // Step 2.6: 注入场景上下文记忆（🛡️ V4.0: 会晤模式下不注入玉瑶的锚点/场景约束）
     const sceneContext = buildContextPrompt();
-    const combinedKnowledge = isEntityMeeting
+    const combinedKnowledge = _isMeeting
       ? (knowledgeBase || '')  // 会晤模式：纯实体上下文，不加玉瑶的场景约束
       : (knowledgeBase && knowledgeBase.startsWith('【角色扮演】'))
         ? knowledgeBase
@@ -71,15 +77,15 @@ export class M5Orchestrator {
     // === P0: 角色路由（从 chat.ts 单源接收，不再重复分类） ===
     // 📜 架构铁律：角色状态以 chat.ts 的 _currentRole 为唯一权威
     const _rpInput = userMessage || cognition.current.raw_input || '';
-    this._currentRole = currentRole || this._currentRole;
+    this._currentRole = _roleIn || this._currentRole;
     // 强制 lover 覆盖（🛡️ V4.0: 会晤模式下不强制覆盖）
     try {
-      if (!isEntityMeeting && this._currentRole !== 'lover' && isIntimate(_rpInput)) {
+      if (!_isMeeting && this._currentRole !== 'lover' && isIntimate(_rpInput)) {
         this._currentRole = 'lover';
         console.log('[M5Role] 消息含亲密词，强制→lover');
       }
     } catch (_re) { /* 亲密词检测非关键 */ }
-    if (isEntityMeeting) this._currentRole = 'recaller';
+    if (_isMeeting) this._currentRole = 'recaller';
     console.log('[M5Role] ' + this._currentRole + ' (from chat.ts)');
 
     // Step 3: LLM 受控生成（唯一LLM调用点）
@@ -87,7 +93,7 @@ export class M5Orchestrator {
     let usedMockFallback = false;
     try {
       const currentTime = new Date().toISOString();
-      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting, onToken: streamOpts?.onToken });
+      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, onToken: streamOpts?.onToken });
       draft = result.text;
     } catch (err) {
       console.error('[M5] LLM生成失败:', err);
@@ -105,7 +111,7 @@ export class M5Orchestrator {
     if (!draft) {
       console.warn('[M5] 首次生成无可解析答案 → 降级重试(low reasoning_effort)');
       try {
-        const _retry = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime: new Date().toISOString(), userMessage, role: this._currentRole, isEntityMeeting, reasoningEffortOverride: 'low' });
+        const _retry = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime: new Date().toISOString(), userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, reasoningEffortOverride: 'low' });
         draft = _retry && _retry.text ? _retry.text : '';
         if (draft) console.warn('[M5] 重试成功，已拿到可用回复');
       } catch (_rErr) {
@@ -117,7 +123,7 @@ export class M5Orchestrator {
     // 如果主 LLM 失败，不伪装——直接返回明确错误
     if (!draft) {
       console.error('[M5] LLM生成失败，返回降级提示（非MockLLM）');
-      if (isEntityMeeting) return '…（抱歉，我暂时无法回应，请稍后再试。）';
+      if (_isMeeting) return '…（抱歉，我暂时无法回应，请稍后再试。）';
       return '抱歉，网络好像不太稳定，请稍后再试。';
     }
 
@@ -145,7 +151,7 @@ export class M5Orchestrator {
     }
 
     if (!final || final.length <= 2) {
-      if (isEntityMeeting) return '…（抱歉，我暂时无法回应，请稍后再试。）';
+      if (_isMeeting) return '…（抱歉，我暂时无法回应，请稍后再试。）';
       return '抱歉，网络好像不太稳定，请稍后再试。';
     }
 

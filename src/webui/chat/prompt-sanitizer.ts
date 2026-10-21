@@ -66,8 +66,32 @@ const REVERT = (text: string, reason: string): SanitizeResult => ({
  * @param text 待清洗的 prompt 文本（会晤模式下的 finalKnowledgeText）
  * @param opts headLimit — 头部窗口大小
  */
+/**
+ * 「提及式」判据 —— 段内命中标记，但属于**正文里的合法提及**而非人设注入，不得删。
+ *
+ * 原实现靠 headLimit=2000 头部窗口规避误删（约束①）；窗口放宽到全量后由本函数接管该职责。
+ * 判据取「疑问 / 引用 / 转述」三类语气特征，命中任一即认为是被提及的文本：
+ *   例：`用户原话："你以为你是玉瑶吗？"` → 含「吗」「？」「"」→ 保留
+ * 而人设注入句（`你是玉瑶 · 灵魂伴侣，…`）不含这些特征 → 照常剥离。
+ */
+const MENTION_CUES: readonly string[] = ['吗', '？', '?', '"', '“', '”', '「', '」', '以为', '你说', '原话', '复述'];
+
+function isMention(seg: string): boolean {
+  // 🔴 硬人设特征串优先于一切「提及式」豁免（T013 Phase2-0）。
+  //   MENTION_CUES 含较宽的 '你说'（覆盖「你说你是玉瑶」类转述），它会命中人设块里的
+  //   「正在和**你说话**」→ 整段被误判为提及而免于剥离 → V27 三条回归测试全挂。
+  //   故只要段内出现**完整人设特征串**，即断定为注入，返回「非提及」＝必须剥离；
+  //   仅在无硬特征串时才按 cue 判定（保住「你以为你是玉瑶吗？」类正文提及不被误删）。
+  const HARD_PERSONA = ['玉瑶 · 灵魂伴侣', '你的名字叫玉瑶', '玉瑶的私人秘书兼情人', '你的名字是玉瑶'];
+  if (HARD_PERSONA.some(h => seg.includes(h))) return false;
+  return MENTION_CUES.some(cue => seg.includes(cue));
+}
+
 export function sanitizeMeetingPrompt(text: string, opts: SanitizeOptions = {}): SanitizeResult {
-  const headLimit = opts.headLimit ?? 2000;
+  // 🔴 T013 Phase2-0: 默认全量按段扫描。原 2000 头部窗口在生产失效 —— 会晤 prompt 是
+  //   「实体档案在前、记忆召回在后」(chat.ts S2-R2)，档案+户口本+知识库本就数千字符，
+  //   窗口整段被档案占满，记忆段里的玉瑶人设必然落在窗口外致静默漏网（生产实测 4966 字符那条）。
+  const headLimit = opts.headLimit ?? Infinity;
   if (!text) return NOOP(text);
 
   // 快筛：整篇无任何标记 → 直接返回（绝大多数会晤轮次走这里）
@@ -80,7 +104,8 @@ export function sanitizeMeetingPrompt(text: string, opts: SanitizeOptions = {}):
 
   for (const seg of segments) {
     const inHead = consumed < headLimit;
-    const dirty = inHead && YUYAO_IDENTITY_MARKERS.some(mk => seg.includes(mk));
+    // 段级三重判据：在窗口内 + 命中标记 + 非提及式
+    const dirty = inHead && YUYAO_IDENTITY_MARKERS.some(mk => seg.includes(mk)) && !isMention(seg);
     if (dirty) removed.push(seg);
     else kept.push(seg);
     consumed += seg.length + 2; // +2 近似 '\n\n' 分隔符

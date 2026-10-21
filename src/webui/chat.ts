@@ -375,20 +375,20 @@ export interface ChatResponse {
  *  格式：{ 行号, 阶段, 描述, 传播方式 }
  */
 const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; via: string }> = [
-  { line: 852, stage: 'L0-路由', desc: '活跃会议名传入下层 stage', via: '_meetingEntityName: _activeMeetingName' },
-  { line: 704, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()' },
-  { line: 1129, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
-  { line: 1231, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
-  { line: 1248, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
-  { line: 2251, stage: 'L5-记忆门控', desc: '会晤模式跳过主人侧自我模型注入（⚠原「跳过主人记忆检索」守卫 ChatPolicy.canRetrieveMemories 全仓零调用点＝死代码，实际由 M6 guard 承担）', via: 'if (ctx.m6 && !_isMeeting)' },
-  { line: 1833, stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
-  { line: 1921, stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
-  { line: 2003, stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint = null' },
-  { line: 2049, stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问（知识边界检测）', via: '!meetingEntityName guard' },
-  { line: 2325, stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像', via: 'ctx.masterProfile && !_meetingEntityName' },
-  { line: 2212, stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
-  { line: 2583, stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate', via: '!!_meetingEntityName' },
-  { line: 2614, stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
+  { line: 738, stage: 'L0-路由', desc: '活跃会议名传入下层 stage', via: '_meetingEntityName: _activeMeetingName' },
+  { line: 590, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()（_activeMeetingName 汇聚点；另 :439 为 entry 侧快照）' },
+  { line: 1046, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
+  { line: 1148, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
+  { line: 1165, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
+  { line: 2172, stage: 'L5-记忆门控', desc: '会晤模式跳过主人侧自我模型注入（⚠原「跳过主人记忆检索」守卫 ChatPolicy.canRetrieveMemories 全仓零调用点＝死代码，实际由 M6 guard 承担）', via: 'if (ctx.m6 && !_isMeeting)' },
+  { line: 1752, stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
+  { line: 1840, stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
+  { line: 1922, stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint = null' },
+  { line: 1968, stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问（知识边界检测）', via: '!meetingEntityName guard' },
+  { line: 2244, stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像（另 :1996 为 strict 关闭时的旧路径）', via: 'ctx.masterProfile && !_meetingEntityName' },
+  { line: 2131, stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
+  { line: 2512, stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate，并经 resolveIdentity 单一决定身份', via: '!!_meetingEntityName → resolveIdentity → orchestrate(..., identity)' },
+  { line: 2543, stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
 ];
 
 export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
@@ -2499,7 +2499,17 @@ if (_meetingExited) {
     if (_meetingDeny) {
       reply = _meetingDeny;
     } else {
-      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _currentRole, !!_meetingEntityName, streamOpts);
+      // 🔴 T013 Phase2-0（ADR-013 §2.1「身份解析在状态之后」）:
+      //   身份交给 resolveIdentity 纯函数一次性决定 —— role 与 isMeeting 在同一个分支产生，
+      //   结构上不可能出现「会晤态 + 玉瑶角色」的组合（原缺陷靠 M5Orchestrator 内部兜底）。
+      const { resolveIdentity: _resolveIdentity } = await import('../m5/identity/resolveIdentity.js');
+      const _identity = _resolveIdentity({
+        isMeeting: !!_meetingEntityName,
+        speakerName: _meetingEntityName,
+        yuyaoRole: _currentRole,
+      });
+      console.log('[Identity] ' + _identity.role + ' meeting=' + _identity.isMeeting + ' speaker=' + (_identity.speakerName ?? '玉瑶'));
+      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity);
     }
 }
 
