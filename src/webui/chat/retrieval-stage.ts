@@ -11,6 +11,8 @@ import type { Perception24D } from '../../m3/types/perception.js';
 import { rerank } from '../../m4/Reranker.js';
 import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
 import { resolveReferent } from '../../app/works/ReferentResolver.js';
+// 🔴 T013 R6（ADR-013 第三层）：会晤 UUID 过滤咽喉 + 命中泄漏校验
+import { applyMeetingUuidFilter, verifyMeetingHits } from '../../m4/retrieval/meetingIsolation.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
@@ -467,11 +469,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         //   ⚠️ 刻意**不**并入 `_gatekeeper.getEffectiveWhitelist()`：那份白名单可能被残留的
         //     sessionEntities 污染（本文件下方注释记录过「冻结在上一个会晤实体」的实测泄漏链），
         //     而检索主体的真源是 EntityMeeting，不是会话层。
-        const _meetingPolicy: PolicePolicy = {
-          visibleUuids: new Set<string>([_entityUuid]),
-          allowUnowned: false,
-          searchScope: 'strict',
-        };
+        //   🔴 T013 R6（ADR-013 第三层）：UUID 过滤收口到 meetingIsolation.applyMeetingUuidFilter
+        //   单一咽喉（deny-by-default, enforce 恒 true），消灭内联第二份策略构造点（防 I007 根因复发）。
+        const _meetingPolicy: PolicePolicy = applyMeetingUuidFilter(_entityUuid);
         const _rqOn = getRetrievalFusionConfig()?.recall_quota?.enabled === true;
         const _injectedGroupIds = new Set<string>();
         try {
@@ -490,6 +490,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             nowMs: Date.now(),
           });
           if (_orRes.hits.length > 0) {
+            // 🔴 T013 R6：会晤命中泄漏校验（防 I007 复发）—— 命中若含非会晤实体 UUID 即告警
+            const _leak = verifyMeetingHits(_orRes.hits, _entityUuid);
+            if (!_leak.ok) console.error('[MeetingIsolation] 🔴 会晤检索泄漏他人实体 UUID:', _leak.leaked.join(','));
             const _orSeen = new Set(memoryFragments.map((f: string) => f.substring(0, 20)));
             let _orInjected = 0;
             for (const _oh of _orRes.hits) {
