@@ -13,6 +13,8 @@ import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
 import { resolveReferent } from '../../app/works/ReferentResolver.js';
 // 🔴 T013 R6（ADR-013 第三层）：会晤 UUID 过滤咽喉 + 命中泄漏校验
 import { applyMeetingUuidFilter, verifyMeetingHits } from '../../m4/retrieval/meetingIsolation.js';
+// 🔴 T013 Phase 2 批B（B2）：群聊状态优先取检索主体 UUID（WS_GROUP_V2 门控）
+import { isGroupSessionEnabled } from '../../m5/group/GroupSession.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
@@ -361,7 +363,28 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   if (_meetingEntityName) {
     try {
       const _fg = ctx.m4?.getFamilyGraph?.();
-      const _entityUuid = _fg?.getUUIDByName?.(_meetingEntityName);
+      // 🔴 T013 Phase 2 批B（B2）: 检索主体 UUID **优先取自群聊状态**，而非靠实体名反查 FG。
+      //   名字反查一旦失败/错配（FG 主名变更、别名、名字含特殊字），白名单就是错的或空的
+      //   —— 这是 I007 串档的同源隐患；而 meetingIsolation.applyMeetingUuidFilter 咽喉要的
+      //   正是一个 speakerUuid，此前无人供给。
+      //   🔴 守卫：仅在 `WS_GROUP_V2` 开启、影子状态处于会晤态、且**与真源实体名一致**时启用
+      //     （比对 name，防投影漂移把检索主体指向另一个人）；任一条件不满足即回退原反查路径。
+      const _shadowSpeakerUuid: string | null = (() => {
+        try {
+          const _gs = (ctx as any)._groupSession;
+          const _st = _gs?.getState?.();
+          if (!_st || !isGroupSessionEnabled()) return null;
+          if (_st.participants.length === 0) return null;
+          const _u = typeof _st.speakerUuid === 'string' ? _st.speakerUuid.trim() : '';
+          if (!_u) return null;
+          const _n = _st.participants.find((p: any) => p.uuid === _u)?.name;
+          return _n === _meetingEntityName ? _u : null;   // 名字不一致 ⇒ 投影漂移，回退
+        } catch { return null; }                          // 影子侧异常绝不影响主链路
+      })();
+      const _entityUuid = _shadowSpeakerUuid ?? _fg?.getUUIDByName?.(_meetingEntityName);
+      if (_shadowSpeakerUuid) {
+        console.log('[GroupShadow] 检索主体 UUID 取自群聊状态（speakerUuid 优先）');
+      }
       const _sqlite = ctx.storage?.getSQLite?.();
       if (_entityUuid && _sqlite && typeof _sqlite.queryAll === 'function') {
         // 🔴 V34 #3: 砂金库索引**启动补齐**（每进程一次，幂等，失败不阻塞）。

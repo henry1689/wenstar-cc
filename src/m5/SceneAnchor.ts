@@ -214,6 +214,31 @@ export function validateAgainstAnchor(draft: string): string {
 }
 
 export function getAnchor(): SceneAnchor { return { ..._anchor }; }
+
+/**
+ * 🔴 T013 批C：恢复场景锚点现场。
+ *
+ * 此前本模块**只有 `resetAnchor()`（归零）没有 setter** —— 结构上就无法「恢复」，
+ * 这正是旧实现退出会晤只能归零、导致玉瑶基线丢失（P039 缺陷②）的根本原因：
+ * 不是没有选择，是没有这个能力。
+ *
+ * 设计约束：
+ *   - 深拷贝写入（调用方随后改动传入对象不影响本模块），与 `getAnchor()` 的深拷贝对称；
+ *   - 空值一律回退默认，不写入 undefined（否则 `buildAnchorConstraint` 会拼出 "在undefined"）。
+ */
+export function setAnchor(a: SceneAnchor): void {
+  const src = a || ({} as SceneAnchor);
+  _anchor = {
+    location: typeof src.location === 'string' ? src.location : '',
+    action: typeof src.action === 'string' ? src.action : '',
+    nudity: typeof src.nudity === 'number' ? src.nudity : 0,
+    intimacy: !!src.intimacy,
+    isActive: !!src.isActive,
+    season: (typeof src.season === 'string' && src.season) ? src.season : getSeason(new Date().getMonth()),
+    hour: typeof src.hour === 'number' ? src.hour : new Date().getHours(),
+  };
+}
+
 export function resetAnchor(): void {
   _anchor = { location: '', action: '', nudity: 0, intimacy: false, isActive: false, season: getSeason(new Date().getMonth()), hour: new Date().getHours() };
   _prevTurns = [];

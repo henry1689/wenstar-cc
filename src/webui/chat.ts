@@ -89,6 +89,12 @@ import { alignmentGuard } from '../app/alignment/VectorAlignmentGuard.js';
 
 import { autoPromoteCandidatesV2 } from '../app/vault/VaultManager.js';
 import { EntityMeeting } from '../m4/household/EntityMeeting.js';
+// 🔴 T013 Phase 2 批B：群聊影子状态（WS_GROUP_V2 门控；关闭时下方分支一行不执行）
+import { GroupSession, isGroupSessionEnabled } from '../m5/group/GroupSession.js';
+import { projectMeetingState, detectDrift, type MeetingSnapshot } from '../m5/group/project.js';
+// 🔴 T013 Phase 2 · R1（P051·PI）：会话状态单键持久化（单写者；WS_GROUP_V2 门控内 no-op）
+import { saveSession, loadSession } from '../m5/group/SessionStore.js';
+import { captureSlot, applySlot } from '../m5/group/contextBridge.js';
 import { filterPrivateConversations, type PrivateConversation } from '../m4/household/EntityPrivacyFilter.js';
 import { FGProfileWriteGateway } from '../m4/household/FGProfileWriteGateway.js';
 // 🔴 P0-2 会话模式分级: 读取 prompt_depth_enabled 总开关
@@ -345,6 +351,15 @@ export interface ChatContext {
   /** V4.0 实体会晤管理器 — 多人会议纪要记录 */
   _entityMeeting?: import('../m4/household/EntityMeeting.js').EntityMeeting;
 
+  /**
+   * T013 Phase 2 批B（B1）：群聊会话**影子状态**。
+   *
+   * 🔴 批B 阶段 EntityMeeting 仍是唯一真源；本对象只被投影、不被决策 ——
+   *   仅在 `WS_GROUP_V2` 开启时才被创建与使用，关闭时整个对象不存在。
+   *   切主（状态机本体替换）留到影子运行验证无漂移之后（ADR-013 §2.3 逐段替换）。
+   */
+  _groupSession?: import('../m5/group/GroupSession.js').GroupSession;
+
   /** 记事记忆服务 */
   yuyaoMemory?: import("../app/yuyao-memory/YuyaoMemoryService.js").YuyaoMemoryService;
 
@@ -374,21 +389,28 @@ export interface ChatResponse {
  *  S4 评审必须逐点核验。修改任何传播点→必须同步更新此处索引。
  *  格式：{ 行号, 阶段, 描述, 传播方式 }
  */
-const MEETING_PROP_POINTS: Array<{ line: number; stage: string; desc: string; via: string }> = [
-  { line: 738, stage: 'L0-路由', desc: '活跃会议名传入下层 stage', via: '_meetingEntityName: _activeMeetingName' },
-  { line: 590, stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名', via: 'getEntityName()（_activeMeetingName 汇聚点；另 :439 为 entry 侧快照）' },
-  { line: 1046, stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
-  { line: 1148, stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
-  { line: 1165, stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
-  { line: 2172, stage: 'L5-记忆门控', desc: '会晤模式跳过主人侧自我模型注入（⚠原「跳过主人记忆检索」守卫 ChatPolicy.canRetrieveMemories 全仓零调用点＝死代码，实际由 M6 guard 承担）', via: 'if (ctx.m6 && !_isMeeting)' },
-  { line: 1752, stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
-  { line: 1840, stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
-  { line: 1922, stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint = null' },
-  { line: 1968, stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问（知识边界检测）', via: '!meetingEntityName guard' },
-  { line: 2244, stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像（另 :1996 为 strict 关闭时的旧路径）', via: 'ctx.masterProfile && !_meetingEntityName' },
-  { line: 2131, stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
-  { line: 2512, stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate，并经 resolveIdentity 单一决定身份', via: '!!_meetingEntityName → resolveIdentity → orchestrate(..., identity)' },
-  { line: 2543, stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
+// 🔴 V15 方案A（2026-10-23，P059·PI，根治第五次行号漂移）：
+//   原为硬编码 `line: number`，任何前置编辑都推偏行号 → 编目静默失真，只能在 S5 闸门发现。
+//   改为 **probe 特征串定位**：守卫用 `src.findIndex(l => l.includes(probe))`（搜索区间限定在编目数组之后）
+//   自动重定位，编辑推偏后永不漂移。14 点 probe 均已验证在编目后**唯一命中**（见 P056 评估）。
+//   - 12 点沿用原特征串；L1 精化为 `const _activeMeetingName`（汇聚点，区别于 :859 entry 侧快照）；
+//     L10 精化为带右括号的主点判据（区别于 :2100 旧路径多出的 `&& !PROMPT_ASSEMBLER_STRICT`）。
+//   - desc/via 保留仅供人读（含行号引用如":859"是历史说明，非定位依据）。
+const MEETING_PROP_POINTS: Array<{ probe: string; stage: string; desc: string; via: string }> = [
+  { probe: '_meetingEntityName: _activeMeetingName', stage: 'L0-路由', desc: '活跃会议名传入下层 stage', via: '活跃会议名传参' },
+  { probe: 'const _activeMeetingName', stage: 'L1-上下文', desc: '从 EntityMeeting 获取实体名（_activeMeetingName 汇聚点；entry 侧快照另见 getEntityName 消息恢复路径）', via: 'getEntityName() 汇聚' },
+  { probe: 'buildEntityContext(ctx.m4.getFamilyGraph', stage: 'L2-档案', desc: '构建实体上下文（档案+对话+开场协议）+ 铁律结构化 rules', via: 'buildEntityContext() → ecResult.rules → PromptAssembler' },
+  { probe: 'dna.entity_genes.push', stage: 'L3-DNA', desc: '注入 entity_genes 到 M1 DNA 编码', via: 'dna.entity_genes.push' },
+  { probe: '_meetingEntityUuid: ctx._entityMeeting', stage: 'L4-KB过滤', desc: '传入 _meetingEntityUuid 给 KnowledgeContextBuilder', via: 'PreM4Input._meetingEntityUuid' },
+  { probe: 'ctx.m6 && !_isMeeting', stage: 'L5-记忆门控', desc: '会晤模式跳过主人侧自我模型注入（⚠原「跳过主人记忆检索」守卫 ChatPolicy.canRetrieveMemories 全仓零调用点＝死代码，实际由 M6 guard 承担）', via: 'if (ctx.m6 && !_isMeeting)' },
+  { probe: 'preserveLabels: !!_meetingEntityName', stage: 'L6-注入保留', desc: 'preserveLabels=true 保留结构标签', via: 'MemoryInjector.preserveLabels' },
+  { probe: 'meetingEntity: _meetingEntityName', stage: 'L7-PFC', desc: '通知前额叶皮层当前会晤实体', via: 'meetingEntity param' },
+  { probe: 'roleHint = _meetingEntityName', stage: 'L8-角色提示', desc: '会晤模式跳过当前角色提示', via: 'roleHint 置空' },
+  { probe: '!knowledgeBaseText && !_meetingEntityName', stage: 'L9-自问自检', desc: '会晤模式跳过玉瑶自问（知识边界检测）', via: '!meetingEntityName guard' },
+  { probe: 'if (ctx.masterProfile && !_meetingEntityName) {', stage: 'L10-主人镜像', desc: '会晤模式跳过主人画像（主点；strict 关闭时旧路径另见 ctx.masterProfile && !_meetingEntityName && !PROMPT_ASSEMBLER_STRICT）', via: 'ctx.masterProfile && !_meetingEntityName' },
+  { probe: 'new ChatPolicy(meetingMode', stage: 'L11-政策选择', desc: '会晤模式使用 ChatPolicy meetingMode', via: 'ChatPolicy(meetingMode(...))' },
+  { probe: 'orchestrate(ctx_m4', stage: 'L12-M5调度', desc: '传入 isEntityMeeting=true 给 M5.orchestrate，经 resolveIdentity（批B 开关开启时为 resolveIdentityFromState）单一决定身份', via: '!!_meetingEntityName → resolveIdentity / resolveIdentityFromState → orchestrate(..., identity)' },
+  { probe: '_meetingEntityName && reply && reply.length > 20', stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
 ];
 
 export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
@@ -929,6 +951,95 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             console.log('[EntityMeeting] 发言人推断: → ' + _inferred);
           }
         } catch { /* 推断失败保持当前发言人 */ }
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔴 T013 Phase 2 批B（B1）：群聊影子状态并线
+    //   EntityMeeting 在本阶段仍是**唯一真源**；此处只把它的真实状态投影成 action
+    //   交给 GroupSession，不参与任何决策（ADR-013 §2.3 逐段替换的第一段）。
+    //   `WS_GROUP_V2` 未设置时整个分支一行不执行 ⇒ 行为与改动前逐字一致。
+    //   🔴 影子侧任何异常都必须被吞掉 —— 新架构出问题绝不能伤及用户。
+    // ═══════════════════════════════════════════════════════════════
+    if (isGroupSessionEnabled()) {
+      try {
+        if (!ctx._groupSession) {
+          ctx._groupSession = new GroupSession({ enabled: true });
+          // 🔴 R1（P051·PI）：启动时从单键恢复会话状态。整份拒绝语义在 restore 内建 ——
+          //   校验失败返回 false 且状态保持原样（不半恢复），此处无需额外处理。
+          try { loadSession(ctx.storage?.getSQLite?.(), ctx._groupSession); }
+          catch (_e) { console.warn('[GroupShadow] R1 恢复异常（非阻塞）:', (_e as Error)?.message); }
+          // 🔴 加人减人回调接线（P051·PI，ADR-013 协作接口#3）：订阅副作用事件，
+          //   命中 participantJoined/participantLeft/speakerChanged 时打点并持久化（单写者=本会话）。
+          //   订阅仅在首次创建时挂一次；影子侧异常一律吞掉，绝不伤及主链路。
+          ctx._groupSession.onEffect((_eff) => {
+            try {
+              if (_eff.type === 'participantJoined' || _eff.type === 'participantLeft' || _eff.type === 'speakerChanged') {
+                console.log('[GroupSession] 事件 ' + _eff.type);
+                saveSession(ctx.storage?.getSQLite?.(), ctx._groupSession!);
+              }
+            } catch (_ee) { /* 影子侧异常不影响主链路 */ }
+          });
+        }
+        const _gs = ctx._groupSession;
+        const _emSnap = ctx._entityMeeting;
+        const _snapActive = !!_emSnap?.isActive?.();
+        const _snapParticipants = _snapActive
+          ? (() => {
+              const _list = ((_emSnap?.getParticipants?.() ?? []) as any[])
+                .filter(p => p?.uuid && p?.name)
+                .map(p => ({ uuid: String(p.uuid), name: String(p.name), category: p.category }));
+              // 🔴 T013 批B 缺陷（2026-10-22 实测发现）：getParticipants() 返回的是
+              //   EntityMeeting._multiParticipants，**只在多人路径赋值**（:165/:230/:327/:815），
+              //   单人会晤从不碰它 → 恒为 [] → projectMeetingState 命中「无效快照」守卫返回
+              //   空序列 → 影子侧在最常用的单人会晤场景下**永不激活**（零日志零埋点）。
+              //   project.ts 的接口契约写的是「单人时只含主发言者」—— 此处兑现它。
+              //   category 在 MeetingSnapshot 中可选，toSeeds 只校验 keyOf 与 name，空串安全。
+              if (_list.length === 0) {
+                const _u = _emSnap?.getEntityUUID?.() ?? null;
+                const _n = _emSnap?.getEntityName?.() ?? null;
+                if (_u && _n) return [{ uuid: String(_u), name: String(_n), category: '' }];
+              }
+              return _list;
+            })()
+          : [];
+        const _snap: MeetingSnapshot = {
+          active: _snapActive,
+          speakerUuid: _snapActive ? (_emSnap?.getEntityUUID?.() ?? null) : null,
+          speakerName: _snapActive ? (_emSnap?.getEntityName?.() ?? null) : null,
+          participants: _snapParticipants,
+        };
+        // 🔴 T013 批C：进入会晤前采样玉瑶现场并压栈。
+        //   时序依据（chat.ts 每轮）：`:831 enter()` → `:947 本投影块` → `:2502 orchestrate()`；
+        //   `M5Orchestrator:63` 每轮调 `extractAnchor()` **用会晤内容覆盖模块单例**，
+        //   故此刻单例里仍是**玉瑶现场**（本轮 M5 还没跑）—— 采样不会采到会晤污染。
+        //   旧代码做不到这件事：它在 `:855` 用 `resetSession()` **归零**，且位置在 exit 之前。
+        const _yuyaoSlot = captureSlot(null, { emotion: { pleasure: p?.pleasure, arousal: p?.arousal, intimacy: p?.intimacy }, savedRole: _currentRole });
+
+        // 投影产出的是 action **序列**（集合重建 + 主发言对齐可能各需一步），逐个派发
+        const _actions = projectMeetingState(_gs.getState(), _snap, Date.now(), _yuyaoSlot);
+        if (_actions.length > 0) {
+          let _next = _gs.getState();
+          for (const _a of _actions) _next = _gs.dispatch(_a);
+          const _drift = detectDrift(_next, _snap);
+          if (_drift) console.warn('[GroupShadow] 🔴 影子状态与真源漂移: ' + _drift);
+
+          // ── T013 批C：退出会晤 → **弹栈恢复**玉瑶现场，而非 reset 归零（修 P039 缺陷②）──
+          //   恢复落在本块之后、`:2502 orchestrate` 之前 ⇒ 本轮回复就是用恢复后的玉瑶现场生成的。
+          const _yuyaoRestored = [..._next.contextStack].reverse().find(sl => sl.uuid === null);
+          if (_actions.some(a => a.type === 'LEAVE') && _yuyaoRestored) {
+            const _ok = applySlot(_yuyaoRestored);
+            // 修 P039 缺陷③：普通会晤退出不再无条件硬置 secretary，而是复原进入前的角色
+            //   （原 `_savedHumanRole` 被 `isCelestialEntity` 分支包住 ⇒ 普通会晤丢失角色现场）
+            if (_yuyaoRestored.savedRole) _currentRole = _yuyaoRestored.savedRole as typeof _currentRole;
+            console.log('[GroupShadow] 玉瑶现场已恢复=' + _ok + ' role=' + _currentRole);
+          }
+        }
+        // 🔴 R1（P051·PI）：每轮状态定稿后落盘到单键（含上方批C 弹栈恢复后的最终态）。
+        //   单写者=本会话；saveSession 内部 WS_GROUP_V2 关闭时 no-op。失败非阻塞。
+        saveSession(ctx.storage?.getSQLite?.(), _gs);
+      } catch (_gsErr) {
+        console.warn('[GroupShadow] 影子状态投影失败（不影响主链路）:', (_gsErr as Error)?.message);
       }
     }
 
@@ -2503,11 +2614,18 @@ if (_meetingExited) {
       //   身份交给 resolveIdentity 纯函数一次性决定 —— role 与 isMeeting 在同一个分支产生，
       //   结构上不可能出现「会晤态 + 玉瑶角色」的组合（原缺陷靠 M5Orchestrator 内部兜底）。
       const { resolveIdentity: _resolveIdentity } = await import('../m5/identity/resolveIdentity.js');
-      const _identity = _resolveIdentity({
-        isMeeting: !!_meetingEntityName,
-        speakerName: _meetingEntityName,
-        yuyaoRole: _currentRole,
-      });
+      // 🔴 T013 Phase 2 批B（B3）: `WS_GROUP_V2` 开启时身份改由**状态**决定
+      //   （ADR-013 硬约束③「身份解析在状态之后」）；关闭时完全保留原调用，行为逐字不变。
+      //   🔴 一致性守卫：只有影子状态与真源（_meetingEntityName）在「是否会晤」上一致时才走状态路径。
+      //     若两者冲突（说明投影出错），立即回退原路径 —— 影子侧的 bug 绝不能改变用户看到的身份。
+      const _gsState = isGroupSessionEnabled() ? ctx._groupSession?.getState() : undefined;
+      const _identity = _gsState && (_gsState.participants.length > 0) === !!_meetingEntityName
+        ? (await import('../m5/group/identityFromState.js')).resolveIdentityFromState(_gsState, _currentRole)
+        : _resolveIdentity({
+            isMeeting: !!_meetingEntityName,
+            speakerName: _meetingEntityName,
+            yuyaoRole: _currentRole,
+          });
       console.log('[Identity] ' + _identity.role + ' meeting=' + _identity.isMeeting + ' speaker=' + (_identity.speakerName ?? '玉瑶'));
       reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity);
     }
