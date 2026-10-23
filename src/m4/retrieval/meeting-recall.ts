@@ -62,6 +62,14 @@ export interface RecallConversationRow {
 export const RECALL_TRIGGER_RE =
   /(?:记得|聊过|说过|之前|以前|上次|那件事|那次|回忆|是不是|上次说|聊起|什么内容|最早|第一次|当初|刚认识|还是.{1,10}(?:的|的?事)|继续说|接着说|接着聊|接着刚才|回到刚才|再说说|再聊聊|再讲讲|刚才说|刚才讲到)/;
 
+/** 🔴 T013 亲密话题召回（A+C，2026-10-23）：亲密记忆实测召回不到（数据在、钙分不低，但问"亲热的事"字面只命中1个组）。
+ *  ① INTIMATE_TOPIC_RE：查询是否涉亲密话题；② 命中则把整组亲密词注入召回，让"亲热"能匹配含"亲密/暧昧/床上"等的组，扩大命中面（治本+扩词）。 */
+export const INTIMATE_TOPIC_RE =
+  /(?:亲热|亲密|暧昧|床上|上床|做爱|性爱|抚摸|高潮|脱光|脱衣|裸|情事|房事|那方面|那档子|第一次亲热|亲热的事|亲热过|亲热的)/;
+/** 亲密词集（命中亲密话题时全量注入召回匹配，覆盖同义/近义表述） */
+export const INTIMATE_KEYWORDS =
+  ['亲热', '亲密', '暧昧', '床上', '上床', '做爱', '性爱', '抚摸', '高潮', '脱', '裸', '情事', '房事', '身体', '身子'];
+
 /** C: 候选稀疏门槛 — 召回候选低于此数即触发 LLM 兜底挑选（业主 2026-09-12 定） */
 export const RECALL_SPARSE_THRESHOLD = 3;
 
@@ -106,6 +114,12 @@ export function extractTopicKeywords(
   preferTopicNames: Iterable<string> = [],
 ): string[] {
   const excl = new Set(excludeNames);
+  // 🔴 T013 A+C 亲密话题召回：查询涉亲密话题时，把整组亲密词前置注入，
+  //   让"亲热"类查询能匹配含"亲密/暧昧/床上"等的组（实测仅字面"亲热"只命中1个组 → 召回不到那段记忆）。
+  if (INTIMATE_TOPIC_RE.test(query || '')) {
+    const intimate = INTIMATE_KEYWORDS.filter((w) => !excl.has(w));
+    if (intimate.length > 0) return intimate.slice(0, Math.max(limit, intimate.length));
+  }
   // 2 字词优先、3 字词靠后：3 字滑窗会产生结构噪声（如"还是徐/是徐诗"），
   // 而 2 字称呼（诗韵/都灵）在记忆 LIKE 召回中最有效——先收 2 字保位再补 3 字，
   // 防噪声把有效 2 字词挤出 limit（实测"诗雨，还是徐诗韵的事"抽词 bug）。
