@@ -190,6 +190,17 @@ parts.push('## 你的身份');
   // ═══ 性格 ═══
   if (selfProfile.traits?.length) { parts.push('### 性格'); parts.push(selfProfile.traits.join('、')); parts.push(''); }
 
+  // ═══ 人格信条（dossier.personalityCore，业主 2026-10-23 授权增补；字段缺省则整段跳过） ═══
+  // 只读当前实体自身 dossier，不引入任何跨实体传播点（S2 已核 COUPLING_MEETING_NAME_POINTS）。
+  const _pc = (dossier as any)?.personalityCore;
+  const _pcCreed = Array.isArray(_pc?.creed) ? _pc.creed.filter((c: any) => c?.k && c?.v) : [];
+  if (_pc && _pcCreed.length > 0) {
+    parts.push(`### ${typeof _pc.title === 'string' && _pc.title ? _pc.title : '人格信条'}`);
+    if (_pc.summary) parts.push(String(_pc.summary));
+    for (const c of _pcCreed) parts.push(`- **${c.k}**：${c.v}`);
+    parts.push('');
+  }
+
   // ═══ 社交关系（系统级：通过 acquaintance_of 传递闭包构建完整人际网络） ═══
   // 原理：entity → acquaintance_of → 所有人 → 过滤社交类型标签
   // 展示 entity 直接和间接认识的所有同事/朋友等

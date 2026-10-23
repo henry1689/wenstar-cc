@@ -160,6 +160,9 @@ export class KnowledgeTextAssembler {
         if (!prof) continue;
         const lines: string[] = [];
         if (prof.relation_to_user) lines.push(`关系: ${prof.relation_to_user}`);
+        // 性格行：dossier.selfProfile.traits（与会晤模式 EntityContextBuilder「### 性格」同源，业主 2026-10-23 增补）
+        const _traits = (prof as any)?.dossier?.selfProfile?.traits;
+        if (Array.isArray(_traits) && _traits.length > 0) lines.push(`性格: ${_traits.slice(0, 4).join('、')}`);
         // 🔴 修复: 原 `(prof as any).basicInfo?.birthYear` 读顶层 basicInfo，但 getPersonProfile
         //    返回的是 node.properties 展开，birthYear 实际在 dossier.basicInfo —— 该年龄注入对所有
         //    用 dossier 的节点永不生效。改用归一化读取器 getPersonBio（dossier 优先+顶层兜底）。

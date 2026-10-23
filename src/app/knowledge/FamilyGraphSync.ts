@@ -183,6 +183,14 @@ function buildPersonSummary(name: string, profile: any): string | null {
   if (profile.habits) parts.push(`习惯: ${profile.habits}`);
   if (profile.description) parts.push(`备注: ${profile.description}`);
 
+  // 人格信条（dossier.personalityCore，业主 2026-10-23 授权增补；缺省跳过）
+  const _pc = profile.dossier?.personalityCore;
+  if (_pc) {
+    const _keys = (Array.isArray(_pc.creed) ? _pc.creed : []).map((c: any) => c?.k).filter(Boolean).join('、');
+    const _pcLine = [_pc.summary, _keys ? `要点:${_keys}` : ''].filter(Boolean).join(' ');
+    if (_pcLine) parts.push(`人格信条: ${_pcLine}`);
+  }
+
   if (parts.length === 0) return null;
 
   return `${name}：${parts.join('；')}`;
