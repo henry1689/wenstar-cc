@@ -587,7 +587,25 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               //   缺它会把组片段从 0.85 降到 0.60，被注入层二次截断挤出）；
               //   关闭时回到 2.3 之前的 `X的记忆`（优先级同为 0.85，形态逐字一致）。
               const _isGroupRoute = _oh.route === 'dialog_group' || _oh.domain === 'dialog_group';
-              const _t = String(_oh.text || '').substring(0, 250);
+              let _t = String(_oh.text || '').substring(0, 250);
+              // 🔴 P145 批B（2026-11-01）深度回忆 · 会晤侧：
+              //   统一中枢**先于** Foundation 注入同组片段；若不在这里展开，Foundation 侧会因
+              //   「同组去重」整组跳过 ⇒ 会晤场景永远召不到全文（只有户主场景能展开）。
+              //   `_entityUuid` 是本块已解析出的检索主体/当前发言人，直接作听众过滤：
+              //   解析不到就不展开（fail-closed），绝不裸奔。
+              if (_isGroupRoute && _entityUuid) {
+                const _deepGid = extractDialogGroupId(_oh);
+                if (_deepGid) {
+                  const { tryDeepRecall } = await import('./b-archive-recall.js');
+                  const _deep = tryDeepRecall({
+                    sql: _sqlite,
+                    message,
+                    groupId: _deepGid,
+                    audienceUuid: _entityUuid,
+                  });
+                  if (_deep) _t = _deep;
+                }
+              }
               if (_t.length > 4 && !_orSeen.has(_t.substring(0, 20))) {
                 _orSeen.add(_t.substring(0, 20));
                 memoryFragments.push(memFragWithTime(
