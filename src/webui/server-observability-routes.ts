@@ -943,21 +943,10 @@ export async function buildCommandCenterSnapshot(
             duplicate_names: _health.duplicateNameUUIDs,
             garbage_entities: _health.garbageEntities,
           } : null,
-          // 检索命中来源分布（从 search_index 推断）
-          search_index: (() => {
-            try {
-              const _conv = _si?.queryAll?.('SELECT COUNT(*) as cnt FROM search_index WHERE source_type=?', ['conversation']) || [];
-              const _mem = _si?.queryAll?.('SELECT COUNT(*) as cnt FROM search_index WHERE source_type=?', ['memory']) || [];
-              const _bd = _si?.queryAll?.('SELECT COUNT(*) as cnt FROM search_index WHERE source_type=?', ['black_diamond']) || [];
-              const _kb = _si?.queryAll?.('SELECT COUNT(*) as cnt FROM search_index WHERE source_type=?', ['knowledge_base']) || [];
-              return {
-                conversations: Number(_conv[0]?.cnt || 0),
-                memories: Number(_mem[0]?.cnt || 0),
-                black_diamond: Number(_bd[0]?.cnt || 0),
-                knowledge_base: Number(_kb[0]?.cnt || 0),
-              };
-            } catch { return null; }
-          })(),
+          // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：search_index 统计字段已下线。
+          //   原字段统计四个分区的行数，而这四个分区在 v11 之后均已无写入方（恒为 0），
+          //   继续输出 0 会让维护者误以为索引仍在运行。检索现状请看 v11 接管指标
+          //   （data/retrieval-v11/metrics.json）。
           // 提示词块使用统计（从 ChatPolicy 推断）
           prompt_governance: {
             assembler_active: !!(globalThis as any).__pfcDirective,
