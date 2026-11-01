@@ -476,16 +476,9 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
       console.warn(`[KnowledgeEngine] 索引失败 ${id}:`, err),
     );
 
-    // 🔴 S2-C2: 增量 n-gram 索引 — 写 search_index（V13 主链检索源）。
-    // 原 add 只写 knowledge_chunks(向量分块)，search_index 全靠启动全量回填 →
-    // 启动后新增的知识(徐诗涵/徐诗韵档案等)在 V13 n-gram 检索里 term 数=0，永远搜不到。
-    try {
-      const { indexDocument } = await import('../../m4/SearchIndexBuilder.js');
-      const _idxDb = (sqlite as any).rawDb;
-      if (_idxDb && typeof _idxDb.run === 'function') {
-        indexDocument(_idxDb, 'knowledge_base', id, fixedTitle + ' ' + fixedContent, params.belongEntityUuid ?? undefined);
-      }
-    } catch (_ie) { /* 增量索引失败不阻塞 */ }
+    // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：不再写 search_index（B3a-1 断写）。
+    //   知识库检索现在由下方 FtsSearch（FTS5 内存倒排 + BM25）与 FTS5→LIKE 回退承担；
+    //   n-gram 倒排分区已无任何读取方。
 
     // 🔴 S4-Y3: 同步 FtsSearch 内存索引 — 原 _ftsSearch 仅启动 init() 全量加载，
     // 运行期新增文档 BM25 路径永远看不到（仅 FTS 空时降级 LIKE）。滑窗模式下 term 更丰富。
@@ -566,16 +559,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     // 内容变了就重新索引
     if (params.content && params.content !== existing.content) {
       indexContent(sqlite, id, params.content).catch(() => {});
-      // 🔴 S2-C2: 同步重建 search_index n-gram 索引（先删旧 term，再写新）—
-      // 原 update 只重建 knowledge_chunks，search_index 旧 term 残留且新 term 缺失。
-      try {
-        const { indexDocument } = await import('../../m4/SearchIndexBuilder.js');
-        const _idxDb = (sqlite as any).rawDb;
-        if (_idxDb && typeof _idxDb.run === 'function') {
-          _idxDb.run("DELETE FROM search_index WHERE source_type = 'knowledge_base' AND source_id = ?", [id]);
-          indexDocument(_idxDb, 'knowledge_base', id, (newTitle || '') + ' ' + newContent, existing.belong_entity_uuid ?? undefined);
-        }
-      } catch (_ue) { /* 更新索引失败不阻塞 */ }
+      // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：不再重建 search_index 的 n-gram 分区。
       // 🔴 S4-Y3: 同步重建 FtsSearch 内存索引（先 remove 旧 doc，再 add 新）
       try { _ftsSearch.remove(id); _ftsSearch.add(id, newTitle || '', newContent, existing.classification ?? null); } catch (_ufe) { /* 不阻塞 */ }
     }
@@ -832,24 +816,13 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
 
   /** 强制重新索引所有已有知识条目（维护用） */
   async function reindexAll(): Promise<number> {
-    // ADR 2026-09-09 架构归位:reindexAll = 重建主链路索引(FTS + n-gram);向量分块分支随功能开关(默认关=跳过)
+    // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：本函数不再重建 search_index 分区（B3a-1 断写）。
+    //   n-gram 全量重建曾占全书最重的维护开销（rebuildAllIndexes 整表重建），
+    //   而其四个分区在 v11 之后均无读取方。知识库检索由 FTS5 承担。
     const started = Date.now();
     // 1) FTS BM25 内存倒排全量重建
     try { await _ftsSearch.rebuild(); } catch (e) { console.warn('[KnowledgeEngine] FTS 重建失败:', (e as Error)?.message ?? e); }
-    // 2) n-gram search_index 全量重建(m4 既有通道,与 add 增量索引 L363 同源,不新增写入通道)
-    let kbTotal = 0;
-    try {
-      const { rebuildAllIndexes } = await import('../../m4/SearchIndexBuilder.js');
-      // 🆕 P3 修复: sql.js 内存态无 rawDb → fallback 到 sqlite 本身（sql.js Database 有 run/exec 方法）
-      // 根因: rebuildAllIndexes 原只接受 better-sqlite3 原始实例，导致 memory 索引永不上线
-      const _idxDb = (sqlite as any).rawDb ?? sqlite;
-      if (_idxDb && typeof _idxDb.run === 'function') {
-        const res = rebuildAllIndexes(_idxDb);
-        kbTotal = res.total;
-        console.log(`[KnowledgeEngine] n-gram 索引重建: ${kbTotal} 条`);
-      }
-    } catch (e) { console.warn('[KnowledgeEngine] n-gram 重建失败:', (e as Error)?.message ?? e); }
-    // 3) 向量分块分支(功能开关开才执行)
+    // 2) 向量分块分支(功能开关开才执行)
     if (vectorSearchEnabled()) {
       await ensureIndex(sqlite);
       const all = list(500);
@@ -858,11 +831,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
         await indexContent(sqlite, item.id, item.content);
         indexed++;
       }
-      console.log(`[KnowledgeEngine] 重新索引完成(FTS+n-gram+向量分块): ${indexed} 条, ${Date.now() - started}ms`);
-      return indexed || kbTotal;
+      console.log(`[KnowledgeEngine] 重新索引完成(FTS+向量分块): ${indexed} 条, ${Date.now() - started}ms`);
+      return indexed;
     }
-    console.log(`[KnowledgeEngine] 重新索引完成(FTS+n-gram, 向量分支关闭): ${Date.now() - started}ms`);
-    return kbTotal;
+    console.log(`[KnowledgeEngine] 重新索引完成(FTS, 向量分支关闭): ${Date.now() - started}ms`);
+    return 0;
   }
 
   /** 向量搜索调试（返回原始分块匹配） */

@@ -350,16 +350,8 @@ export class MemoryAssessor {
       const entries = autoPromoteCandidatesV2(sqlite, MEMORY_CONFIG.goldToDiamond.batchSize);
       if (entries.length > 0) {
         console.log(`[MemoryAssessor] 金库→黑钻: ${entries.length} 条`);
-        // V11.0: 增量n-gram索引写入
-        try {
-          const { indexDocument } = await import('../../m4/SearchIndexBuilder.js');
-          for (const entry of entries) {
-            const summary = entry?.summary || entry?.notes || '';
-            if (summary.length > 5) {
-              indexDocument(sqlite.rawDb || sqlite, 'black_diamond', String(entry.id || ''), summary);
-            }
-          }
-        } catch { /* 索引写入不阻塞 */ }
+        // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：不再写 search_index（B3a-1 断写）。
+        //   黑钻检索走 BlackDiamondAdapter 直查 black_diamond 表，不经倒排索引。
       }
     } catch (err) {
       console.warn('[MemoryAssessor] 金库→黑钻失败:', err);
