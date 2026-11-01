@@ -11,7 +11,7 @@
  *
  * 附加基线规则：长期无刺激时向人格基线缓慢回落，非归零。
  */
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 import { DIM_DECAY_CLASS, DECAY_HALFLIFE, type DecayClass } from './stimulus-table.js';
 
 /** 人格基线（默认值，后续可通过人格配置覆盖） */
@@ -32,8 +32,8 @@ const DEFAULT_BASELINE: number[] = [
 const BASELINE_RETURN_RATE = 0.005; // 每小时 0.5%，约 200 小时回归到基线
 
 export interface DecayInput {
-  current: EmotionVector24D;       // 当前 24D 向量
-  delta: Partial<EmotionVector24D>; // 本轮刺激增量
+  current: EmotionState24;       // 当前情绪状态分量集
+  delta: Partial<EmotionState24>; // 本轮刺激增量
   deltaHours: number;              // 距上次更新的时间差（小时）
   relationStage: string;           // 关系阶段
   personalityFactor?: number;      // 人格系数，默认 1.0
@@ -41,7 +41,7 @@ export interface DecayInput {
 }
 
 export interface DecayOutput {
-  vector: EmotionVector24D;
+  vector: EmotionState24;
   decayed: boolean;                // 是否发生了衰减变化
   appliedDelta: boolean;           // 是否应用了刺激
 }
@@ -111,10 +111,10 @@ export function applyDecay(input: DecayInput): DecayOutput {
 /**
  * 仅衰减（无刺激，用于长时间无对话的批量回补）
  */
-export function applyDecayOnly(current: EmotionVector24D, deltaHours: number): EmotionVector24D {
+export function applyDecayOnly(current: EmotionState24, deltaHours: number): EmotionState24 {
   return applyDecay({
     current,
-    delta: {} as Partial<EmotionVector24D>,
+    delta: {} as Partial<EmotionState24>,
     deltaHours,
     relationStage: 'stranger',
   }).vector;
@@ -122,7 +122,7 @@ export function applyDecayOnly(current: EmotionVector24D, deltaHours: number): E
 
 // ── 工具函数 ──
 
-const DIM_KEYS: (keyof EmotionVector24D)[] = [
+const DIM_KEYS: (keyof EmotionState24)[] = [
   'joy', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'calm', 'anxiety',
   'affection', 'trust', 'intimacy', 'respect',
   'arousal', 'fatigue', 'excitement', 'boredom',
@@ -130,16 +130,16 @@ const DIM_KEYS: (keyof EmotionVector24D)[] = [
   'nostalgia', 'curiosity', 'shyness', 'jealousy',
 ];
 
-function objectToArray(vec: Partial<EmotionVector24D>): number[] {
+function objectToArray(vec: Partial<EmotionState24>): number[] {
   return DIM_KEYS.map(k => (vec[k] ?? 0) as number);
 }
 
-function arrayToObject(arr: number[]): EmotionVector24D {
+function arrayToObject(arr: number[]): EmotionState24 {
   const obj: any = {};
   for (let i = 0; i < 24; i++) {
     obj[DIM_KEYS[i]] = clamp(Math.round(arr[i] * 100) / 100, 0, 100);
   }
-  return obj as EmotionVector24D;
+  return obj as EmotionState24;
 }
 
 function clamp(v: number, min: number, max: number): number {

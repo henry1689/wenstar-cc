@@ -10,7 +10,7 @@
  *   1. 保留 ANCHOR/对话的 UID（权威身份）
  *   2. 为重复组中的非权威记录（evt_* 优先）重新生成确定性 UID
  *   3. 新 UID 基于 id + created_at + seq_pos 的 SHA256（幂等可重跑）
- *   4. 同步更新 state_spines / atom_repair_index 中的引用
+ *   4. 同步更新 atom_repair_index 中的引用（state_spines 已随底座1 废除删除 — P071）
  *   5. 保留旧 UID 映射日志（便于回滚）
  *
  * 安全性:
@@ -86,15 +86,7 @@ for (const [uid, count] of (dupGroups[0]?.values || [])) {
 const migrated = migrationLog.filter(l => !l.keep).length;
 console.log(`重新生成 UID: ${migrated} 条`);
 
-// ── 同步更新 state_spines ──
-console.log('\n同步 state_spines...');
-let ssUpdated = 0;
-for (const log of migrationLog) {
-  if (log.keep) continue;
-  db.run('UPDATE state_spines SET global_uid = ? WHERE global_uid = ?', [log.newUid, log.oldUid]);
-  ssUpdated++;
-}
-console.log(`  state_spines 更新: ${ssUpdated} 条`);
+// ── state_spines 已随底座1 废除删除（P071），不再同步 ──
 
 // ── 同步更新 atom_repair_index ──
 console.log('同步 atom_repair_index...');

@@ -1,9 +1,10 @@
 /**
  * FusionMath — 融合记忆系统的核心算法库
  *
- * 纯函数，零外部依赖。所有记忆动力学基于 24 维情感向量运算。
+ * 纯函数，零外部依赖。所有记忆动力学基于感知向量运算。
+ * 🔴 P072/P074：中间层 PerceptionState24（24 维）与钙分 24D 输入属待废——M3 直产 40D 后钙分公式 40D 化（40D 量纲统一法令）。
  */
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { SimilarityMode, EmotionalMemoryRecord } from './types/index.js';
 
 // ──────────────────────────────────────────────
@@ -11,7 +12,7 @@ import type { SimilarityMode, EmotionalMemoryRecord } from './types/index.js';
 // ──────────────────────────────────────────────
 
 /** 哪些维度是双极性的 (-1..1)，需要映射到 [0,1] */
-const BIPOLAR_FIELDS: Array<keyof Perception24D> = [
+const BIPOLAR_FIELDS: Array<keyof PerceptionState24> = [
   'pleasure', 'dominance', 'aggression',
   'temporal_focus', 'power_diff', 'moral_judgment',
 ];
@@ -20,10 +21,10 @@ function normalizeValue(value: number, bipolar: boolean): number {
   return bipolar ? (value + 1) / 2 : value;  // -1→0, 0→0.5, 1→1
 }
 
-/** 将 Perception24D 转为 24 维 [0,1]²⁴ 归一化向量 */
-export function toNormalizedVector(p: Perception24D): Float64Array {
+/** 将感知向量转为 24 维归一化向量（🔴 P074 待废：钙分命门当前依赖，40D 化后退役） */
+export function toNormalizedVector(p: PerceptionState24): Float64Array {
   const v = new Float64Array(24);
-  const keys = Object.keys(p) as Array<keyof Perception24D>;
+  const keys = Object.keys(p) as Array<keyof PerceptionState24>;
   for (let d = 0; d < 24; d++) {
     v[d] = normalizeValue(p[keys[d]], BIPOLAR_FIELDS.includes(keys[d]));
   }
@@ -38,18 +39,18 @@ export function toNormalizedVector(p: Perception24D): Float64Array {
  * calcium = ||v|| / sqrt(N)
  *
  * 蓝皮书 V3.0 §5.2 公式（含惊讶度因子）:
- *   calcium = ||24D|| / sqrt(24) + w_surprise × surprise
+ *   calcium = ||24D|| / sqrt(24) + w_surprise × surprise（🔴 P074 待废口径：重构后钙分输入 40D 化）
  *   V2.0 基础上增加惊讶度，偏离基线越远越优先巩固
  *
  * 惊讶度原理: 越偏离用户日常情绪基线的信息，越值得巩固。
  * 这与生物学中"惊讶驱动学习"一致——意外的经历更容易被记住。
  *
- * @param p - 当前 24D 感知向量 (P3 改为 32D)
+ * @param p - 当前感知向量（🔴 P074 待废：PerceptionState24 中间层）
  * @param baseline - 用户情绪基线（可选），含 pleasure/arousal/intimacy
  * @returns calcium score (0-1) + level (0-3)
  */
 export function computeCalcium(
-  p: Perception24D,
+  p: PerceptionState24,
   baseline?: { pleasure: number; arousal: number; intimacy: number },
 ): { score: number; level: 0 | 1 | 2 | 3 } {
   const v = toNormalizedVector(p);
@@ -111,77 +112,11 @@ function allocateQuadrantWeights(mode: SimilarityMode): [number, number, number,
   }
 }
 
-/**
- * 计算两个感知向量之间的加权余弦相似度。
- * 相似度 ∈ [0, 1]，1 = 完全相同。
- */
-export function emotionalSimilarity(
-  a: Perception24D,
-  b: Perception24D,
-  mode: SimilarityMode = 'balanced',
-  currentPerception?: Perception24D,
-): number {
-  const va = toNormalizedVector(a);
-  const vb = toNormalizedVector(b);
-
-  const quadWeights = allocateQuadrantWeights(mode);
-  // P1-1: 当前感知动态权重修正
-  const dynamicWeights = [...quadWeights];
-  if (currentPerception) {
-    if (currentPerception.intimacy > 0.4) {
-      dynamicWeights[2] = Math.min(0.7, dynamicWeights[2] + 0.2);
-      for (let q = 0; q < 4; q++) { if (q !== 2) dynamicWeights[q] = Math.max(0.05, dynamicWeights[q] - 0.07); }
-    }
-    if (currentPerception.pleasure > 0.5) {
-      dynamicWeights[0] = Math.min(0.7, dynamicWeights[0] + 0.15);
-      for (let q = 1; q < 4; q++) { dynamicWeights[q] = Math.max(0.05, dynamicWeights[q] - 0.05); }
-    }
-    if (currentPerception.sexual_attraction > 0.4) {
-      dynamicWeights[3] = Math.min(0.7, dynamicWeights[3] + 0.2);
-      for (let q = 0; q < 3; q++) { dynamicWeights[q] = Math.max(0.05, dynamicWeights[q] - 0.07); }
-    }
-    const weightSum = dynamicWeights.reduce((s, w) => s + w, 0);
-    if (weightSum > 0) for (let q = 0; q < 4; q++) dynamicWeights[q] /= weightSum;
-  }
-
-  // 逐维度权重
-  const dimWeights = new Float64Array(24);
-  if (mode === 'by_calcium') {
-    // 极端维度主导：权重 ∝ |v - 0.5|
-    let sumExtremity = 0;
-    for (let d = 0; d < 24; d++) {
-      const extremity = Math.abs(va[d] * 2 - 1);  // 0..1
-      dimWeights[d] = extremity;
-      sumExtremity += extremity;
-    }
-    if (sumExtremity > 0) {
-      for (let d = 0; d < 24; d++) dimWeights[d] /= sumExtremity;
-    } else {
-      for (let d = 0; d < 24; d++) dimWeights[d] = 1 / 24;
-    }
-  } else {
-    for (let q = 0; q < 4; q++) {
-      const w = dynamicWeights[q] / 6;
-      for (let d = q * 6; d < (q + 1) * 6; d++) dimWeights[d] = w;
-    }
-  }
-
-  // 加权余弦
-  let dot = 0, normA = 0, normB = 0;
-  for (let d = 0; d < 24; d++) {
-    const wd = dimWeights[d];
-    dot += wd * va[d] * vb[d];
-    normA += wd * va[d] * va[d];
-    normB += wd * vb[d] * vb[d];
-  }
-
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
 // ──────────────────────────────────────────────
 // 4. 记忆动力学
 // ──────────────────────────────────────────────
+// 🔴 P072 批2 墓碑：原 emotionalSimilarity（24 维加权余弦，零外部消费方）已删除——
+//   禁止 24 维量纲相似度函数（40D 量纲统一法令）；toNormalizedVector 保留（computeCalcium 钙分命门内部依赖，归 P074）。
 
 /** 初始强度：S 曲线，calcium→编码强度 */
 export function initialStrength(calciumScore: number): number {
@@ -296,4 +231,35 @@ export function allocateRetrievalWeights(
 
   const sum = wE + wT + wEnt + wCa;
   return { emotional: wE / sum, topic: wT / sum, entity: wEnt / sum, calcium: wCa / sum };
+}
+
+// ═══════════════════════════════════════════════
+// P074-A2 · 钙分 40D 化双算观测（2026-10-24）
+// ═══════════════════════════════════════════════
+
+/**
+ * P074-A2 双算观测：新钙分口径候选核心项 = 40D 14 语义维 L2 范数 / √14。
+ *   - 值域 [0,1]（双极维 D36/D37 先归一到 [0,1]）；全零向量 → 0。
+ *   - 🔴 纯观测：无任何消费方，不参与晋升/衰减/三库判定；
+ *     积累新旧钙分对比数据后，由业主裁决切换时点（P074 三步走：双算→报告→切换）。
+ */
+export function calciumFromPerceptionV40(
+  p40: { [k: string]: number | undefined } | import('../m3/types/perception-40d.js').PerceptionV40,
+): number {
+  const keys = [
+    'd09_self_identity', 'd12_enjoyment', 'd14_self_protection', 'd15_partner_attachment',
+    'd17_family_belonging', 'd19_social_fit',
+    'd33_sexual_attraction', 'd34_energy_merge', 'd35_sincerity', 'd36_dominance',
+    'd37_moral_judgment', 'd38_humor', 'd39_dependency', 'd40_possessiveness',
+  ];
+  let sumSq = 0;
+  const src = p40 as { [k: string]: number | undefined };
+  for (const k of keys) {
+    let v = Number(src[k] ?? 0);
+    if (!Number.isFinite(v)) v = 0;
+    if (k === 'd36_dominance' || k === 'd37_moral_judgment') v = (v + 1) / 2; // 双极 [-1,1] → [0,1]
+    else v = Math.max(0, Math.min(1, v));
+    sumSq += v * v;
+  }
+  return Math.sqrt(sumSq) / Math.sqrt(keys.length);
 }

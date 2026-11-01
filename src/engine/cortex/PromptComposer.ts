@@ -8,7 +8,7 @@
  * 修改人设只需改 prompts/ 目录下的配置文件。
  */
 import type { PromptFragment } from './types.js';
-import type { EmotionVector24D, RelationState, Atmosphere, MemoryPermission } from '../bus/types.js';
+import type { EmotionState24, RelationState, Atmosphere, MemoryPermission } from '../bus/types.js';
 import { PERSONALITY_FRAGMENTS } from './prompts/personality.js';
 import { RULES_FRAGMENTS } from './prompts/rules.js';
 import { buildEmotionFragments } from './prompts/emotion-state.js';
@@ -16,7 +16,7 @@ import { buildIntimateFragments } from './prompts/intimate-scenes.js';
 import { buildCommunicationFragments } from './prompts/communication-mode.js';
 
 export interface ComposerInput {
-  emotionVector: EmotionVector24D;
+  emotionVector: EmotionState24;
   relationState: RelationState;
   atmosphere: Atmosphere;
   memoryPermission: MemoryPermission;

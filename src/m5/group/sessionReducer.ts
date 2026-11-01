@@ -40,12 +40,20 @@ export function createSessionState(now: number = Date.now()): SessionState {
     contextStack: [],
     lastActivityAt: now,
     meetingStartHistoryIndex: 0,
+    askAllQueue: [],
+    everHadSeats: false,
+    aloneNotified: false,
+    // 尚无临时点名 ⇒ 没有待恢复的原主（D2）
+    transientSpeakerFrom: null,
   };
 }
 
 /** 会话模式 —— 派生，不入库（ADR-013 §2.1 硬约束①） */
 export function sessionMode(state: SessionState): SessionMode {
-  return state.participants.length > 0 ? 'meeting' : 'yuyao';
+  // 🔴 2026-11-01 三值化：空场要区分「散会之后」与「从未会晤」——
+  //   前者是独处态（业主一个人，不该有人应答），后者是玉瑶态（正常对话）。
+  if (state.participants.length > 0) return 'meeting';
+  return state.everHadSeats === true ? 'alone' : 'yuyao';
 }
 
 /** 是否多人 —— 派生（修掉旧 `isMulti` 存库布尔漂移） */
@@ -140,6 +148,15 @@ export function reduce(prev: SessionState, action: Action): SessionState {
         lastActivityAt: now,
         meetingStartHistoryIndex:
           typeof action.historyIndex === 'number' ? action.historyIndex : prev.meetingStartHistoryIndex,
+        // P090：进入新会话即清空轮答队列，防上次残留（P096 §1.3）
+        askAllQueue: [],
+        // 🔴 2026-11-01：一旦建立过席位即永久置位 —— 散会后 mode 变为 'alone'
+        //   （独处态），而不是退回 'yuyao'（把散会误当成从未会晤）。
+        everHadSeats: true,
+        // 有人进来 ⇒ 独处结束，下次散会要重新提示
+        aloneNotified: false,
+        // 🔴 D2：新会话开始 ⇒ 上一场留下的待回退目标已无意义
+        transientSpeakerFrom: null,
       };
     }
 
@@ -155,6 +172,10 @@ export function reduce(prev: SessionState, action: Action): SessionState {
         speakerUuid: prev.speakerUuid ?? action.target.uuid,
         turnIndex: prev.turnIndex + 1,
         lastActivityAt: now,
+        // P090：**正在轮答时**新加入者追加队尾（也被问到，与会议常识一致）。
+        //   🔴 必须带「队列非空」前置条件 —— 若无条件追加，不在轮答时的普通 JOIN
+        //   会把空队列变成非空 ⇒ diffEffects 误派生 `askAllStarted` ⇒ 幻觉出一次全员提问。
+        askAllQueue: prev.askAllQueue.length > 0 ? [...prev.askAllQueue, action.target.uuid] : [],
       };
     }
 
@@ -172,6 +193,15 @@ export function reduce(prev: SessionState, action: Action): SessionState {
         speakerUuid: target.uuid,
         contextStack: action.slot ? pushSlot(prev.contextStack, action.slot) : [...prev.contextStack],
         lastActivityAt: now,
+        // P090 · P096 §1.3：**出队语义** —— target 在轮答队列中则移除。
+        //   askAll 推进靠本分支自然出队（每次出队都会 SPEAK，speakerChanged 已覆盖日志与持久化）。
+        //   🔴 注意 SPEAK **不清空整个队列**：点名即停（P094 裁决③）由**调用层**按意图决定
+        //   是否进入轮答循环来满足（点名意图不进循环），残留队列由下次 WAKE/RESUME 清空。
+        //   若在此处清空，askAll 每推进一人队列即被清空 ⇒ 轮答只能进行一人。
+        askAllQueue: prev.askAllQueue.filter(u => u !== target.uuid),
+        // 🔴 D2：普通换主 = 会话结构已按业主明确意图重排 ⇒ 丢掉上一轮的临时回退目标。
+        //   （调用层的「回原主」本身也是 SPEAK，同样走到这里把指针清掉，形成闭环。）
+        transientSpeakerFrom: null,
       };
     }
 
@@ -187,6 +217,12 @@ export function reduce(prev: SessionState, action: Action): SessionState {
           speakerUuid: null,
           turnIndex: prev.turnIndex + 1,
           lastActivityAt: now,
+          // P090：散会即清空轮答队列（队列里都是已不存在的参与者，留着是脏数据）
+          askAllQueue: [],
+          // 进入独处态 ⇒ 重置提示标记（下一轮给一次性过渡文案）
+          aloneNotified: false,
+          // D2：散会后没有「原主」可回
+          transientSpeakerFrom: null,
         };
       }
       const left = findParticipant(prev, action.target)
@@ -199,12 +235,56 @@ export function reduce(prev: SessionState, action: Action): SessionState {
         speakerUuid: prev.speakerUuid === left.uuid ? (participants[0]?.uuid ?? null) : prev.speakerUuid,
         turnIndex: prev.turnIndex + 1,
         lastActivityAt: now,
+        // P090：离开者同步移出轮答队列（否则会向已离席的人继续轮询）
+        askAllQueue: prev.askAllQueue.filter(u => u !== left.uuid),
+        // 最后一人离场 ⇒ 与散会同义，重置独处提示标记
+        aloneNotified: participants.length === 0 ? false : prev.aloneNotified,
+        // D2：走掉的正是待回退的原主 ⇒ 指针作废（否则下一轮会 SPEAK 一个不在场的人）；
+        //   离开的是被点名者时保留指针，下一轮仍应正常回原主。
+        transientSpeakerFrom: prev.transientSpeakerFrom === left.uuid ? null : prev.transientSpeakerFrom,
+      };
+    }
+
+    // ── 独处态过渡提示已发出（2026-11-01）──
+    case 'ALONE_ACK': {
+      if (prev.aloneNotified === true) return prev;      // 幂等
+      return { ...prev, aloneNotified: true, lastActivityAt: now };
+    }
+
+    // ── 本轮点名应答（2026-11-01 D2）──
+    case 'TRANSIENT_SPEAK': {
+      const target = findParticipant(prev, action.target)
+        ?? prev.participants.find(p => p.name === action.target)
+        ?? null;
+      if (!target) return prev;                                  // 非参与者 → 不操作
+      if (target.uuid === prev.speakerUuid) return prev;          // 点的就是当前发言者 = 无变化
+      // 🔴 已在临时顶替中（连续点名）：保留**最初**的原主，不把上一个被点名者当成原主 ——
+      //   否则「@阿珍 → @诗雨」之后会回到阿珍，而那从来不是业主原本在跟谁说话。
+      const from = prev.transientSpeakerFrom ?? prev.speakerUuid;
+      return {
+        ...prev,
+        participants: prev.participants.map(p => (p.uuid === target.uuid ? { ...p, turnCount: p.turnCount + 1 } : p)),
+        speakerUuid: target.uuid,
+        lastActivityAt: now,
+        transientSpeakerFrom: from,
       };
     }
 
     // ── 重启恢复（校验失败直接拒绝，绝不半恢复）──
     case 'RESUME':
       return normalizeState(action.state, action.now ?? Date.now()) ?? prev;
+
+    // ── P090 · P096 §1.3：向全员提问 —— 一次性入队 ──
+    case 'ASK_ALL': {
+      if (prev.participants.length === 0) return prev;   // 玉瑶态无对象可问 → 不操作
+      return {
+        ...prev,
+        // 全量入队、按 participants 原序、**含当前发言人**（P094 裁决①：一律全答，
+        // 不做「刚答过就跳过」的判断 —— 那类跳过要靠 LLM 判定，会引入漂移）。
+        askAllQueue: prev.participants.map(p => p.uuid),
+        lastActivityAt: now,
+      };
+    }
 
     // ── 时间活动（只刷新时间戳，不改结构）──
     case 'IDLE':
@@ -249,6 +329,12 @@ export function diffEffects(prev: SessionState, next: SessionState): SessionEffe
 
   if (prev.speakerUuid !== next.speakerUuid) {
     out.push({ type: 'speakerChanged', from: prev.speakerUuid, to: next.speakerUuid });
+  }
+
+  // P090 · P096 §1.4：轮答**首次**入队（空 → 非空）才派生一次。
+  //   推进阶段不派生新 effect —— 每次出队都会 `SPEAK`，上面的 speakerChanged 已覆盖。
+  if (prev.askAllQueue.length === 0 && next.askAllQueue.length > 0) {
+    out.push({ type: 'askAllStarted', uuids: [...next.askAllQueue] });
   }
   return out;
 }
@@ -312,6 +398,26 @@ export function normalizeState(raw: unknown, now: number = Date.now()): SessionS
     }
   }
 
+  // P090：轮答队列 —— **向后兼容**（旧快照无此字段 ⇒ 补 []，schemaVersion 不 bump）。
+  //   队列里的每个 UUID 必须仍是当前参与者，否则按本函数的保守策略**整份拒绝**。
+  //   （半错队列 = 向已离席/不存在的人继续轮询；宁可拒绝恢复，也不恢复出一个错状态。）
+  const askAllQueue: string[] = [];
+  if (s.askAllQueue !== undefined) {
+    if (!Array.isArray(s.askAllQueue)) return null;
+    for (const u of s.askAllQueue) {
+      if (typeof u !== 'string' || !u || !seen.has(u)) return null;
+      askAllQueue.push(u);
+    }
+  }
+
+  // 🔴 D2：临时点名回退指针 —— **向后兼容**（旧快照无此字段 ⇒ null，schemaVersion 不 bump）。
+  //   与 askAllQueue 不同，这里**不整份拒绝**：指针只是「下一轮回谁」的便利信息，
+  //   指向已不在场的人时丢弃即可（丢掉 = 本次恢复没有待回退目标），
+  //   而拒绝整份恢复会让业主重启后直接丢掉整个会晤 —— 代价远大于收益。
+  const transientFromRaw =
+    typeof s.transientSpeakerFrom === 'string' && s.transientSpeakerFrom ? s.transientSpeakerFrom : null;
+  const transientSpeakerFrom = transientFromRaw && seen.has(transientFromRaw) ? transientFromRaw : null;
+
   return {
     schemaVersion: GROUP_SESSION_SCHEMA_VERSION,
     participants,
@@ -323,6 +429,13 @@ export function normalizeState(raw: unknown, now: number = Date.now()): SessionS
       typeof s.meetingStartHistoryIndex === 'number' && s.meetingStartHistoryIndex >= 0
         ? s.meetingStartHistoryIndex
         : 0,
+    askAllQueue,
+    // 🔴 向后兼容：旧快照无此字段 ⇒ 由参与者推导；无参与者则为 false
+    //   （等价于旧实现「重启后丢失会晤记忆」）。
+    everHadSeats: s.everHadSeats === true || participants.length > 0,
+    // 旧快照无此字段 ⇒ false（下一轮独处会重新提示一次，无副作用）
+    aloneNotified: s.aloneNotified === true,
+    transientSpeakerFrom,
   };
 }
 

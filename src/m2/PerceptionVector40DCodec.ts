@@ -1,23 +1,22 @@
 /**
  * PerceptionVector40DCodec — 40D 感知向量统一编解码标准
  * ============================================================
- * 40D 编码完全参照 32D 通用规则细则（双规范结合）:
+ * 40D 编码（🔴 《40D 量纲统一法令》：40D 为全系统唯一合法量纲，6D-36D 一律非法）：
  *   - WS-ARCH-32D-MEM 工程蓝皮书 spine.proto D1-D32（5 大类，field 10-55）
- *   - DNA 双螺旋完整编码规范 V2.0 §1.1（海胆 32 根语义刺）
+ *   - DNA 双螺旋完整编码规范 V2.0 §1.1（原「海胆 32 根语义刺」条款已随法令改为 40 根）
  * 40D = spine.proto D1-D32 + 新增 D33-D40（伴侣情感纹理，第 6 大类）
  *
- * 🔴 双轨制铁律：
- *   24D（Perception24D/EmotionVectorCodec）完全保留不动；
+ * 🔴 P072 批1/批3：原「双轨制铁律（24D 完全保留不动）」声明已废——EmotionVectorCodec
+ *   （24D 编解码）已整文件删除；PerceptionState24 / projectState24ToV40 属 P072-B/C 与 P074
+ *   待废中间层（M3 直产 40D 后退役），不再享有“保留不动”地位。
  *   40D 侧每个维度 D1-D40 一一对应独立定义，不做折中合并。
- *   map24DTo40D 仅用于「存量迁移初始填充 + 当前无 P3 数据源时派生」，
- *   不改变 24D 侧任何行为。
  *
  * 铁律遵循（来自双规范）:
  *   1. 每根刺 = float32，只记录主观感受强度，不记录实体对象
  *   2. 全部 40D 由规则计算产出，禁 LLM 直接算（MH-4）
  *   3. 12 节点编码管道全部规则驱动
  */
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import {
   PerceptionV40,
   PERCEPTION_40D_KEYS,
@@ -27,7 +26,7 @@ import {
 } from '../m3/types/perception-40d.js';
 
 // V12.4 阶段B 根除24D: 默认 40D v2 JSON（全零语义向量）— 金库/记事/锚点等无感知输入时的统一落库默认值。
-// 与旧 perception_json='{}'（全零 24D）语义等价：知识类条目不参与情感相似召回（余弦 0）。
+// 与旧 perception_json 全零向量语义等价（历史：该列已删）：知识类条目不参与情感相似召回（余弦 0）。
 export function encodeEmptyPerceptionV40(): string {
   return encodePerceptionV40(createEmptyPerceptionV40());
 }
@@ -86,6 +85,19 @@ function parseV2Dims(rec: Record<string, unknown>): number[] | null {
     out[i] = v;
   }
   return out;
+}
+
+/**
+ * 🔴 P072 整改批（管控总纲§四）：40 元素数字数组 → v2 编码字符串。
+ * 收回 3 处手写 `JSON.stringify({__v,dims})` 旁路（手写处持有的是 number[]，
+ * 直接改用 encodePerceptionV40 会因类型不符编译不过）。
+ * 硬校验：长度必须 = 40 且全为有限数，否则抛错（防脏数据入库）。
+ */
+export function encodePerceptionV40FromDims(dims: readonly number[]): string {
+  if (!Array.isArray(dims) || dims.length !== PERCEPTION_40D_DIM || !dims.every((v) => typeof v === 'number' && isFinite(v))) {
+    throw new Error(`encodePerceptionV40FromDims: dims 必须为 ${PERCEPTION_40D_DIM} 个有限数字`);
+  }
+  return JSON.stringify({ __v: PERCEPTION_40D_ENCODING_VERSION, dims: [...dims] });
 }
 
 export function decodePerceptionV40(json: string | null | undefined): PerceptionV40 | null {
@@ -156,15 +168,15 @@ export function detectPerceptionV40Version(json: string | null | undefined): num
 }
 
 // ──────────────────────────────────────────────
-// 2. 24D → 40D 映射（仅迁移/派生用，不碰 24D 侧）
+// 2. 感知向量 → 40D 映射（🔴 P072-B/C 待废：仅存量迁移/派生用，M3 直产 40D 后随 P074 退役）
 // ──────────────────────────────────────────────
 
 /**
- * 24D → 40D 语义映射表。
- * 🟢 = 当前由 24D 规则引擎派生（24D 有现成语义）
+ * 🔴 P072-B/C 待废：存量/派生用映射表（M3 直产 40D 后随 P074 退役，不再用于查询侧）。
+ * 🟢 = 当前由 24D 规则引擎派生（待废中间层语义）
  * 🔵 = 留接口，依赖 P3 瑶灵/瑶光数据源（当前填 0）
  */
-export const MAP_24_TO_40: ReadonlyArray<{ key24: keyof Perception24D; dim40: number; sector: string }> = [
+export const MAP_24_TO_40: ReadonlyArray<{ key24: keyof PerceptionState24; dim40: number; sector: string }> = [
   // ── 大类2 精神内核（🟢 部分派生）──
   { key24: 'self_ref',      dim40: 9,  sector: 'inner_spirit' },     // D09 自我认知
   { key24: 'pleasure',      dim40: 12, sector: 'inner_spirit' },     // D12 愉悦
@@ -185,12 +197,12 @@ export const MAP_24_TO_40: ReadonlyArray<{ key24: keyof Perception24D; dim40: nu
 ];
 
 /**
- * 将 Perception24D 映射为 PerceptionV40。
+ * 将 PerceptionState24 映射为 PerceptionV40。
  * 🟢 维度从 24D 派生，🔵 维度（无 P3 数据源）填 0。
  * 用于：存量迁移初始填充 + 当前运行时派生（P3 前）。
  * 不修改 24D 输入对象。
  */
-export function map24DTo40D(p24: Perception24D): PerceptionV40 {
+export function projectState24ToV40(p24: PerceptionState24): PerceptionV40 {
   const p = createEmptyPerceptionV40();
   for (const { key24, dim40 } of MAP_24_TO_40) {
     p[PERCEPTION_40D_KEYS[dim40 - 1]] = p24[key24] ?? 0;
@@ -277,15 +289,8 @@ export function cosineSimilarity40D(a: PerceptionV40, b: PerceptionV40): number 
 }
 
 /**
- * 情绪共振切片：只取伴侣纹理（D33-D40）+ 精神/人际可用维（D09-D20）
- * 用于情绪共振检索（40D 文档 §九：情绪共振只取 14D）。
+ * 🔴 P072 业主立法级裁决（2026-10-23）：「除 40D 外其它都是违法」
+ * 原 cosineSimilarity40DSemantic（20 语义维切片）与 resonanceVector40D（14 维共振切片）
+ * 已删除——全系统唯一合法相似度 = 上方 cosineSimilarity40D（全 40 维扇区加权），
+ * 禁止任何子维度切片变体。
  */
-export function resonanceVector40D(p: PerceptionV40): Float64Array {
-  const v = toNormalizedVector40D(p);
-  // 切片：D09-D20（12D 精神+人际）+ D33-D40（8D 伴侣纹理）= 20D
-  // 实际共振核心：伴侣纹理 8D + 愉悦/依恋 等
-  const idx = [8, 11, 13, 14, 16, 18, 32, 33, 34, 35, 36, 37, 38, 39]; // D09,D12,D14,D15,D17,D19,D33-D40 = 14D
-  const out = new Float64Array(idx.length);
-  for (let i = 0; i < idx.length; i++) out[i] = v[idx[i]];
-  return out;
-}

@@ -121,7 +121,7 @@ export function buildLongTextFragment(content: string, level: DetailLevel): stri
   const text = (content || '').trim();
   if (text.length <= LONG_TEXT_THRESHOLD) {
     return '【对话原文·权威记录】' + text +
-      '\n（以上为当时对话原文。过去发生的事不得编造：原文没有的人物/情节不得提及。）';
+      '\n（以上为当时对话原文——【记得】档权威记录。可自然口语化复述，但原文没有的人物/情节/时间不得新增提及。）';
   }
 
   let body: string;

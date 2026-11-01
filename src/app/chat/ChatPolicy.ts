@@ -8,6 +8,11 @@
  *   - 单一真相源: ChatMode 是唯一会话状态描述
  *   - 策略可查询: policy.canXxx() 替代裸 if (!_meetingEntityName)
  *   - 防御式默认: canXxx() 默认 false，白名单制
+ *
+ * 🔴 P071-Phase2 批B-3（2026-10-26，业主批准）：死枚举清理——
+ *   `roleplay`（V4.0 已废除）与 `task`（零消费者实证）两个 ChatMode kind 及其工厂已删除；
+ *   会话模式精简为三真实模式 normal / entity_meeting / secretary（对应 P088 权威矩阵）。
+ *   原 roleplay 守卫条件随之简化（现存模式均可用主 FG / 知识库——隔离由 UUID 户籍法承担）。
  */
 
 // ── 会话模式类型 ──
@@ -15,9 +20,7 @@
 export type ChatMode =
   | { kind: 'normal' }
   | { kind: 'entity_meeting'; entityUuid: string; entityName: string }
-  | { kind: 'roleplay'; branchId: string; roleId: string; roleName: string; allowMainFgRead: false }
-  | { kind: 'secretary'; }
-  | { kind: 'task'; taskType: string };
+  | { kind: 'secretary'; };
 
 export type ChatModeKind = ChatMode['kind'];
 
@@ -31,22 +34,20 @@ export class ChatPolicy {
     return this.mode.kind === 'normal' || this.mode.kind === 'secretary';
   }
 
-  /** 是否可以使用主 FG（家族图谱） */
+  /** 是否可以使用主 FG（家族图谱）——roleplay 已废除（V4.0），现存三模式均可用；隔离由 UUID 户籍法承担 */
   canUseMainFG(): boolean {
-    // 角色扮演使用独立分支 FG，不使用主 FG
-    return this.mode.kind !== 'roleplay';
+    return true;
   }
 
-  /** 是否可以将数据写入主 FG */
+  /** 是否可以将数据写入主 FG（同上：会晤写入按实体 UUID 隔离，非禁止写） */
   canPersistToMainFG(): boolean {
-    // 角色扮演绝对不写主 FG
-    return this.mode.kind !== 'roleplay';
+    return true;
   }
 
   /** 是否可以注入角色提示（当前角色路由） */
   canUseRoleHint(): boolean {
     // 会晤模式下实体有自己的身份，不注入玉瑶角色提示
-    return this.mode.kind !== 'entity_meeting' && this.mode.kind !== 'roleplay';
+    return this.mode.kind !== 'entity_meeting';
   }
 
   /** 是否可以注入 "不知道" 守卫（玉瑶不知道的事诚实说不知道） */
@@ -63,12 +64,12 @@ export class ChatPolicy {
 
   /** 是否可以使用 PFC 知识精炼 */
   canUsePFCKnowledgeRefine(): boolean {
-    return this.mode.kind !== 'entity_meeting' && this.mode.kind !== 'roleplay';
+    return this.mode.kind !== 'entity_meeting';
   }
 
   /** 是否可以使用知识库 */
   canUseKnowledgeBase(): boolean {
-    return this.mode.kind !== 'roleplay';
+    return true;  // roleplay 已废除，隔离由 UUID 户籍法承担
   }
 
   /** 是否为实体会晤 */
@@ -76,18 +77,13 @@ export class ChatPolicy {
     return this.mode.kind === 'entity_meeting';
   }
 
-  /** 是否为角色扮演 */
-  isRoleplay(): boolean {
-    return this.mode.kind === 'roleplay';
-  }
+  // 🔴 P071-Phase2 批B-3：isRoleplay() 已随 roleplay kind 一并删除（仅测试引用，零生产消费）
 
   /** 获取活跃模式的简短描述 */
   getModeLabel(): string {
     switch (this.mode.kind) {
       case 'entity_meeting': return `会晤:${this.mode.entityName}`;
-      case 'roleplay': return `扮演:${this.mode.roleName}`;
       case 'secretary': return '秘书模式';
-      case 'task': return `任务:${this.mode.taskType}`;
       default: return '正常';
     }
   }
@@ -108,16 +104,10 @@ export function meetingMode(entityUuid: string, entityName: string): ChatMode {
   return { kind: 'entity_meeting', entityUuid, entityName };
 }
 
-export function roleplayMode(branchId: string, roleId: string, roleName: string): ChatMode {
-  return { kind: 'roleplay', branchId, roleId, roleName, allowMainFgRead: false };
-}
-
 export function secretaryMode(): ChatMode {
   return { kind: 'secretary' };
 }
 
-export function taskMode(taskType: string): ChatMode {
-  return { kind: 'task', taskType };
-}
+// 🔴 P071-Phase2 批B-3：roleplayMode / taskMode 工厂已删除（roleplay V4.0 废除、task 零消费者）
 
 export default ChatPolicy;

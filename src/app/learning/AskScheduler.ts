@@ -17,7 +17,7 @@
  *   const suggestions = scheduler.suggestClassifications(title);
  */
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 
 export interface AskDecision {
   shouldAsk: boolean;
@@ -51,7 +51,7 @@ export class AskScheduler {
   /**
    * 判断现在是否适合反问
    */
-  async shouldAsk(perception: Perception24D): Promise<AskDecision> {
+  async shouldAsk(perception: PerceptionState24): Promise<AskDecision> {
     const decisions: AskDecision = {
       shouldAsk: false,
       reason: '',

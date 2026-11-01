@@ -50,6 +50,24 @@ const prestartResults = [];
 //   若由 P0/P1 代写锁，P2 会判定「他人持锁」而被自己拒绝 → 服务无法启动。
 //   本监督进程职责仅两件：① 启动前拒绝重复实例 ② 清理陈旧锁。
 const LOCK_PATH = path.join(__dirname, 'data', 'webui', 'server.lock');
+const PORT = process.env.PORT || '3000';
+
+/** 读取端口 PORT 的 LISTENING 持有者 PID；未监听 / 读取失败返回 null。 */
+function portHolderPid() {
+  try {
+    const out = execSync(`netstat -ano | findstr ":${PORT}.*LISTENING"`, {
+      encoding: 'utf8', timeout: 5000, shell: 'cmd', windowsHide: true,
+    }).toString().trim();
+    if (!out) return null;
+    // 🔴 必须按字面量锚定端口号，且要求其后紧跟空白。
+    //   findstr 的 `.` 是通配符，`:3000.*LISTENING` 会捞到 `:30001`；
+    //   若此处用 /:(\d+)/ 贪婪捕获，会把 30001 当成端口 3000 的持有者 →
+    //   误判「锁主已换人」→ 清锁 → 启动第二实例 → 双写覆盖（正是本函数要防的事）。
+    const esc = String(PORT).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = out.match(new RegExp(':' + esc + '\\s+\\S+\\s+LISTENING\\s+(\\d+)', 'i'));
+    return m ? Number(m[1]) : null;   // IPv4/IPv6 两行持有者相同，取第一条即可
+  } catch { return null; }
+}
 
 // [1] 启动前：陈旧锁清理 / 存活则拒绝启动
 if (fs.existsSync(LOCK_PATH)) {
@@ -65,8 +83,28 @@ if (fs.existsSync(LOCK_PATH)) {
     const foreignHost = typeof prev.host === 'string' && prev.host !== os.hostname();
     let alive = false;
     if (!foreignHost) {
-      try { process.kill(prev.pid, 0); alive = true; }
-      catch (e) { alive = e && e.code === 'EPERM'; } // Windows: 无权限 = 进程存在
+      let pidAlive = false;
+      try { process.kill(prev.pid, 0); pidAlive = true; }
+      catch (e) { pidAlive = !!(e && e.code === 'EPERM'); } // Windows: 无权限 = 进程存在
+
+      // 🔴 2026-10-28 三因子判活：仅凭 process.kill(pid, 0) 会因 **Windows PID 复用**
+      //   把无关进程当成持锁者，导致锁永远判为「活着」→ 启动方反复 exit(1)。
+      //   实测：PID 64816 的锁自 2026-10-15T07:54 未释放，期间撞锁失败 **31.9 万次**
+      //   （err.log 里「服务已在运行」318,649 条），每一条都是一次 exit(1) → pm2 重启。
+      //   端口持有者是决定性证据：server 若真活着，3000 必然由它自己监听。
+      const holder = portHolderPid();
+      if (holder === prev.pid) {
+        alive = true;                              // 确证存活：端口正是锁主持有
+      } else if (holder !== null && holder !== prev.pid) {
+        alive = false;                             // 确证已死：锁主已换人，锁必然过期
+      } else {
+        // 端口未监听：可能是「已写锁、未 bind」的启动窗口，也可能服务已死。
+        // 兜底 = PID 存活 **且** 锁新鲜。写锁与 bind 实测相隔约 19s，给足 5 分钟。
+        //   反过来说，一个正常 server 不可能「活着却 13 天不监听端口」。
+        const startedAt = Date.parse(prev.startedAt || '');
+        const fresh = Number.isFinite(startedAt) && (Date.now() - startedAt) < 5 * 60 * 1000;
+        alive = pidAlive && fresh;
+      }
     }
     if (alive) {
       console.error('[Start] ❌ 服务已在运行 (PID ' + prev.pid + ', host ' + prev.host + ')');
@@ -80,7 +118,6 @@ if (fs.existsSync(LOCK_PATH)) {
 }
 
 // V20: 写库脚本守卫 — 若端口 3000 已被旧实例占用，跳过所有写库脚本（并发写 fusion_memory.db 会 SQLITE_CORRUPT）
-const PORT = process.env.PORT || '3000';
 let _portBusy = false;
 try {
   const out = execSync(`netstat -ano | findstr ":${PORT}.*LISTENING"`, { encoding: 'utf8', timeout: 5000, shell: 'cmd', windowsHide: true }).toString().trim();
@@ -169,7 +206,10 @@ if (process.platform === 'win32') {
 }
 
 // 启动 server.ts
-console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')...');
+// 🔴 2026-10-27：加时间戳。原行无时间信息，导致「1462 次启动」无法还原发生时刻、
+//   无法判断是持续循环还是历史累计（实测日志跨度 38 天、日均 38.5 次）。有了时间戳即可
+//   直接统计重启频率的逐日曲线，不用靠日志行号间接估算。
+console.log('[Start] 启动 server.ts (端口 ' + (process.env.PORT || '3000') + ')... @ ' + new Date().toISOString());
 // 🔴 2026-09-20 宿主机内存紧张下的结构性缓解：把默认 V8 堆上限从 12288 降到 4096。
 //   依据：宿主可用内存仅 ~0.9GB（VS Code / WSL / Docker / llama 常驻，用户工作必须），
 //   12GB 的上限使 V8 **惰性 GC**（推高 RSS 与换页）；而 `db.export()` 的缓冲是 ArrayBuffer
@@ -204,6 +244,15 @@ child.on('error', (err) => {
   process.exit(1);
 });
 
-child.on('exit', (code) => {
+child.on('exit', (code, signal) => {
+  // 🔴 2026-10-27：记录退出原因。
+  //   原实现直接 `process.exit(code || 0)` —— 而进程被 kill 时 code 为 null、
+  //   只有 signal 有值，于是 `null || 0` → exit(0) → pm2 记为**正常退出**、
+  //   不留下任何异常痕迹。实测后果：38 天 1462 次重启，而 err.log 里
+  //   uncaughtException / EADDRINUSE / OOM / shutdown 全是 0，排查完全无从下手。
+  //   signal 是「被谁杀的」的直接证据，不记录就永远查不到。
+  //   ⚠️ 退出码逻辑**保持原样**（exit(code || 0)），只补日志 —— 不改变 pm2 的重启与退避行为。
+  console.error('[Start] ⚠️ server.ts 已退出: code=' + code + ' signal=' + signal +
+    ' @ ' + new Date().toISOString() + '（pm2 将自动重拉）');
   process.exit(code || 0);
 });

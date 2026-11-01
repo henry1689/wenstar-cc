@@ -44,7 +44,7 @@ export interface MemoryRetrieverSource {
   retrieveMultiRank(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { perception?: unknown; entityUuids?: string[]; sessionId?: string; searchScope?: SearchScope },
+    options?: { perception?: unknown; p40?: unknown; queryText?: string; entityUuids?: string[]; sessionId?: string; searchScope?: SearchScope },
   ): Promise<MultiRankLike>;
 }
 
@@ -61,6 +61,9 @@ export class MemoryAdapter implements RetrievalAdapter {
       // 🔴 Foundation V2.0: 透传搜索范围限定
       const result = await this.retriever.retrieveMultiRank(locusPath, entities, {
         perception: ctx.perception,
+        // 🔴 P071-Phase2批B-2: M3 原生 40D + 用户消息透传——会晤中枢 spine 语义联想与 DUAL_CHAIN 寻址先行点火
+        p40: ctx.perception40d ?? undefined,
+        queryText: ctx.query,
         entityUuids: ctx.entityUuids,
         sessionId: ctx.sessionId,
         searchScope: ctx.searchScope,

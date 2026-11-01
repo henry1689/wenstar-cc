@@ -13,7 +13,7 @@
  */
 import type { ChatContext } from '../chat.js';
 import type { DNA } from '../../m1/types/dna.js';
-import type { Perception24D, M3Decision } from '../../m3/types/perception.js';
+import type { PerceptionState24, M3Decision } from '../../m3/types/perception.js';
 import type { ConversationTurn } from '../../m5/types/index.js';
 import type { RoleType } from '../../app/role/RoleClassifier.js';
 import type { M4Context } from '../../m4/types/index.js';
@@ -35,7 +35,7 @@ export interface Stage<TInput, TOutput> {
 export interface PerceptionInput { message: string; ctx: ChatContext; _currentRole: RoleType; }
 
 export interface PerceptionOutput {
-  dna: DNA; p: Perception24D; decision: M3Decision; seqPos: number;
+  dna: DNA; p: PerceptionState24; decision: M3Decision; seqPos: number;
   _currentRole: RoleType; _ruleEngineBlocked: boolean; _ruleEngineReply: string | null;
   _weatherContext: string;
 }
@@ -50,7 +50,7 @@ export type { Stage2Input, Stage2Output } from './process-stages.js';
 // 🟡 STAGE 3 — 实现在 chat.ts line 820-940
 
 export interface KnowledgeInput {
-  message: string; dna: DNA; p: Perception24D; decision: M3Decision; ctx: ChatContext;
+  message: string; dna: DNA; p: PerceptionState24; decision: M3Decision; ctx: ChatContext;
   _meetingEntityName: string | null; _entityContextText: string;
   memoryFragments: string[]; knowledgeBaseText: string; emotionalMemories: ScoredMemory[];
 }
@@ -65,7 +65,7 @@ export interface KnowledgeOutput {
 // 🔴 STAGE 4 — 实现在 chat.ts line 1280-1574
 
 export interface InjectionInput {
-  message: string; ctx: ChatContext; dna: DNA; p: Perception24D; decision: M3Decision;
+  message: string; ctx: ChatContext; dna: DNA; p: PerceptionState24; decision: M3Decision;
   ctx_m4: M4Context; _meetingEntityName: string | null; _entityContextText: string;
   _currentRole: RoleType; enrichedHistory: ConversationTurn[];
   knowledgeBaseText: string; memoryFragments: string[]; familyConstraint: string;
@@ -80,6 +80,6 @@ export interface InjectionOutput {
 // ⚪ STAGE 5 — 实现在 chat.ts line 1635-2299
 
 export interface PostReplyInput {
-  message: string; reply: string; ctx: ChatContext; dna: DNA; p: Perception24D;
+  message: string; reply: string; ctx: ChatContext; dna: DNA; p: PerceptionState24;
   decision: M3Decision; seqPos: number; _meetingEntityName: string | null;
 }

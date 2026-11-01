@@ -106,6 +106,7 @@ export class M7Orchestrator {
       { key: 'self_evolve',   fn: () => this.extractUserPrefAndOptimizeSelf() },
       { key: 'person_review', fn: () => this.digImportantPersonEvent() },
       { key: 'behavior_pattern', fn: () => this.extractBehaviorPatterns() },
+      { key: 'memsym_element', fn: () => this.extractMemSymElements() },
     ];
     for (const mod of modules) {
       if (this.isModuleCircuitBroken(mod.key)) continue;
@@ -436,6 +437,54 @@ export class M7Orchestrator {
       console.log('[Dream] 人物复盘完成');
     } catch (err) {
       console.warn('[Dream] 人物复盘失败:', err);
+    }
+  }
+
+  /**
+   * MemSym 批γ-b · 元素化萃取（离线主源之一，ADR-MEM-002 第三块）
+   * I011 结构根治后：直写 **memsym_elements 专表**（v30）——脱离文档知识库管道
+   * （其 FTS 去重命中即静默 UPDATE 旧条目，导致落池申报N/插入0）。
+   * 红线二：萃取在离线巩固层，生成层只包装不扩充。
+   */
+  private async extractMemSymElements(): Promise<void> {
+    if (this.alreadyRanToday('memsym_element')) return;
+    const storage = this._storageRef;
+    if (!storage) return;
+    try {
+      const sqlite = typeof storage.getSQLite === 'function' ? storage.getSQLite() : null;
+      if (!sqlite) return;
+      const rows = (sqlite.queryAll(
+        `SELECT id, belong_entity_uuid, raw_input, calcium_score FROM memories
+         WHERE julianday('now') - julianday(created_at) < 7 AND calcium_score >= 0.8
+         ORDER BY calcium_score DESC LIMIT 30`, []) || []) as Array<Record<string, unknown>>;
+      let ingested = 0;
+      for (const r of rows) {
+        const uuid = String(r.belong_entity_uuid || '');
+        if (!uuid) continue;
+        const raw = String(r.raw_input || '').trim();
+        if (raw.length < 6) continue;
+        try {
+          // 幂等：id = me-<源记忆id>，INSERT OR IGNORE 天然去重（无 FTS 语义干扰）
+          sqlite.writeRaw(
+            `INSERT OR IGNORE INTO memsym_elements (id, entity_uuid, content, tags, impression, source_anchor_id)
+             VALUES (?, ?, ?, 'memsym-element,preference', ?, ?)`,
+            ['me-' + String(r.id || ''), uuid, raw.substring(0, 120),
+             Math.min(1, Number(r.calcium_score ?? 0.5)), String(r.id || '')]);
+          ingested++;
+        } catch (insErr) {
+          console.warn('[MemSym] 元素落池单行失败:', String((insErr as Error)?.message || '').substring(0, 60));
+          continue;
+        }
+      }
+      // 🔴 写后自验（经验：功能"看似工作"≠落库，验证必须查库）——回查专表真实计数
+      try {
+        const verified = sqlite.queryAll(
+          'SELECT COUNT(*) AS n FROM memsym_elements', []) as Array<{ n: number }>;
+        console.log(`[MemSym·元素萃取] 落池申报=${ingested} 专表实证=${verified?.[0]?.n ?? '?'} 条`);
+      } catch { /* 自验失败不阻塞 */ }
+      if (ingested > 0) console.log(`[MemSym·元素萃取] M7 离线落池 ${ingested} 条（7日高钙→原子元素）`);
+    } catch (err) {
+      console.warn('[MemSym] 元素萃取失败:', (err as Error)?.message);
     }
   }
 

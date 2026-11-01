@@ -15,7 +15,7 @@
  *   // 注入 LLM: "根据过去的经验，可以适度安抚用户。上次类似场景后用户情绪好转了。"
  */
 import type { DNA } from '../../../m1/types/dna.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 import type { SQLiteAdapter } from '../../../m2/SQLiteAdapter.js';
 
 export interface EmotionRegulation {
@@ -43,7 +43,7 @@ export class EmotionRegulator {
    * @param currentPerception 当前 M3 感知结果
    * @param relatedMemories   M4 检索到的相关记忆
    */
-  regulate(currentPerception: Perception24D, relatedMemories: DNA[]): EmotionRegulation {
+  regulate(currentPerception: PerceptionState24, relatedMemories: DNA[]): EmotionRegulation {
     const result: EmotionRegulation = {
       suggestedShift: { pleasure: 0, arousal: 0 },
       confidence: 0,

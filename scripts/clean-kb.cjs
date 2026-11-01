@@ -13,7 +13,11 @@ for (let i = 2; i < process.argv.length; i++) {
 const mode = argv.apply ? 'apply' : 'dry-run', isDryRun = mode === 'dry-run';
 
 const fs = require('fs');
+const path = require('path');
 const initSqlJs = require('sql.js');
+// 🔴 2026-10-31：原硬编码 'D:/wenstar'（旧根，且该目录真实存在）→ 会静默操作旧库。
+//   改为从脚本位置推导当前项目根，可用 WENSTAR_HOME 覆盖。
+const PROJECT_ROOT = process.env.WENSTAR_HOME || path.resolve(__dirname, '..');
 
 async function run() {
   // ── 预检门控 (在 DB 访问之前) ──
@@ -30,10 +34,10 @@ async function run() {
   if (isDryRun) { console.log('[DRY-RUN] clean-kb — 将扫描但不删除。使用 --apply --operator <id> --reason <text> --ticket <id> --scope <sel> [--confirm <token>] 执行实际清理。\n'); process.exit(0); }
 
   const SQL = await initSqlJs();
-  const db = new SQL.Database(fs.readFileSync('D:/wenstar/data/webui/fusion_memory.db'));
+  const db = new SQL.Database(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'webui', 'fusion_memory.db')));
 
   // Run the DDL first to ensure tables exist
-  const ddl = fs.readFileSync('D:/wenstar/src/m2/schema.sql', 'utf-8');
+  const ddl = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'm2', 'schema.sql'), 'utf-8');
   db.run(ddl);
 
   const before = db.exec("SELECT COUNT(*) as cnt FROM knowledge_base")[0].values[0][0];
@@ -53,7 +57,7 @@ async function run() {
   console.log('清理后条数:', after);
 
   // Write back
-  fs.writeFileSync('D:/wenstar/data/webui/fusion_memory.db', Buffer.from(db.export()));
+  fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'webui', 'fusion_memory.db'), Buffer.from(db.export()));
   console.log('数据库已更新');
 }
 

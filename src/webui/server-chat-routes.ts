@@ -16,6 +16,8 @@ import type { ChatResponse, ChatContext } from './chat.js';
 import { randomUUID } from 'node:crypto';
 // 🔴 P1-5 S4-M3: streaming.enabled/job_ttl_ms 接线（enabled:false 一键回退同步路径）
 import { getRetrievalFusionConfig } from '../config/retrieval-fusion-config.js';
+// P1-A：输出侧身份归属（此前生产零接线）；P1-C-1：内部概念出口审计（只告警不削字）
+import { attributeReply, auditReplyExit } from '../m5/group/outputGuard.js';
 
 /** TTS 异步 job 存储（S4 P1-2 修复：长文音频后台生成，不阻塞 /api/chat 响应） */
 const TTS_JOBS = new Map<string, { urls: string[]; done: boolean; createdAt: number }>();
@@ -534,7 +536,8 @@ async function buildTTSResult(
 }
 
 export interface ChatRouteDeps {
-  processChat: (message: string, clientMsgId?: string | null, testMode?: boolean, onToken?: (delta: { text?: string }) => void) => Promise<ChatResponse>;
+  /** P090：第5参 askAllOpts —— askAll 逐人生成参数（server.ts 包装函数同签名；缺省 undefined 零行为变化） */
+  processChat: (message: string, clientMsgId?: string | null, testMode?: boolean, onToken?: (delta: { text?: string }) => void, askAllOpts?: { fixedSpeakerUuid?: string; skipUserPersist?: boolean }) => Promise<ChatResponse>;
   /** 🔴 P1-5 流式: 直写 SSE 客户端池（绕过 broadcastEvent 1.5s 限速） */
   pushToSSEClients?: (event: string, data: any) => void;
   resetPipeline: () => Promise<void>;
@@ -618,7 +621,32 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
             }
           });
           job.result = result;
-          job.reply = result.reply || '';
+          // P090 · P096 §2.4：askAll 轮答 —— 首轮已答第一人，这里按剩余队列逐人驱动。
+          //   🔴 每段都是一次**完整独立的 processChat**（各自召回/身份/幻觉校验/持久化），
+          //   代码路径上不存在两个 UUID 共享一次 orchestrate —— 这是业主隔离红线的结构性保证。
+          //   try/catch 包裹循环体：**单段失败记空并继续，不阻塞其余人**（P096 §2.4）。
+          //   `skipUserPersist=true`：用户消息首轮已落库，后续段只写各自回复。
+          //   后续段不传 onToken —— token 流已按首轮推送给 SSE，追加会污染前端已渲染内容。
+          //   队列为空（非 askAll 场景）⇒ 循环 0 次 ⇒ 行为与现在逐字一致。
+          let _replyAll = result.reply || '';
+          if (result.askAll?.queue?.length) {
+            const _segParts: string[] = [];
+            if (_replyAll) _segParts.push(_replyAll);
+            for (const _qa of result.askAll.queue) {
+              try {
+                const _seg = await processChat(body.message.trim(), body.client_msg_id, body.test_mode === true, undefined,
+                  { fixedSpeakerUuid: _qa.uuid, skipUserPersist: true });
+                if (_seg.reply) _segParts.push(_seg.reply);
+              } catch (_ea) {
+                console.warn('[AskAll] 段生成失败（不阻塞其余人）: ' + _qa.name + ' — ' + ((_ea as Error)?.message || _ea));
+              }
+            }
+            _replyAll = _segParts.filter(Boolean).join('\n\n');
+            result.reply = _replyAll;   // 保持 job.result 与 job.reply 一致
+          }
+          job.reply = _replyAll;
+          // P1-C-1: 内部概念出口审计（**只告警不削字** —— askAll 与普通路径都汇于此）
+          auditReplyExit(job.reply, 'stream');
           // 🔴 发送卡死修复: TTS 不阻塞 done——reply 就绪立即完成（文本可展示），TTS 后台异步生成后更新 audio。
           job.status = 'done';
           job.terminalAt = Date.now();
@@ -663,15 +691,71 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
 
     const result = await processChat(body.message.trim(), body.client_msg_id, body.test_mode === true);
 
+    // P090 · P096 §2.4：askAll 轮答 —— 首轮已答第一人，这里按剩余队列逐人驱动
+    //   （与流式路径 :620 同一策略）。🔴 每段都是一次**完整独立的 processChat**
+    //   （各自召回/身份/幻觉校验/持久化），代码路径上不存在两个 UUID 共享一次
+    //   orchestrate —— 业主隔离红线的结构性保证。单段失败记空并继续，不阻塞其余人；
+    //   skipUserPersist=true 防同一条用户消息写 N 遍；队列为空（非 askAll 场景）
+    //   ⇒ 循环 0 次 ⇒ 行为与现在逐字一致。
+    //   🔴 必须改写 `result.reply`：下方 buildTTSResult 与 _sanitizeForJSON 都读它，
+    //   只改局部变量会让前端拿到未拼接的首轮回复。
+    if (result.askAll?.queue?.length) {
+      const _segParts: string[] = [];
+      if (result.reply) _segParts.push(result.reply);
+      for (const _qa of result.askAll.queue) {
+        try {
+          const _seg = await processChat(body.message.trim(), body.client_msg_id, body.test_mode === true, undefined,
+            { fixedSpeakerUuid: _qa.uuid, skipUserPersist: true });
+          if (_seg.reply) _segParts.push(_seg.reply);
+        } catch (_ea) {
+          console.warn('[AskAll] 段生成失败（不阻塞其余人）: ' + _qa.name + ' — ' + ((_ea as Error)?.message || _ea));
+        }
+      }
+      result.reply = _segParts.filter(Boolean).join('\n\n');
+    }
+
     // TTS 生成 — 长文分段滚动播报（V12.5，P1-5 抽 helper 与流式路径共用）
     const { audio_url, audio_urls, tts_job } = await buildTTSResult(result.reply || '', body.tts !== false, DATA_DIR);
     // 安全序列化：防止循环引用导致 JSON.stringify 抛异常
     const safeResult = _sanitizeForJSON(result);
     const safeObject = (safeResult && typeof safeResult === 'object' && !Array.isArray(safeResult)) ? safeResult : {};
     // P2-2: UI 显示 — 附带当前聊天对象状态（chat_state 不进 ChatResponse 核心结构，仅路由层附加）
-    const chat_state = buildChatState(deps.entityMeeting);
+    let chat_state = buildChatState(deps.entityMeeting);
+    // 🔴 2026-10-31 标签单一真源：优先用 chat.ts 带出的「**生成该回复时的身份**」。
+    //   buildChatState 取的是**请求结束时**的 speaker —— 本轮只要发生过换人
+    //   （点名换人 / inferSpeaker），标签就会与正文自称错位：真机表现为
+    //   「外层标签罗珍思、正文却说诗雨」，甚至同一条里前后两个名字。
+    {
+      const _gen = (safeObject as Record<string, unknown>).speakerName;
+      if (chat_state && typeof _gen === 'string' && _gen) {
+        chat_state = { ...chat_state, speakerName: _gen };
+      }
+    }
+    // P1-A · 输出侧身份归属接线（2026-10-27）
+    //   🔴 outputGuard 此前**生产零接线**（全仓只有它自己的测试在调用），
+    //      前端 `speaker?【名】+content:content` 无条件拼粘性发言人，而正文里的
+    //      `徐诗雨：` 是 LLM 自写的分段 ⇒ 产生 `【罗珍思】徐诗雨：` 身份错乱。
+    //   🔴 只在**会晤态**接线；私聊/玉瑶态（participants 为空）走原路径，行为逐字不变。
+    //   🔴 放在 TTS 与持久化**之后** ⇒ 不影响音频与落库，只改本条返回体。
+    const _payload: Record<string, unknown> = {
+      ...(safeObject as Record<string, unknown>), chat_state, audio_url, audio_urls, tts_job,
+    };
+    if (chat_state && chat_state.mode === 'meeting' && typeof _payload.reply === 'string' && _payload.reply) {
+      try {
+        const _attr = attributeReply(_payload.reply as string, chat_state.participants, chat_state.speakerName);
+        chat_state = { ...chat_state, speakerName: _attr.speakerName };
+        _payload.reply = _attr.body;
+        _payload.chat_state = chat_state;
+        if (_attr.warn) console.warn('[OutputGuard] ' + _attr.warn);
+      } catch (_e) {
+        // fail-open：归一失败绝不能挡住回复（守卫是增强，不是闸门）
+        console.warn('[OutputGuard] 出口归一失败，回退原回复:', (_e as Error)?.message);
+      }
+    }
+    // P1-C-1: 内部概念出口审计（**只告警不削字**）—— 同步路径收口
+    if (typeof _payload.reply === 'string') auditReplyExit(_payload.reply, 'sync');
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ ...(safeObject as Record<string, unknown>), chat_state, audio_url, audio_urls, tts_job }));
+    res.end(JSON.stringify(_payload));
     } catch (err) {
       console.error('[ChatRoute] /api/chat 异常:', (err as Error)?.message || err);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

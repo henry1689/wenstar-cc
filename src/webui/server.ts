@@ -858,13 +858,12 @@ async function initPipeline(): Promise<void> {
     if (gatekeeper) entityMeeting.setGatekeeper(gatekeeper);
     const minutesStore = new MeetingMinutesStore(familyGraph);
     entityMeeting.setMinutesStore(minutesStore);
-    // 🔴 S2-G1: 注入存储（会晤状态持久化 + 重启恢复）
-    try {
-      entityMeeting.setStorage(storage);
-      const _restored = entityMeeting.restoreLastMeeting();
-      if (_restored) console.log('  [S2-G1] 重启自动恢复会晤实体 ✓');
-    } catch (_re) { console.warn('  [S2-G1] 会晤恢复失败:', (_re as Error)?.message); }
-    console.log('  实体会晤管理器 (EntityMeeting) 就绪 ✓ (含会议纪要 + 会晤持久化)');
+    // 🔴 2026-10-31 第三层固化：原 S2-G1「注入存储 + 启动期 restoreLastMeeting()」已删除。
+    //   会话状态的跨重启恢复由 GroupSession 的 R1 快照承担（engine_store 单键
+    //   `group_session_state`，见 SessionStore.loadSession），在 chat.ts 每请求入口执行。
+    //   两条恢复链并存本身就是隐患：旧链恢复出 EntityMeeting._meeting，而群聊状态真源在
+    //   GroupSession ⇒ 两者必然分叉，实测表现为「进去了但系统以为没进」。
+    console.log('  实体会晤管理器 (EntityMeeting) 就绪 ✓ (含会议纪要副作用)');
     markModuleAlive('EntityMeeting·会晤');
   } catch (e) {
     console.warn('  实体会晤初始化失败:', (e as Error).message);
@@ -1295,6 +1294,8 @@ async function initPipeline(): Promise<void> {
 
   // 🛡️ V4.0: 音频文件清理（启动时 + 每 24h）
   cleanupOldAudioFiles();
+  // 🧹 2026-10-30: 残留临时库清扫（启动时一次）
+  cleanupStaleDbTemps();
   addTimer(setInterval(() => cleanupOldAudioFiles(), 24 * 3600_000));
   // 🛡️ V12.5: TTS 异步 job 兜底清理（每 60s，复审 P2-1）
   // 🔴 P1-5 m10: 并入 CHAT_JOBS 清理（流式 job 防长驻内存，独立定时器而非仅惰性触发）
@@ -1629,7 +1630,14 @@ function createReplyOnlyChatResponse(reply: string): ChatResponse {
 }
 
 
-async function processChat(message: string, clientMsgId?: string | null, testMode?: boolean, onToken?: (delta: { text?: string }) => void): Promise<ChatResponse> {
+async function processChat(
+  message: string,
+  clientMsgId?: string | null,
+  testMode?: boolean,
+  onToken?: (delta: { text?: string }) => void,
+  /** P090：askAll 逐人生成参数（透传给 chat.ts；缺省 undefined 零行为变化） */
+  askAllOpts?: { fixedSpeakerUuid?: string; skipUserPersist?: boolean },
+): Promise<ChatResponse> {
   // 🔴 P1-1: 移除 server.ts 提前退出（只认纯词 + 提前清 session 导致对话组永不落库）。
   // 会晤结束语统一由 chat.ts 门卫处理（flush 对话组 + 锚点 + 清 session + 回玉瑶）。
   return processChatNew(message, {
@@ -1649,7 +1657,7 @@ async function processChat(message: string, clientMsgId?: string | null, testMod
     _entityMeeting: entityMeeting,
     clientMsgId: clientMsgId || null,
     testMode: testMode || false,
-  }, onToken ? { onToken } : undefined);
+  }, onToken ? { onToken } : undefined, askAllOpts);
 }
 
 /**
@@ -1689,6 +1697,68 @@ const MAX_SSE_CLIENTS = 100;
  *   V26: 引擎产出格式随引擎而定（edge→.mp3 / sapi→.wav），故按扩展名集合过滤，
  *        否则非 .mp3 的产物会永久堆积、并把成功记录挤出「最近 500 个」窗口。 */
 const TTS_AUDIO_EXTS = ['.mp3', '.wav'];
+
+/**
+ * 🧹 2026-10-30 残留临时库清扫（启动时一次）
+ *
+ * 背景：sql.js 落盘采用「写 `${dbPath}.tmp-${pid}` → rename」的原子替换。正常路径下临时文件
+ *   随即消失；但**进程在落盘途中被杀**（pm2 restart / 崩溃）时 rename 不会执行，于是一个
+ *   完整的整库副本留在磁盘上。实测残留一个 = 541MB，而每次重启都可能撞上 500MB 全量落盘。
+ *
+ * 🔴 全仓横向覆盖（DS-23）：写临时库的**不只是主库**。全仓检索 `${...}.tmp-${process.pid}`
+ *   共 3 处独立写点，逐一纳入清扫目标 —— 只清主库等于把同一缺陷留在另外两个库里：
+ *     · src/m2/SQLiteAdapter.ts            → data/webui/fusion_memory.db.tmp-<pid>
+ *     · src/m4/household/FamilyGraph.ts    → data/webui/knowledge/family_graph.db.tmp-<pid>
+ *     · src/app/memory-vault/MemoryVault.ts→ data/memory-vault/vault.db.tmp-<pid>
+ *
+ * 安全边界（宁可不删，不可误删）：
+ *   · 只匹配「已知库名 + .tmp-<数字>」，其它文件一律不碰；
+ *   · 跳过**当前进程**自己的临时文件；
+ *   · `process.kill(pid, 0)` 仍成功的（进程还活着）一律跳过；
+ *   · 修改时间不足 STALE_DB_TEMP_MIN_AGE_MS 的跳过 —— 可能正在写，或刚被杀而 rename 尚未完成；
+ *   · 全程 try/catch，绝不影响启动。
+ */
+
+/** 已知会写 `${dbPath}.tmp-<pid>` 的库（目录 + 库文件名）——新增写点时必须同步登记 */
+const STALE_DB_TEMP_TARGETS: ReadonlyArray<{ dir: string; base: string }> = [
+  { dir: DATA_DIR, base: 'fusion_memory.db' },
+  { dir: path.join(DATA_DIR, 'knowledge'), base: 'family_graph.db' },
+  { dir: path.join(PROJECT_ROOT, 'data', 'memory-vault'), base: 'vault.db' },
+];
+
+/** 临时库年龄下限：不足该时长的跳过（可能正在写，或刚被杀而 rename 尚未完成） */
+const STALE_DB_TEMP_MIN_AGE_MS = 10 * 60_000;
+
+function cleanupStaleDbTemps(): void {
+  let freed = 0;
+  let count = 0;
+  for (const { dir, base } of STALE_DB_TEMP_TARGETS) {
+    try {
+      if (!existsSync(dir)) continue;
+      const tmpRe = new RegExp('^' + base.replace(/\./g, '\\.') + '\\.tmp-(\\d+)$');
+      for (const f of readdirSync(dir)) {
+        const m = tmpRe.exec(f);
+        if (!m) continue;
+        const pid = Number(m[1]);
+        if (!Number.isFinite(pid) || pid === process.pid) continue;
+        let alive = false;
+        try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+        if (alive) continue;
+        const fp = path.join(dir, f);
+        try {
+          const st = fs.statSync(fp);
+          if (Date.now() - st.mtimeMs < STALE_DB_TEMP_MIN_AGE_MS) continue;
+          unlinkSync(fp);
+          freed += st.size;
+          count++;
+          console.log('[DbTempClean] 清理残留临时库 ' + fp + ' (' + Math.round(st.size / 1048576) + 'MB)');
+        } catch { /* 单个失败不影响其余 */ }
+      }
+    } catch { /* 单个目标失败不影响其余目标 */ }
+  }
+  if (count > 0) console.log('[DbTempClean] 共回收 ' + count + ' 个文件 / ' + Math.round(freed / 1048576) + 'MB');
+}
+
 function cleanupOldAudioFiles(): void {
   try {
     const audioDir = path.join(DATA_DIR, 'audio');

@@ -1,5 +1,8 @@
 # 天枢架构修订方案
 
+> 🔴 **量纲封存声明（2026-10-24《40D 量纲统一法令》）**：本文档成文于旧量纲时代（24D/32D/36D/6D 等表述均为历史），其量纲相关内容**一律以 40D 为准，不得引用旧量纲条款**。当前权威：`data/knowledge-v4/governance/40d-unification-decree-v1.0.md`。
+
+
 > 日期：2026-08-07 · 性质：只读复盘 + 规划 · 关联任务：《WenStarOS 天枢架构全局复盘与重设》
 > 关联报告：`40d-single-track-audit.md` / `search-engine-capability-audit.md` / `current-core-dataflows.md` / `large-file-refactor-map.md`
 

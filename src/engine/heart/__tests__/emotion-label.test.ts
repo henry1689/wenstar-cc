@@ -3,10 +3,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import { classifyEmotion } from '../emotion-label.js';
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
-function makeVector(values: Partial<EmotionVector24D>): EmotionVector24D {
-  const base: EmotionVector24D = {
+function makeVector(values: Partial<EmotionState24>): EmotionState24 {
+  const base: EmotionState24 = {
     joy: 0, sadness: 0, anger: 0, fear: 0,
     surprise: 0, disgust: 0, calm: 0, anxiety: 0,
     affection: 0, trust: 0, intimacy: 0, respect: 0,

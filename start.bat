@@ -19,14 +19,14 @@ if "%DEEPSEEK_API_KEY%"=="" (
 
 REM 启动 WebUI 后端
 echo [1/2] 启动玉瑶 WebUI (port 3000)...
-start "玉瑶-WebUI" cmd /c "cd /d D:\wenstar && npx tsx src/webui/server.ts"
+start "玉瑶-WebUI" cmd /c "cd /d D:\tools\wenstar-cc && npx tsx src/webui/server.ts"
 
 REM 等待后端就绪
 timeout /t 6 /nobreak >nul
 
 REM 启动 3D 粒子前端
 echo [2/2] 启动粒子可视化 (port 5173)...
-start "玉瑶-粒子" cmd /c "cd /d D:\wenstar\ui && npx vite --host 0.0.0.0 --port 5173"
+start "玉瑶-粒子" cmd /c "cd /d D:\tools\wenstar-cc\ui && npx vite --host 0.0.0.0 --port 5173"
 
 timeout /t 3 /nobreak >nul
 

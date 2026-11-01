@@ -6,7 +6,8 @@
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { KnowledgeBase } from '../m2/KnowledgeBase.js';
 import type { DNA } from '../m1/types/dna.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
+import type { PerceptionV40 } from '../m3/types/perception-40d.js';
 import type { MemorySummary } from './types/index.js';
 import { RETRIEVAL_THRESHOLDS, BATCH_SIZES, MIN_MATCHED_FOR_BREAK } from '../m2/retrieval-constants.js';
 // 🔴 2026-09-12 召回窗口修复: 实体分层召回的归属过滤统一走公安过滤器（户籍管理法第九条 搜索闸门）
@@ -17,9 +18,23 @@ import { LocalCache } from '../app/tools/LocalCache.js';
 import { HippocampalIndex } from '../engine/tianquan/temporal/HippocampalIndex.js';
 import { SURNAME_CHARS } from '../config/app-identity.js';
 import type { MultiRankResult, RankedList, RankedItem } from './types/retrieval.js';
+// 🔴 检索架构 v11 §S2 A5：闸门加载失败的 fail-closed 改造（蓝皮书 §5.3 业主裁决 2026-10-27 方案 A）
+import { Flags, ENCLOSURE_DEFAULT_LIMIT, RERANK_TOP_K } from './retrieval/Flags.js';
+import {
+  incr as incrMetric,
+  write as writeShadow,
+  error as errorShadow,
+  observeLatency,
+  coverageOf,
+} from './retrieval/ShadowLog.js';
+import { recallByStructured, scoreAndRank } from './retrieval/StructuredRecall.js';
+import type { EnclosureDomain } from './retrieval/StructuredRecall.js';
 
 // 关键词检索缓存：相同关键词 30 秒内复用结果
 const keywordCache = new LocalCache<string, DNA[]>({ ttlMs: 30_000, namespace: 'm4_keyword' });
+
+// P071 Phase1: 语义联想路 G1 语义初筛阈值（蓝皮书 §4.1：cosine≥0.3）
+const SPINE40_SEMANTIC_FLOOR = 0.3;
 
 // P1-2: 会话级缓存 — 同一会话相同 locus 复用检索结果
 const sessionCache = new LocalCache<string, DNA[]>({ ttlMs: 300_000, namespace: 'm4_session' });
@@ -185,6 +200,324 @@ export class MemoryRetriever {
   }
 
   /**
+   * 🔴 检索架构 v11 §S2 A6 —— 影子调用（双跑）
+   * ==========================================================
+   * 与生产链路**并行**跑一遍新结构化召回，结果**只写日志、不参与返回**。
+   *
+   * 【硬约束（任务书 §S2 A「影子调用硬约束」+ D1）】
+   *   1. **fire-and-forget**：`setImmediate` 派发，**不 await**。
+   *      这样生产链路既不增加延迟，也不改变任何 await 顺序 ——
+   *      是满足 S2-B8「生产返回结果集逐字节一致」的最强保证。
+   *   2. 整体 try/catch 包住，异常只走 `ShadowLog.error`，**永不抛出**。
+   *   3. 影子自身耗时在影子路径内自测并写日志（不占用生产请求时间）。
+   *   4. 不碰任何业务表、不写 `search_index`、不进缓存（ADR-013）。
+   *
+   * 【为什么 domain 固定传 ['dialog_group','memory']】
+   * 路由开关（`RETRIEVAL_V11_DIALOG_GROUP` 等）控制的是**生产走哪条路**；
+   * 影子是**测量工具**，必须探测新链路真正要走的全部域，否则双跑数据失真。
+   * 尤其 S1 已停写 conversation 的 n-gram 索引，对话组主路是退化窗口的关键对照面。
+   */
+  private _shadowRecall(args: {
+    locusPath: string;
+    /** 旧链路本次返回的 id（生产结果集的 id，不是正文） */
+    oldIds: string[];
+    keywords: string[];
+    entityUuids?: string[];
+    p40?: PerceptionV40;
+    domains?: EnclosureDomain[];
+    gateDegraded?: boolean;
+  }): void {
+    if (!Flags.enabled()) return; // 总闸关闭 ⇒ 影子完全不跑，零副作用
+    const traceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    // 🔴 **四域全探**（业主 2026-10-27 裁决「影子覆盖率是少了点，可以再大一些」）。
+    //    此前只探 dialog_group + memory，而旧路 `old_ids` 是六路合并结果，
+    //    两者口径不可比 ⇒ 实测覆盖率仅 17%，偏低是口径造成的，不全是召回真的差。
+    //    扩到四域后覆盖率才对得起 §7.1「新链路 ⊇ 旧链路」的判据。
+    //    影子是 fire-and-forget 不 await，四域串行约 200ms 不落到生产延迟上。
+    const domains = args.domains ?? ['memory', 'dialog_group', 'conversation', 'work'];
+
+    setImmediate(async () => {
+      try {
+        const sqlite = (this.storage as any)?.getSQLite?.();
+        if (!sqlite || typeof sqlite.queryAll !== 'function') return;
+
+        const uuids = (args.entityUuids ?? []).filter(Boolean);
+        const all: Array<Awaited<ReturnType<typeof recallByStructured>>[number]> = [];
+
+        const tEnc = Date.now();
+        for (const d of domains) {
+          const hits = await recallByStructured(sqlite, {
+            domain: d,
+            entityUuids: uuids,
+            keywords: args.keywords,
+            locusPath: args.locusPath,
+            limit: ENCLOSURE_DEFAULT_LIMIT,
+          }, args.p40);
+          all.push(...hits);
+        }
+        const encMs = Date.now() - tEnc;
+
+        const tRk = Date.now();
+        const ranked = scoreAndRank(all, Date.now());
+        const rerankMs = Date.now() - tRk;
+
+        // 🔴 out 必须是**截断后**的候选数才有意义（§8.3 空结果率 / 漏斗宽度口径）。
+        //    原实现直接用未截断的 ranked，导致 out 恒等于 in，该指标失效。
+        const newIds = ranked.slice(0, RERANK_TOP_K).map((h) => h.id);
+        incrMetric('v11_retrieval_total');
+        incrMetric('v11_candidates_in', all.length);
+        incrMetric('v11_candidates_out', newIds.length);
+        if (!args.p40) incrMetric('semantic_skipped_total');
+        if (args.gateDegraded) incrMetric('gate_degraded_total');
+        observeLatency(encMs + rerankMs);
+
+        writeShadow({
+          trace_id: traceId,
+          ts: new Date().toISOString(),
+          domains,
+          candidates_in: all.length,
+          candidates_out: newIds.length,
+          top_ids: newIds.slice(0, 5),
+          old_ids: args.oldIds,
+          new_ids: newIds,
+          stage_ms: { enclosure: encMs, rerank: rerankMs },
+          flags: {
+            gate_degraded: args.gateDegraded === true,
+            semantic_skipped: !args.p40,
+            // 空 UUID 白名单 ⇒ 围栏 fail-closed 返回空（结构性，不是故障）
+            fence_skipped_no_uuid_scope: uuids.length === 0,
+          },
+          // 🔴 §7.1 判据集合（2026-10-28 修正 · 业主裁决「按蓝皮书字面修为候选集」）
+          //   蓝皮书 §8.3 原文：「旧路每条结果 ∈ **新链路候选集**」的查询占比。
+          //   原实现传的是 `newIds` = `ranked.slice(0, RERANK_TOP_K)` —— 拿**截断后的前 50**
+          //   冒充候选集，而围栏出口 `candidates_in` 实测 P50=**829**。
+          //   实测四口径对照（260 条样本）：现行整体 5.1% / 蓝皮书字面查询级 0% /
+          //   overlap@10 = 1.0% / 零覆盖 54.2% —— 全部因集合被截断而失真。
+          //   ⇒ 改为对 `all`（围栏全候选集）计算；`new_ids` 仍记 top-K，
+          //     供离线另算排名重合度做交叉验证（口径不再混用）。
+          //   ⚠️ 本字段取值集合已变 ⇒ **修正前的 coverage 历史作废**，须重采。
+          coverage: coverageOf(args.oldIds, all.map((h) => h.id)),
+        });
+      } catch (e) {
+        errorShadow(e, traceId); // 影子失败只记录，不抛出、不影响生产结果
+      }
+    });
+  }
+
+  /** 🔴 v11 §S3 A1 路由总闸：三个开关全开才接管（围栏 + 精排 + 全局），缺一即走旧路 */
+  private _v11RouteOn(): boolean {
+    return Flags.enabled() && Flags.enclosure() && Flags.rerank();
+  }
+
+  /**
+   * 🔴 检索架构 v11 §S3 A1 —— 新链路：围栏 → 精排 → 回表 → 五级闸门
+   * ==========================================================
+   * 只替换 **G1 的候选生成方式**（倒排索引 → 结构化围栏 + 现算精排），
+   * **G2–G5 一字不动**且必须挂在本方法出口（白皮书 §4.1.1：闸门是唯一读取通道，无旁路）。
+   *
+   * @returns `null` = 新链路**不接管**，调用方原样落回旧路。
+   *   触发条件：无 sqlite 句柄 / 空 UUID 白名单（围栏 fail-closed）/ 围栏零命中 / 回表失败。
+   *   🔴 零命中时落回旧路是 **fail-open**（蓝皮书 §2.3 铁律②：精排是质量优化，
+   *   只能 fail-open，不得因新链路空结果而丢召回）。
+   */
+  private async _v11FenceToDnas(
+    locusPath: string,
+    entities: Array<{ name: string; type: string }>,
+    options?: { limit?: number; p40?: PerceptionV40; entityUuids?: string[]; rawQuery?: string },
+  ): Promise<DNA[] | null> {
+    const sqlite = (this.storage as any)?.getSQLite?.();
+    if (!sqlite || typeof sqlite.queryAll !== 'function') return null;
+
+    const uuids = (options?.entityUuids ?? []).filter(Boolean);
+    // 🔴 红线 14：UUID 白名单为空不得放行 ⇒ 围栏 fail-closed，本方法不接管
+    if (uuids.length === 0) return null;
+
+    const keywords: string[] = [];
+    for (const e of entities) if (e.name && e.name.length > 0) keywords.push(e.name);
+    if (locusPath) {
+      const last = locusPath.split('.').pop();
+      if (last && last !== 'default' && last !== 'general') keywords.push(last);
+    }
+    if (options?.rawQuery) keywords.push(options.rawQuery);
+
+    // [1] 围栏
+    const hits = await recallByStructured(sqlite, {
+      domain: 'memory',
+      entityUuids: uuids,
+      keywords,
+      locusPath,
+      limit: ENCLOSURE_DEFAULT_LIMIT,
+    }, options?.p40);
+    if (hits.length === 0) return null; // fail-open 落回旧路
+
+    // [2] 精排（权重取 Flags 冻结常量，本阶段禁止调参 —— 任务书 S2-D5 / S3-D3）
+    const ranked = scoreAndRank(hits, Date.now());
+    // 🔴 **恒用 RERANK_TOP_K，不得让 `options.limit` 参与截断**。
+    //    旧路 `retrieveMemories` 是 `return merged`（六路合并后 30–60 条），
+    //    `options.limit`（默认 5）在旧路只用于知识库配额，**不限制最终返回条数**。
+    //    v11 是「在内部换实现」不是「换接口」（蓝皮书 §2.1），返回语义必须与旧路一致。
+    //    2026-10-27 首次上线时按 limit=5 截断，实测召回骤减，随即回滚。
+    const top = ranked.slice(0, RERANK_TOP_K);
+
+    // [3] 回表取完整列 —— 围栏契约（蓝皮书 §2.2 EnclosureHit）只带精排所需字段，
+    //     五级闸门还需要 calcium_level / effective_strength / is_landmark 等，
+    //     故按 top-K id 回表（≤12 行）。与旧路 recallByKeywordIndex 的「索引命中→回表」同型。
+    let rows: Array<Record<string, unknown>>;
+    try {
+      const phs = top.map(() => '?').join(',');
+      // 🔴 SQLiteAdapter.queryAll 签名是 (sql, params?: any[]) —— 参数整组传数组，不得展开
+      rows = sqlite.queryAll(
+        `SELECT * FROM memories WHERE id IN (${phs}) AND COALESCE(namespace,'default') <> 'test'`,
+        top.map((h) => h.id),
+      ) as Array<Record<string, unknown>>;
+    } catch (e) {
+      console.warn('[RetrievalV11] 回表失败，落回旧路:', (e as Error)?.message);
+      return null; // fail-open
+    }
+
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const r of rows || []) if (r['id'] != null) byId.set(String(r['id']), r);
+
+    let merged: DNA[] = [];
+    for (const h of top) {
+      const r = byId.get(h.id);
+      if (!r) continue;
+      merged.push({
+        branch_id: String(r['id']),
+        locus_path: (r['locus_path'] as string) ?? '',
+        taxonomy_version: '1.0',
+        seq_pos: (r['seq_pos'] as number) ?? 0,
+        leaf_zone: (r['leaf_zone'] as string) ?? 'language_semantic_zone',
+        ref: '',
+        entity_genes: [],
+        raw_input: (r['raw_input'] as string) ?? '',
+        created_at: (r['created_at'] as string) ?? '',
+        calcium_score: (r['calcium_score'] as number) ?? 0,
+        calcium_level: (r['calcium_level'] as number) ?? 0,
+        memory_kind: r['memory_kind'] as string,
+        dna_root_id: r['dna_root_id'] as string,
+        effective_strength: (r['effective_strength'] as number) ?? 1,
+        is_landmark: (r['is_landmark'] as number) ?? 0,
+        absolute_timestamp: r['created_at'] ? new Date(String(r['created_at'])).getTime() : Date.now(),
+      } as unknown as DNA);
+    }
+    if (merged.length === 0) return null;
+
+    return merged;
+  }
+
+  /**
+   * 🔴 五级闸门 G2–G5 —— v11 两个出口共用的唯一挂载实现。
+   * 不可旁路（白皮书 §4.1.1）；容器层只映射 id/文本/钙分/时间/locus，**不映射
+   * `cosine_score`**（蓝皮书 §5.2 hasScores 陷阱会清空全部无分候选）。
+   * @returns `[]` 表示 fail-closed 已触发（闸门加载失败且开关已闭合）。
+   */
+  private async _v11ApplyGate(
+    dnas: DNA[],
+    locusPath: string,
+    perceptionFingerprint: string,
+  ): Promise<DNA[]> {
+    let merged = dnas;
+    try {
+      const { getFiveStageGate } = await import('../m3/FiveStageGate.js');
+      const gate = getFiveStageGate();
+      const gated = gate.filter(
+        merged.map((d) => ({
+          id: d.branch_id,
+          dna_root_id: (d as any).dna_root_id,
+          raw_input: d.raw_input,
+          calcium_score: (d as any).calcium_score ?? 0,
+          calcium_level: (d as any).calcium_level ?? 0,
+          effective_strength: (d as any).effective_strength ?? 1,
+          location_fingerprint: (d as any).location_fingerprint ?? '',
+          locus_path: d.locus_path,
+          leaf_zone: d.leaf_zone,
+          absolute_timestamp: (d as any).absolute_timestamp ?? Date.now(),
+          is_landmark: (d as any).is_landmark ?? 0,
+        })),
+        { query: locusPath, locationFingerprint: perceptionFingerprint },
+      );
+      const gatedSet = new Set(gated.passed.map((m) => m.id));
+      merged = merged.filter((d) => gatedSet.has(d.branch_id));
+    } catch (_e) {
+      if (!Flags.gateFailClosed()) {
+        console.warn('[FiveStageGate·v11] 加载失败，跳过闸门过滤(回退开关已开，仅限紧急，须上报):', (_e as Error).message);
+      } else {
+        console.error('[FiveStageGate·v11] 加载失败，按 fail-closed 返回空结果:', (_e as Error).message);
+        incrMetric('gate_failclosed_total');
+        return [];
+      }
+    }
+    return merged;
+  }
+
+  /** v11 §S3 A1 挂载点① 用的新链路：围栏→精排→回表→五级闸门 */
+  private async _v11RetrieveMemories(
+    locusPath: string,
+    entities: Array<{ name: string; type: string }>,
+    options?: { limit?: number; p40?: PerceptionV40; entityUuids?: string[]; rawQuery?: string; perception?: PerceptionState24 },
+  ): Promise<DNA[] | null> {
+    const dnas = await this._v11FenceToDnas(locusPath, entities, options);
+    if (!dnas) {
+      // 🔴 接管率观测：围栏未给出候选 ⇒ 调用方 `viaV11 && viaV11.length>0` 必然为假 ⇒ 落回旧路
+      incrMetric('v11_fallback_fence_total');
+      incrMetric('v11_fallback_total');
+      return null;
+    }
+    const fp = (options?.perception as any)?.location_fingerprint ?? '';
+    const gated = await this._v11ApplyGate(dnas, locusPath, fp);
+    // 判据与调用方**逐字同一条件**，避免「埋点说接管、代码没接管」的双口径
+    if (gated.length > 0) incrMetric('v11_takeover_total');
+    else incrMetric('v11_fallback_total'); // 围栏有货但闸门后为空（全被过滤 / fail-closed）
+    return gated;
+  }
+
+  /**
+   * 🔴 v11 §S3 A1 挂载点② —— 只替换 `retrieveMultiRank` 六路里的 **keyword 路**。
+   *
+   * 业主 2026-10-27 裁决：v11 本质是取代 n-gram 倒排的关键词召回，
+   * 其余五路（emotion / spine / locus / entity / work）**原样保留**，
+   * V13 RRF 的多路多样性不变（白皮书 §4.1「v11 只替换 G1 的候选生成方式」）。
+   *
+   * ⚠️ 不在本方法内挂闸门 —— `retrieveMultiRank` 的六路汇合处已有共享闸门挂载点②，
+   * 在此再挂一次会重复过滤。
+   *
+   * @returns `null` = 新链路不接管，调用方落回旧路。
+   */
+  private async _v11KeywordRanked(
+    locusPath: string,
+    entities: Array<{ name: string; type: string }>,
+    options?: { p40?: PerceptionV40; entityUuids?: string[]; rawQuery?: string; isBackgroundTask?: boolean },
+  ): Promise<RankedItem[] | null> {
+    const dnas = await this._v11FenceToDnas(locusPath, entities, options);
+    if (!dnas || dnas.length === 0) {
+      // 🔴 接管率观测（与挂载点①同型）：围栏未给出候选 ⇒ runKeyword 调用方必落回旧路
+      incrMetric('v11_fallback_fence_total');
+      incrMetric('v11_fallback_total');
+      return null;
+    }
+    const items: RankedItem[] = [];
+    for (const d of dnas) {
+      if (options?.isBackgroundTask && (d as any).memory_kind === 'roleplay') continue;
+      items.push({
+        id: d.branch_id,
+        text: (d.raw_input ?? '').substring(0, 200),
+        score: (d as any).calcium_score ?? 0,
+        source: 'keyword',
+        entityUuid: (d as any).belong_entity_uuid ?? null,
+        calciumScore: (d as any).calcium_score ?? 0,
+        createdAt: d.created_at ?? '',
+      });
+    }
+    // `_v11FenceToDnas` 已按精排分降序返回，此处保持原序（路内已排序）
+    // 🔴 接管率观测：判据与 runKeyword 的 `viaV11 && viaV11.length > 0` 逐字同一条件。
+    //    items 为空（围栏有货但全被 isBackgroundTask 的 roleplay 过滤）同样算**未接管**。
+    if (items.length > 0) incrMetric('v11_takeover_total');
+    else incrMetric('v11_fallback_total');
+    return items;
+  }
+
+  /**
    * 根据 M3 决策检索相关历史记忆
    *
    * v2: 新增会话级缓存（P1-2），同一会话中相同 locus_path 复用检索结果
@@ -192,8 +525,21 @@ export class MemoryRetriever {
   async retrieveMemories(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean; rawQuery?: string; searchScope?: 'strict' | 'allow-unowned' | 'full' }
+    options?: { limit?: number; perception?: PerceptionState24; p40?: PerceptionV40; sessionId?: string; entityUuids?: string[]; isBackgroundTask?: boolean; rawQuery?: string; searchScope?: 'strict' | 'allow-unowned' | 'full' }
   ): Promise<DNA[]> {
+    // 🔴 v11 §S3 A1 路由：新链路开启时接管候选生成。**旧路代码在其后逐字保留**，
+    //    关掉 RETRIEVAL_V11 即回到改造前状态（分钟级回滚，任务书 S3-C）。
+    //    新链路不接管（返回 null）时同样落回旧路，不阻断检索。
+    if (this._v11RouteOn()) {
+      const viaV11 = await this._v11RetrieveMemories(locusPath, entities, options);
+      // 🔴 **不切片**：旧路是 `return merged`（六路合并后可能 30–60 条），
+      //    `options.limit` 在旧路只用于知识库配额（`limit - merged.length`），
+      //    **不**限制最终返回条数。若在此按 limit 截断，等于把生产召回从几十条砍到 5 条
+      //    —— 2026-10-27 切换上线后实测到角色说「那个 XX 真没印象」的召回失效即由此而来。
+      //    v11 是「在内部换实现」不是「换接口」（蓝皮书 §2.1），返回语义必须与旧路一致。
+      if (viaV11 && viaV11.length > 0) return viaV11;
+    }
+
     const limit = options?.limit ?? 5;
     const startTs = Date.now();
     const sessionId = options?.sessionId ?? this._sessionId;
@@ -304,6 +650,7 @@ export class MemoryRetriever {
       try {
         const scored = this.storage.findByEmotionalSimilarity({
           current_perception: options?.perception!,
+          p40: options?.p40,  // 🔴 P072 整改批：查询同源——原生 40D 优先，缺失回退仅供内部分析
           entities: entities.filter(e => e.type === 'emotion').map(e => e.name),
           similarity_mode: 'mood_congruent',
           limit: 10,
@@ -334,59 +681,8 @@ export class MemoryRetriever {
       }
     }
 
-    // 🔥 3.5 双螺旋 state_spines 检索：从语义向量分片库直接读取候选
-    // 🔴 P2-A2 修复: state_spines 无实体维度，会晤场景（有 entityUuids）跳过（防全库向量泄漏）
-    const bySpine: DNA[] = [];
-    if (options?.perception && (options.entityUuids?.length ?? 0) === 0) {
-      try {
-        const sqlite = (this.storage as any).getSQLite?.();
-        if (sqlite && typeof sqlite.queryAll === 'function') {
-          const p = options.perception;
-          const spineRows = sqlite.queryAll(
-            `SELECT s.global_uid, s.dimension_id, s.value, s.timestamp_ms
-             FROM state_spines s
-             WHERE s.dimension_id IN (1, 2, 5, 13)
-               AND s.timestamp_ms > ?
-             ORDER BY s.timestamp_ms DESC LIMIT 200`,
-            [Date.now() - 30 * 86400000]
-          );
-          if (spineRows && spineRows.length > 0) {
-            const spineMap = new Map<string, { dims: Map<number, number>; ts: number }>();
-            for (const row of spineRows) {
-              const uid = row.global_uid as string;
-              if (!spineMap.has(uid)) spineMap.set(uid, { dims: new Map(), ts: row.timestamp_ms as number });
-              const entry = spineMap.get(uid)!;
-              entry.dims.set(row.dimension_id as number, row.value as number);
-            }
-            const targetDims = [p.pleasure ?? 0, p.arousal ?? 0, p.intimacy ?? 0, p.intimacy ?? 0];
-            for (const [uid, entry] of spineMap) {
-              const vec: number[] = [
-                entry.dims.get(1) ?? 0.5,
-                entry.dims.get(2) ?? 0.5,
-                entry.dims.get(5) ?? 0.5,
-                entry.dims.get(13) ?? 0.5,
-              ];
-              let dot = 0, nA = 0, nB = 0;
-              for (let i = 0; i < 4; i++) { dot += vec[i] * targetDims[i]; nA += vec[i] * vec[i]; nB += targetDims[i] * targetDims[i]; }
-              const sim = nA && nB ? (dot / (Math.sqrt(nA) * Math.sqrt(nB)) + 1) / 2 : 0.5;
-              if (sim > 0.3) {
-                bySpine.push({
-                  branch_id: uid, locus_path: '', taxonomy_version: '1.0',
-                  seq_pos: 0, leaf_zone: 'language_semantic_zone', ref: '',
-                  entity_genes: [], raw_input: '', created_at: new Date(entry.ts).toISOString(),
-                  calcium_score: sim * 10, calcium_level: Math.min(3, Math.floor(sim / 0.25)),
-                } as any);
-              }
-            }
-            if (bySpine.length > 0) {
-              console.log('[M4-DualHelix] state_spines: ' + bySpine.length + ' candidates');
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[M4-DualHelix] 检索失败:', err);
-      }
-    }
+    // 🔴 P071(2026-10-23): 原 3.5 双螺旋 state_spines 检索路已随底座1 废除删除
+    //   （该表从未建 HNSW、仅 4 维+30 天窗+候选无文本，残废路；40D 语义真源=memories.perception_40d）
 
     // 4. 🆕 实体归属检索（belong_entity_uuid 直查，不依赖 memory_kind）
     //    🔴 2026-09-12 召回窗口修复: 原「单窗口取最新 10 条」→ 分层召回（最新层 + 地标/高钙化层），
@@ -425,10 +721,10 @@ export class MemoryRetriever {
       }
     }
 
-    // 5. 合并去重（加入 bySpine 源）
+    // 5. 合并去重（P071: spine 路已删，剩四源）
     const seen = new Set<string>();
     let merged: DNA[] = [];
-    for (const dna of [...byEmotion, ...byKeyword, ...bySpine, ...byLocus]) {
+    for (const dna of [...byEmotion, ...byKeyword, ...byLocus]) {
       if (!seen.has(dna.branch_id) && merged.length < limit) {
         seen.add(dna.branch_id);
         merged.push(dna);
@@ -534,8 +830,19 @@ export class MemoryRetriever {
         const gatedSet = new Set(gated.passed.map(m => m.id));
         merged = merged.filter(d => gatedSet.has(d.branch_id));
       } catch (_e) {
-        // 闸门加载失败不阻断检索, 仅告警
-        console.warn('[FiveStageGate] 加载失败, 跳过闸门过滤:', (_e as Error).message);
+        // 🔴 五级闸门是安全边界，只能 fail-closed（蓝皮书 §2.3 铁律① / §5.3 方案 A）。
+        //    原实现「打印告警并继续」是 fail-open，使「不可绕过」在异常路径上被绕过 —— 本次根治。
+        //    开关 RETRIEVAL_V11_GATE_FAILCLOSED：S2 期默认关（生产行为不变），
+        //    S3 起默认闭合。回退开关仅限紧急且须上报（任务书 §S2 C / §S3 D5）。
+        if (!Flags.gateFailClosed()) {
+          // 旧行为：告警后**落穿**到后续会话缓存 / 海马体索引 / 检索日志再返回。
+          // 这里刻意不 return —— 保持与改造前逐字节一致的控制流（fail-open 放行）。
+          console.warn('[FiveStageGate] 加载失败, 跳过闸门过滤(回退开关已开，仅限紧急，须上报):', (_e as Error).message);
+        } else {
+          console.error('[FiveStageGate] 加载失败，按 fail-closed 返回空结果:', (_e as Error).message);
+          incrMetric('gate_failclosed_total');
+          return []; // 安全边界失败 ⇒ 宁拒不放
+        }
       }
     }
 
@@ -584,6 +891,15 @@ export class MemoryRetriever {
       }
     } catch (e) { /* 日志不可用不影响主流程 */ }
 
+    // 🔴 v11 §S2 A6 影子调用：只写日志，绝不参与返回值（fire-and-forget，不 await）
+    this._shadowRecall({
+      locusPath,
+      oldIds: merged.map((d) => d.branch_id),
+      keywords: [...keywords],
+      entityUuids: options?.entityUuids,
+      p40: options?.p40,
+    });
+
     return merged;
   }
 
@@ -613,7 +929,7 @@ export class MemoryRetriever {
   async retrieveMultiRank(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { perception?: Perception24D; entityUuids?: string[]; sessionId?: string; isBackgroundTask?: boolean; searchScope?: 'strict' | 'allow-unowned' | 'full' }
+    options?: { perception?: PerceptionState24; p40?: PerceptionV40; queryText?: string; entityUuids?: string[]; sessionId?: string; isBackgroundTask?: boolean; searchScope?: 'strict' | 'allow-unowned' | 'full' }
   ): Promise<MultiRankResult> {
     const sessionId = options?.sessionId ?? this._sessionId;
     const lists: RankedList[] = [];
@@ -648,7 +964,8 @@ export class MemoryRetriever {
     // 原串行 6 路各自包成独立 async 函数（自带 try-catch 隔离，异常不阻塞其他路），
     // Promise.all 并行执行。结果按固定顺序 [emotion, keyword, spine, locus, entity, work]
     // 合并 → 保持下游 V13 RRF 对 lists 顺序的稳定依赖。
-    // 🔴 每路守卫条件原样保留（emotion 需 perception、spine 会晤跳过、entity 需 uuid、work 需关键词）。
+    // 🔴 P071 Phase1: spine 路以 perception_40d 重建（语义联想路，全实体含会晤，无时间窗）。
+    // 🔴 每路守卫条件原样保留（emotion 需 perception、spine 需 perception、entity 需 uuid、work 需关键词）。
     // 🔴 不剪枝：keyword/spine 的 200 条候选窗口原样保留（改动会改变召回范围）。
     const entityUuids = options?.entityUuids ?? [];
     
@@ -664,6 +981,7 @@ export class MemoryRetriever {
         try {
           const scored = this.storage.findByEmotionalSimilarity({
             current_perception: options.perception,
+            p40: options?.p40,  // 🔴 P072 整改批：查询同源——原生 40D 优先，缺失回退仅供内部分析
             entities: entities.filter(e => e.type === 'emotion').map(e => e.name),
             similarity_mode: 'mood_congruent',
             limit: 30,
@@ -691,6 +1009,13 @@ export class MemoryRetriever {
 
     // 2. 关键词/BM25路 (keyword)
     const runKeyword = async (): Promise<RankedItem[]> => {
+      // 🔴 v11 §S3 A1 挂载点②：新链路开启时**只替换本路**（v11 本质取代 n-gram 倒排
+      //    的关键词召回）。其余五路 emotion/spine/locus/entity/work 原样保留，
+      //    V13 RRF 多样性不变。旧路代码在其后逐字保留，关开关即回滚。
+      if (this._v11RouteOn()) {
+        const viaV11 = await this._v11KeywordRanked(locusPath, entities, options);
+        if (viaV11 && viaV11.length > 0) return viaV11;
+      }
       const items: RankedItem[] = [];
       if (keywords.size > 0) {
         try {
@@ -723,49 +1048,102 @@ export class MemoryRetriever {
       return items;
     };
 
-    // 3. 双螺旋 state_spines 向量路 (spine)
-    // 🔴 P2-A2 修复: state_spines 表无 belong_entity_uuid 列，global_uid 与 memories 无法关联，
-    //   检索出的 spine 候选无法回溯到具体实体（天然"无归属"）。
-    //   会晤场景（有 entityUuids）下跳过 spine 路——否则会把全库情绪向量注入（违反 UUID 法 deny-by-default）。
-    //   户主场景（无 entityUuids）下保留（户主最高权限，spine 作为辅助信号）。
-    const runSpine = async (): Promise<RankedItem[]> => {
+    // 3. P071 Phase1 · 语义联想路 (spine40D) — 双螺旋语义链真源 memories.perception_40d
+    // 🔴 P072 业主立法级裁决（2026-10-23）：「除 40D 外其它都是违法」——
+    //   查询向量**必须是 M3 原生 40D**（options.p40，与写入侧同源同规格）；
+    //   **禁止 projectState24ToV40 等 24D→40D 二次投影**（违法支线，且实测六维规格不一致：
+    //   写入侧未映射维=M3 中性 0.35/瑶光回填，投影侧=0 → 瑶光回填记忆被系统性降分）。
+    //   无原生 p40 → 本路直接跳过，不降级。
+    // 法定 G1 候选源：全 40 维扇区加权余弦（cosineSimilarity40D 唯一合法相似度）
+    //   → floor 0.3（G1 语义初筛在路内执行，见闸门挂载注释）。
+    //   - 全实体生效（含会晤场景）：UUID 过滤经 belong_entity_uuid 列；户主场景全池（最高权限钥匙）。
+    //   - 无时间窗（SEMANTIC_ONLY 自由联想，隔几年也命中）。
+    //   - 退化治理：全零向量 sim=0 被 floor 拦截（交关键词路）；同 dna_root_id 一簇一票；tie-break sim→钙分→新。
+    //   - 双源（业主裁决⑤ 四库覆盖）：memories（金库，排 promoted_to_diamond）+
+    //     black_diamond（黑钻 active）；砂金无向量列由关键词/原文路覆盖，
+    //     知识库走 KnowledgeEngine 既有链路（visible_entity_uuids 可见性规则不旁路）。
+    const runSpine40D = async (): Promise<RankedItem[]> => {
       const items: RankedItem[] = [];
-      if (options?.perception && entityUuids.length === 0) {
-        try {
-          const sqlite = (this.storage as any).getSQLite?.();
-          if (sqlite && typeof sqlite.queryAll === 'function') {
-            const p = options.perception;
-            const spineRows = sqlite.queryAll(
-              `SELECT s.global_uid, s.dimension_id, s.value, s.timestamp_ms
-               FROM state_spines s WHERE s.dimension_id IN (1,2,5,13)
-                 AND s.timestamp_ms > ? ORDER BY s.timestamp_ms DESC LIMIT 200`,
-              [Date.now() - 30 * 86400000]
-            );
-            if (spineRows?.length) {
-              const spineMap = new Map<string, { dims: Map<number,number>; ts: number }>();
-              for (const row of spineRows) {
-                const uid = row.global_uid as string;
-                if (!spineMap.has(uid)) spineMap.set(uid, { dims: new Map(), ts: row.timestamp_ms as number });
-                spineMap.get(uid)!.dims.set(row.dimension_id as number, row.value as number);
-              }
-              const targetDims = [p.pleasure ?? 0, p.arousal ?? 0, p.intimacy ?? 0, p.intimacy ?? 0];
-              for (const [uid, entry] of spineMap) {
-                const vec = [entry.dims.get(1) ?? 0.5, entry.dims.get(2) ?? 0.5, entry.dims.get(5) ?? 0.5, entry.dims.get(13) ?? 0.5];
-                let dot = 0, nA = 0, nB = 0;
-                for (let i = 0; i < 4; i++) { dot += vec[i] * targetDims[i]; nA += vec[i] * vec[i]; nB += targetDims[i] * targetDims[i]; }
-                const sim = nA && nB ? (dot / Math.sqrt(nA * nB) + 1) / 2 : 0.5;
-                if (sim > 0.3) {
-                  items.push({
-                    id: uid, text: '', source: 'spine', entityUuid: null,
-                    score: sim, calciumScore: sim * 10, createdAt: new Date(entry.ts).toISOString(),
-                  });
+      const q40 = options?.p40; // M3 原生 40D（唯一合法查询量纲）
+      if (!q40) return items;
+      try {
+        const sqlite = (this.storage as any).getSQLite?.();
+        if (sqlite && typeof sqlite.queryAll === 'function') {
+          const { decodePerceptionV40, cosineSimilarity40D } = await import('../m2/PerceptionVector40DCodec.js');
+          // UUID 户籍过滤（户籍法第九条 搜索闸门）：白名单非空 → IN 子句；空 → 户主全池
+          const uuidClause = entityUuids.length > 0 ? `AND belong_entity_uuid IN (${entityUuids.map(() => '?').join(',')})` : '';
+          const uuidParams = entityUuids.length > 0 ? entityUuids : [];
+          const rows: Array<{ id: string; raw_input: string; calcium_score: number; created_at: string; perception_40d: string; dna_root_id: string | null; src: string; memory_kind?: string }> = [
+            ...(sqlite.queryAll(
+              `SELECT id, raw_input, calcium_score, created_at, perception_40d, dna_root_id, memory_kind, 'memory' AS src
+               FROM memories
+               WHERE COALESCE(promoted_to_diamond, 0) = 0
+                 AND COALESCE(namespace, 'default') <> 'test'
+                 AND perception_40d IS NOT NULL AND perception_40d <> '' ${uuidClause}`,
+              uuidParams,
+            ) ?? []),
+            ...(sqlite.queryAll(
+              `SELECT id, summary AS raw_input, (CAST(calcium_level AS REAL) / 3.0) AS calcium_score,
+                      created_at, emotion_vector AS perception_40d, dna_root_id, 'active' AS memory_kind, 'black_diamond' AS src
+               FROM black_diamond
+               WHERE status = 'active' AND emotion_vector IS NOT NULL AND emotion_vector <> '' ${uuidClause}`,
+              uuidParams,
+            ) ?? []),
+          ];
+          // 🔴 P071-Phase2批B · DUAL_CHAIN 寻址先行（业主架构：UUID 主线，藤/时序为池内工具）：
+          //   主动回忆意图（G4 正则，经 isActiveRecallIntent 同源判定）且 UUID 白名单非空时 →
+          //   ATL 按实体归属 + 时序倒序取历史 GlobalUID（200）扩展语义联想候选池——
+          //   旧记忆不再被近期窗/关键词排除；双 UUID 守卫（ATL entity IN + 下方 memories belong IN）。
+          if (entityUuids.length > 0 && options?.queryText) {
+            try {
+              const { isActiveRecallIntent } = await import('../m3/FiveStageGate.js');
+              if (isActiveRecallIntent(options.queryText)) {
+                const hist = sqlite.queryAll(
+                  `SELECT global_uid FROM atom_address_timeline
+                   WHERE entity_belong_id IN (${entityUuids.map(() => '?').join(',')})
+                   ORDER BY absolute_timestamp DESC LIMIT 200`, entityUuids) as Array<{ global_uid: string }>;
+                if (hist && hist.length > 0) {
+                  const huids = hist.map(h => h.global_uid);
+                  const histRows = sqlite.queryAll(
+                    `SELECT id, raw_input, calcium_score, created_at, perception_40d, dna_root_id, memory_kind, 'memory' AS src
+                     FROM memories
+                     WHERE global_uid IN (${huids.map(() => '?').join(',')})
+                       AND COALESCE(promoted_to_diamond, 0) = 0
+                       AND COALESCE(namespace, 'default') <> 'test'
+                       AND perception_40d IS NOT NULL AND perception_40d <> '' ${uuidClause}`,
+                    [...huids, ...uuidParams]) as Array<typeof rows[number]>;
+                  if (histRows?.length) {
+                    rows.push(...histRows);
+                    console.log(`[M4-Spine40D] DUAL_CHAIN 寻址先行: ATL 历史候选 ${histRows.length} 条（意图命中）`);
+                  }
                 }
               }
-            }
+            } catch { /* 寻址先行失败不阻塞语义联想 */ }
           }
-        } catch { /* skip */ }
-      }
-      items.sort((a, b) => b.score - a.score);
+          // 语义扇区余弦 + 退化治理：全零拦截 / 同 dna_root 一簇一票 / tie-break
+          const bestByRoot = new Map<string, { r: typeof rows[number]; sim: number }>();
+          for (const r of rows) {
+            if (options?.isBackgroundTask && r.memory_kind === 'roleplay') continue;
+            const mem40 = decodePerceptionV40(r.perception_40d);
+            if (!mem40) continue;
+            const sim = cosineSimilarity40D(q40, mem40);
+            if (!Number.isFinite(sim) || sim < SPINE40_SEMANTIC_FLOOR) continue;
+            const rootKey = r.dna_root_id || r.id;
+            const prev = bestByRoot.get(rootKey);
+            if (!prev || sim > prev.sim) bestByRoot.set(rootKey, { r, sim });
+          }
+          for (const { r, sim } of bestByRoot.values()) {
+            items.push({
+              id: r.id, text: (r.raw_input ?? '').substring(0, 200),
+              score: sim, source: 'spine',
+              entityUuid: null, calciumScore: r.calcium_score ?? 0,
+              createdAt: r.created_at ?? '',
+            });
+          }
+          if (items.length > 0) console.log('[M4-Spine40D] 语义联想候选: ' + items.length + ' 条 (双源' + rows.length + '行)');
+        }
+      } catch (err) { console.warn('[M4-Spine40D] 语义联想路失败（不阻塞其他路）:', (err as Error).message); }
+      items.sort((a, b) => (b.score - a.score) || ((b.calciumScore ?? 0) - (a.calciumScore ?? 0)));
       return items;
     };
 
@@ -880,9 +1258,9 @@ export class MemoryRetriever {
       return items;
     };
 
-    // 六路并行执行 → 固定顺序合并（Promise.all 数组保序，不依赖完成先后）
+    // P071 Phase1: 六路并行（spine 路以 perception_40d 重建，恢复原六路结构）
     const [emotionItems, keywordItems, spineItems, locusItems, entityItems, workItems] = await Promise.all([
-      runEmotion(), runKeyword(), runSpine(), runLocus(), runEntity(), runWork(),
+      runEmotion(), runKeyword(), runSpine40D(), runLocus(), runEntity(), runWork(),
     ]);
 
     if (emotionItems.length > 0) lists.push({ source: 'emotion', items: emotionItems });
@@ -892,15 +1270,64 @@ export class MemoryRetriever {
     if (entityItems.length > 0) lists.push({ source: 'entity', items: entityItems });
     if (workItems.length > 0) lists.push({ source: 'work', items: workItems });
 
+    // 🔴 P071 Phase1: 五级闸门挂共享出口（蓝皮书 §8.3「唯一读取通道，无旁路」，
+    //   原主链 retrieveMultiRank 全程 0 闸门 = 合规缺陷，本次修复）
+    //   - G1 语义初筛：spine 路内 floor=0.3 已执行；容器 G1 **不重复设分**——
+    //     混合池中非语义候选无 cosine 分，一旦池内存在带分候选，G1 会把无分候选全部清零剔除
+    //     （FiveStageGate 实现如此），故容器层不映射 cosine_score 字段，G1 自然放行。
+    //   - 容器跑 G2 时空 / G3 衰减 / G4 意图 / G5 话题壁垒；只按**成员过滤**、保持各路原序
+    //     （G2-G5 现行为均为重权不丢弃；成员过滤为未来丢弃型规则预留）。
+    try {
+      if (lists.length > 0) {
+        const { getFiveStageGate } = await import('../m3/FiveStageGate.js');
+        const gate = getFiveStageGate();
+        const gateCandidates = lists.flatMap(l => l.items.map(it => ({
+          id: it.id,
+          raw_input: it.text,
+          calcium_score: it.calciumScore,
+          absolute_timestamp: it.createdAt ? Date.parse(it.createdAt) : undefined,
+          locus_path: locusPath,
+        })));
+        if (gateCandidates.length > 0) {
+          // P071-Phase2: G4 意图区分用真实消息（原误传 locusPath 致主动回忆正则空转）；无消息回退 locusPath
+          const gated = gate.filter(gateCandidates, { query: options?.queryText || locusPath, locationFingerprint: '' });
+          const passedIds = new Set(gated.passed.map(m => m.id));
+          for (const l of lists) l.items = l.items.filter(it => passedIds.has(it.id));
+          for (let i = lists.length - 1; i >= 0; i--) if (lists[i].items.length === 0) lists.splice(i, 1);
+          console.log(`[FiveStageGate·主链] ${gateCandidates.length}候选过闸 | ${JSON.stringify(gated.stageStats)}`);
+        }
+      }
+    } catch (e) {
+      // 🔴 同上：主链共享出口的闸门加载失败，只能 fail-closed（蓝皮书 §5.3 改造点 ②）。
+      if (!Flags.gateFailClosed()) {
+        // 旧行为：告警后**落穿**到 try/catch 之后的去重计数再返回（fail-open 放行）。
+        // 这里刻意不 return —— 保持与改造前逐字节一致的控制流。
+        console.warn('[FiveStageGate·主链] 加载失败，跳过闸门过滤(回退开关已开，仅限紧急，须上报):', (e as Error).message);
+      } else {
+        console.error('[FiveStageGate·主链] 加载失败，按 fail-closed 清空候选:', (e as Error).message);
+        incrMetric('gate_failclosed_total');
+        return { lists: [], totalCandidates: 0, indexHit, indexedIds };
+      }
+    }
+
     // 去重计数
     const allIds = new Set<string>();
     for (const list of lists) for (const item of list.items) allIds.add(item.id);
+
+    // 🔴 v11 §S2 A6 影子调用：只写日志，绝不参与返回值（fire-and-forget，不 await）
+    this._shadowRecall({
+      locusPath,
+      oldIds: [...allIds],
+      keywords: [...keywords],
+      entityUuids: options?.entityUuids,
+      p40: options?.p40,
+    });
 
     return { lists, totalCandidates: allIds.size, indexHit, indexedIds };
   }
 
   /** V3.1 记忆再巩固: 检索触发突触更新（人脑 reconsolidation 机制） */
-  private _reconsolidateAsync(memories: DNA[], currentPerception?: Perception24D): void {
+  private _reconsolidateAsync(memories: DNA[], currentPerception?: PerceptionState24): void {
     try {
       const sqlite = (this.storage as any).getSQLite?.();
       if (!sqlite) return;
@@ -966,7 +1393,7 @@ export class MemoryRetriever {
   async retrieveMemoriesStructured(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    options?: { limit?: number; perception?: Perception24D; sessionId?: string; entityUuids?: string[] }
+    options?: { limit?: number; perception?: PerceptionState24; sessionId?: string; entityUuids?: string[] }
   ): Promise<{ items: StructuredMemoryItem[]; summary: MemorySummary }> {
     const dnas = await this.retrieveMemories(locusPath, entities, options);
     const summary = this.compressMemories(dnas);

@@ -161,6 +161,10 @@ export class UUIDGatekeeper {
     }
     this.resetSessionStats();
     this.nameToUUIDCache.clear();
+    // P105 §二（P100 §二已批准）：门卫激活可观测 —— 本函数此前**零日志出口**，
+    //   「门卫是否真的开了」只能靠源码断言、无法用日志证明，是取证链唯一薄弱点
+    //   （P098 §一 提出的建议项）。N 取已 filter(Boolean) 的真实参会数，不重算不猜。
+    console.log('[Gatekeeper] 会话开启: ' + this.meetingState.participants.size + '人 — ' + name);
   }
 
   /** 会晤中途加人 */

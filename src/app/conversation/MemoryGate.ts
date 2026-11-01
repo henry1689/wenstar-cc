@@ -18,7 +18,7 @@
  */
 
 import type { ConversationTurn } from '../../m5/types/index.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 
 // ─── 对话模式 ───
 
@@ -56,7 +56,7 @@ export interface MemoryGateContext {
   /** 用户消息长度 */
   messageLength: number;
   /** P1-2: M3 24D 感知向量（用于增强模式判定） */
-  perception?: Perception24D;
+  perception?: PerceptionState24;
 }
 
 // ─── 过去时标记词 ───

@@ -4,11 +4,11 @@
  * 情感/关系状态全部收敛至此。
  * S2 充实神经递质衰减 + 关系突触模型。
  */
-import type { EmotionVector24D, RelationState, Atmosphere, MemoryPermission } from '../../bus/types.js';
+import type { EmotionState24, RelationState, Atmosphere, MemoryPermission } from '../../bus/types.js';
 
 // ── 全局状态快照 ──
 export interface HeartGlobalState {
-  emotionVector: EmotionVector24D;           // 24D 情感向量（S2 做衰减）
+  emotionVector: EmotionState24;           // 情绪状态分量集（S2 做衰减；🔴 P076 原 24D 命名废除）
   relationState: RelationState;              // 关系阶段
   atmosphere: Atmosphere;                    // 对话氛围
   memoryPermission: MemoryPermission;        // 记忆权限
@@ -28,7 +28,7 @@ export interface RelationMetrics {
 
 // ── 情感刺激增量（用于仿生钩子） ──
 export interface EmotionDelta {
-  vector: Partial<EmotionVector24D>;
+  vector: Partial<EmotionState24>;
   intensity: number;
 }
 

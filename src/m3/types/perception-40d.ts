@@ -1,6 +1,6 @@
 // 40维语义感知坐标系 — M3 输入契约（V2.1 瑶光对齐）
-// Ref: 32D 通用规则细则（双规范结合）+ 瑶光权威源对齐:
-//   - WS-ARCH-32D-MEM 工程蓝皮书 spine.proto D1-D32（5 大类，field 10-55）
+// Ref: 《40D 量纲统一法令》+ 瑶光权威源对齐:
+//   - 维度定型：D1-D32（5 大类）+ D33-D40（第 6 大类亲密纹理）；原 32D-MEM 蓝皮书引用已随法令 40D 化
 //   - DNA 双螺旋完整编码规范 V2.0 §1.1（海胆 32 根语义刺）
 //   - 瑶光 domain_yaoguang/channels/ ObjDimConfig（命名/定义/阈值权威源）
 //   - WS-RECTIFY-40D-YAOGUANG-V1.0 整改清单
@@ -24,7 +24,7 @@
 //   大类3 圈层人际       D15-D20   6D   来源: spine.proto  (瑶灵 D15-D20)
 //   大类4 时空环境       D21-D26   6D   来源: spine.proto  (瑶灵 D21-D26)
 //   大类5 动态成长       D27-D32   6D   来源: spine.proto  (瑶灵 D27-D32)
-//   大类6 伴侣情感纹理   D33-D40   8D   ★ 新增扇区 (24D 保留)
+//   大类6 伴侣情感纹理   D33-D40   8D   ★ 第 6 大类扇区
 //                      ─────
 //                       40D
 
@@ -140,8 +140,8 @@ export const PERCEPTION_40D_SECTORS = [
 /** 扇区检索权重（P3 前：肉身体验/时空/成长无数据源，权重降 0；伴侣纹理最高） */
 export const PERCEPTION_40D_SECTOR_WEIGHTS: Record<string, number> = {
   physical_body:   0.0,   // D01-D08: 当前全 0，P3 瑶灵通道上线后激活
-  inner_spirit:    0.15,  // D09-D14: 当前部分由 24D 派生
-  social_bonds:    0.15,  // D15-D20: 当前部分由 24D 派生
+  inner_spirit:    0.15,  // D09-D14: 当前部分由中间层派生（P074 后直产）
+  social_bonds:    0.15,  // D15-D20: 当前部分由中间层派生（P074 后直产）
   spatiotemporal:  0.0,   // D21-D26: 当前全 0，P3 瑶光通道上线后激活
   dynamic_growth:  0.0,   // D27-D32: 当前全 0，P3 激活
   intimate_texture: 0.30, // D33-D40: ★ 伴侣情感信号，检索权重最高
@@ -150,12 +150,9 @@ export const PERCEPTION_40D_SECTOR_WEIGHTS: Record<string, number> = {
 /** 维度总数 */
 export const PERCEPTION_40D_DIM = 40;
 
-/** 情绪共振检索切片：感知情绪 + 伴侣纹理 = 14D（40D 文档 §九） */
-export const PERCEPTION_40D_RESONANCE_DIMS = [
-  // D01-D08 感知情绪（来自大类1 的部分）——当前 P3 前全 0，但保留槽位
-  // 实际情绪共振切片：伴侣纹理 D33-D40（8D）+ 精神/人际中可用的情绪维
-  // 当前实现：伴侣纹理 8D 为主，P3 后并入 D01-D06
-] as const;
+// 🔴 P072 业主立法级裁决（2026-10-23）：「除 40D 外其它都是违法」
+// 原 PERCEPTION_40D_RESONANCE_DIMS（14 维共振切片，零使用空壳）已删除——
+// 全系统禁止任何 40D 以下的子维度切片量纲。
 
 /** 40D 维度键序（固定，用于编解码对齐）—— 裸 key 与瑶光 dim_key 一致 */
 export const PERCEPTION_40D_KEYS: (keyof PerceptionV40)[] = [

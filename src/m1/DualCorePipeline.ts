@@ -20,7 +20,7 @@ import type { M3LogicOrchestrator } from '../m3/M3LogicOrchestrator.js';
 import type { M4Orchestrator } from '../m4/M4Orchestrator.js';
 import type { M5Orchestrator } from '../m5/M5Orchestrator.js';
 import type { FiveStageGate, GateContext, ScoredMemory, GateResult } from '../m3/FiveStageGate.js';
-import type { Perception24D, M3Decision } from '../m3/types/perception.js';
+import type { PerceptionState24, M3Decision } from '../m3/types/perception.js';
 import type { BIOSContext, BIOSOutput, MindContext, MindOutput } from './DualCoreKernel.js';
 
 // ── BIOS 核阶段 ──────────────────────────────────────────────
@@ -29,7 +29,7 @@ export interface BIOSPhaseInput {
   message: string;
   dna: DNA;
   decision: M3Decision;
-  perception: Perception24D;
+  perception: PerceptionState24;
   emotionalMemories: any[];
   locationFingerprint?: string;
   currentRoleplay: string | null;

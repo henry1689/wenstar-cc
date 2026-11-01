@@ -139,6 +139,13 @@ export const config = {
   /** ── TTS 语音 (8765) ── */
   tts: {
     apiUrl: 'http://localhost:8765',
+    /** V26 语音引擎：edge=微软在线（音质最好，但依赖其服务，协议为逆向实现）
+     *  / sapi=Windows 本地离线（零网络依赖，音质一般）。
+     *  可用环境变量 TTS_ENGINE 覆盖；切换后需重启服务（worker 启动时选定引擎）。 */
+    engine: 'edge',
+    /** V26 edge-tts 宿主 Python 绝对路径。必须指向装了 edge_tts 的解释器——
+     *  PATH 里的 `python` 是 hermes venv 3.11，没有 edge_tts。 */
+    pythonPath: 'C:\\Users\\henry\\AppData\\Local\\Programs\\Python\\Python313\\python.exe',
   },
 
   /** ── T1: 太虚图书馆（旗舰版）── */

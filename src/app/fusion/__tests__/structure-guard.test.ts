@@ -9,9 +9,9 @@
 import { describe, it, expect } from 'vitest';
 import { fuseSources } from '../FusionEngine.js';
 import type { FusionInput, FusionResult } from '../FusionEngine.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 
-const BASE_P: Perception24D = {
+const BASE_P: PerceptionState24 = {
   pleasure: 0, arousal: 0.5, dominance: 0.5, aggression: 0, sincerity: 0.5, humor: 0,
   factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5, temporal_focus: 0, self_ref: 0.5,
   intimacy: 0, power_diff: 0, dependency: 0.5, moral_judgment: 0, etiquette: 0.5, belonging: 0.5,

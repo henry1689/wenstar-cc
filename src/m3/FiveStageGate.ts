@@ -268,4 +268,9 @@ const _instance = new FiveStageGate();
 
 /** 全局五级闸门实例 */
 export function getFiveStageGate(): FiveStageGate { return _instance; }
+
+/** 🔴 P071-Phase2批B: G4 主动回忆意图判定（导出供 DUAL_CHAIN 寻址先行复用同一正则，防口径漂移） */
+export function isActiveRecallIntent(query: string): boolean {
+  return G4_ACTIVE_RECALL_REGEX.test(query);
+}
 export { _instance as fiveStageGate };

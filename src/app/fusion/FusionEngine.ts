@@ -11,12 +11,12 @@
  *
  * 零 LLM 调用，纯规则。
  */
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { MemorySummary } from '../../m4/types/index.js';
 
 /** 熔铸器输入 */
 export interface FusionInput {
-  perception: Perception24D;
+  perception: PerceptionState24;
   knowledgeBaseText: string;
   memorySummary: MemorySummary;
   familyContext?: Array<{ entity: string; relation: string; related_entity: string }>;
@@ -46,7 +46,7 @@ const CREDIBILITY_MAP: Array<{ prefix: string; score: number }> = [
 ];
 
 /** P0-1: 感知驱动的动态评分 */
-function scoreFragment(frag: string, perception?: Perception24D): number {
+function scoreFragment(frag: string, perception?: PerceptionState24): number {
   let score = 1;
   for (const rule of CREDIBILITY_MAP) {
     if (frag.startsWith(rule.prefix)) { score = rule.score; break; }
@@ -77,7 +77,7 @@ function extractEntities(text: string): string[] {
  * P0-1: 对 memoryFragments 去重 + 可信度排序 + 同层二次排序
  * 同可信度层级内：情感相关度×0.6 + 内容长度(近度)×0.4
  */
-function dedupAndSortFragments(fragments: string[], perception?: Perception24D): string[] {
+function dedupAndSortFragments(fragments: string[], perception?: PerceptionState24): string[] {
   if (fragments.length <= 1) return fragments;
 
   // 按可信度降序排序

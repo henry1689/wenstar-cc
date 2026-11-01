@@ -75,7 +75,23 @@ describe('T012 发言人推断 inferSpeaker（多人·自然聊天）', () => {
     saveLastMeeting: () => {},
     _saveMeetingSnapshot: () => {},
   };
-  const mk = () => { const em = new EntityMeeting(stubFG); em.enterMulti(['徐诗雨', '阿珍']); return em; };
+  /**
+   * 🔴 2026-10-31 第三层固化：`EntityMeeting.enterMulti()` 已随旧状态机删除。
+   *   会晤状态的真源是 GroupSession —— 本测试用**只读视图**注入等价状态，
+   *   与生产接线方式（chat.ts 里的 `setSessionView`）完全同形。
+   */
+  const withMeeting = (participants: Array<{ uuid: string; name: string }>, speakerUuid: string) => {
+    const em = new EntityMeeting(stubFG);
+    em.setSessionView({
+      isAvailable: () => true,
+      isActive: () => true,
+      isMulti: () => true,
+      getSpeakerUuid: () => speakerUuid,
+      getParticipants: () => participants.map(p => ({ ...p, category: 'G' })),
+    });
+    return em;
+  };
+  const mk = () => withMeeting([{ uuid: 'TXS-1', name: '徐诗雨' }, { uuid: 'TXS-2', name: '阿珍' }], 'TXS-1');
 
   it('内容提及一人 → 该人接（层②，无LLM）', async () => {
     const em = mk();
@@ -83,7 +99,7 @@ describe('T012 发言人推断 inferSpeaker（多人·自然聊天）', () => {
   });
   it('别名提及归一后命中（提及非当前参会者）', async () => {
     // 令阿珍为主发言人(当前)，徐诗雨为另一参会者 → 点别名"诗雨"应切到徐诗雨
-    const em = new EntityMeeting(stubFG); em.enterMulti(['阿珍', '徐诗雨']);
+    const em = withMeeting([{ uuid: 'TXS-2', name: '阿珍' }, { uuid: 'TXS-1', name: '徐诗雨' }], 'TXS-2');
     expect(await em.inferSpeaker('诗雨你作业写完没', new Map([['诗雨', '徐诗雨']]))).toBe('徐诗雨');
   });
   it('提及当前主发言人 → null（维持，不误切）', async () => {

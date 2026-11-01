@@ -37,6 +37,7 @@ import type { EntityGene } from '../../m1/types/dna.js';
 import { validatePersonName, validateRelationType } from '../EntityValidator.js';
 import { dossierRead, dossierWrite } from './shared/DossierPath.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
+import { parseSocialGroups, sameSocialGroup, findOutsiders } from './SocialGroupResolver.js';
 import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
 // 🔴 修复3-A(2026-10-08): 写入侧串联第二道 person 判据（纯函数，静态引入不占懒加载路径）。
 //   `EntityWriteGate.checkPersonEntity` 相较 `GarbageEntityGuard.checkEntity` 额外具备
@@ -527,8 +528,13 @@ function isSpecificRelationLabel(value?: string): boolean {
   return !!value && /^(妈妈|爸爸|姐姐|妹妹|哥哥|弟弟|老公|老婆|爷爷|奶奶|外公|外婆|儿子|女儿|孩子|孙子|孙女)$/.test(value);
 }
 
-function normalizePendingKey(field: string, value: string): string {
-  return `${field}::${value.trim().replace(/\s+/g, ' ')}`;
+function normalizePendingKey(field: string, value: unknown): string {
+  // P136 修复（2026-10-30，用户指令）：pending 的 value 允许数组（taboos/dislikes/traits 类），
+  //   原 `value: string` 签名在数组上 .trim() 抛 TypeError → dedupePendingItems 中断 →
+  //   该轮档案 pending 写入静默失败（err.log 5 次实证；缺陷引入于 6ac709b / 2026-07-19）。
+  //   非字符串统一 JSON.stringify 归一（key 稳定、去重语义不变；字符串路径与原实现逐字等价）。
+  const s = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  return `${field}::${s.trim().replace(/\s+/g, ' ')}`;
 }
 
 /**
@@ -2586,6 +2592,43 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /** V6: 将 edge relation 转为中文展示标签（委托 shared/RelationLabels） */
+  // ═══ P113 §2.3 社团判定三接口（P123 落码；纯读零写入，实现见 SocialGroupResolver.ts） ═══
+
+  /**
+   * 社团编码列表（entityUuid → 如 ['CO01'] / ['WW']）；缺失/空/异常 → null（fail-closed：无法判定）。
+   * 按 uuid 直查 social_group_genes 列；未命中走 getEntityByUUID 的 legacy_ids 重定向兜底。
+   * 数据源：nodes.social_group_genes（BFS 全量分配，实测 1109/1109 person 全覆盖）。
+   */
+  getSocialGroups(entityUuid: string): string[] | null {
+    if (!entityUuid) return null;
+    type GRow = { social_group_genes: string | null };
+    let rows = this.query('SELECT social_group_genes FROM nodes WHERE uuid = ?', [entityUuid]) as GRow[];
+    if (rows.length === 0) {
+      const legacy = this.getEntityByUUID(entityUuid);
+      if (legacy?.id) rows = this.query('SELECT social_group_genes FROM nodes WHERE id = ?', [legacy.id]) as GRow[];
+    }
+    return parseSocialGroups(rows[0]?.social_group_genes);
+  }
+
+  /**
+   * 同社团判定：两方编码集交集非空 ⇔ 同社团；任一方无法判定(null) ⇔ false（宁严勿放，
+   * 与 FG 户籍管理法 fail-closed 方向一致）。供 P107 社团外参会提醒路径消费。
+   */
+  isSameSocialGroup(uuidA: string, uuidB: string): boolean {
+    return sameSocialGroup(this.getSocialGroups(uuidA), this.getSocialGroups(uuidB));
+  }
+
+  /**
+   * 参会者中的社团外人员名单（P107 提醒+用户授权路径用）：
+   * 与主会人(host)不同社团或无法判定 ⇒ 入名单；host 自身编码缺失 ⇒ 全员入名单
+   * （P113 用例 6：fail-closed 方向一致）。返回 participantUuids 的子集，顺序保持不变。
+   */
+  getOutsiders(participantUuids: string[], hostUuid: string): string[] {
+    const hostGroups = this.getSocialGroups(hostUuid);
+    const participants = participantUuids.map(uuid => ({ uuid, groups: this.getSocialGroups(uuid) }));
+    return findOutsiders(participants, hostGroups);
+  }
+
   private _getEdgeDisplayLabel(relation: string, isOutgoing: boolean): string {
     return getRelationLabel(relation, isOutgoing);
   }
@@ -7200,7 +7243,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.markDirty(true);
   }
 
-  /** 从24D向量更新情绪强度 (EMA平滑) */
+  /** 从情绪状态向量更新情绪强度 (EMA平滑；🔴 Heart 24 命名属 P076 待裁) */
   updateEmotionalIntensity(sourceName: string, targetName: string, p24d: Record<string, number>): void {
     const edge = this.findEdge(sourceName, targetName);
     if (!edge) return;

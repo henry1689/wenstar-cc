@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import {
   PERCEPTION_40D_ENCODING_VERSION,
+  encodePerceptionV40FromDims,
   decodePerceptionV40,
   encodePerceptionV40,
 } from './PerceptionVector40DCodec.js';
@@ -97,28 +98,15 @@ const MIGRATIONS: Migration[] = [
       } catch (e) { console.warn('[Migration] ambient_weather_context 表创建失败:', e); }
     },
   },
-  // v4: 双螺旋存储三底座 — state_spines + atom_address_timeline + atom_repair_index
+  // v4: 双螺旋存储底座 — atom_address_timeline + atom_repair_index
   //     适配: DNA双螺旋编码规范V2.0 / 大一统架构V1.0 / 天权底座V1.0
+  //     🔴 P071(2026-10-23) 底座1 state_spines（语义向量分片库）已废除：
+  //         40D 语义真源=memories.perception_40d，本表从未建 HNSW、仅 24D+零占位，
+  //         读写方全死 → 业主裁决彻底删除（迁移 v26 DROP）。全新库不再创建。
   {
     version: 4,
-    description: '双螺旋存储三底座 — 语义向量分片库+寻址治理存储池+修复索引表',
+    description: '双螺旋存储底座 — 寻址治理存储池+修复索引表（state_spines 已废除）',
     apply: (db: any) => {
-      // ── 底座1: 语义向量分片库 (HNSW 网状索引, 蓝皮书 §3.1) ──
-      try {
-        db.run(`CREATE TABLE IF NOT EXISTS state_spines (
-          global_uid          TEXT NOT NULL,
-          dimension_id        INTEGER NOT NULL CHECK(dimension_id BETWEEN 1 AND 32),
-          value               REAL NOT NULL,
-          consistency_mark    TEXT NOT NULL DEFAULT 'consistent',
-          location_fingerprint TEXT,
-          timestamp_ms        INTEGER NOT NULL,
-          checksum            TEXT,
-          dna_branch          BLOB,
-          PRIMARY KEY (global_uid, dimension_id)
-        ) WITHOUT ROWID`);
-        db.run("CREATE INDEX IF NOT EXISTS idx_spines_dim ON state_spines(dimension_id, timestamp_ms)");
-      } catch (e) { console.warn('[Migration] state_spines 创建失败:', e); }
-
       // ── 底座2: 寻址治理存储池 (B+Tree 线性时序索引, 蓝皮书 §3.2) ──
       try {
         db.run(`CREATE TABLE IF NOT EXISTS atom_address_timeline (
@@ -155,8 +143,7 @@ const MIGRATIONS: Migration[] = [
 
       // ── 底座隔离纪律（日志输出供运营确认） ──
       try {
-        console.log('[Migration] v4 ✅ 双螺旋三底座已就绪');
-        console.log('  🔴 纪律: state_spines 仅HNSW — 禁止时序排序');
+        console.log('[Migration] v4 ✅ 双螺旋底座已就绪');
         console.log('  🔴 纪律: atom_address_timeline 仅B+Tree+倒排 — 禁止存语义向量');
         console.log('  🔴 纪律: 原始数据层 — 禁止直接做语义检索');
         console.log('  🔴 纪律: 三底座仅通过 GlobalUID 关联');
@@ -363,29 +350,13 @@ const MIGRATIONS: Migration[] = [
     },
   },
   // V21: state_spines 放宽 dimension_id CHECK 1-32 → 1-40（40D 统一）
+  //   🔴 P071(2026-10-23) 已废止为 no-op：state_spines 已在迁移 v26 删除（40D 真源=memories.perception_40d）。
+  //   保留 v11 条目以维持迁移序号连续（schema_version 记账不可跳号），但不再执行任何 DDL。
   {
     version: 11,
-    description: 'V21 40D: state_spines dimension_id CHECK 放宽 1-32 → 1-40（重建表）',
-    apply: (db: any) => {
-      try {
-        // SQLite 无法 ALTER CHECK 约束 → 重建表（新建 1-40 约束 → 复制 → 删旧 → 改名）
-        db.run('ALTER TABLE state_spines RENAME TO state_spines_old');
-        db.run(`CREATE TABLE state_spines (
-          global_uid          TEXT NOT NULL,
-          dimension_id        INTEGER NOT NULL CHECK(dimension_id BETWEEN 1 AND 40),
-          value               REAL NOT NULL,
-          consistency_mark    TEXT NOT NULL DEFAULT 'consistent',
-          location_fingerprint TEXT,
-          timestamp_ms        INTEGER NOT NULL,
-          checksum            TEXT,
-          dna_branch          BLOB,
-          PRIMARY KEY (global_uid, dimension_id)
-        ) WITHOUT ROWID`);
-        db.run('INSERT INTO state_spines (global_uid, dimension_id, value, consistency_mark, location_fingerprint, timestamp_ms, checksum, dna_branch) SELECT global_uid, dimension_id, value, consistency_mark, location_fingerprint, timestamp_ms, checksum, dna_branch FROM state_spines_old');
-        db.run('DROP TABLE state_spines_old');
-        db.run('CREATE INDEX IF NOT EXISTS idx_spines_dim ON state_spines(dimension_id, timestamp_ms)');
-        console.log('[Migration] v11 ✅ state_spines CHECK 放宽到 1-40');
-      } catch (e) { console.warn('[Migration] v11 state_spines 重建失败:', e); }
+    description: '【已废止】V21 state_spines CHECK 放宽（表已在 v26 删除，no-op 保序号）',
+    apply: (_db: any) => {
+      console.log('[Migration] v11 ⬜ state_spines 已废止（P071），跳过');
     },
   },
   {
@@ -506,7 +477,7 @@ const MIGRATIONS: Migration[] = [
                   const v = Number((p24 as Record<string, number>)[k]);
                   if (isFinite(v)) p40[d - 1] = v;
                 }
-                db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [JSON.stringify({ __v: PERCEPTION_40D_ENCODING_VERSION, dims: p40 }), String(id)]);
+                db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [encodePerceptionV40FromDims(p40), String(id)]);
                 backfilled++;
               } catch { /* 单条失败跳过 */ }
             }
@@ -1077,6 +1048,117 @@ const MIGRATIONS: Migration[] = [
       } catch (e) {
         console.warn('[Migration] v25 生命周期初始化失败（非致命）:', (e as Error)?.message);
       }
+    },
+  },
+  // v25 → v26: 🔴 P071(2026-10-23) 彻底删除 state_spines（双螺旋底座1 语义向量分片库）
+  //   业主裁决「没用处就彻底删除，现在这系统已经太庞大了，后续还要逐一精简的」。
+  //   依据（摸底报告 D:\work\原设计系统摸底报告-20261023.md）：
+  //     ① 从未建 HNSW（仅裸表）；② 仅写入 24D 旧口径+25-40 维零占位（真 40D 在 memories.perception_40d）；
+  //     ③ 读取方（MemoryRetriever spine 路/OfflineSemanticEdgeBuilder/Dim24to32Migration）全死/残废；
+  //     ④ 24D 可由 40D 反向投影(deriveState24FromV40)完全重建，纯冗余。
+  //   同步删除代码：DualHelixWriter spine 段、SQLiteAdapter._backfillLibs40D 段、MemoryRetriever 两处 spine 路、
+  //   OfflineSemanticEdgeBuilder.ts、Dim24to32Migration.ts。
+  //   寻址链 atom_address_timeline（底座2）保留启用（Phase 2 DNA 藤 vine_group_id）。
+  {
+    version: 26,
+    description: 'P071: 彻底删除 state_spines 语义向量分片库（40D 真源=memories.perception_40d）',
+    apply: (db: any) => {
+      try {
+        db.run('DROP INDEX IF EXISTS idx_spines_dim');
+        db.run('DROP TABLE IF EXISTS state_spines');
+        console.log('[Migration] v26 ✅ state_spines 已彻底删除（P071 底座1 废除，40D 真源=memories.perception_40d）');
+      } catch (e) { console.warn('[Migration] v26 state_spines 删除失败:', e); }
+    },
+  },
+  // v27 → P072-A4 量纲战役收官（2026-10-26，业主「按顺序逐一完成」）：
+  //   钙分三量纲归一（P053 遗留：memories.calcium_score 0-1≈12234条 / 1-5≈434条 / 5-10≈55条 混存）。
+  //   统一规则（P068 U3 实战同款，幂等：归一后全 ≤1，重跑不变）：
+  //     ≤1 → 原值；1 < x ≤ 5 → ÷5；x > 5 → ÷10。
+  //   晋升代码（VaultManager）本就双尺度兼容（≥0.9 OR ≥4.5），归一后统一 ≥0.9 真值口径；
+  //   recall/landmark/U3 情感通道与钙化等级（level）不受影响。
+  //   🔴 范围修正：perception_v2（情绪增量对象）经核查为 Heart 引擎活数据通道
+  //     （EmotionRegulator 读 / MemoryRetriever 异步写 / 850 行），不在本次退役范围（归 P076 域后续）。
+  //   纪律：随启动迁移链执行（sql.js）；改前整库备份 + 重启后全新实例复验（经验#19）。
+  {
+    version: 27,
+    description: 'P072-A4: 钙分三量纲归一（统一 0-1 真值口径，量纲战役收官）',
+    apply: (db: any) => {
+      try {
+        db.run(`UPDATE memories SET calcium_score = CASE
+            WHEN calcium_score <= 1 THEN calcium_score
+            WHEN calcium_score <= 5 THEN calcium_score / 5.0
+            ELSE calcium_score / 10.0 END
+          WHERE calcium_score > 1`);
+        const changed = typeof (db as any).getRowsModified === 'function' ? (db as any).getRowsModified() : 0;
+        const mx = db.exec('SELECT ROUND(MAX(calcium_score), 3) FROM memories')[0]?.values?.[0]?.[0];
+        const over1 = db.exec('SELECT COUNT(*) FROM memories WHERE calcium_score > 1')[0]?.values?.[0]?.[0];
+        console.log(`[Migration] v27 ✅ 钙分归一: 本次归一 ${changed} 条，MAX=${mx}，残留>1=${over1}`);
+      } catch (e) { console.warn('[Migration] v27 钙分归一失败:', e); }
+    },
+  },
+  // v28 → P071 Phase2（2026-10-26，业主「继续开打」）：藤蔓组回填（DUAL_CHAIN 寻址先行数据前提）
+  //   ATL vine_group_id 自建表起 0% 填充 → 按 GlobalUID 关联 memories.dialog_group_id 回填（主干），
+  //   无对话组者 dna_root_id 兑底。幂等（WHERE empty 重跑不变）。
+  {
+    version: 28,
+    description: 'P071-Phase2: ATL 藤蔓组回填（dialog_group 主干 + dna_root 兑底）',
+    apply: (db: any) => {
+      try {
+        db.run(`UPDATE atom_address_timeline SET vine_group_id = (
+            SELECT COALESCE(
+              (SELECT m.dialog_group_id FROM memories m WHERE m.global_uid = atom_address_timeline.global_uid AND m.dialog_group_id IS NOT NULL AND m.dialog_group_id <> '' LIMIT 1),
+              (SELECT m.dna_root_id FROM memories m WHERE m.global_uid = atom_address_timeline.global_uid AND m.dna_root_id IS NOT NULL AND m.dna_root_id <> '' LIMIT 1)
+            )
+          ) WHERE (vine_group_id IS NULL OR vine_group_id = '')`);
+        const vchg = typeof (db as any).getRowsModified === 'function' ? (db as any).getRowsModified() : 0;
+        const vfilled = db.exec("SELECT COUNT(*) FROM atom_address_timeline WHERE vine_group_id IS NOT NULL AND vine_group_id <> ''")[0]?.values?.[0]?.[0];
+        const vtotal = db.exec('SELECT COUNT(*) FROM atom_address_timeline')[0]?.values?.[0]?.[0];
+        console.log(`[Migration] v28 ✅ 藤蔓组回填: 本次 ${vchg} 条，已填充 ${vfilled}/${vtotal}`);
+      } catch (e) { console.warn('[Migration] v28 藤蔓组回填失败:', e); }
+    },
+  },
+  // v29 → P071 Phase2 批B 前置（2026-10-26，业主裁决④升级落地 + UUID 主线架构）：
+  //   ATL entity_belong_id 户籍化。现状 5,742 条人名（违户籍法，无法可靠关联）→
+  //   ① 人名经 entities 表精确名匹配迁 TXS-ID（3,551 条可映射，如徐诗雨→TXS-000000007）；
+  //   ② 非人名垃圾（妈/爸爸/喜欢/公司/开心等早期 entityNames[0] 误写，2,191 条）置 NULL
+  //      （fail-closed：归属真源在 memories.belong_entity_uuid，ATL 归属轴仅作寻址辅助）。
+  //   幂等：WHERE 非 TXS 且非空，重跑不触已迁行。
+  {
+    version: 29,
+    description: 'P071-Phase2批B: ATL entity_belong_id 户籍化（人名→TXS-ID，非人名 NULL fail-closed）',
+    apply: (db: any) => {
+      try {
+        db.run(`UPDATE atom_address_timeline SET entity_belong_id = (
+            SELECT e.uuid FROM entities e WHERE e.name = atom_address_timeline.entity_belong_id AND e.uuid LIKE 'TXS-%' LIMIT 1
+          ) WHERE entity_belong_id IS NOT NULL AND entity_belong_id <> '' AND entity_belong_id NOT LIKE 'TXS-%'
+            AND EXISTS (SELECT 1 FROM entities e WHERE e.name = atom_address_timeline.entity_belong_id AND e.uuid LIKE 'TXS-%')`);
+        const migrated = typeof (db as any).getRowsModified === 'function' ? (db as any).getRowsModified() : 0;
+        db.run(`UPDATE atom_address_timeline SET entity_belong_id = NULL
+          WHERE entity_belong_id IS NOT NULL AND entity_belong_id <> '' AND entity_belong_id NOT LIKE 'TXS-%'`);
+        const nulled = typeof (db as any).getRowsModified === 'function' ? (db as any).getRowsModified() : 0;
+        const txs = db.exec("SELECT COUNT(*) FROM atom_address_timeline WHERE entity_belong_id LIKE 'TXS-%'")[0]?.values?.[0]?.[0];
+        const nulls = db.exec('SELECT COUNT(*) FROM atom_address_timeline WHERE entity_belong_id IS NULL')[0]?.values?.[0]?.[0];
+        console.log(`[Migration] v29 ✅ ATL户籍化: 迁TXS ${migrated} 条，非人名置NULL ${nulled} 条（TXS=${txs}, NULL=${nulls}）`);
+      } catch (e) { console.warn('[Migration] v29 ATL户籍化失败:', e); }
+    },
+  },
+  // v30 → I011 结构根治（2026-11-01，业主「结构上彻底解决」）：MemSym 要素独立成池。
+  //   根因：KnowledgeEngine.add 的 FTS 去重命中即静默 UPDATE 旧条目并 return 成功（不插新行）——
+  //   元素内容为真实记忆文本必然撞中 → 落池申报N/插入0（生产实证：申报13/库内0/落盘0）。
+  //   结构解：要素池沙箱 = memsym_elements 专表（蓝皮书本义），与文档管道（去重/cabinet/文档隐私守卫）解耦；
+  //   软遗忘(impression)/钙化(recall_count/last_recalled_at)/归属(entity_uuid)/溯源(source_anchor_id)字段自治。
+  {
+    version: 30,
+    description: 'MemSym: memsym_elements 要素独立成池专表（I011 结构根治）',
+    apply: (db: any) => {
+      try {
+        db.run(`CREATE TABLE IF NOT EXISTS memsym_elements (
+          id TEXT PRIMARY KEY, entity_uuid TEXT NOT NULL, content TEXT NOT NULL, tags TEXT DEFAULT '',
+          impression REAL DEFAULT 0.5, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT,
+          source_anchor_id TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_memsym_entity ON memsym_elements(entity_uuid)`);
+        console.log('[Migration] v30 ✅ MemSym 要素池专表就绪');
+      } catch (e) { console.warn('[Migration] v30 MemSym 要素池失败:', e); }
     },
   },
 ];

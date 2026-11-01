@@ -14,7 +14,7 @@
 
 import type { SQLiteAdapter } from '../../../m2/SQLiteAdapter.js';
 import type { DNA } from '../../../m1/types/dna.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 import { HippocampalIndex } from './HippocampalIndex.js';
 import { SceneMap } from './SceneMap.js';
 import {
@@ -136,7 +136,7 @@ export class SceneSnapshotBuilder {
   private _buildSignature(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    perception: Perception24D,
+    perception: PerceptionState24,
   ): string {
     return this.hIndex.computeSignature(locusPath, entities, perception);
   }
@@ -177,7 +177,7 @@ export class SceneSnapshotBuilder {
   }
 
   /** 情绪趋势 */
-  private _deriveEmotionTrend(perception: Perception24D): EmotionTrend {
+  private _deriveEmotionTrend(perception: PerceptionState24): EmotionTrend {
     // 简化处理：如果有 arousal 漂移标记则使用，否则默认 stable
     const drift = (perception as any).emotion_drift;
     if (typeof drift === 'number') {
@@ -233,7 +233,7 @@ export class SceneSnapshotBuilder {
   }
 
   /** 钙化分数 */
-  private _computeCalcium(memories: DNA[], perception: Perception24D): number {
+  private _computeCalcium(memories: DNA[], perception: PerceptionState24): number {
     if (memories.length === 0) return 0;
     // 取 TOP-3 记忆的钙化均值
     const top = memories.slice(0, 3);

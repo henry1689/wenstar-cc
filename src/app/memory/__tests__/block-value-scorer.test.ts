@@ -15,7 +15,7 @@ import {
   SCENE_PAREN_MIN_LEN,
   type BlockRound,
 } from '../BlockValueScorer.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 
 /**
  * [ADR-010 P1-B / 2026-10-06] 对话块价值判定 —— 确定性规则的守卫
@@ -35,7 +35,7 @@ const codeOf = (p: string): string =>
     .replace(/\/\/[^\n]*/g, '');
 
 /** 中性感知向量（24 维齐全，避免用 as any 绕过类型） */
-function neutralP(): Perception24D {
+function neutralP(): PerceptionState24 {
   return {
     pleasure: 0, arousal: 0, dominance: 0, aggression: 0, sincerity: 0.5,
     humor: 0, factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0,
@@ -45,7 +45,7 @@ function neutralP(): Perception24D {
     possessiveness: 0, ecstasy: 0, safety: 0.5,
   };
 }
-const withDim = (k: keyof Perception24D, v: number): Perception24D => ({ ...neutralP(), [k]: v });
+const withDim = (k: keyof PerceptionState24, v: number): PerceptionState24 => ({ ...neutralP(), [k]: v });
 
 /** 一段足够长的场景描写（≥ SCENE_PAREN_MIN_LEN 字） */
 const LONG_SCENE = '（她把外套搭在椅背上，走到窗边站了一会儿，外面的雨还没停，玻璃上全是水痕）';

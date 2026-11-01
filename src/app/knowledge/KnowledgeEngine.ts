@@ -9,7 +9,7 @@
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { buildSqlClause, policyFor, passes as policePasses } from '../../governance/police/UUIDPoliceFilter.js';
 import type { KnowledgeItem } from './types.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { parseFile } from './FileUploadService.js';
 import { FileChunker } from '../tools/FileChunker.js';
 import { ConfigService } from '../../config/ConfigService.js';
@@ -290,6 +290,14 @@ function normalizeVisibleList(v: string | string[] | null | undefined): string |
   return ids.length ? JSON.stringify(ids) : null;
 }
 
+// 🔴 隐私守卫词条表（模块顶层导出，供 add() 与回归测试共用同一真源）
+// 🔴 2026-10-30 业主裁决A（P135）：`梓铭简介` 词条出栈——该源稿系业主 2026-06-28 亲自导入的
+//    人物源稿（cabinet/knowledge-md 磁盘件至今完好），历史批次按“用户个人信息”误伤拉黑；
+//    解除后由 privacy-guard-unblacklist.test.ts 回归锁定：其余词条（徐诗雨身高/我的XXX/用户信息X:）拦截能力不变，防死灰复燃回填。
+// 🔴 2026-10-30 业主指令（P137）：`徐诗雨身高` 词条出栈——实体档案类同批误伤（P0-6 记载同批源件），
+//    同先例解除；17 个第一人称个人隐私模板词条（我的XXX/用户X:）为业主个人隐私本体，**保留锁定**（双向测试锁定）。
+export const _privacyPatterns = /^用户信息[:：]|^用户地址[:：]|^用户偏好[:：]|^用户厌恶[:：]|^习惯[:：]|^喜好[:：]|^重点关注[:：]|^待查询[:：]|^回忆[:：]|^研究[:：]|我的名字是|我的女友|我的工作|我的老婆|我的这根|我在哪个公园|我在哪家公司|我在外面|我在问你在哪里|我在深圳市|我把一切|我家里面|我在他们面/;
+
 export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   /**
    * 修复双重 UTF-8 编码的中文字符串
@@ -348,8 +356,7 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
      */
     visibleEntityUuids?: string | string[] | null;
   }): Promise<KnowledgeItem> {
-    // 🔴 隐私守卫：拒绝个人/用户信息进入知识库
-    const _privacyPatterns = /^用户信息[:：]|^用户地址[:：]|^用户偏好[:：]|^用户厌恶[:：]|^习惯[:：]|^喜好[:：]|^重点关注[:：]|^待查询[:：]|^回忆[:：]|^研究[:：]|徐诗雨身高|梓铭简介|我的名字是|我的女友|我的工作|我的老婆|我的这根|我在哪个公园|我在哪家公司|我在外面|我在问你在哪里|我在深圳市|我把一切|我家里面|我在他们面/;
+    // 🔴 隐私守卫：拒绝个人/用户信息进入知识库（`_privacyPatterns` 已提至模块顶层，见 createKnowledgeEngine 上方 —— P135 为可回归断言而导出）
     if (_privacyPatterns.test(params.title) || _privacyPatterns.test(params.content || '')) {
       console.warn(`[KE] 🔴 隐私守卫拦截: "${(params.title||'').substring(0,40)}" — 用户个人信息不得进入知识库`);
       throw new Error('隐私内容不可存入知识库：用户个人信息应存于 MasterProfileService 或 FamilyGraph');
@@ -914,8 +921,8 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   }
 
   // ─── 辅助：计算两个 24D 向量的余弦相似度 ───
-  function cosineSimilarity(a: number[], b: Perception24D | { pleasure: number; arousal: number; intimacy: number }): number {
-    // 从 Perception24D 提取关键维度做向量 (pleasure, arousal, dominance, intimacy, sexual_attraction, safety)
+  function cosineSimilarity(a: number[], b: PerceptionState24 | { pleasure: number; arousal: number; intimacy: number }): number {
+    // 从 PerceptionState24 提取关键维度做向量 (pleasure, arousal, dominance, intimacy, sexual_attraction, safety)
     const bVec = [b.pleasure ?? 0, b.arousal ?? 0, (b as any).dominance ?? 0, b.intimacy ?? 0, (b as any).sexual_attraction ?? 0, (b as any).safety ?? 0.5];
     const aLen = Math.sqrt(a.reduce((s, v) => s + v * v, 0));
     const bLen = Math.sqrt(bVec.reduce((s, v) => s + v * v, 0));

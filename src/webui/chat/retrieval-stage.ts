@@ -7,21 +7,25 @@
  */
 import type { ScoredMemory, SimilarityMode } from '../../m2/types/index.js';
 import type { DNA } from '../../m1/types/dna.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { rerank } from '../../m4/Reranker.js';
 import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
 import { resolveReferent } from '../../app/works/ReferentResolver.js';
 // 🔴 T013 R6（ADR-013 第三层）：会晤 UUID 过滤咽喉 + 命中泄漏校验
 import { applyMeetingUuidFilter, verifyMeetingHits } from '../../m4/retrieval/meetingIsolation.js';
-// 🔴 T013 Phase 2 批B（B2）：群聊状态优先取检索主体 UUID（WS_GROUP_V2 门控）
-import { isGroupSessionEnabled } from '../../m5/group/GroupSession.js';
+// 🔴 T013 Phase 2 批B（B2）：群聊状态优先取检索主体 UUID
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
 //   与 MeetingWallAdapter 共用本模块，杜绝同构漂移（模块零 import，无 M 层反向依赖）。
+import { classifyMemSymPath, boostElementSource } from '../../m4/retrieval/memsym-path-router.js';
+import { pickElements } from '../../m4/retrieval/element-picker.js';
+import { incMemSym, trackElementUse } from '../../m4/retrieval/memsym-metrics.js';
+import { sweepAllStores, organizeForQuestion, cleanSweepKeywords, CRYSTAL_DIRECTIVE, SWEEP_POLICY } from '../../m4/retrieval/meeting-recall.js';
 import {
   RECALL_TRIGGER_RE,
   extractTopicKeywords,
+  detectConceptThemes,
   keywordRecallMemories,
   recallSandboxConversations,
   shouldEscalateToLlmPicker,
@@ -259,7 +263,7 @@ export interface RetrievalInput {
   /** 🆕 V5.1: 会晤实体名 — 非空时跳过所有记忆检索 */
   _meetingEntityName?: string | null;
   dna: DNA;
-  p: Perception24D;
+  p: PerceptionState24;
   /** V3: M3 直接产出的 40D 感知向量 — 透传给 searchV13 作为 40D 查询向量 */
   p40?: import('../../m3/types/perception-40d.js').PerceptionV40;
   /** V34: 带 timestamp —— 砂金库兜底用它算出「上下文最旧一轮」，只取比它更早的原文 */
@@ -367,13 +371,15 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       //   名字反查一旦失败/错配（FG 主名变更、别名、名字含特殊字），白名单就是错的或空的
       //   —— 这是 I007 串档的同源隐患；而 meetingIsolation.applyMeetingUuidFilter 咽喉要的
       //   正是一个 speakerUuid，此前无人供给。
-      //   🔴 守卫：仅在 `WS_GROUP_V2` 开启、影子状态处于会晤态、且**与真源实体名一致**时启用
-      //     （比对 name，防投影漂移把检索主体指向另一个人）；任一条件不满足即回退原反查路径。
+      //   🔴 守卫：状态处于会晤态、且**与真源实体名一致**时启用
+      //     （比对 name，防漂移把检索主体指向另一个人）；任一条件不满足即回退原反查路径。
+      //   🔴 2026-10-31 第三层固化：`WS_GROUP_V2` 门控已删除 —— GroupSession 是唯一状态源，
+      //     不再有「开关关闭时整段不生效」的分支。
       const _shadowSpeakerUuid: string | null = (() => {
         try {
           const _gs = (ctx as any)._groupSession;
           const _st = _gs?.getState?.();
-          if (!_st || !isGroupSessionEnabled()) return null;
+          if (!_st) return null;
           if (_st.participants.length === 0) return null;
           const _u = typeof _st.speakerUuid === 'string' ? _st.speakerUuid.trim() : '';
           if (!_u) return null;
@@ -435,6 +441,57 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           _seenMId.add(_m.id);
           return true;
         });
+        // 🔴 事件联想召回（P071 Phase2，业主裁决：事件联想为主 + 模糊关键词并行 · 顺藤摸瓜）。
+        //   40D 感知向量邻域直接召回——不依赖关键词字面、不设时间窗，与近期/关键词/最早通道**并行**。
+        //   40D/UUID/DNA 本就是为"写入+锁定+快速召回"设计的索引体系，现按此定位用作候选生成
+        //   （而非仅事后精排）："回忆亲密时光"经 40D 亲密维度(D15/D33-40)联想命中亲密记忆，隔几年也行。
+        if (input.p40) {
+          try {
+            const { associativeRecallByPerception40D } = await import('../../m4/retrieval/meeting-recall.js');
+            const { isPerception40DEnabled } = await import('../../config/perception-40d-config.js');
+            if (isPerception40DEnabled()) {
+              const _assocMems = associativeRecallByPerception40D(_sqlite, _entityUuid, input.p40, 8);
+              let _assocAdded = 0;
+              for (const _am of _assocMems) {
+                if (!_seenMId.has(_am.id)) { _seenMId.add(_am.id); _entityMems.push(_am); _assocAdded++; }
+              }
+              if (_assocAdded > 0) console.log('[EntityMem·联想] 40D事件联想召回: ' + _assocAdded + ' 条');
+            }
+          } catch (_assocErr) { /* 联想召回失败不阻塞主召回 */ }
+        }
+        // 🔴 P071-Phase2批B-3 · 会晤栈 DUAL_CHAIN 寻址先行（镜像主链实现 `766ce12`，UUID 主线铁约束）：
+        //   主动回忆意图（G4 同源正则，防口径漂移）且会晤实体 UUID 非空 → ATL 按归属+时序倒序取
+        //   历史 GlobalUID（200）→ memories（双 UUID 守卫 + namespace 排除 + p40 存在）→ 并集去重入
+        //   _entityMems（下游 fabrication 过滤/40D 重排/配额统一处理）。零删减——联想V1 全历史扫描保留兑底。
+        if (input.p40 && _entityUuid) {
+          try {
+            // 🔴 防漂移：触发判定用 meeting-recall 单源 RECALL_TRIGGER_RE（法规：禁止本地复制正则）；
+            //   G4 闸门配置正则（M3Config）口径较窄，另属地标降权语义，两者职责不同不合并。
+            const { RECALL_TRIGGER_RE } = await import('../../m4/retrieval/meeting-recall.js');
+            if (RECALL_TRIGGER_RE.test(message)) {
+              const _histRows = _sqlite.queryAll(
+                `SELECT global_uid FROM atom_address_timeline WHERE entity_belong_id = ?
+                 ORDER BY absolute_timestamp DESC LIMIT 200`, [_entityUuid]);
+              if (_histRows?.length) {
+                const _huids = (_histRows as Array<{ global_uid: string }>).map(h => h.global_uid);
+                const _memRows = _sqlite.queryAll(
+                  `SELECT id, raw_input, calcium_score, created_at, perception_40d, dna_root_id
+                   FROM memories
+                   WHERE global_uid IN (${_huids.map(() => '?').join(',')})
+                     AND belong_entity_uuid = ?
+                     AND COALESCE(promoted_to_diamond, 0) = 0
+                     AND COALESCE(namespace, 'default') <> 'test'
+                     AND perception_40d IS NOT NULL AND perception_40d <> ''`,
+                  [..._huids, _entityUuid]);
+                let _dcAdded = 0;
+                for (const _r of (_memRows as Array<any>)) {
+                  if (!_seenMId.has(_r.id)) { _seenMId.add(_r.id); _entityMems.push(_r); _dcAdded++; }
+                }
+                if (_dcAdded > 0) console.log(`[EntityMem·寻址先行] DUAL_CHAIN ATL 历史候选: ${_dcAdded} 条`);
+              }
+            }
+          } catch (_dcErr) { /* 寻址先行失败不阻塞主召回 */ }
+        }
         // 🔴 S2-J1b: 过滤编造特征记忆 — LLM 单方面输出的"过去经历"类内容(海边/比基尼/营销总监/来月经等)
         // 被当真实记忆检索注入 → 巩固谎言。命中特征词的记忆不注入。
         const FABRICATION_PATTERNS = /海边|比基尼|营销总监|全职太太|来月经|身体开始变|刻骨铭心|从零到一|泳衣|穿拖鞋/;
@@ -506,6 +563,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           _reg.register(new MeetingWallAdapter(_sqlite as any));
           const _orRes = await _orchestrator.runSearch(_reg, {
             query: message,
+            perception40d: input.p40,  // P071-Phase2批B-2: M3 原生 40D → 会晤中枢 spine/DUAL_CHAIN 点火
             entityUuids: [_entityUuid],
             // 🔴 I007 修复：deny-by-default 的会晤策略（原为 enforce:false ⇒ 五路适配器全库召回）
             policy: _meetingPolicy,
@@ -611,7 +669,14 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           try {
             // 🔴 P0-1：关键词路的时间窗与砂金库兜底同源（原来是硬编码当日 <1 天，
             //   隔天提起话题时够不到 —— 与"四条通道都不覆盖 1 天以上"是同一个洞）
-            const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4, SANDBOX_RECALL_WINDOW_DAYS);
+            // 🔴 P071 批C 模糊概念图：主题命中 → 无窗联想匹配（跨时间召回旧记忆，业主：去21天窗）；
+            //   字面匹配保持近期窗（续聊近因语义不变）——双层窗语义。
+            const _themesC = detectConceptThemes(message);
+            const _kwRows = keywordRecallMemories(_sqlite, _entityUuid, _topicKw, 4,
+              _themesC.length > 0 ? null : SANDBOX_RECALL_WINDOW_DAYS);
+            if (_themesC.length > 0) {
+              console.log(`[EntityMem·概念图] 主题命中 ${_themesC.map((t) => t.name).join('/')} → 关键词召回无窗匹配`);
+            }
             // 内容相关命中无条件前置注入（每条 250 字，不占钙化槽 15 条名额）：
             // 低钙关键记忆(如引诗)即使钙化排 50+ 也能进上下文。
             for (const _kr of _kwRows) {
@@ -728,11 +793,57 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           console.log('[MEMPROBE-2] heads=' + memoryFragments.slice(0, 4).map(function (f) { return String(f).replace(/\s+/g, ' ').slice(0, 34); }).join(' || '));
         } catch {}
         if (_entityMems.length > 0) console.log('[EntityMem] 会晤实体自有记忆: ' + _cleanMems.length + ' 条(原' + _entityMems.length + ')');
-        // 🔴 S2-J1b: 记忆不足时注入反编造强化 — 用户问"过去/经历/几岁"但无真实记忆时，
-        // 明确告知 LLM: 无记录的经历 = 不存在，不得编造。宁说"记不清/档案没写"。
+        // 🔴 S2-J1b → MemSym 批β 三档改写（ADR-MEM-002 第四条法理）：
+        //   禁止的是「新增要素」冒充过往事实；允许「要素集内带标记的润色表达」。
         if (_cleanMems.length < 3) {
-          memoryFragments.push('【反编造铁律】如果你的档案和以上记忆中都没有用户问到的某个具体经历（如"几岁做了什么""某年某件事"），说明那件事没有记录。**绝不能编造**——诚实地说"这个我没印象了，档案里没写"或"我不记得有这样的事"。编造是系统级错误。');
+          memoryFragments.push('【回忆表达三档 · MemSym】关于过去的记忆：' +
+            '①以上记忆中有明确记载的 → 自然讲述（可口语化，不改事实）；' +
+            '②只有零星线索/片段 → 照示范说：「顺序记不真切了——但那会儿的感觉是记得的：先是…后来是暖的…（这些是印象，你别当准的，但确实是心里的样子）」——**禁止新增事实要素/时间/地点/人物**（哪怕加「印象里」，新增要素仍属编造）；永远不说「不敢说/不敢编」（那是退缩不是诚实）；' +
+            '③完全没有记载的经历 → 如实说"这个我没印象了，档案里没写"，并引导对方补充线索。' +
+            '禁止"对不上号式回避"：片段也要带着感情努力拼出最接近的样子。');
         }
+        // 🔴 MemSym 批δ · 通路B元素浸润（ADR-MEM-002 第三块）：主旨判定为当下对话时，
+        //   拾取沉淀元素作为风格素材注入（非往事叙事）；主动运用义务（宪法信条7）——
+        //   实体可主动、自然地融入当下对话，无需回忆前缀；不得复述为往事、不得新增细节。
+        try {
+          const _memsymPath = classifyMemSymPath(message);
+          incMemSym(_memsymPath === 'A' ? 'pathA' : 'pathB');
+          if (_memsymPath === 'B' && _entityUuid) {
+            const _picked = pickElements(_sqlite as never, {
+              entityUuid: _entityUuid,
+              currentContext: message,
+              purpose: 'enrich_empathy',
+              allowedElementTags: new Set(['preference', 'mood', 'style', 'intimate_cue'] as const),
+              threshold: 0.45,
+              limit: 3,
+            });
+            if (_picked.length > 0) {
+              incMemSym('elementPicked', _picked.length);
+              memoryFragments.push('【默契元素 · MemSym】以下是你沉淀下来的真实元素（非往事叙事，可溯源）——' +
+                '可主动、自然地融入当下对话，烘托此刻氛围（无需回忆前缀；不得复述为往事事件，不得新增细节/时间/地点）：\n' +
+                _picked.map((p) => `- ${p.content}${p.settled ? '' : '（新鲜感受,尚在沉淀,轻用）'}`).join('\n'));
+              for (const p of _picked) {
+                trackElementUse(p.content);
+                boostElementSource(_sqlite as never, _entityUuid, p.sourceAnchorUUID);
+                incMemSym('boostB');
+              }
+            }
+          }
+        } catch (_memsymErr) { /* 通路B失败不阻塞召回主链 */ }
+        // 🔴 P093 统一编排器调用（结晶核心令执行层——收集最大化+问题中心整编，单源自 meeting-recall）
+        try {
+          if (classifyMemSymPath(message) === 'A' && _entityUuid) {
+            const _sweepKw = cleanSweepKeywords(_topicKw.length > 0 ? _topicKw : extractTopicKeywords(message, _exclKwNames, 8, _topicPrefer));
+            if (_sweepKw.length > 0) {
+              const _swept = organizeForQuestion(sweepAllStores(_sqlite as never, _entityUuid, _sweepKw), _sweepKw);
+              if (_swept.length > 0) {
+                memoryFragments.push('【深度回忆素材包 · MemSym】以下是全部记忆仓（砂金/金库黑钻/知识库）与该话题相关的碎片——整编组织，努力还原情景：\n' +
+                  _swept.join('\n') + CRYSTAL_DIRECTIVE);
+                console.log(`[MemSym·深度素材] P093编排器 ${_sweepKw.join('/')} → ${_swept.length} 条整编入包`);
+              }
+            }
+          }
+        } catch (_deepErr) { /* 深度素材包失败不阻塞召回主链 */ }
         // 🔴 2026-09-12 生产实测修复（决定性命中）: 原查询只取"最新 5 条"且不过滤，
         //   而她最新的 vault_log 多是 landmark 噪声（"AAAA…"/"散会"/"徐诗雨"/"…"）与空 content_md
         //   → 实测注入的 5 条里 2 条空白 + 2 条碎片；真正有内容的条目（中秋 10 / 诗韵 68 / 诗涵 11 = 89 条）
@@ -1201,7 +1312,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       }
   } catch (err) { console.warn('[EmotionContagion] 检索失败:', err); }
 
-  // ── V11.0: 统一语义搜索 — n-gram初筛 + 自有32D向量精排（替代旧LIKE黑钻检索） ──
+  // ── V11.0: 统一语义搜索 — n-gram初筛 + 自有40D向量精排（替代旧LIKE黑钻检索） ──
   // ── V13.0: WS_SEARCH_V13=true 时走七层仿生管线 ──
   const WS_SEARCH_V13 = true; // 硬编码开启，绕过 env 加载问题
   console.error('[RETRIEVAL-STAGE-V13] ENTERED runRetrieval, WS_SEARCH_V13=' + WS_SEARCH_V13 + ' m4=' + !!ctx.m4 + ' retrieveFn=' + !!(ctx.m4?.retrieveMultiRankForSearch));
@@ -1225,6 +1336,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
 
             const _multiRank = await ctx.m4.retrieveMultiRankForSearch(_locusPath, _entities, {
               perception: p,
+              p40: input.p40,  // 🔴 P072: M3 原生 40D 透传给语义联想路（唯一合法查询量纲，禁 24D 二次投影）
+              queryText: message,  // P071-Phase2: 真实消息 → G4 意图区分（原误传 locusPath 致正则空转）
               entityUuids: _activeEntityUuids,
               sessionId: ctx.sessionId,
             });
@@ -1278,6 +1391,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           const { search: unifiedSearch } = await import('../../m4/UnifiedSearchEngine.js');
           _dbResult = unifiedSearch(_sqlite.rawDb || _sqlite, message, p, {
             mode: isTopicShift ? 'full' : 'balanced',
+            p40: input.p40,  // 🔴 P072 批2: M3 原生 40D 透传（V11 兑底路径同样禁 24D 投影）
             entityUuids: _activeEntityUuids.length > 0 ? _activeEntityUuids : undefined,
             limit: isTopicShift ? 6 : 3,
             includeKnowledgeBase: true,

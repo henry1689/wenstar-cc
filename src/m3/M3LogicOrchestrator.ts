@@ -26,6 +26,10 @@ import type {
   EnhancedDNA,
 } from './types/perception.js';
 import { PerceptionAnalyzer, getTotalHitCount } from './PerceptionAnalyzer.js';
+import { calciumFromPerceptionV40 } from '../m2/math.js';
+
+// 🔴 P074-A2 双算观测计数器（纯观测，无消费方）
+let _dualN = 0, _dualSumOld = 0, _dualSumNew = 0;
 
 /**
  * M3 逻辑决策层编排器
@@ -73,14 +77,25 @@ export class M3LogicOrchestrator {
     enhanced.calcium_score = calcium.score;
     enhanced.calcium_level = calcium.level;
 
-    // Phase 3.5: V3 — M3 直接产出 40D（在 injectContext 之后、决策路由之前，
-    // 与 24D 同源同路径：40D 语义维 = 注入上下文后的最终 24D 投影）
+    // Phase 3.5: V3 — M3 产出 40D（在 injectContext 之后、决策路由之前，
+    // 与感知中间层同源同路径：40D = 最终投影；🔴 P074 待废过渡态：改 scorers 直产）
     enhanced.perceptionV40 = this.analyzer.buildPerceptionV40(enhanced.perception);
+
+    // 🔴 P074-A2 钙分双算观测（2026-10-24）：新口径（40D 14 语义维 L2/√14）旁路计算——
+    //   无任何消费方、不参与晋升/衰减/三库判定；每 20 次输出对账日志。
+    //   积累对比数据后由业主裁决切换（P074 三步走：双算→报告→切换，含 A4 存量重算停服窗口）。
+    try {
+      enhanced.calcium_score_40d = calciumFromPerceptionV40(enhanced.perceptionV40);
+      _dualN++; _dualSumOld += enhanced.calcium_score || 0; _dualSumNew += enhanced.calcium_score_40d;
+      if (_dualN % 20 === 0) {
+        console.log(`[P074-dual] n=${_dualN} avg_old=${(_dualSumOld / _dualN).toFixed(3)} avg_new=${(_dualSumNew / _dualN).toFixed(3)}`);
+      }
+    } catch { /* 观测失败不影响主链 */ }
 
     // Phase 4: 决策路由
     const actions = this.route(enhanced);
 
-    // Phase 5: P2 — 从 24D 向量推导情绪标签 + 置信度 + 规则匹配详情
+    // Phase 5: P2 — 从感知向量（🔴 中间层，P074 待废）推导情绪标签 + 置信度 + 规则匹配详情
     const { primary, secondary, matchedRules } = PerceptionAnalyzer.deriveEmotionLabels(enhanced.perception);
     // 使用真实词命中数（从 PerceptionAnalyzer 累计的词表命中统计）
     const realHits = getTotalHitCount();

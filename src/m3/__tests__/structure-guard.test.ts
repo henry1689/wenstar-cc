@@ -1,6 +1,11 @@
 /**
  * M3 结构性守卫测试
  *
+ * 🔴 P072/P074 待废说明：本测试锁定的 PerceptionState24 24 槽位/24维评分等结构属
+ *    《40D 量纲统一法令》下的 M3 内部计算介质（待废中间层，不落库不构成检索量纲）；
+ *    P074（M3 直产 40D 批5）完成后本测试的 24 维断言将同步改为 40D。
+ *    当前保留 = 对现行代码的真实契约锁定，非量纲认可。
+ *
  * 用途：锁定 M3 模块的结构契约，防止后期架构漂移。
  * 覆盖以下维度：
  *   1. 类型导出（perception.ts 全部 7 个类型接口形状）
@@ -15,7 +20,7 @@ import { describe, it, expect } from 'vitest';
 import { PerceptionAnalyzer, getHitReport } from '../PerceptionAnalyzer.js';
 import { M3LogicOrchestrator } from '../M3LogicOrchestrator.js';
 import type {
-  Perception24D,
+  PerceptionState24,
   EnhancedDNA,
   CalciumResult,
   CalciumLevel,
@@ -29,8 +34,8 @@ import type {
 // ════════════════════════════════════════════════════════════════════
 
 describe('[M3守卫] perception.ts 类型接口', () => {
-  it('Perception24D 有 24 个 number 字段、4 象限各 6 维', () => {
-    const p: Perception24D = {
+  it('PerceptionState24 有 24 个 number 字段、4 象限各 6 维', () => {
+    const p: PerceptionState24 = {
       // 原24字段
       pleasure: 0.5, arousal: 0.5, dominance: 0.5, aggression: 0.5, sincerity: 0.5, humor: 0.5,
       factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5, temporal_focus: 0.5, self_ref: 0.5,
@@ -61,7 +66,7 @@ describe('[M3守卫] perception.ts 类型接口', () => {
     const ed: EnhancedDNA = {
       branch_id: 'evt_00000000_000', locus_path: 'user.misc.default',
       raw_input: 'test', entity_genes: [],
-      perception: {} as Perception24D,
+      perception: {} as PerceptionState24,
       calcium_score: 0.5, calcium_level: 1,
     };
     expect(ed.branch_id).toBeTruthy();
@@ -228,8 +233,8 @@ describe('[M3守卫] 运行时不变性', () => {
 // ════════════════════════════════════════════════════════════════════
 
 describe('[M3守卫] 外部消费者契约', () => {
-  it('Perception24D 被 m2/math/types/SQLite/m5/m8/m9/adapter 使用 — 24 字段不变', () => {
-    const keys: (keyof Perception24D)[] = [
+  it('PerceptionState24 被 m2/math/types/SQLite/m5/m8/m9/adapter 使用 — 24 字段不变', () => {
+    const keys: (keyof PerceptionState24)[] = [
       // 原24字段
       'pleasure', 'arousal', 'dominance', 'aggression', 'sincerity', 'humor',
       'factual', 'logical', 'certainty', 'abstract', 'temporal_focus', 'self_ref',

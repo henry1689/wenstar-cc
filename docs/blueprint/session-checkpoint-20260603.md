@@ -7,6 +7,9 @@ metadata:
   originSessionId: current
 ---
 
+> 🔴 **量纲封存声明（2026-10-24《40D 量纲统一法令》）**：本文档成文于旧量纲时代（24D/32D/36D/6D 等表述均为历史），其量纲相关内容**一律以 40D 为准，不得引用旧量纲条款**。当前权威：`data/knowledge-v4/governance/40d-unification-decree-v1.0.md`。
+
+
 # 会话检查点：2026-06-03
 
 ## 已完成的工作

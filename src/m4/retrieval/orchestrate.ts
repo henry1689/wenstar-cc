@@ -26,7 +26,7 @@ export interface FoundationRouteOptions {
   activeEntityUuids: string[];
   /** 话题切换（full 模式） */
   isTopicShift?: boolean;
-  /** 感知向量（24D + 40D） */
+  /** 感知向量（中间层 + 40D；🔴 中间层属 P074 待废） */
   perception?: RetrievalContext['perception'];
   perception40d?: RetrievalContext['perception40d'];
   /** 时间导航参数 */

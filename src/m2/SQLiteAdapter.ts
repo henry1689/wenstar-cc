@@ -118,7 +118,7 @@ export const ANCHOR_REBUILD_GROUPS_SQL =
   "GROUP BY c2.belong_entity_uuid " +
   "ORDER BY COUNT(*) DESC, MIN(c2.seq_pos) ASC, MIN(c2.timestamp) ASC, c2.belong_entity_uuid ASC LIMIT 1) " +
   "ORDER BY dg.belong_entity_uuid, dg.first_ts";
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { EntityGene } from '../m1/types/dna.js';
 import type {
   EmotionalMemoryRecord,
@@ -136,9 +136,9 @@ import {
 } from './math.js';
 import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
 import { computeL2Norm40D } from './PerceptionVector40DCodec.js';
-import { decodePerceptionV40, encodePerceptionV40, map24DTo40D, cosineSimilarity40D, PERCEPTION_40D_ENCODING_VERSION, encodeEmptyPerceptionV40 } from './PerceptionVector40DCodec.js';
-import type { PerceptionV40 } from './types/perception-40d.js';
-import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from './types/perception-40d.js';
+import { decodePerceptionV40, encodePerceptionV40, projectState24ToV40, cosineSimilarity40D, PERCEPTION_40D_ENCODING_VERSION, encodeEmptyPerceptionV40, encodePerceptionV40FromDims } from './PerceptionVector40DCodec.js';
+import type { PerceptionV40 } from '../m3/types/perception-40d.js';
+import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from '../m3/types/perception-40d.js';
 import { migrateSchema } from './MigrationManager.js';
 import { createHash } from 'node:crypto';
 import { assertWriteAllowed } from '../app/locking/ServerLock.js';
@@ -185,39 +185,22 @@ function jsonToGenes(json: string): EntityGene[] {
   try { return JSON.parse(json); } catch (err) { console.warn('[SQLite] jsonToGenes解析失败:', err); return []; }
 }
 
-/** V12.4 阶段B: 解析 24D JSON（数组24元素 或 命名对象）→ Perception24D。解析失败返回中性 0.5。
- *  仅作 writeMemory 的 40D 派生源（24D 不再落库）。 */
-const KEYS24_ORDER: (keyof Perception24D)[] = [
+/** V12.4: 24D 槽位键序（STATE24_ORDER）—— 仅存于 40D→24D 反解（deriveState24FromV40）与 24D 中性回填。
+ *  🔴 P072 批1（2026-10-24）：原 parsePerceptionState24Json（writeMemory 的 24D 派生源）已删除——
+ *  writeMemory 现单轨接收原生 perceptionV40，禁止 24D JSON 中间物。 */
+const STATE24_ORDER: (keyof PerceptionState24)[] = [
   'pleasure','arousal','dominance','aggression','sincerity','humor',
   'factual','logical','certainty','abstract','temporal_focus','self_ref',
   'intimacy','power_diff','dependency','moral_judgment','etiquette','belonging',
   'sexual_attraction','sensory_craving','energy_merge','possessiveness','ecstasy','safety',
 ];
-function parsePerception24DJson(json: string | null | undefined): Perception24D {
-  const neutral: Perception24D = {} as Perception24D;
-  for (const k of KEYS24_ORDER) neutral[k] = 0.5;
-  if (!json) return neutral;
-  try {
-    const p = JSON.parse(json);
-    if (Array.isArray(p) && p.length === 24) {
-      const o = {} as Record<string, number>;
-      for (let i = 0; i < 24; i++) o[KEYS24_ORDER[i]] = Number(p[i]) || 0;
-      return o as unknown as Perception24D;
-    }
-    if (p && typeof p === 'object') {
-      const o = {} as Record<string, number>;
-      for (const k of KEYS24_ORDER) o[k] = Number((p as Record<string, unknown>)[k]) || 0;
-      return o as unknown as Perception24D;
-    }
-  } catch { /* 解析失败走中性 */ }
-  return neutral;
-}
 
 /** V12.4 阶段B 根除24D: 40D → 24D 反解映射（仅 14 维可反解，与 MAP_24_TO_40 互逆）。
  *  🔴 边界铁律：40D 无槽位的 10 维（arousal/aggression/factual/logical/certainty/abstract/
  *      temporal_focus/power_diff/sensory_craving/ecstasy）无真实值，反解为中性 0.5。
- *      record.perception 仅供 M3 内部/下游读字段方使用，不落库、不再参与 24D 检索打分。 */
-const REVERSE_MAP_40_TO_24: ReadonlyArray<{ dim40: number; key24: keyof Perception24D }> = [
+ *      record.perception 仅供 M3 内部/下游读字段方使用，不落库、不再参与检索打分。
+ *  🔴 P074 待废：本反解链与 PerceptionState24 中间层随 M3 直产 40D 改造整体退役（40D 量纲统一法令）。 */
+const REVERSE_MAP_40_TO_24: ReadonlyArray<{ dim40: number; key24: keyof PerceptionState24 }> = [
   { dim40: 9, key24: 'self_ref' }, { dim40: 12, key24: 'pleasure' }, { dim40: 14, key24: 'safety' },
   { dim40: 15, key24: 'intimacy' }, { dim40: 17, key24: 'belonging' }, { dim40: 19, key24: 'etiquette' },
   { dim40: 33, key24: 'sexual_attraction' }, { dim40: 34, key24: 'energy_merge' },
@@ -225,9 +208,9 @@ const REVERSE_MAP_40_TO_24: ReadonlyArray<{ dim40: number; key24: keyof Percepti
   { dim40: 37, key24: 'moral_judgment' }, { dim40: 38, key24: 'humor' },
   { dim40: 39, key24: 'dependency' }, { dim40: 40, key24: 'possessiveness' },
 ];
-function perceptionV40To24D(p40: PerceptionV40 | null): Perception24D {
-  const neutral: Perception24D = {} as Perception24D;
-  for (const k of KEYS24_ORDER) neutral[k] = 0.5;
+function deriveState24FromV40(p40: PerceptionV40 | null): PerceptionState24 {
+  const neutral: PerceptionState24 = {} as PerceptionState24;
+  for (const k of STATE24_ORDER) neutral[k] = 0.5;
   if (!p40) return neutral;
   for (const { dim40, key24 } of REVERSE_MAP_40_TO_24) {
     const v = p40[PERCEPTION_40D_KEYS[dim40 - 1]];
@@ -799,10 +782,10 @@ export class SQLiteAdapter {
       try {
         this._backfillPerception40D();
       } catch (_p40Err) { console.warn('[V20] 40D 补全失败:', (_p40Err as Error)?.message); }
-      // V21: 三库（state_spines/knowledge_base/black_diamond）40D 补齐
+      // V21: 双库（knowledge_base/black_diamond）40D 补齐（state_spines 已废除删除，P071）
       try {
         this._backfillLibs40D();
-      } catch (_libErr) { console.warn('[V21] 三库 40D 补齐失败:', (_libErr as Error)?.message); }
+      } catch (_libErr) { console.warn('[V21] 双库 40D 补齐失败:', (_libErr as Error)?.message); }
       // V12.4: 存量 40D 编码升级 — v1 纯数组 → v2 `{__v:2,dims:[...]}`（幂等）
       try {
         this._upgradePerception40DToV2();
@@ -1006,11 +989,19 @@ export class SQLiteAdapter {
 
   write(record: EmotionalMemoryRecord): void {
     this.ensureReady();
+    // 🔴 A 去重闸门（业主 2026-10-15 批准 A+C）：新建时同原文已存在 → 不再写第二条。
+    //   放在所有预处理之前：重复即不写，后面的 seq_pos 预检/感知向量编码全是无用功。
+    //   只影响 memories；对话原文在 conversations 表原样保留，本闸门绝不触碰。
+    if (this._isDuplicateNewWrite(record.raw_input, record.id)) {
+      console.warn(`[SQLiteAdapter] ♻️ write() 去重拦下重复记忆 id=${record.id} seq=${record.seq_pos}（同原文已存在于库）`);
+      return;
+    }
     // 🔴 D8 值保留守卫: 入参未携带的 6 个身份关键列 → 继承旧行值（REPLACE 会把未携带列重置为 NULL）
     this._preserveIdentityCriticalValues(record);
     // V12.4 阶段B 根除24D: perception_json 列已删，24D 不再落库（仅作 M3 内部语义引擎/计算介质）。
-    // 40D 强制恒写：record.perceptionV40 优先，缺失时从 record.perception(24D) 派生，防读-改-写清空。
-    const p40 = record.perceptionV40 ?? map24DTo40D(record.perception);
+    // 40D 强制恒写：record.perceptionV40 优先，缺失时从 record.perception 派生，防读-改-写清空。
+    // 🔴 P072-B 待废（依赖 P074）：此 24D 派生兜底待 M3 直产 40D 后废除（40D 量纲统一法令第四条）。
+    const p40 = record.perceptionV40 ?? projectState24ToV40(record.perception);
     const p40Json = encodePerceptionV40(p40);
 
     // P0-4: 钙化分边界强制校验
@@ -1162,8 +1153,7 @@ export class SQLiteAdapter {
    */
   writeMemory(opts: {
     id: string; seqPos: number; createdAt: string;
-    // V12.4 阶段B 根除24D: perceptionJson 不再落库，仅作 40D 缺失时的派生源（可选）
-    perceptionJson?: string | null; calciumScore: number; calciumLevel: number;
+    calciumScore: number; calciumLevel: number;
     locusPath: string; leafZone: string; rawInput: string;
     primaryEmotion: string; memoryType: string;
     globalUid?: string; locationFingerprint?: string;
@@ -1180,7 +1170,7 @@ export class SQLiteAdapter {
     validUntilMs?: number | null;     // V13: 有效截止时间(ms)
     foresightStatus?: string | null;  // V13: 前瞻状态
     namespace?: string | null;        // BATCH-23: memory namespace scope
-    perceptionV40?: string | null;    // V20: 40D感知向量(JSON数组40元素)，写 perception_40d 列（唯一落库感知向量）
+    perceptionV40?: string | null;    // V20: 40D感知向量(JSON数组40元素)，写 perception_40d 列（唯一落库感知向量）；🔴 P072 批1: 原 perceptionJson(24D) 参数已删，单轨
     timePeriod?: string | null;       // 批次3: 时段 (dawn/morning/midday/afternoon/evening/night/midnight)
     season?: string | null;           // 批次3: 季节 (spring/summer/autumn/winter)
     lunarTerm?: string | null;        // 批次3: 节气
@@ -1207,10 +1197,33 @@ export class SQLiteAdapter {
   }): boolean {
     this.ensureReady();
     try {
-      // 40D 强制恒写：perceptionV40 优先，缺失时从 perceptionJson(24D JSON) 派生
-      const p40Json = opts.perceptionV40
-        ? opts.perceptionV40
-        : (opts.perceptionJson ? encodePerceptionV40(map24DTo40D(parsePerception24DJson(opts.perceptionJson))) : null);
+      // 🔴 A 去重闸门（业主 2026-10-15 批准 A+C）：新建时同原文已存在 → 不再写第二条。
+      //   返回 true（而非 false）：调用方关心的是「这条内容是否已在库」，重复命中即已达成；
+      //   返回 false 会让 persistence-stage 误判写入失败并触发重试/报错链路。
+      if (this._isDuplicateNewWrite(opts.rawInput, opts.id, opts.leafZone)) {
+        console.warn(`[SQLiteAdapter] ♻️ writeMemory 去重拦下重复记忆 id=${opts.id} seq=${opts.seqPos} zone=${opts.leafZone}（同 zone 内同原文已存在）`);
+        return true;
+      }
+    // 🔴 P072 批1（2026-10-24）：原 perceptionJson(24D) 派生分支已删——writeMemory 单轨接收
+    //   原生 perceptionV40（M3 直接产出的 40D JSON 字符串），缺失即 null（由 writePerceptionV40Dual/
+    //   启动补全兑底），禁止任何 24D 中间物与二次派生。
+      // 🔴 2026-10-30 彻底修复 seq_pos 冲突丢写（防御层）：
+      //   背景：seq_pos 有三个消费者 —— user 行 / assistant 行 / WorkingMemory 的 evt 行，
+      //   而 reserveNextSeq() 每轮只预留 2 个号，evt 行复用了 user 的号 ⇒ 必然相撞。
+      //   `write()` 路径早有占用预检（撞了改分配），`writeMemory()` 却没有 ⇒ 对话记忆整条丢失。
+      //   实测：6 次 `❌ writeMemory 失败 … UNIQUE constraint failed: memories.seq_pos`
+      //   与 6 次「用户轮未落库」一一对应。
+      //   此处与 write() 同构：占用即改分配 MAX+1，保证**任何**发号Bug都不会演变成数据丢失。
+      try {
+        const _clash = this.queryAll('SELECT id FROM memories WHERE seq_pos = ? AND id <> ? LIMIT 1', [opts.seqPos, opts.id]);
+        if (_clash.length) {
+          const _mx = this.db!.exec('SELECT COALESCE(MAX(seq_pos),0)+1 FROM memories');
+          const _next = Number(_mx?.[0]?.values?.[0]?.[0] ?? Date.now());
+          console.warn(`[SQLiteAdapter] writeMemory seq_pos=${opts.seqPos} 已被占用 → 重新分配 ${_next}（避免 UNIQUE 冲突丢写）`);
+          opts.seqPos = _next;
+        }
+      } catch { /* 预检失败不阻塞写入，交由下方 catch 可见 */ }
+    const p40Json = opts.perceptionV40 ?? null;
 
       // 🔴 D3 修复(2026-09-11): fg_entity_names 落库。
       // 原实现列清单缺席该列 → INSERT OR REPLACE 每轮把已写入的值抹成 NULL（全库 2012 条恒空）。
@@ -1296,6 +1309,44 @@ export class SQLiteAdapter {
       return true;
     } catch (e: any) {
       console.error(`[SQLiteAdapter] ❌ writeMemory 失败 seq=${opts.seqPos} zone=${opts.leafZone}:`, e?.message);
+      return false;
+    }
+  }
+
+  /**
+   * A 写入端重复去重闸门（业主 2026-10-15 批准 A+C 的 A 半边）
+   *
+   * 背景（2026-10-15 全库实测）：memories 10,500 条中 **2,722 条（25.9%）是完全相同的重复**，
+   *   最夸张的单条 `你好` 写了 558 次、横跨 27 天。写入端此前**零去重**，垃圾只增不减。
+   *
+   * 口径（S2 已批准，刻意收窄以防误伤）：
+   *   · 只比 `raw_input` **Trim 后逐字完全相同** —— 绝不用相似度/嵌入距离，
+   *     否则「你想我了吗」与「你今天想我了吗」会被判重复而丢掉真实信息
+   *   · **亲密话语不会因此丢失**：拦下的只是「不再新写一条一模一样的行」，
+   *     已存在的那条照旧在库；对话原文完整保留在 conversations（8,218 条，本闸门不碰）
+   *   · **仅拦截新建，同 id 更新一律放行**（先查 self id 存在性，避免存量重复导致更新被误吞）
+   *
+   * fail-open：查重 SQL 任何异常都放行写入 —— 去重是**优化**，不能变成数据写不进去的理由。
+   */
+  private _isDuplicateNewWrite(rawInput: string, selfId: string, leafZone?: string | null): boolean {
+    try {
+      const s = String(rawInput ?? '').trim();
+      if (s.length < 2) return false;   // 退化/极短内容归 MemoryWriteGateway 道2 管，此处不越权
+      const self = this.queryAll('SELECT 1 FROM memories WHERE id = ? LIMIT 1', [selfId]);
+      if (self.length) return false;    // 同 id 已存在 = 更新既有行 → 放行
+      // TRIM 两侧口径统一：库里历史行可能带空白，故对列也 TRIM（10k 行全扫，实测 <5ms）
+      // 🔴 2026-10-30 去重作用域收敛到**同一 leaf_zone**（业主批准）。
+      //   原实现是**全库跨 zone** 比对 ⇒ 玉瑶在 assistant 区说过一句与用户相同的话，
+      //   用户这条就被判「已存在」而不写 ⇒ **用户侧记忆真缺失**（「刚说的话她没记住」的根因之一）。
+      //   依据：user 的发言与 assistant 的应答是两条独立证据，文本相同不等于同一件事。
+      //   未传 leafZone 的调用方（write() 事件行）保持原全库语义，行为零变化。
+      const zone = leafZone === undefined || leafZone === null ? null : String(leafZone);
+      const dup = zone === null
+        ? this.queryAll('SELECT id FROM memories WHERE TRIM(raw_input) = ? LIMIT 1', [s])
+        : this.queryAll('SELECT id FROM memories WHERE TRIM(raw_input) = ? AND leaf_zone = ? LIMIT 1', [s, zone]);
+      return dup.length > 0;
+    } catch (e: any) {
+      console.warn('[SQLiteAdapter] 去重预检失败 → fail-open 放行写入:', e?.message);
       return false;
     }
   }
@@ -1454,6 +1505,43 @@ export class SQLiteAdapter {
     return 0;
   }
 
+  /**
+   * 返回两表中**最大普通递增序号** —— 序号分配器的正确起点。
+   *
+   * 🔴 为什么不能用 getTotalCount()：那是「记录条数」不是「已用序号」。两表序号非连续
+   *   （历史删除/时间戳型占位），条数恒小于最大号 ⇒ 分配器会发到**已占用**的号上。
+   *   实测：条数 10482，而最大号 10817，差距 336 ⇒ 新对话写 memories 100% UNIQUE 冲突。
+   *
+   * 两个细节：
+   * ① **排除时间戳型**（`>= 1e12`）：`YuyaoMemoryService` 等以 `Date.now()` 作 seq_pos。
+   *    若计入，counter 会跳到 1.79e12，后续所有普通序号都成"新号"，唯一约束形同虚设。
+   * ② **两表都查**：conversations 与 memories 共用同一序号空间（同一轮对话 user/assistant
+   *    的 seq 在两表同值，实测重叠 6616 个），只看一边会漏掉另一半的占用号。
+   */
+  getMaxSeqPos(): number {
+    this.ensureReady();
+    const maxOf = (t: string): number => {
+      const res = this.execSql(`SELECT COALESCE(MAX(seq_pos), 0) FROM ${t} WHERE seq_pos BETWEEN 1 AND 999999`);
+      if (res.length > 0 && res[0].values.length > 0) {
+        return Number(res[0].values[0][0]) || 0;
+      }
+      return 0;
+    };
+    return Math.max(maxOf('memories'), maxOf('conversations'));
+  }
+
+  /** 某序号是否已被两表任一占用（供分配器避开历史占位号）。 */
+  isSeqPosTaken(pos: number): boolean {
+    this.ensureReady();
+    if (!Number.isFinite(pos) || pos <= 0) return false;
+    const hit = (t: string): number => {
+      const res = this.execSql(`SELECT COUNT(*) FROM ${t} WHERE seq_pos = ?`, [pos]);
+      if (res.length > 0 && res[0].values.length > 0) return Number(res[0].values[0][0]) || 0;
+      return 0;
+    };
+    return hit('memories') + hit('conversations') > 0;
+  }
+
   // ─── 情感检索（核心新能力） ───
 
   /**
@@ -1471,7 +1559,7 @@ export class SQLiteAdapter {
   /**
    * V12.4 阶段A: 40D 情感检索 — 用 perception_40d 列 + cosineSimilarity40D 评分。
    * 与 findByEmotionalSimilarity 同构（landmark/recent 分层 + 过滤），但：
-   *   - 查询感知：current_perception(24D) → map24DTo40D → PerceptionV40
+   *   - 查询感知：current_perception → 40D 派生（🔴 P072-C 待废：此 projectState24ToV40 查询投影将改传原生 p40，options.p40 已就位）
    *   - 记录感知：record.perceptionV40（perception_40d 列，v2 兼容 decode）
    *   - 相似度：cosineSimilarity40D（扇区加权）
    * 40D 缺失行（perceptionV40 空）→ 降级按钙化分排序，不崩不泄漏。
@@ -1480,13 +1568,14 @@ export class SQLiteAdapter {
    */
   findByEmotionalSimilarity40D(query: RetrievalQuery): ScoredMemory[] {
     this.ensureReady();
-    const cacheKey = 'ems40_' + query.similarity_mode + '_' + query.limit + '_' + (query.locus_path || '') + '_' + (query.entities?.slice().sort().join(',') || '') + '_' + (query.entityUuids?.slice().sort().join(',') || '') + '_' + (query.isBackgroundTask ? 'bg' : 'chat') + '_' + JSON.stringify(query.current_perception);
+    const cacheKey = 'ems40_' + query.similarity_mode + '_' + query.limit + '_' + (query.locus_path || '') + '_' + (query.entities?.slice().sort().join(',') || '') + '_' + (query.entityUuids?.slice().sort().join(',') || '') + '_' + (query.isBackgroundTask ? 'bg' : 'chat') + '_' + (query.p40 ? 'p40:' + JSON.stringify(query.p40) : 'np40') + '_' + JSON.stringify(query.current_perception);
     const cached = this._cacheGet<ScoredMemory[]>(cacheKey);
     if (cached) return cached;
 
     const startTime = performance.now();
     // 查询 24D → 40D 派生（与 M3 buildPerceptionV40 同源投影）
-    const q40 = map24DTo40D(query.current_perception);
+    // p40 优先原生（查询同源，量纲法令第四条）；缺失回退仅供内部分析（非用户检索查询）
+    const q40 = query.p40 ?? projectState24ToV40(query.current_perception);
 
     // P0-3: 仅后台任务（isBackgroundTask=true，梦境/金库/分析）排除 roleplay 记忆；
     // 聊天私聊/会晤检索不过滤（会晤记忆可被聊天召回，根治"回头就忘"）。保留 memory_kind 体系。
@@ -1561,7 +1650,7 @@ export class SQLiteAdapter {
   }
 
   /** V12.4: 40D 单条评分 — cosineSimilarity40D 扇区加权。
-   * 合成语义对齐 24D _scoreMemory（S4 评审 P1 修复）：
+   * 合成语义对齐 原24D _scoreMemory 行为基线（S4 评审 P1 修复；历史口径，P074 后 40D 化）：
    *   - 钙化分 /10 归一化（累积级钙化最高 [0,10]，不归一化会淹没情感相似度）
    *   - effective_strength 乘子 + 时间衰减
    *   - safeComposite > 0.05 低相似过滤（与调用方阈值契约一致）
@@ -1744,14 +1833,14 @@ export class SQLiteAdapter {
 
   /** 情感相似事件增强 */
   applyReinforcement(
-    newPerception: Perception24D,
+    newPerception: PerceptionState24,
     newCalcium: number,
     memoryIds: string[],
   ): void {
     this.ensureReady();
     const now = new Date().toISOString();
     // V12.4 阶段B 根除24D: 相似度改用 40D 扇区加权余弦（perception 反解后 10 维中性 0.5，24D 余弦失真）
-    const newP40 = map24DTo40D(newPerception);
+    const newP40 = projectState24ToV40(newPerception);
     for (const id of memoryIds) {
       const record = this.findById(id);
       if (!record) continue;
@@ -2321,10 +2410,11 @@ export class SQLiteAdapter {
    * 每次启动自动执行，幂等（清理旧 ANCHOR → 重建）。
    */
   /**
-   * 🔴 V20: 40D 启动补全 — 在 sql.js 内存态内从 24D 派生 40D 写入 perception_40d。
+   * 🔴 V20: 40D 启动补全 — 在 sql.js 内存态内补全 perception_40d（缺失时从 24D 派生）。
    * 根治 sql.js 整库覆写：backfill（better-sqlite3）写磁盘的数据被 sql.js 内存态覆盖，
    * 此处改为「内存态内补全」→ flush 时随库持久，不再丢失。
    * 幂等：只处理 perception_40d 为空的行。
+   * 🔴 P072-B/P074 待废：24D 派生源随 M3 直产 40D 改造退役（现存为幂等兑底）。
    */
   private _backfillPerception40D(): number {
     if (!this.db) return 0;
@@ -2370,7 +2460,7 @@ export class SQLiteAdapter {
             if (isFinite(v)) p40[d - 1] = v;
           }
           // V12.4: 编码标识 — 40D 带 __v 版本（v2 对象格式），decode 向后兼容 v1 纯数组
-          this.db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [JSON.stringify({ __v: PERCEPTION_40D_ENCODING_VERSION, dims: p40 }), String(id)]);
+          this.db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [encodePerceptionV40FromDims(p40), String(id)]);
           updated++;
         } catch { /* 单条失败跳过 */ }
       }
@@ -2383,36 +2473,18 @@ export class SQLiteAdapter {
   }
 
   /**
-   * 🔴 V21: 三库 40D 启动补全 — state_spines / knowledge_base / black_diamond。
+   * 🔴 V21: 双库 40D 启动补全 — knowledge_base / black_diamond。
    * 与 _backfillPerception40D 同模式（sql.js 内存态内补全 → flush 随库持久）。
    * 幂等：只处理缺 40D 的行。
-   *   1. state_spines: 补 dimension_id 25-40（值 0 占位，待瑶光/瑶灵数据源）
-   *   2. knowledge_base: emotion_vector 24 数组 → 40D（14 维映射 + 26 维 0）
-   *   3. black_diamond: emotion_vector（存时间戳异常）→ 40D 默认数组
+   *   1. knowledge_base: emotion_vector 24 数组 → 40D（14 维映射 + 26 维 0）
+   *   2. black_diamond: emotion_vector（存时间戳异常）→ 40D 默认数组
+   *   （原第 1 段 state_spines 25-40 维补齐已随底座1 废除删除 — P071）
    */
   private _backfillLibs40D(): number {
     if (!this.db) return 0;
     let total = 0;
     try {
-      // ── 1. state_spines 补 25-40 维 ──
-      try {
-        const maxDim = this.db.exec("SELECT MAX(dimension_id) m FROM state_spines")[0]?.values?.[0]?.[0] ?? 0;
-        if (Number(maxDim) < 40) {
-          const uids = this.db.exec("SELECT DISTINCT global_uid FROM state_spines WHERE dimension_id IN (1,2,3)")[0]?.values ?? [];
-          for (const [uid] of uids) {
-            for (let d = Number(maxDim) + 1; d <= 40; d++) {
-              this.db.run(
-                "INSERT OR REPLACE INTO state_spines (global_uid, dimension_id, value, consistency_mark, location_fingerprint, timestamp_ms, checksum) VALUES (?, ?, 0, 'consistent', 'backfill_40d', ?, '')",
-                [String(uid), d, Date.now()]
-              );
-              total++;
-            }
-          }
-          if (total > 0) console.log(`[V21] state_spines 40D 补齐: ${total} 行 (25-40维)`);
-        }
-      } catch (e) { console.warn('[V21] state_spines 40D 补齐异常:', (e as Error)?.message); }
-
-      // ── 2. knowledge_base emotion_vector 24→40D ──
+      // ── 1. knowledge_base emotion_vector 24→40D ──
       try {
         const kbRows = this.db.exec(
           "SELECT id, emotion_vector FROM knowledge_base WHERE emotion_vector IS NOT NULL AND emotion_vector != ''"
@@ -2499,7 +2571,7 @@ export class SQLiteAdapter {
           }
           // 纯数组 v1 → 升级为 v2
           if (Array.isArray(parsed) && parsed.length === 40) {
-            this.db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [JSON.stringify({ __v: PERCEPTION_40D_ENCODING_VERSION, dims: parsed }), String(id)]);
+            this.db.run("UPDATE memories SET perception_40d = ? WHERE id = ?", [encodePerceptionV40FromDims(parsed as number[]), String(id)]);
             upgraded++;
           }
         } catch { /* 单条解析失败跳过 */ }
@@ -3204,9 +3276,9 @@ export class SQLiteAdapter {
     }
 
     // V12.4 阶段B 根除24D: 感知向量唯一来源 = perception_40d 列（v2 兼容 decode），
-    // 反解 24D 仅 14 维真实、10 维中性 0.5（无槽位字段不落库）。
+    // 反解 24D 仅 14 维真实、10 维中性 0.5（🔴 P074 待废：24D 反解字段随中间层退役）。
     const p40 = decodePerceptionV40(obj.perception_40d);
-    const perception = perceptionV40To24D(p40);
+    const perception = deriveState24FromV40(p40);
 
     return {
       id: obj.id,

@@ -4,9 +4,9 @@
  * 多路独立排名输出的统一接口，替代 MemoryRetriever 内部的数组拼接。
  *
  * 召回路:
- *   emotion  — 24D 情绪相似度降序（mood_congruent 模式）
+ *   emotion  — 情绪相似度降序（40D，mood_congruent 模式）
  *   keyword  — n-gram 关键词命中数降序
- *   spine    — state_spines 24D 余弦相似度降序
+ *   spine    — 🔴 P071 已废除（state_spines 底座1 删除；40D 真源=memories.perception_40d）
  *   locus    — 话题前缀匹配 + seq_pos 降序
  *   entity   — belong_entity_uuid 直查 + 时序降序
  *   work     — works 表作品直达（长文召回元数据桥，"那篇小说"）

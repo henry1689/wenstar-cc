@@ -4,7 +4,7 @@ import { PerceptionAnalyzer } from '../m3/PerceptionAnalyzer.js';
 import { M7Orchestrator } from '../m7/M7Orchestrator.js';
 import { M3_CONFIG } from '../config/M3Config.js';
 import type { DNA } from '../m1/types/dna.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { M8Engine } from '../m8/M8Engine.js';
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 
@@ -32,7 +32,7 @@ const dna: DNA = {
   raw_input: '需要跨轮保留的低钙记忆', created_at: new Date().toISOString(),
 };
 
-const perception: Perception24D = {
+const perception: PerceptionState24 = {
   pleasure: 0, arousal: 0, dominance: 0, aggression: 0, sincerity: 0,
   humor: 0, factual: 0, logical: 0, certainty: 0, abstract: 0,
   temporal_focus: 0, self_ref: 0, intimacy: 0, power_diff: 0,

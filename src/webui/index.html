@@ -513,12 +513,24 @@ async function applyChatStateAsync(bubble){
     const rr=await fetch('/api/conversation');
     const dd=await rr.json();
     if(dd.chat_state)applyChatState(dd.chat_state);
-    if(bubble&&dd.chat_state&&dd.chat_state.mode==='meeting'&&dd.chat_state.speakerName){
-      const sp=dd.chat_state.speakerName;
+    const cs=dd.chat_state;
+    if(!cs||!bubble)return;
+    // 🔴 C-3（2026-10-27 实测缺陷）：原实现**只在 meeting 且 speakerName 非空**时才改 `.ml` 标签。
+    //   流式路径先 `addMsg('a','')` 建空气泡（index.html:688），此刻 chat_state 还没回来，
+    //   标签用的是**上一轮**的 `_cs`；退出会晤那一轮 `mode='yuyao'` ⇒ 分支不进 ⇒
+    //   标签永远停在上一个发言人（实测：[MeetExit] 已执行、回复实为玉瑶，标签仍写「徐诗雨」）。
+    //   同步路径没这问题 —— 它在 addMsg **之前**就 applyChatState 了。
+    //   故改为：**所有形态都重算标签**，正文【名】前缀逻辑保持原样。
+    const ml=bubble.closest('.msg')?.querySelector('.ml');
+    if(cs.mode==='meeting'&&cs.speakerName){
+      const sp=cs.speakerName;
       if(bubble.textContent.indexOf('【'+sp+'】')!==0)bubble.textContent='【'+sp+'】'+bubble.textContent;
-      const ml=bubble.closest('.msg')?.querySelector('.ml');
       if(ml)ml.textContent=sp;
+      return;
     }
+    // 其余形态：会晤但无单一发言人（多发言人轮，正文自带【名】）→ 目标名；
+    // 玉瑶态 → persona 身份；私聊 → 聊天对象。
+    if(ml)ml.textContent=(cs.mode==='yuyao')?getPersonaLabel():(cs.targetName||'玉瑶');
   }catch(e){}
 }
 

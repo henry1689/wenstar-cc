@@ -6,7 +6,7 @@
  *
  * 输出：{ role: RoleType, confidence: number, rule: string }
  */
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { EntityGene } from '../../m1/types/dna.js';
 
 export type RoleType = 'secretary' | 'lover' | 'counselor' | 'strategist' | 'recaller';
@@ -21,7 +21,7 @@ export interface RoleDecision {
 
 export interface RoleClassifierInput {
   message: string;
-  perception: Perception24D;
+  perception: PerceptionState24;
   entities: EntityGene[];
   /** 上一轮角色（用于连续性） */
   previousRole?: RoleType;

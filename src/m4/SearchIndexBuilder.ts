@@ -5,7 +5,7 @@
  * 写入 search_index 表。提供增量索引和存量回填两个入口。
  *
  * n-gram仅作性能优化前置过滤器，不参与最终相关性排序。
- * 最终排序权完全交给 VectorReranker 的自有32D语义向量。
+ * 最终排序权完全交给 VectorReranker 的自有40D向量。
  *
  * 设计原则：
  *   - 零外部依赖，纯本地n-gram切词
@@ -103,25 +103,11 @@ export function rebuildAllIndexes(db: any): { total: number; bySource: Record<st
 
   const bySource: Record<string, number> = { conversation: 0, memory: 0, black_diamond: 0, knowledge_base: 0, work: 0 };
 
-  // ═══ 1. 砂金库 — conversations ═══
-  // 🔴 V34(2026-09-25): 撤除 `is_compacted = 0` 过滤。
-  //   原过滤使**被归档的对话连全文搜索索引都进不去** —— 砂金库作为「回忆兜底层」的职责
-  //   在索引侧也被切断：用户问几天前聊过的具体事，倒排索引里根本没有那些 term。
-  //   归档只是内存窗口标记，原文只增不删，索引必须覆盖全量。
-  try {
-    const convs = db.exec(
-      "SELECT id, content, belong_entity_uuid FROM conversations WHERE content IS NOT NULL ORDER BY id"
-    );
-    if (convs.length && convs[0].values) {
-      for (const [id, content, entityUuid] of convs[0].values) {
-        const n = indexDocument(db, 'conversation', String(id), String(content), entityUuid ? String(entityUuid) : undefined);
-        if (n > 0) bySource.conversation++;
-      }
-    }
-    console.log(`[SearchIndex] 砂金库索引: ${bySource.conversation} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 砂金库索引失败:', (e as Error).message);
-  }
+  // ═══ 1. 砂金库 — conversations（🛑 检索架构 v11 §S1 已停建） ═══
+  // 🔴 2026-10-27: conversation 的 n-gram 倒排索引已判废，本函数不再为其建索引
+  //   （原 V34 的「全量覆盖、不带 is_compacted 过滤」逻辑随之撤销）。
+  //   bySource.conversation 保留键位并恒为 0，维持调用方统计口径的字段形状不变。
+  //   读取侧影响见 §S1.1 变更台账：会晤倒排路退化为时间窗兜底，dialog_group 摘要路不受影响。
 
   // ═══ 2. 金库 — memories ═══
   try {
@@ -222,45 +208,22 @@ export function indexWorkChunks(
 }
 
 /**
- * 🔴 V34(2026-09-25) 砂金库索引**增量回填** —— 补齐 rebuildAllIndexes 覆盖不到的那部分对话。
+ * 🛑 检索架构 v11 §S1（2026-10-27）：砂金库 n-gram 增量回填**已停用**。
  *
- * 背景：`rebuildAllIndexes` 仅在 `search_index` 为空时执行（防重复回填），因此
- * 「执行之后才写入的对话」以及「当时因 is_compacted=0 被排除、V34 才恢复可见的归档对话」
- * 会长期缺席索引。实测：5936 条对话中仅 5214 条进了索引（缺 12%）。
- * 砂金库召回的主路径已改为倒排索引（查询驱动）⇒ 索引缺一条，那条就永远捞不回来。
+ * 原职责（V34 2026-09-25）：补齐 `rebuildAllIndexes` 覆盖不到的对话，是砂金库倒排召回主路径的补写通道。
+ * 现状：conversation 的 n-gram 倒排索引整体判废（重建侧与实时写入侧均已停），本函数退化为**空操作**。
  *
- * 本函数是**幂等增量**：只索引 `search_index` 里还没有的对话，可重复调用。
- * 刻意**不带** `is_compacted = 0` 过滤 —— 归档只是内存窗口标记，原文只增不删，索引须覆盖全量。
+ * 刻意保留函数与签名：调用方 `src/webui/chat/retrieval-stage.ts` 仍在启动期调用一次，
+ * 直接删除会改动对话主链的 import 与调用点。返回 0 的语义是「本次回填 0 条」，调用方无需感知。
  *
- * @param db         sql.js Database 实例（需有 exec / run 方法）
- * @param batchLimit 单次最多回填条数（0 = 不限；大批量建议分批，避免长事务阻塞）
- * @returns 实际索引的对话条数
+ * @param db         保留参数（已不使用），维持调用方零改动
+ * @param batchLimit 保留参数（已不使用），维持调用方零改动
+ * @returns 恒为 0
  */
 export function backfillConversationIndex(db: any, batchLimit = 0): number {
-  if (!db) return 0;
-  let indexed = 0;
-  try {
-    // source_id 以**文本**比较（写入时为 String(id)），这样能吃到 idx_si_source(source_type, source_id)
-    const limitClause = Number.isFinite(batchLimit) && batchLimit > 0 ? ` LIMIT ${Math.floor(batchLimit)}` : '';
-    const rows = db.exec(
-      `SELECT c.id, c.content, c.belong_entity_uuid FROM conversations c
-       WHERE c.content IS NOT NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM search_index s
-           WHERE s.source_type = 'conversation' AND s.source_id = CAST(c.id AS TEXT)
-         )
-       ORDER BY c.id${limitClause}`,
-    );
-    if (!rows.length || !rows[0].values) return 0;
-    for (const [id, content, entityUuid] of rows[0].values) {
-      const n = indexDocument(db, 'conversation', String(id), String(content), entityUuid ? String(entityUuid) : undefined);
-      if (n > 0) indexed++;
-    }
-    console.log(`[SearchIndex] 砂金库增量回填: ${indexed} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 砂金库增量回填失败:', (e as Error).message);
-  }
-  return indexed;
+  void db;          // 保留形参：调用点零改动（见上方说明）
+  void batchLimit;  // 保留形参：调用点零改动（见上方说明）
+  return 0;
 }
 
 /**

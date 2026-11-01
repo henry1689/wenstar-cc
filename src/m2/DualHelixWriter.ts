@@ -1,17 +1,19 @@
 /**
- * DualHelixWriter.ts — 双螺旋三底座同步写入
+ * DualHelixWriter.ts — 双螺旋底座同步写入
  * ============================================
- * 任何记忆写入操作时, 同时向三个底座写数据 (蓝皮书 §3.1-3.3)。
+ * 任何记忆写入操作时, 同时向双螺旋底座写数据 (蓝皮书 §3.2-3.3)。
  *
- * 底座1 state_spines:         32D 拆为 32 条独立行, HNSW 网状索引
+ * 🔴 P071(2026-10-23): 底座1 state_spines（语义向量分片库）已彻底废除删除：
+ *   40D 语义真源 = memories.perception_40d（本表从未建 HNSW、仅 24D+零占位、读写方全死）。
+ *   本文件不再写 state_spines；迁移 v26 已 DROP 该表。
+ *
  * 底座2 atom_address_timeline: 寻址元数据, B+Tree 线性时序索引
  * 底座3 atom_repair_index:     断链修复索引
  *
  * 铁律:
- *   - 三底座仅通过 GlobalUID 关联
- *   - state_spines: 仅 HNSW, 禁止时序排序
+ *   - 底座仅通过 GlobalUID 关联
  *   - atom_address_timeline: 仅 B+Tree+倒排, 禁止存语义向量
- *   - 原始数据层 (memories): 仅文本, 禁止直接做语义检索
+ *   - 语义向量唯一真源 (memories.perception_40d)
  *
  * V2.0 可靠性增强：
  *   - 返回值改为 { success, error, details }，调用方可感知写入失败
@@ -30,7 +32,7 @@ import { createHash } from 'node:crypto';
 export interface HelixWriteParams {
   /** 23字符 GlobalUID (DNAEncoder.generateGlobalUID) */
   globalUid: string;
-  /** 24D 感知向量 JSON (P3 升级为 32D) */
+  /** 24D 感知向量 JSON — 🔴 P071 起不再消费（底座1 已废除），保留字段兼容调用方 */
   perceptionJson: string;
   /** 全局序列号 */
   seqPos: number;
@@ -46,6 +48,10 @@ export interface HelixWriteParams {
   entityNames?: string[];
   /** 钙化分数 */
   calciumScore?: number;
+  /** P071-Phase2: 藤蔓组ID（事件主干：dialog_group 优先/dna_root 兑底）→ ATL vine_group_id */
+  vineGroupId?: string;
+  /** P071-Phase2批B: 归属主体 UUID（户籍法：ATL 归属轴必须 TXS-ID，人名已废） */
+  entityBelongUuid?: string;
 }
 
 export interface HelixWriteResult {
@@ -67,7 +73,7 @@ const MAX_RETRIES = 3;
 const _failedQueue: FailedEntry[] = [];
 
 /**
- * 向双螺旋三底座写入一条海胆记录。
+ * 向双螺旋底座写入一条海胆记录。
  *
  * 在 persistConversation() 的每个 writeMemory() 后调用。
  * 每个底座独立 try-catch，部分失败不影响其他底座写入。
@@ -80,58 +86,27 @@ export function writeToDualHelix(db: any, params: HelixWriteParams): HelixWriteR
   }
 
   const failedSpines: string[] = [];
-  let perception: Record<string, number> = {};
-
-  try {
-    perception = JSON.parse(params.perceptionJson || '{}');
-  } catch {
-    failedSpines.push('parse_perception');
-    return { success: false, error: 'perceptionJson 解析失败', failedSpines };
-  }
 
   const ts = new Date(params.createdAt).getTime();
-  const locFp = params.locationFingerprint || '0'.repeat(32);
   const checksum = createHash('sha256')
     .update(`${params.globalUid}:${params.seqPos}:${ts}`)
     .digest('hex').substring(0, 16);
 
-  // ═══════ 底座1: state_spines (24D 拆为 24 行, P3→32D) ═══════
-  const dims: [string, number][] = [
-    ['pleasure', 1], ['arousal', 2], ['dominance', 3],
-    ['aggression', 4], ['sincerity', 5], ['humor', 6],
-    ['factual', 7], ['logical', 8], ['certainty', 9],
-    ['abstract', 10], ['temporal_focus', 11], ['self_ref', 12],
-    ['intimacy', 13], ['power_diff', 14], ['dependency', 15],
-    ['moral_judgment', 16], ['etiquette', 17], ['belonging', 18],
-    ['sexual_attraction', 19], ['sensory_craving', 20], ['energy_merge', 21],
-    ['possessiveness', 22], ['ecstasy', 23], ['safety', 24],
-  ];
-
-  try {
-    for (const [key, dimId] of dims) {
-      const value = typeof perception[key] === 'number' ? perception[key] : 0;
-      db.run(
-        `INSERT OR REPLACE INTO state_spines (global_uid, dimension_id, value, consistency_mark, location_fingerprint, timestamp_ms, checksum)
-         VALUES (?, ?, ?, 'consistent', ?, ?, ?)`,
-        [params.globalUid, dimId, value, locFp, ts, checksum],
-      );
-    }
-  } catch (e) {
-    failedSpines.push('spine1:state_spines');
-  }
+  // ═══════ 底座1 state_spines: 🔴 P071 已废除删除（40D 真源=memories.perception_40d，不再写入） ═══════
 
   // ═══════ 底座2: atom_address_timeline ═══════
   try {
     const timeSliceTag = new Date(ts).toISOString().substring(0, 7); // YYYY-MM
-    const entityBelong = params.entityNames?.[0] || '';
+    // 🔴 P071-Phase2批B: 归属轴改写 TXS-ID（原 entityNames[0] 人名违户籍法，已废——v29 迁移历史数据）
+    const entityBelong = params.entityBelongUuid || '';
     db.run(
       `INSERT OR REPLACE INTO atom_address_timeline
-       (global_uid, global_time_seq, absolute_timestamp, time_slice_tag, entity_belong_id,
+       (global_uid, global_time_seq, absolute_timestamp, time_slice_tag, vine_group_id, entity_belong_id,
         hot_cold_level, crc_checksum, state_flag, created_at, route_stamp_list)
-       VALUES (?, ?, ?, ?, ?, 'W', ?, 'N', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'W', ?, 'N', ?, ?)`,
       [
         params.globalUid, params.seqPos, ts, timeSliceTag,
-        entityBelong || null, checksum, ts,
+        params.vineGroupId || null, entityBelong || null, checksum, ts,
         JSON.stringify([{ workshop: 'M1', phase_id: 'encode', node_id: 'DNAEncoder', timestamp: ts / 1000, detail: 'initial_encode' }]),
       ],
     );
@@ -146,7 +121,7 @@ export function writeToDualHelix(db: any, params: HelixWriteParams): HelixWriteR
        VALUES (?, ?, ?, unixepoch())`,
       [
         params.globalUid,
-        `state_spines::${params.globalUid}::1-24`,
+        `memories.perception_40d::${params.globalUid}`,
         `memories::${params.dnaRootId || params.globalUid}`,
       ],
     );
@@ -201,7 +176,7 @@ export function retryHelixQueue(db: any): number {
         lastError: result.error,
         firstFailedAt: entry.firstFailedAt,
         lastFailedAt: new Date().toISOString(),
-        message: `[DualHelix] ${entry.params.globalUid} 写入失败，已重试 ${entry.retries} 次仍失败，HNSW 索引可能残缺`,
+        message: `[DualHelix] ${entry.params.globalUid} 写入失败，已重试 ${entry.retries} 次仍失败，寻址链/修复索引可能残缺`,
       }));
       // 不再重试，保留日志即可
     } else {

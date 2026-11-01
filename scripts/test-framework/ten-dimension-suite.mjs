@@ -180,7 +180,8 @@ class TenDimensionSuite {
     const c = (label, pass, detail = '') => { checks.push({ label, pass, detail }); console.log(`  ${pass ? '✅' : '❌'} ${label}${detail ? ' — ' + detail : ''}`); };
 
     // 1. 核心表存在
-    for (const tbl of ['memories','conversations','knowledge_base','search_index','memory_associations','state_spines','atom_address_timeline','entity_relations']) {
+    // state_spines 已随 P071 底座1 废除删除，不再作必需表
+    for (const tbl of ['memories','conversations','knowledge_base','search_index','memory_associations','atom_address_timeline','entity_relations']) {
       const exists = this._tableExists(tbl);
       c(`表 ${tbl} 存在`, exists, exists ? '' : 'MIGRATION MISSING');
     }

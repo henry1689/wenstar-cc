@@ -5,7 +5,7 @@
  * 全链路唯一主键: DNA编码 {branch_id}.{seq_pos}.{locus_path}
  */
 import type { DNA, SelfModelV1 } from '../m1/types/dna.js';
-import type { Perception24D, CalciumResult } from '../m3/types/perception.js';
+import type { PerceptionState24, CalciumResult } from '../m3/types/perception.js';
 import type { ScoredMemory, SimilarityMode } from '../m2/types/index.js';
 
 // ════════════════════════════════════════════════════════════════════
@@ -105,7 +105,7 @@ export interface FeatureInput {
 }
 
 export interface FeatureOutput {
-  perception: Perception24D;
+  perception: PerceptionState24;
   calcium: CalciumResult;
   emotions: { primary?: string; secondary?: string[] };
 }
@@ -137,7 +137,7 @@ export interface VectorAlignOutput {
 
 export interface StorageInput {
   dna: DNA;
-  perception: Perception24D;
+  perception: PerceptionState24;
   calcium: { score: number; level: number };
   input: string;
   reply?: string;

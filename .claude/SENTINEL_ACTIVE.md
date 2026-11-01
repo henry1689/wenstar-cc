@@ -1,17 +1,18 @@
 # ⚠️⚠️⚠️ SENTINEL 哨兵实时拦截通告 ⚠️⚠️⚠️
 
-> 最后更新: 2026-09-02T09:24:50.032Z
+> 最后更新: 2026-10-31T00:32:16.967Z
 > 此文件由 Sentinel 哨兵自动维护，每次拦截后更新。
 
 ---
 
 ## 🔴 以下文件已被 Sentinel 物理锁定（只读）
 
-- **src/m3/PerceptionAnalyzer.ts** — 8 次无令牌修改 — 🔒 已锁定，不可编辑
+- **src/m4/household/EntityMeeting.ts** — 3 次无令牌修改 — 🔒 已锁定，不可编辑
+- **src/webui/chat/process-stages.ts** — 8 次无令牌修改 — 🔒 已锁定，不可编辑
 
 ## 🟠 以下文件已被 Sentinel 多次拦截
 
-*暂无警告文件*
+- src/webui/chat.ts — 2 次拦截
 
 ---
 

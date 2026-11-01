@@ -27,6 +27,14 @@ export const MEMORY_CONFIG = {
     minCalciumScore: 4.5,
     /** 晋升最低召回次数 */
     minRecallCount: 5,
+    // 🔴 T068任务1 U3：情感/关系类低钙独立晋升通道（不改量纲、不改现有阈值，只加一条 OR）。
+    //   背景：亲密/情感记忆钙分多在 0.625(0-1量纲)，够不到 0.9/4.5 → 永不晋升黑钻 → 滞留金库召回不够。
+    //   判据：narrative_tag 属情感/关系类 且 归一化钙分 >= 此阈值 且 recall >= emotionMinRecall。
+    //   量纲归一（三量纲混用）：≤1→原值；1<x≤5→÷5；>5→÷10（归到 0-1 量纲比较）。
+    /** 情感通道归一化钙分阈值（0-1 量纲） */
+    emotionMinNormalizedCalcium: 0.3,
+    /** 情感通道最低召回次数（至少被召回过 1 次，证有价值） */
+    emotionMinRecall: 1,
     /** 每批最大处理数 */
     batchSize: 5,
   },

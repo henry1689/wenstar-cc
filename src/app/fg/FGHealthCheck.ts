@@ -6,6 +6,7 @@
  * 清理后必须显式 markDirty(true) 触发落盘，否则重启后还原。
  */
 import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
+import { NON_NAME_TAIL_CHARS } from '../entity/EntityCandidateGrader.js';
 
 export interface FGHealthReport {
   totalNodes: number;
@@ -198,5 +199,54 @@ export class FGHealthCheck {
       )
     `);
     return before - this.countEdges();
+  }
+
+  /**
+   * 滑窗垃圾实体自检（2026-10-23，长期兜底预警）
+   * ============================================================
+   * 背景：尤其/水乳交/阿珍带/阿珍聊/阿珍妈 5 个滑窗片段曾误晋升 active。
+   *   根因 = 滑窗跨词边界切割 + 强上下文判定在情色/角色扮演语境被「叫/是/找」虚触发。
+   *   代码侧已双层堵漏（NON_NAME_TAIL_CHARS 加 5 尾字 + _hasNameStrongContext 起名句降级），
+   *   但语义判定无法穷尽 —— 新语境仍可能产生新变体，故加本自检作**兜底预警**。
+   *
+   * 判据（复用 NON_NAME_TAIL_CHARS 单一真源，不复制判据；只预警不自动 void，
+   *   避免误杀真人 —— 是否清除由人工/离线终审定夺）：
+   *   ① type='person' 且 status='active' 且 name != '我'
+   *   ② 无 description 且无 relation_to_user（从未获得真实档案）
+   *   ③ 名尾命中 NON_NAME_TAIL_CHARS（跨词边界滑窗片段的强特征）
+   *   ④ evidence.contexts 显示源自单句（短窗口，非多轮真实交往）
+   * 四条全中 → 疑似滑窗垃圾，返回预警清单。
+   *
+   * @returns 疑似垃圾实体清单（空数组 = 健康）
+   */
+  detectSlidingWindowJunk(): Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string }> {
+    const suspects: Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string }> = [];
+    let rows: any[] = [];
+    try {
+      rows = this.q("SELECT id, name, uuid, properties FROM nodes WHERE type='person' AND status='active' AND name != '我'");
+    } catch (e: any) {
+      console.warn('[FG SelfCheck] 滑窗自检查询失败(非阻塞):', e?.message || e);
+      return suspects;
+    }
+    for (const row of rows) {
+      const name = String(row.name || '');
+      if (!name) continue;
+      let props: any = {};
+      try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+      // ② 无真实档案
+      const hasProfile = !!(props.description || props.relation_to_user);
+      if (hasProfile) continue;
+      // ③ 名尾命中非名尾字集（复用单一真源）
+      const tail = name[name.length - 1];
+      if (!NON_NAME_TAIL_CHARS.has(tail)) continue;
+      // ④ 源自单句：contexts ≤1 或无 contexts（老垃圾无 evidence 字段）都算单句来源
+      const ev = props.evidence || {};
+      const ctxCount = Array.isArray(ev.contexts) ? ev.contexts.length : 0;
+      const mentions = typeof ev.count === 'number' ? ev.count : (props.mention_count ?? 0);
+      if (ctxCount <= 1) {
+        suspects.push({ name, id: row.id, uuid: row.uuid || null, mentions, tail });
+      }
+    }
+    return suspects;
   }
 }

@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { WorkingMemory } from '../WorkingMemory.js';
 import { computeCalcium } from '../../m2/math.js';
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { DNA } from '../../m1/types/dna.js';
 
 // 模拟的 FusionStorageAdapter（仅用于构造 WorkingMemory）
@@ -63,7 +63,7 @@ describe('[M9守卫] 毕业/丢弃判定逻辑', () => {
   };
 
   // 模拟一个感知向量，使 computeCalcium 输出可预测
-  const makeP = (pleasure: number, arousal: number): Perception24D => ({
+  const makeP = (pleasure: number, arousal: number): PerceptionState24 => ({
     pleasure, arousal, dominance: 0.5, aggression: 0, sincerity: 0.5, humor: 0,
     factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5,
     temporal_focus: 0, self_ref: 0.5, intimacy: 0.5, power_diff: 0,

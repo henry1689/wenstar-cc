@@ -12,7 +12,7 @@
  * 适配: 知识库自学习改善方案 Phase 1
  */
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { EntityGene } from '../../m1/types/dna.js';
 import { EntityStrengthTracker } from './EntityStrengthTracker.js';
 import { EmotionBaseline } from './EmotionBaseline.js';
@@ -43,7 +43,7 @@ export class AutoLearnPlugin {
    */
   async learn(
     entities: EntityGene[],
-    perception: Perception24D,
+    perception: PerceptionState24,
     message: string,
   ): Promise<void> {
     try {

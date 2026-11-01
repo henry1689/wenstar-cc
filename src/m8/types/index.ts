@@ -1,7 +1,7 @@
 // M8 关系年轮与具身记忆引擎 · 类型定义
 // Ref: docs/M8-design-v1.md §2-§4
 
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 
 // ════════════════════════════════════════════════════════
 // 2.1 核心四元组存储
@@ -109,7 +109,7 @@ export type WriteSource = 'emergency' | 'async';
 
 export interface WriteParams {
   sensory_anchor: string;
-  perception: Perception24D;
+  perception: PerceptionState24;
   emotional_valence: string;
   narrative_tag: string;
   raw_input: string;

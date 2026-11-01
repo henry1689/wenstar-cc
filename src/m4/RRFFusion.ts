@@ -30,7 +30,7 @@ export const DEFAULT_RRF_CONFIG: RRFConfig = (() => {
   return {
     k: 60,
     weights: {
-      spine:   w.spine ?? 0.35,   // 24D 向量语义路（主力信号）
+      spine:   w.spine ?? 0.35,   // 40D 语义联想路（主力信号）
       keyword: w.keyword ?? 0.30, // n-gram 关键词路（精确匹配）
       work:    w.work ?? 0.25,    // 作品直达路（长文召回，指称解析命中即置顶）
       entity:  w.entity ?? 0.20,  // 实体归属路（实体定向）

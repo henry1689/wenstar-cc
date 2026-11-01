@@ -15,7 +15,7 @@ import { getPeriod, getSeason, getLunarTerm } from '../engine/temporal/global-ty
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DNA, LeafZone } from '../m1/types/dna.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { WriteResult, ReadResult, QueryOptions, StorageStatus, SearchScope } from './types/index.js';
 import { SQLiteAdapter } from './SQLiteAdapter.js';
 import { computeCalcium, initialStrength } from './math.js';
@@ -58,11 +58,15 @@ export class FusionStorageAdapter {
       () => this.sqlite.scheduleFlush(),
     );
     await this._conversationDB.initialize();
-    this.seqCounter = this.sqlite.getTotalCount();
+    // 🔴 V50 根治「序号撞车」：起点必须是**已用最大序号**，不是**记录条数**。
+    //   原实现 getTotalCount() 返回 COUNT(*)（10482），而两表最大号已是 10817，
+    //   差 336 ⇒ 分配器发到已占用号上 ⇒ 每轮对话 writeMemory 100% UNIQUE 冲突
+    //   （实测 2026-10-15 一个上午的对话记忆全丢，日志 28 次 constraint failed）。
+    this.seqCounter = this.sqlite.getMaxSeqPos();
     this.initialized = true;
   }
 
-  // ─── 写入（接收 DNA + 24D 感知向量） ───
+  // ─── 写入（接收 DNA + 感知向量；🔴 参数类型 PerceptionState24 属 P074 待废中间层） ───
 
   /** 预分配下一个 seq_pos（不写入，由 WorkingMemory 负责实际写入） */
   reserveNextSeq(): number {
@@ -72,12 +76,22 @@ export class FusionStorageAdapter {
     // 与 memories.seq_pos UNIQUE 冲突 → INSERT OR REPLACE 覆盖上一轮 assistant 记忆
     // （实测会晤/私聊 assistant 回复记忆全部丢失，同 seq 多行数 = 0 印证）。
     // 改为 +2: user=N+1, asst=N+2, 下轮 user=N+3 —— user/asst seq 全局唯一。
-    const pos = this.seqCounter + 1;
-    this.seqCounter += 2;
+    // 🔴 V50 防御：即便起点正确，仍可能撞上历史回灌/迁移留下的占位号。
+    //   分配时逐个跳过已占用号，否则下游 writeMemory 整轮 UNIQUE 失败 → 记忆静默丢失。
+    // 🔴 2026-10-30 根治：每轮发 **3 个**连续空号 —— user=pos / assistant=pos+1 / evt=pos+2。
+    //   原实现只校验 pos 空闲（pos+1 只是隐含保留），而 WorkingMemory 缓冲的 evt 记忆行
+    //   复用 chat.ts 传下来的同一个 `seqPos` ⇒ **user 行与 evt 行抢同一个号**，
+    //   INSERT 第二个必然撞 `UNIQUE constraint failed: memories.seq_pos`，
+    //   实测导致用户轮整条记忆写失败（「她没记住我刚说的」的一部分真因）。
+    //   三个消费者 ⇒ 三个号；游标推进到 pos+2，下一轮从 pos+3 起。
+    const _free = (p: number) => !this.sqlite.isSeqPosTaken(p);
+    let pos = this.seqCounter + 1;
+    while (!(_free(pos) && _free(pos + 1) && _free(pos + 2))) pos++;
+    this.seqCounter = pos + 2;
     return pos;
   }
 
-  async write(dna: DNA, perception: Perception24D, primaryEmotion?: string, secondaryEmotions?: string[]): Promise<WriteResult> {
+  async write(dna: DNA, perception: PerceptionState24, primaryEmotion?: string, secondaryEmotions?: string[]): Promise<WriteResult> {
     this.ensureReady();
     // 🔴 五要素守卫：entity_genes 为空时拒绝写入（roleplay 豁免）
     const guard = checkWriteGuard({
@@ -257,7 +271,7 @@ export class FusionStorageAdapter {
     this.sqlite.updateRecall(memoryIds);
   }
 
-  applyReinforcement(perception: Perception24D, calcium: number, memoryIds: string[]): void {
+  applyReinforcement(perception: PerceptionState24, calcium: number, memoryIds: string[]): void {
     this.ensureReady();
     this.sqlite.applyReinforcement(perception, calcium, memoryIds);
   }
@@ -560,7 +574,7 @@ export class FusionStorageAdapter {
    * Zone JSON 备份写入
    * 保持与旧 JsonStorageAdapter 兼容的格式
    */
-  private appendToJsonZone(dna: DNA, perception: Perception24D): void {
+  private appendToJsonZone(dna: DNA, perception: PerceptionState24): void {
     try {
       const zone = dna.leaf_zone || 'language_semantic_zone';
       const zoneDir = join(this.dataDir, 'zones');

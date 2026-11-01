@@ -5,14 +5,14 @@
  * 职责：构建所有防护消息（幻觉/重复/感受/日常/时间等）
  */
 import type { M4Context } from '../m4/types/index.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { ConversationTurn } from '../m5/types/index.js';
 import type { MemoryGateOutput } from '../app/conversation/MemoryGate.js';
 
 /** Guard 构建器输入 */
 export interface GuardBuilderInput {
   message: string;
-  perception: Perception24D;
+  perception: PerceptionState24;
   decision: { primary_emotion?: string; secondary_emotions?: string[] };
   ctx_m4: M4Context;
   conversationHistory: ConversationTurn[];

@@ -26,7 +26,7 @@ const ZERO_EMOTION: EmotionSlot = { pleasure: 0, arousal: 0, intimacy: 0 };
 
 /** 采样时可传入的外部情感值（会晤态下当前轮的 M3 感知） */
 export interface CaptureOptions {
-  /** 当前轮情感（M3 Perception24D 的 pleasure/arousal/intimacy）；缺省时用零值 */
+  /** 当前轮情感（M3 PerceptionState24 的 pleasure/arousal/intimacy）；缺省时用零值 */
   emotion?: Partial<EmotionSlot>;
   /** 玉瑶态的当前角色（RoleRouter 结果）；仅 uuid=null（玉瑶）时有意义 */
   savedRole?: string;

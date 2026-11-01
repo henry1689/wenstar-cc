@@ -7,7 +7,7 @@
  * 策略:
  *   1. 为每条旧记忆生成确定性 GlobalUID (基于 seq_pos + created_at 的 SHA256)
  *   2. 批量写入 memories.global_uid + location_fingerprint
- *   3. 同时回填 state_spines / atom_address_timeline / atom_repair_index (可选)
+ *   3. 同时回填 atom_address_timeline / atom_repair_index (可选；state_spines 已废除删除 — P071)
  *
  * 执行:
  *   npx tsx src/m2/BackfillGlobalUID.ts

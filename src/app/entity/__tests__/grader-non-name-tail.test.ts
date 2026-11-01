@@ -97,6 +97,41 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     }
   });
 
+  // ══════════════════════════════════════════════════════════════════
+  // 🔴 F-34（2026-10-28）：姓 + 纯亲属称呼
+  //
+  // 事故链（实测探针复现）：`熊妈` 被判 L0 非人名（尾字「妈」在 NON_NAME_TAIL_CHARS）
+  //   → FG 节点不建 → `addEdge(child_of)` 报「拒绝建孤儿边」
+  //   → `parentEdges` 为空 → 人物档案里 **「母亲：」整段消失**（单测稳定失败）。
+  //   根因：2026-10-23 为堵「阿珍妈」加的尾字，误伤了真称呼。
+  // ══════════════════════════════════════════════════════════════════
+  it('🔴 F-34 放行面：姓+纯称呼必须放行（否则人物档案父母栏整段消失）', () => {
+    for (const ok of ['熊妈', '熊妈妈', '李爸', '张叔']) {
+      expect(looksLikeSentenceFragment(ok), `${ok} 应放行（姓 + 纯称呼序列）`).toBe(false);
+      expect(gradeEntity(ok, new Set()).grade, `${ok} 不应被判 L0 非人名`).toBeGreaterThan(0);
+    }
+  });
+
+  it('🔴 F-34 反锁面：放行不得扩大到 10-23 堵住的滑窗垃圾与无姓称呼', () => {
+    //  ① 10-23 实测堵住的那批（阿珍妈/水乳交/阿珍带/阿珍聊）
+    //  ② 长度超界但仍含姓首字+称呼尾字（王大妈）
+    //  ③ 纯称呼无姓首字（妈妈/爸爸/姐姐/朋友）——与上方既有反例防线同源
+    const mustStayBlocked = ['阿珍妈', '水乳交', '阿珍带', '阿珍聊', '王大妈', '妈妈', '爸爸', '姐姐', '朋友'];
+    const leaked = mustStayBlocked.filter((n) => gradeEntity(n, new Set()).grade >= 3);
+    expect(leaked, `以下本应被拦的名字被放行：${leaked.join('、')}`).toEqual([]);
+  });
+
+  it('🔴 F-34 豁免只作用于尾字判据这一处，无姓的纯称呼放行不了', () => {
+    // 「妈妈」：尾字在 NON_NAME_TAIL_CHARS 内，且首字「妈」非姓 ⇒ 豁免不成立 ⇒ 仍被尾字判据拦
+    expect(looksLikeSentenceFragment('妈妈'), '妈妈（无姓首字）应仍被尾字判据拦下').toBe(true);
+    expect(gradeEntity('妈妈', new Set()).grade).toBeLessThan(3);
+    // 「爸爸」：尾字**不在**尾字集（本判据从不负责它），它由 gradeEntity 的
+    //   ENTITY_BLACKLIST 拦下 —— 与上方既有「反例防线」同源。
+    //   此处锁住两点：①它够不上 L3；②本豁免没有把它变成「尾字判据放行」。
+    expect(gradeEntity('爸爸', new Set()).grade, '爸爸 应仍被 grade 门拦下').toBeLessThan(3);
+    expect(looksLikeSentenceFragment('爸爸'), '爸爸 尾字不在尾字集，判据现状即为 false（非本次改动引起）').toBe(false);
+  });
+
   it('已知垃圾候选集的拦截率（信息性，不设硬阈值以免脆弱）', () => {
     if (!existsSync(FUSION_DB)) return;
     const Database = require('better-sqlite3');

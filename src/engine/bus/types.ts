@@ -112,7 +112,9 @@ export interface MemoryRetrievedEvent {
 // 状态侧事件
 // ═══════════════════════════════════════════════
 
-export interface EmotionVector24D {
+/** 🔴 P076 乙方案（业主裁决 2026-10-24）：原 EmotionVector24D 去量纲化改名——
+ *  本结构是 24 项**情绪状态分量清单**（非测量维度），量纲命名除 40D 外清零（40D 量纲统一法令）。 */
+export interface EmotionState24 {
   // 基础情绪
   joy: number; sadness: number; anger: number; fear: number;
   surprise: number; disgust: number; calm: number; anxiety: number;
@@ -132,7 +134,7 @@ export interface HeartStateUpdatedEvent {
   timestamp: number;
   sessionId: string;
   payload: {
-    emotionVector: EmotionVector24D;
+    emotionVector: EmotionState24;
     relationState: RelationState;
     atmosphere: Atmosphere;
     memoryPermission: MemoryPermission;

@@ -9,7 +9,7 @@
  *   ΔE_actual = base × intensity × k_trust × k_relation × k_margin
  *   k_margin = 1 - |E_base - 50| / 100 (边际递减，韦伯定律)
  */
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
 // ── 事件类型枚举 ──
 export type StimulusType =
@@ -154,7 +154,7 @@ export function getEmotionClass(dimIndex: number): EmotionClass {
 }
 
 // ── 维度键名（用于数组↔对象转换） ──
-const DIM_KEYS: (keyof EmotionVector24D)[] = [
+const DIM_KEYS: (keyof EmotionState24)[] = [
   'joy', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'calm', 'anxiety',
   'affection', 'trust', 'intimacy', 'respect',
   'arousal', 'fatigue', 'excitement', 'boredom',
@@ -162,12 +162,12 @@ const DIM_KEYS: (keyof EmotionVector24D)[] = [
   'nostalgia', 'curiosity', 'shyness', 'jealousy',
 ];
 
-function arrayToObject(arr: number[]): EmotionVector24D {
+function arrayToObject(arr: number[]): EmotionState24 {
   const obj: any = {};
   for (let i = 0; i < 24; i++) {
     obj[DIM_KEYS[i]] = arr[i];
   }
-  return obj as EmotionVector24D;
+  return obj as EmotionState24;
 }
 
 // ── 核心函数：获取实际刺激增量 ──
@@ -177,14 +177,14 @@ export interface StimulusParams {
   intensity: number;        // 0-1，事件强度
   trustFactor: number;      // 0-1，信任调制
   relationStage: string;    // 'stranger' | 'familiar' | 'intimate'
-  currentEmotion: EmotionVector24D;  // 当前 24D 用于边际递减
+  currentEmotion: EmotionState24;  // 当前情绪状态分量（用于边际递减）
 }
 
-export function getStimulusDelta(params: StimulusParams): EmotionVector24D {
+export function getStimulusDelta(params: StimulusParams): EmotionState24 {
   const base = STIMULUS_BASE[params.type];
   if (!base) {
     // 未知事件类型返回零向量
-    return new Array(24).fill(0) as unknown as EmotionVector24D;
+    return new Array(24).fill(0) as unknown as EmotionState24;
   }
 
   const current = params.currentEmotion;

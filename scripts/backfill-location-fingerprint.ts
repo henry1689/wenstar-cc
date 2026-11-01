@@ -86,8 +86,7 @@ for (const row of rows) {
     const newLocHash = createHash('sha256').update(fp).digest('hex').substring(0, 8).toUpperCase();
     const newUid = uidStr.substring(0, 9) + newLocHash + uidStr.substring(17);
     db.run('UPDATE memories SET global_uid = ? WHERE id = ?', [newUid, id]);
-    // 同步 state_spines
-    db.run('UPDATE state_spines SET global_uid = ? WHERE global_uid = ?', [newUid, uidStr]);
+    // state_spines 已随底座1 废除删除（P071），不再同步
     db.run('UPDATE atom_repair_index SET global_uid = ? WHERE global_uid = ?', [newUid, uidStr]);
     uidLog.push({ id: idStr, oldUid: uidStr, newUid });
     updatedUid++;

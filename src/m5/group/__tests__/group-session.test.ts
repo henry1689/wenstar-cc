@@ -23,8 +23,10 @@ import {
 } from '../speakerResolver.js';
 import {
   extractSpeakerHeader, validateReplyIdentity, detectSelfIdent, looksLikeRawJson, withSpeakerHeader,
+  attributeReply, splitSpeakerSegments, detectZeroSubjectConflict,
+  detectInternalConceptEcho, auditReplyExit,
 } from '../outputGuard.js';
-import { GroupSession, isGroupSessionEnabled, GROUP_SESSION_FLAG } from '../GroupSession.js';
+import { GroupSession } from '../GroupSession.js';
 import { resolveIdentityFromState } from '../identityFromState.js';
 
 const T0 = 1_700_000_000_000;
@@ -119,7 +121,7 @@ describe('[批A] reducer — 纯函数与唯一写入口', () => {
     const s0 = reduce(createSessionState(T0), wake([A], undefined, { slot: slot(null, '玉瑶现场') }));
     const s1 = reduce(s0, { type: 'LEAVE', now: T0 });
     expect(s1.participants).toHaveLength(0);
-    expect(sessionMode(s1)).toBe('yuyao');
+    expect(sessionMode(s1)).toBe('alone');   // 2026-11-01 三值化：散会后是「独处态」，不再与「从未会晤」同值
     expect(s1.contextStack.some(c => c.uuid === null)).toBe(true);   // 基线未丢
     const fx = diffEffects(s0, s1);
     expect(fx.some(e => e.type === 'meetingEnded')).toBe(true);
@@ -361,18 +363,21 @@ describe('[批A] 第七层 outputGuard — 默认 +0 LLM', () => {
   });
 });
 
-describe('[批A] GroupSession — 门面与回滚开关', () => {
-  it('WS_GROUP_V2 默认关闭', () => {
-    expect(isGroupSessionEnabled({} as NodeJS.ProcessEnv)).toBe(false);
-    expect(isGroupSessionEnabled({ [GROUP_SESSION_FLAG]: '1' } as NodeJS.ProcessEnv)).toBe(true);
-    expect(isGroupSessionEnabled({ [GROUP_SESSION_FLAG]: 'true' } as NodeJS.ProcessEnv)).toBe(true);
-    expect(isGroupSessionEnabled({ [GROUP_SESSION_FLAG]: '0' } as NodeJS.ProcessEnv)).toBe(false);
-    expect(new GroupSession({ now: () => T0 }).isEnabled()).toBe(false);
-    expect(new GroupSession({ enabled: true, now: () => T0 }).isEnabled()).toBe(true);
+describe('[批A] GroupSession — 门面', () => {
+  /**
+   * 🔴 2026-10-31 第三层固化：原「WS_GROUP_V2 默认关闭 / 开=启用 / 关=禁用」三态断言已删除。
+   *   开关本身不存在了（`isGroupSessionEnabled` / `GROUP_SESSION_FLAG` / `isEnabled` 全删），
+   *   故此处守的是**反向不变量**：它必须不存在 —— 防止旧开关被悄悄重新引入。
+   */
+  it('🔴 回滚开关已彻底删除（不得重新引入）', async () => {
+    const mod: any = await import('../GroupSession.js');
+    expect(mod.isGroupSessionEnabled, '旧开关函数不得重新导出').toBeUndefined();
+    expect(mod.GROUP_SESSION_FLAG, '旧开关常量不得重新导出').toBeUndefined();
+    expect((new GroupSession({ now: () => T0 }) as any).isEnabled, '旧开关状态方法不得重新出现').toBeUndefined();
   });
 
   it('dispatch 更新状态并触发 onEnter / onSlot(save)', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     const enters: string[] = [];
     const slots: string[] = [];
     g.onEnter((p, n) => enters.push(`${p.participants.length}->${n.participants.length}`));
@@ -386,7 +391,7 @@ describe('[批A] GroupSession — 门面与回滚开关', () => {
   });
 
   it('无变化的 dispatch 不触发任何监听者（门卫拒绝路径零副作用）', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     let calls = 0;
     g.onEffect(() => { calls++; });
     g.dispatch({ type: 'JOIN', target: { uuid: '', name: '' }, now: T0 });   // 无效 uuid
@@ -394,11 +399,11 @@ describe('[批A] GroupSession — 门面与回滚开关', () => {
   });
 
   it('serialize / restore 往返；坏数据拒绝且状态不变', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A, B]));
     const json = g.serialize();
 
-    const g2 = new GroupSession({ enabled: true, now: () => T0 });
+    const g2 = new GroupSession({ now: () => T0 });
     expect(g2.restore(json)).toBe(true);
     expect(g2.participantCount).toBe(2);
     expect(g2.speakerUuid).toBe('TXS-1');
@@ -408,7 +413,7 @@ describe('[批A] GroupSession — 门面与回滚开关', () => {
   });
 
   it('动作审计轨迹（action 序列即日志）', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A, B]));
     g.dispatch({ type: 'SPEAK', target: B.uuid, now: T0 });
     g.dispatch({ type: 'LEAVE', now: T0 });
@@ -416,7 +421,7 @@ describe('[批A] GroupSession — 门面与回滚开关', () => {
   });
 
   it('参与者查询辅助方法', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A, B]));
     expect(g.getParticipants().map(p => p.name)).toEqual(['徐诗雨', '熊梓铭']);
     expect(g.getParticipantByUuid('TXS-2')!.name).toBe('熊梓铭');
@@ -428,7 +433,7 @@ describe('[批A] GroupSession — 门面与回滚开关', () => {
 
 describe('[批A] identityFromState — 身份解析在状态之后（硬约束③）', () => {
   it('玉瑶态：mode=yuyao，speakerUuid=null，角色取入参', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     const id = resolveIdentityFromState(g.getState(), 'lover');
     expect(id.mode).toBe('yuyao');
     expect(id.isMeeting).toBe(false);
@@ -437,7 +442,7 @@ describe('[批A] identityFromState — 身份解析在状态之后（硬约束�
   });
 
   it('会晤态：一律 recaller（不可能出现会晤+玉瑶角色），speakerUuid 供 PI 接入', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A, B]));
     const id = resolveIdentityFromState(g.getState(), 'lover');   // 传错角色也被收口
     expect(id.role).toBe('recaller');
@@ -449,7 +454,7 @@ describe('[批A] identityFromState — 身份解析在状态之后（硬约束�
   });
 
   it('切换主发言后身份随之改变（状态先于身份）', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A, B]));
     g.dispatch({ type: 'SPEAK', target: B.uuid, now: T0 });
     const id = resolveIdentityFromState(g.getState(), 'secretary');
@@ -458,11 +463,143 @@ describe('[批A] identityFromState — 身份解析在状态之后（硬约束�
   });
 
   it('散会后回落玉瑶态，speakerUuid 清空（不残留旧 UUID）', () => {
-    const g = new GroupSession({ enabled: true, now: () => T0 });
+    const g = new GroupSession({ now: () => T0 });
     g.dispatch(wake([A]));
     g.dispatch({ type: 'LEAVE', now: T0 });
     const id = resolveIdentityFromState(g.getState(), 'secretary');
     expect(id.speakerUuid).toBeNull();
-    expect(id.mode).toBe('yuyao');
+    expect(id.mode).toBe('alone');   // 2026-11-01 三值化：散会后是「独处态」，不再与「从未会晤」同值；isMeeting/角色/ speakerUuid 断言不变
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// P1-A · 输出侧身份归属（2026-10-27 业主实测缺陷的回归）
+// 🔴 缺陷形态：`【罗珍思】徐诗雨：（…）` —— outputGuard 生产零接线，
+//    前端无条件拼粘性发言人，正文里的分段标记无人解析 ⇒ 整轮误归。
+// ═══════════════════════════════════════════════════════════════
+describe('P1-A · attributeReply 出口归一', () => {
+  /** 参与者白名单（对应生产 SessionState.participants） */
+  const NAMES = ['徐诗雨', '熊梓铭', '阿珍'];
+
+  it('🔴 回归：双人单轮（【名】形态）→ multi，speakerName 必须为 null', () => {
+    const reply = '【徐诗雨】（诗雨应了一声，把包带往肩上顺了顺）\n诗雨这就去。\n【熊梓铭】（梓铭点点头）\n我在这儿。';
+    const r = attributeReply(reply, NAMES, '熊梓铭');
+    expect(r.multi).toBe(true);
+    // 🔴 关键：多发言人轮次必须置 null，前端 `speaker?【名】+content:content` 才不会拼出
+    //    `【熊梓铭】徐诗雨：…` 这种前后矛盾
+    expect(r.speakerName).toBeNull();
+    expect(r.segments.map(s => s.speaker)).toEqual(['徐诗雨', '熊梓铭']);
+    expect(r.body).toContain('【徐诗雨】');
+    expect(r.body).toContain('【熊梓铭】');
+  });
+
+  it('🔴 回归：行首「名：」形态（实测原缺陷形态）→ 同样识别为双人', () => {
+    const reply = '徐诗雨：（诗雨应了一声）\n诗雨这就去。\n熊梓铭：（梓铭点点头）\n我在这儿。';
+    const r = attributeReply(reply, NAMES, '熊梓铭');
+    expect(r.multi).toBe(true);
+    expect(r.speakerName).toBeNull();
+    expect(r.segments.map(s => s.speaker)).toEqual(['徐诗雨', '熊梓铭']);
+  });
+
+  it('🔴 回归：单段带标记 → 纠正粘性发言人，且剥掉段首标记避免「【徐诗雨】徐诗雨：」双叠', () => {
+    const reply = '徐诗雨：（脸烧得更厉害了）诗雨真不知道你会这么想。';
+    const r = attributeReply(reply, NAMES, '熊梓铭');   // 粘性是熊梓铭（错的）
+    expect(r.multi).toBe(false);
+    expect(r.speakerName).toBe('徐诗雨');                // 以段首标记为准，不沿用粘性
+    expect(r.body).not.toContain('徐诗雨：');            // 段首标记已剥除
+    expect(r.body).toContain('诗雨真不知道你会这么想');
+  });
+
+  it('🔴 回归：零主语自称冲突 → 只记 warn，不改写、不抛', () => {
+    // 实测原形态：声明是熊梓铭，正文句首自称「诗雨」
+    const r = attributeReply('熊梓铭：诗雨这边就回宿舍拿点东西。', NAMES, '熊梓铭');
+    expect(r.multi).toBe(false);
+    expect(r.warn).toContain('徐诗雨');
+    expect(r.body).toContain('诗雨这边就回宿舍');        // 正文一字不改
+  });
+
+  it('自称与声明发言人同人 → 不告警（「诗雨」属徐诗雨自己）', () => {
+    const r = attributeReply('徐诗雨：诗雨这就去。', NAMES, '徐诗雨');
+    expect(r.warn).toBeNull();
+  });
+
+  it('🔴 窄判据：句中提及他人不算自称（P043 —— 保护性判据须比被保护文本更窄）', () => {
+    const r = attributeReply('熊梓铭：我和徐诗雨聊过天。', NAMES, '熊梓铭');
+    expect(r.warn).toBeNull();
+  });
+
+  it('🔴 探针实测的误报收窄：只看段首行，后文提及 / 昵称自指不得报冲突', () => {
+    // 实测原形态：罗珍思段的第二行「阿珍这边没什么要拿的」——阿珍是昵称自指，
+    // 扫全文会被误判成「自称他人」。自称冲突描述的是**发言人怎么开口**，故只取首行。
+    const r = attributeReply(
+      '熊梓铭：（梓铭点点头）\n诗雨这边就回宿舍拿点东西，没别的。',
+      NAMES, '熊梓铭',
+    );
+    expect(r.warn).toBeNull();
+    expect(r.body).toContain('诗雨这边就回宿舍');       // 正文一字不改
+  });
+
+  it('无白名单（私聊/玉瑶态）→ 行为与旧路径逐字一致', () => {
+    const r = attributeReply('随便说点什么', [], '玉瑶');
+    expect(r.multi).toBe(false);
+    expect(r.speakerName).toBe('玉瑶');
+    expect(r.body).toBe('随便说点什么');
+    expect(r.warn).toBeNull();
+  });
+
+  it('三套格式混排：结构化头 + 正文分段，头作缺省回落', () => {
+    const r = attributeReply('speaker: 徐诗雨\n---\n诗雨这就去。', NAMES, '熊梓铭');
+    expect(r.multi).toBe(false);
+    expect(r.speakerName).toBe('徐诗雨');     // 头优先于粘性
+    expect(r.body).toBe('诗雨这就去。');
+  });
+
+  it('正文出现非人名的「XX：」不误切（白名单挡住「注意：」这类）', () => {
+    const segs = splitSpeakerSegments('注意：这段别切开\n原因：还在查', NAMES);
+    expect(segs).toHaveLength(1);
+    expect(segs[0].speaker).toBeNull();
+    expect(segs[0].text).toContain('注意：');
+  });
+
+  it('detectZeroSubjectConflict：未声明发言人时恒为空', () => {
+    expect(detectZeroSubjectConflict('诗雨这就去', null, NAMES)).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// P1-C-1 · 内部概念出口审计（业主 2026-10-27 裁决：**先只检测不削字**）
+// 🔴 出口守卫模块红线：关键词判据用于削字会造成「大面积误杀（回复变空）」，
+//    故本批次只产出命中事实 + 打日志，**正文一字不动**。
+// ═══════════════════════════════════════════════════════════════
+describe('P1-C-1 · detectInternalConceptEcho 只检测不削字', () => {
+  it('🔴 回归：业主实测泄漏形态「徐诗涵 · 人物档案」必须命中', () => {
+    const leak = '是说刚才让你在车里等的事，还是那个"徐诗涵 · 人物档案"没归类的事？';
+    const hits = detectInternalConceptEcho(leak);
+    expect(hits.map(h => h.marker)).toContain('人物档案');
+    // 🔴 只检测不削字：入参必须逐字不变（防将来有人把 detect 改成改写）
+    expect(leak).toBe('是说刚才让你在车里等的事，还是那个"徐诗涵 · 人物档案"没归类的事？');
+  });
+
+  it('干净回复 → 空数组（零误报）', () => {
+    expect(detectInternalConceptEcho('那诗雨这就下去，不磨蹭了。')).toEqual([]);
+    expect(detectInternalConceptEcho('')).toEqual([]);
+    expect(detectInternalConceptEcho(undefined as unknown as string)).toEqual([]);
+  });
+
+  it('命中多个概念时逐个列出（带首现位置）', () => {
+    const hits = detectInternalConceptEcho('你从知识库和户口档案里查一下户口号');
+    const markers = hits.map(h => h.marker);
+    expect(markers).toContain('知识库');
+    expect(markers).toContain('户口档案');
+    expect(markers).toContain('户口号');
+    for (const h of hits) expect(h.index).toBeGreaterThanOrEqual(0);
+  });
+
+  it('🔴 auditReplyExit 结构上无从改写：返回 void，且异常时也不抛', () => {
+    expect(auditReplyExit('含人物档案的回复', 'sync')).toBeUndefined();
+    expect(auditReplyExit('含人物档案的回复', 'stream')).toBeUndefined();
+    // 审计自身异常绝不能影响回复链路
+    expect(() => auditReplyExit(null as unknown as string, 'sync')).not.toThrow();
+    expect(() => auditReplyExit(undefined as unknown as string, 'stream')).not.toThrow();
   });
 });

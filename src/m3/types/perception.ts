@@ -21,9 +21,11 @@ import type { DNA, EntityGene } from '../../m1/types/dna.js';
  * 4 大象限 × 6 维度，共同构成一个"最小语义单元（DNA）"的完整心理画像。
  * 所有维度为规则驱动计算（关键词匹配 + 逻辑判断），不使用机器学习模型。
  *
- * Ref: 24维语义感知与钙质强度定义规范 §第一部分
+ * Ref: 感知与钙质强度定义规范 §第一部分
+ * 🔴 P074 待废中间层：《40D 量纲统一法令》下本接口（24 槽位）仅为 M3 内部计算介质，
+ *    不落库、不构成检索量纲；M3 直产 40D 改造后整体退役（P072 批5）。
  */
-export interface Perception24D {
+export interface PerceptionState24 {
   // ── 象限1: 情绪效价与能量 (Emotion/Energy) ──
   /** E1 愉悦度: -1.0(痛苦) ~ 1.0(快乐)，中性事实为 0.0 */
   pleasure: number;
@@ -126,9 +128,9 @@ export interface CalciumResult {
  * 增强型 DNA — M3 逻辑决策层的处理单元
  *
  * 由 PerceptionAnalyzer 对 M1 原始 DNA 进行感知分析后产出。
- * 包含 24 维感知画像和钙质强度，供 M3 做决策使用。
+ * 包含感知画像（🔴 中间层 24 槽位，P074 待废）和钙质强度，供 M3 做决策使用。
  *
- * Ref: 24维语义感知与钙质强度定义规范 §第三部分
+ * Ref: 感知与钙质强度定义规范 §第三部分
  */
 export interface EnhancedDNA {
   /** 原始 DNA 基础字段 */
@@ -137,8 +139,8 @@ export interface EnhancedDNA {
   raw_input: string;
   entity_genes: EntityGene[];
 
-  /** 注入的 24 维感知层 — 降级为投影层（由 40D 语义维反投影 + 24D 独有维原生） */
-  perception: Perception24D;
+  /** 注入的感知层 — 投影层（🔴 P074 待废：由 40D 语义维反投影 + 中间层独有维原生） */
+  perception: PerceptionState24;
 
   /** V3: 40D 感知向量 — M3 直接产出的主向量（语义维 D09-D20/D33-D40 + 客观维由瑶光填充）。
    *  可选：analyze() 阶段未填，M3LogicOrchestrator.decide() 末尾统一填充。 */
@@ -146,6 +148,9 @@ export interface EnhancedDNA {
 
   /** 钙质强度分数 (0.0 ~ 1.0) */
   calcium_score: number;
+  /** 🔴 P074-A2 双算观测（2026-10-24）：新钙分口径（40D 14 语义维 L2/√14）旁路值——
+   *  无任何消费方，不参与晋升/衰减；对比数据积累后由业主裁决切换（P074 三步走）。 */
+  calcium_score_40d?: number;
 
   /** 预计算的强度等级 */
   calcium_level: CalciumLevel;
@@ -217,7 +222,7 @@ export interface M3Decision {
   /** 当前时间上下文 */
   timestamp: string;
 
-  /** P2: 主情绪标签（由 PerceptionAnalyzer 从24D向量推导） */
+  /** P2: 主情绪标签（由 PerceptionAnalyzer 从感知向量推导；🔴 中间层，P074 待废） */
   primary_emotion?: string;
   /** P2: 次要情绪标签（复合情绪） */
   secondary_emotions?: string[];

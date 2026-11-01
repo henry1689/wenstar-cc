@@ -10,7 +10,7 @@
  * S3 接入 transformers.js（量化版 bge-small-zh-v1.5，~20MB）
  * 纯前端运行，无需后端服务。
  */
-import type { EmotionVector24D } from '../bus/types.js';
+import type { EmotionState24 } from '../bus/types.js';
 
 // ── 嵌入模型状态 ──
 export type EmbeddingStatus = 'uninitialized' | 'loading' | 'ready' | 'failed';

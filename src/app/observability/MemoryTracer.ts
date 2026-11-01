@@ -13,7 +13,7 @@
  *
  * 输出格式：console.log + 可选的 JSON 持久化
  */
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { ConfigService } from '../../config/ConfigService.js';
 
 interface TraceSpan {
@@ -31,7 +31,7 @@ let _startTime = 0;
 const ENABLED = !ConfigService.getBool('WS_DISABLE_MEMORY_TRACER');
 
 /** 开始追踪一轮对话 */
-export function traceStart(message: string, perception?: Perception24D): void {
+export function traceStart(message: string, perception?: PerceptionState24): void {
   if (!ENABLED) return;
   _startTime = Date.now();
   _currentSpan = {

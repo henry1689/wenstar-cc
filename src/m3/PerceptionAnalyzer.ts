@@ -22,7 +22,7 @@ import type { DNA } from '../m1/types/dna.js';
 import { loadSet } from '../m1/LexiconLoader.js';
 import { computeCalcium as m2ComputeCalcium } from '../m2/math.js';
 import { M3_CONFIG } from '../config/M3Config.js';
-/** 词级命中统计（用于调试 24D 感知分析 — 记录每个词在真实输入中命中了多少次） */
+/** 词级命中统计（用于调试感知分析 — 记录每个词在真实输入中命中了多少次；🔴 统计对象属 P074 待废中间层） */
 const wordHitCounters = new Map<string, number>();
 const MAX_HIT_COUNTERS = 500;
 
@@ -50,13 +50,13 @@ function maybeCleanHitCounters(): void {
   }
 }
 import type {
-  Perception24D,
+  PerceptionState24,
   EnhancedDNA,
   CalciumResult,
   CalciumLevel,
   M3Context,
 } from './types/perception.js';
-// V3: 40D 感知向量 — M3 直接产出 40D 语义维（24D 投影）
+// V3: 40D 感知向量 — M3 产出 40D 语义维（当前经中间层投影；🔴 P074 改直产）
 import { createEmptyPerceptionV40, PERCEPTION_40D_KEYS } from './types/perception-40d.js';
 import type { PerceptionV40 } from './types/perception-40d.js';
 import { MAP_24_TO_40 } from '../m2/PerceptionVector40DCodec.js';
@@ -229,7 +229,7 @@ class EmotionScorer {
     return normalizeHits(countHits(text, HUMOR_WORDS), 3);
   }
 
-  static all(text: string): Pick<Perception24D, 'pleasure' | 'arousal' | 'dominance' | 'aggression' | 'sincerity' | 'humor'> {
+  static all(text: string): Pick<PerceptionState24, 'pleasure' | 'arousal' | 'dominance' | 'aggression' | 'sincerity' | 'humor'> {
     return {
       pleasure: this.pleasure(text),
       arousal: this.arousal(text),
@@ -290,7 +290,7 @@ class CognitionScorer {
     return clamp(countFirstPerson(text) * 0.15, 0, 1);
   }
 
-  static all(text: string): Pick<Perception24D, 'factual' | 'logical' | 'certainty' | 'abstract' | 'temporal_focus' | 'self_ref'> {
+  static all(text: string): Pick<PerceptionState24, 'factual' | 'logical' | 'certainty' | 'abstract' | 'temporal_focus' | 'self_ref'> {
     return {
       factual: this.factual(text),
       logical: this.logical(text),
@@ -338,7 +338,7 @@ class SocialScorer {
     return clamp(score, 0, 1);
   }
 
-  static all(text: string): Pick<Perception24D, 'intimacy' | 'power_diff' | 'dependency' | 'moral_judgment' | 'etiquette' | 'belonging'> {
+  static all(text: string): Pick<PerceptionState24, 'intimacy' | 'power_diff' | 'dependency' | 'moral_judgment' | 'etiquette' | 'belonging'> {
     return {
       intimacy: this.intimacy(text),
       power_diff: this.powerDiff(text),
@@ -380,7 +380,7 @@ class IntimacyScorer {
     return clamp(score, 0, 1);
   }
 
-  static all(text: string): Pick<Perception24D, 'sexual_attraction' | 'sensory_craving' | 'energy_merge' | 'possessiveness' | 'ecstasy' | 'safety'> {
+  static all(text: string): Pick<PerceptionState24, 'sexual_attraction' | 'sensory_craving' | 'energy_merge' | 'possessiveness' | 'ecstasy' | 'safety'> {
     return {
       sexual_attraction: this.sexualAttraction(text),
       sensory_craving: this.sensoryCraving(text),
@@ -406,7 +406,7 @@ export interface CalciumConfig {
 
 // M3 的钙化计算：以 M2 L2 范数为基础，叠加 M3 上下文调整
 // 为什么统一：同一事件两个分数会导致记忆晋升/遗忘与对话决策不一致
-function calculateCalcium(p: Perception24D, config?: CalciumConfig, entityGenes?: Array<{ name: string; type: string }>, baseline?: { pleasure: number; arousal: number; intimacy: number }): CalciumResult {
+function calculateCalcium(p: PerceptionState24, config?: CalciumConfig, entityGenes?: Array<{ name: string; type: string }>, baseline?: { pleasure: number; arousal: number; intimacy: number }): CalciumResult {
   // ① NaN/undefined 安全钳
   const pleasure = safeVal(p.pleasure);
   const arousal = safeVal(p.arousal);
@@ -512,7 +512,7 @@ function selfCheck(score: number, ctx: { pleasure: number; aggression: number; s
  * 由 M3LogicOrchestrator 在 M2 存储完成后调用。
  *
  * 输入: DNA 对象（branch_id, locus_path, raw_input, entity_genes）
- * 输出: EnhancedDNA 对象（含 24 维感知 + 钙质强度）
+ * 输出: EnhancedDNA 对象（含感知向量[🔴 中间层 24D，P074 待废] + 钙质强度）
  *
  * 三步走算法:
  * 1. 语境剥离 (Context Stripping): 忽略位置信息，只看 raw_input
@@ -520,7 +520,7 @@ function selfCheck(score: number, ctx: { pleasure: number; aggression: number; s
  * 3. 潜意识扫描 (Subconscious Scanning): 代词和隐喻扫描
  *
  * v1.1 新增: 场景感知调整 — analyze() 从 dna 读取 locus_path 和 scene_tags，
- * 在 24D 基线值上按场景微调（不改变核心关键词匹配算法）。
+ * 在感知基线值上按场景微调（不改变核心关键词匹配算法；🔴 基线层属 P074 待废中间层）。
  * P3 新增: 隐性情绪检测 — 当显性正负情感词少但隐忍词命中时，调整感知基线。
  * Ref: M1 场景标签扩展 P0, M2 情感曲谱改善 P3
  */
@@ -535,7 +535,7 @@ export class PerceptionAnalyzer {
     const cognition = CognitionScorer.all(text);
     const social = SocialScorer.all(text);
     const intimacy = IntimacyScorer.all(text);
-    const perception: Perception24D = { ...emotion, ...cognition, ...social, ...intimacy };
+    const perception: PerceptionState24 = { ...emotion, ...cognition, ...social, ...intimacy };
 
     // ── 场景感知基线调整（基于 locus_path，使用 M1 标准分类路径） ──
     let calciumConfig: CalciumConfig | undefined;
@@ -602,7 +602,8 @@ export class PerceptionAnalyzer {
   }
 
   /**
-   * V3: M3 直接产出 40D — 将最终调整后的 24D 投影到 40D 语义维。
+   * V3: M3 产出 40D — 将最终调整后的感知向量投影到 40D 语义维。
+   * 🔴 P074 待废过渡态：投影形态将改 scorers 直产 40D（40D 量纲统一法令，废中间层）。
    *
    * 必须在 injectContext() 之后调用（由 M3LogicOrchestrator.decide 负责时机），
    * 保证 24D/40D 语义维同源、永不发散（"严格走 24D 原路径"的本质）。
@@ -615,12 +616,12 @@ export class PerceptionAnalyzer {
    * 客观维（D01-D08 肉身 / D10/D11/D13/D16/D18/D20 / D21-D32 时空成长）由瑶光异步填充，
    * 此处置 0 占位。D36/D37 双极 [-1,1] 原样保留，其余钳 [0,1]。
    */
-  buildPerceptionV40(p: Perception24D): PerceptionV40 {
+  buildPerceptionV40(p: PerceptionState24): PerceptionV40 {
     // 使用中性值 0.35 初始化（保持钙化分数不变）
     const NEUTRAL = 0.35;
     const p40 = {} as PerceptionV40;
     for (const k of PERCEPTION_40D_KEYS) p40[k] = NEUTRAL;
-    // 然后覆盖 24D 映射的字段
+    // 覆盖中间层映射字段（🔴 P074 待废投影）
     for (const { key24, dim40 } of MAP_24_TO_40) {
       const key40 = PERCEPTION_40D_KEYS[dim40 - 1];
       const v = p[key24] ?? 0;
@@ -631,7 +632,7 @@ export class PerceptionAnalyzer {
   }
 
   /**
-   * 场景感知基线调整 — 从 dna.locus_path + scene_tags 微调 24D 基线 + 钙质偏移。
+   * 场景感知基线调整 — 从 dna.locus_path + scene_tags 微调感知基线（🔴 中间层 24D，P074 待废）+ 钙质偏移。
    *
    * 不改变核心关键词匹配算法，只在基线值上做场景修正。
    * P0: 场景标签组合 → 特定维度基线偏移
@@ -639,7 +640,7 @@ export class PerceptionAnalyzer {
    *
    * @returns 钙质配置（阈值偏移 + 分数加成），用于后续钙质重算
    */
-  private applySceneAdjustments(p: Perception24D, locusPath: string, _tags?: string[]): CalciumConfig {
+  private applySceneAdjustments(p: PerceptionState24, locusPath: string, _tags?: string[]): CalciumConfig {
     const sa = M3_CONFIG.sceneAdjustments;
     let thresholdOffset = 0;
     let scoreBonus = 0;
@@ -773,12 +774,12 @@ export class PerceptionAnalyzer {
   }
 
   /**
-   * P2: 从 24D 感知向量推导主情绪和次要情绪标签（30+ 规则）。
+   * P2: 从感知向量（🔴 中间层 24D，P074 待废）推导主情绪和次要情绪标签（30+ 规则）。
    *
    * v2: 基于 matchScore + priority 显式排序，取代代码顺序隐式判定。
    * 返回结构化的规则匹配列表，输出 matchedRules 供调试观测。
    */
-  static deriveEmotionLabels(perception: Perception24D): {
+  static deriveEmotionLabels(perception: PerceptionState24): {
     primary: string | undefined;
     secondary: string[] | undefined;
     matchedRules: Array<{ label: string; score: number; priority: number }>;
@@ -898,7 +899,7 @@ export class PerceptionAnalyzer {
   }
 
   /** 根据感知向量重新计算钙质强度（在 injectContext 后调用） */
-  static recalculateCalcium(perception: Perception24D, config?: CalciumConfig, entityGenes?: Array<{ name: string; type: string }>): CalciumResult {
+  static recalculateCalcium(perception: PerceptionState24, config?: CalciumConfig, entityGenes?: Array<{ name: string; type: string }>): CalciumResult {
     return calculateCalcium(perception, config, entityGenes);
   }
 }

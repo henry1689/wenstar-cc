@@ -8,7 +8,7 @@
  * - 修复 P1: 周期巩固时保留未毕业条目，显式排空时记录丢弃
  */
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { DNA } from '../m1/types/dna.js';
 import type { WriteResult } from '../m2/types/index.js';
 import { PerceptionAnalyzer } from '../m3/PerceptionAnalyzer.js';
@@ -16,7 +16,7 @@ import { M3_CONFIG } from '../config/M3Config.js';
 
 interface WorkingEntry {
   dna: DNA;
-  perception: Perception24D;
+  perception: PerceptionState24;
   calciumScore: number;
   calciumLevel: number;
   seqPos: number;
@@ -105,7 +105,7 @@ export class MemoryWriteBuffer {
    * 推入一条新记录
    * @param seqPos 由 FusionStorageAdapter.reserveNextSeq() 预分配的位置
    */
-  push(dna: DNA, perception: Perception24D, seqPos: number, primaryEmotion?: string, secondaryEmotions?: string[]): void {
+  push(dna: DNA, perception: PerceptionState24, seqPos: number, primaryEmotion?: string, secondaryEmotions?: string[]): void {
     const calcium = PerceptionAnalyzer.recalculateCalcium(perception);
     const meaningful = dna.entity_genes.some(g =>
       g.type !== 'self' && g.name.length > 0

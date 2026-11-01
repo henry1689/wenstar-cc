@@ -17,7 +17,7 @@
  *   import { bionic } from './adapter/bionic-adapter.js';
  *   await bionic.search('你好', null, 'user_123');
  */
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import { LocalCache } from '../app/tools/LocalCache.js';
 import { createHash } from 'node:crypto';
 import { ConfigService } from '../config/ConfigService.js';
@@ -82,7 +82,7 @@ export interface VadSpectrum {
 export interface SongSheet {
   topic: string;
   turns: Array<{ role: string; content: string }>;
-  emotion24d?: Perception24D;
+  emotion24d?: PerceptionState24;
   vad?: VadSpectrum | null;
   userId?: string;
 }

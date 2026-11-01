@@ -158,13 +158,7 @@ describe('[M2守卫] math.ts 算法库', () => {
     expect([0, 1, 2, 3]).toContain(r.level);
   });
 
-  it('emotionalSimilarity 接受 (a, b, mode?) 返回 [0,1]', () => {
-    const a = { pleasure: 0.6, arousal: 0.3, dominance: 0.5, aggression: 0.4, sincerity: 0.7, humor: 0.3, factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5, temporal_focus: 0.5, self_ref: 0.5, intimacy: 0.5, power_diff: 0.5, dependency: 0.5, moral_judgment: 0.5, etiquette: 0.5, belonging: 0.5, sexual_attraction: 0.5, sensory_craving: 0.5, energy_merge: 0.5, possessiveness: 0.5, ecstasy: 0.5, safety: 0.5 };
-    const b = { pleasure: 0.7, arousal: 0.4, dominance: 0.5, aggression: 0.3, sincerity: 0.6, humor: 0.4, factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.5, temporal_focus: 0.5, self_ref: 0.5, intimacy: 0.5, power_diff: 0.5, dependency: 0.5, moral_judgment: 0.5, etiquette: 0.5, belonging: 0.5, sexual_attraction: 0.5, sensory_craving: 0.5, energy_merge: 0.5, possessiveness: 0.5, ecstasy: 0.5, safety: 0.5 };
-    expect(mathModule.emotionalSimilarity(a, b, 'balanced')).toBeGreaterThanOrEqual(0);
-    expect(mathModule.emotionalSimilarity(a, b)).toBeGreaterThanOrEqual(0);
-    expect(mathModule.emotionalSimilarity(a, b, 'by_calcium')).toBeGreaterThanOrEqual(0);
-  });
+  // 🔴 P072 批2 墓碑：原 emotionalSimilarity(24维加权余弦) 测试用例已随函数删除——禁止 24 维量纲函数（40D 法令）
 
   it('initialStrength 参数(calciumScore) 返回 [0,1]', () => {
     expect(mathModule.initialStrength(0)).toBeCloseTo(0.1, 1);

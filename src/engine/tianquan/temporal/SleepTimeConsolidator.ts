@@ -830,29 +830,21 @@ export class SleepTimeConsolidator {
       }
 
       // 2. 将 top-5 高钙化记忆摘要写入 knowledge_base（皮层学习）
-      const top5 = topMemories.slice(0, 5);
-      for (const mem of top5) {
-        const raw = ((mem as any).raw_input || '').substring(0, 120);
-        const existing = sqlite.queryAll(
-          "SELECT id FROM knowledge_base WHERE title = ? LIMIT 1",
-          [`巩固记忆: ${raw}`]
-        );
-        if (existing?.length) continue;
-
-        const knId = `sysc_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
-        // 🔴 2026-09-19 户管管理法（写入端修复）：皮层学习条目是**单条源记忆**的派生（非跨实体聚合），
-        //   归属可精确继承 → 复用 deriveBelongUuid（同一单一事实源）。
-        //   原实现列清单列了 belong_entity_uuid 却 bind 字面 NULL —— 列在、值恒空，
-        //   守卫（只查「列是否列出」）看不见，是本次事故的隐蔽形态。
-        sqlite.writeRaw(
-          `INSERT INTO knowledge_base (id, title, content, source_type, tags, created_at, updated_at, locked, classification, classification_pending, interaction_type, belong_entity_uuid)
-           VALUES (?, ?, ?, 'systems_consolidation', ?, ?, ?, 1, '系统巩固', 0, 'other', ?)`,
-          [knId, `巩固记忆: ${raw}`, `钙化 ${(mem as any).calcium_score?.toFixed(2)} 的持久记忆:\n${raw}`,
-           JSON.stringify(['systems_consolidation', 'hippocampal_replay']),
-           new Date().toISOString(), new Date().toISOString(),
-           deriveBelongUuid(mem) ?? null]
-        );
-      }
+      // 🔴🔴 P0-8a(2026-10-07) 已**移除此处对 knowledge_base 的写入**（原为 `systems_consolidation`
+      //   「巩固记忆」条目，正文 22~120 字）。
+      //
+      //   为什么移除 —— 业主 2026-10-07 定义了知识库边界，原话：
+      //     「知识库里不应该有什么碎片信息，也不能有这些，因为这里只存文档和微信临时信息」。
+      //   实测危害：业主与熊梓铭会晤时，她「查到」的所谓档案就是这类 22~71 字的碎片 ——
+      //     它们标题里带人名，在 `KnowledgeEngine.weightedSearch` 里拿满 `titleBoost`（最高 3 倍），
+      //     得分 0.600，而 5231 字的【FG档案范式】只有 0.139，被 `_kept` 的 `matchScore >= 0.3`
+      //     门槛整个滤掉 ⇒ **实体永远查不到自己的文档**。
+      //
+      //   信息去哪了：本段是「皮层学习」的派生（源记忆仍在 memories，钙化分仍在），
+      //     移除知识库写入**不丢任何原始信息**，只是不再把它当成"知识库文档"。
+      //   原实现的归属处理（deriveBelongUuid 继承源记忆归属）是对的，一并记录以备日后需要把它
+      //     写到别处（如 vault_log）时复用。
+      //   知识库的"文档 + 微信临时"边界由 P0-8a 的 SourceTypePolicy 与清理脚本共同维护。
 
       // 3. 清理 hippocampal_index 中的低质量条目
       try {
@@ -861,7 +853,9 @@ export class SleepTimeConsolidator {
         idx.runDailyMaintenance();
       } catch (e) { console.warn(`[SleepTimeConsolidator] 操作失败`, (e as Error)?.message || e); }
 
-      if (reinforced > 0) console.log(`[SleepTime] 系统巩固: 强化 ${reinforced} 条稀疏索引 + ${top5.length} 条皮层学习`);
+      // 🔴 P0-8a(2026-10-07): 原此处还报 `+ ${top5.length} 条皮层学习`（写入 knowledge_base 的条数）。
+      //   皮层学习条目自本批起不再写入知识库，故计数已无意义，改为如实说明。
+      if (reinforced > 0) console.log(`[SleepTime] 系统巩固: 强化 ${reinforced} 条稀疏索引（皮层学习条目自 P0-8a 起不再写入知识库）`);
     } catch (err) {
       console.warn('[SleepTime] 系统巩固失败:', err);
     }

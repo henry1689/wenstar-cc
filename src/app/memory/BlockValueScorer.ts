@@ -34,7 +34,7 @@
 import { createHash } from 'node:crypto';
 import { computeCalcium } from '../../m2/math.js';
 import { isDegenerateContent } from '../../m2/MemoryWriteGateway.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 
 // ══════════════════════════════════════════════════════════════
 // 判据常量（收拢处 —— 改这里即改全链路）
@@ -97,7 +97,7 @@ export type BlockDecayClass = 'emotional' | 'relational' | 'work' | 'neutral';
 export interface BlockScoreInput {
   rounds: readonly BlockRound[];
   /** 每轮的感知向量（与 rounds 同序；缺项按中性处理） */
-  perceptions: readonly Perception24D[];
+  perceptions: readonly PerceptionState24[];
   /** 块内峰值钙分 [0,1]（chat.ts 逐轮累积） */
   maxCalcium: number;
   maxCalciumRound: number;
@@ -171,7 +171,7 @@ export function sceneRatioOf(rounds: readonly BlockRound[]): number {
 }
 
 /** 情绪曲线：逐轮钙分 [0,1]（与 memories 同标度） */
-export function emotionCurveOf(perceptions: readonly Perception24D[]): number[] {
+export function emotionCurveOf(perceptions: readonly PerceptionState24[]): number[] {
   return perceptions.map((p) => {
     if (!p) return 0;
     try {
@@ -226,11 +226,11 @@ export function degradedRatioOf(rounds: readonly BlockRound[]): number {
  * —— 与真人记忆一致（一段相处里最动人的那一刻决定这段记多久）。
  */
 export function decayClassOf(
-  perceptions: readonly Perception24D[],
+  perceptions: readonly PerceptionState24[],
   locusPath: string,
   entityNames: readonly string[],
 ): BlockDecayClass {
-  const peak = (key: keyof Perception24D): number => {
+  const peak = (key: keyof PerceptionState24): number => {
     let m = 0;
     for (const p of perceptions) {
       const v = Number((p as any)?.[key]) || 0;

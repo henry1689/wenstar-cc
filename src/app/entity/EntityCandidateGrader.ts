@@ -75,7 +75,11 @@ const WEAK_EVIDENCE_SURNAMES = new Set([
  *
  * 这是**类别级**判据（虚词/代词/助词字集，非人名），不违反「零硬编码人名」原则。
  */
-const NON_NAME_TAIL_CHARS = new Set([
+/**
+ * 非名尾字集（单一真源，2026-10-23 导出供 FGHealthCheck 滑窗垃圾自检复用，避免判据两处拷贝）。
+ * 复用方：gradeEntity（进门/转正两道门）+ FGHealthCheck.detectSlidingWindowJunk（自检预警）。
+ */
+export const NON_NAME_TAIL_CHARS = new Set([
   '了','些','什','从','但','你','候','儿','再','别','又','可','后','吗','嘛','她',
   '好','就','是','更','有','条','样','次','的','要','说','那','哪','里','间','面','首',
   '乱','亲','痛','满','熟','注','装','资','足','班','饭','尘','粉','毕','竟','虽','干',
@@ -97,7 +101,50 @@ const NON_NAME_TAIL_CHARS = new Set([
   //   ⚠️ 刻意排除：心（心怡/静心）· 亮（明亮/光亮）· 盈（盈盈）· 灵（都灵/灵灵）
   //     —— 这四个是常见人名用字，纳入会误伤未来真人（宁可漏拦，不可误伤）。
   '电','气','绪','人',
+  // 2026-10-23 新增（实测 5 个滑窗垃圾:尤其/水乳交/阿珍带/阿珍聊/阿珍妈 全部误晋升 active）：
+  //   其（尤其是→尤其）· 交（水乳交融→水乳交）· 带（就叫阿珍带吧→阿珍带）·
+  //   聊（找阿珍聊聊→阿珍聊）· 妈（叫阿珍妈吧→阿珍妈）。
+  //   五个尾字均经全库 34 真人名/别名校验**零命中**（安全增量），符合「只在垃圾尾部出现、
+  //   从不真人名收尾」取材原则。妈/带/聊=称谓或动词，其/交=虚词/连绵词残片，均非名尾。
+  '其','交','带','聊','妈',
 ]);
+
+/**
+ * 亲属称呼字 —— F-34（2026-10-28）放行面的**唯一词表**
+ * ==============================================
+ * 背景：2026-10-23 为堵「阿珍妈（叫阿珍妈吧 → 滑窗切出）」把 `妈` 加进
+ * `NON_NAME_TAIL_CHARS`，连带把 **「熊妈」这类真·母亲称呼**也判成 L0 非人名
+ * ⇒ FG 节点不建 ⇒ `addEdge` 拒绝孤儿边 ⇒ 人物档案的「母亲：」栏整段消失
+ * （实测单测稳定失败，台账 F-34）。
+ *
+ * 🔴 **不是放宽，是把判据收得更精确** —— 两个真实案例撞同一条窄尾字判据：
+ *   `阿珍妈` = 滑窗垃圾要拦 · `熊妈` = 真称呼要放。
+ *   交集解法：**首字命中姓氏表 且 余下字符全是亲属称呼** 才豁免。
+ *
+ * 逐案核验：
+ *   ✅ 放行：熊妈 · 熊妈妈 · 李爸 · 张叔
+ *   ❌ 仍拦：阿珍妈（"阿"非姓）· 王大妈（"大"非称呼）· 妈妈/爸爸（无姓首字）
+ *          · 尤其 · 水乳交 · 阿珍带 · 阿珍聊 · 习累 · 秋节快 · 马上
+ *
+ * ⚠️ 扩词表前必读上方核验表：每加一个字，都要同时确认它不会让上面「仍拦」组的
+ *    任何一项变成放行。本词表与 `NON_NAME_TAIL_CHARS` **存在有意重叠**（妈/婆），
+ *    重叠字正是本豁免存在的原因。
+ */
+const KINSHIP_TAIL_CHARS = new Set([
+  '妈','爸','爹','娘','爷','奶','婆','公','哥','姐','弟','妹',
+  '叔','婶','姑','舅','姨','侄','孙','儿',
+]);
+
+/**
+ * 是否为「姓 + 纯亲属称呼序列」（熊妈 / 熊妈妈）。
+ * 长度卡 2~4：称呼式姓名不会更长，超长即更可能是滑窗片段（王大妈 → ❌）。
+ */
+function isKinshipAddress(name: string): boolean {
+  if (name.length < 2 || name.length > 4) return false;
+  if (!hasSurname(name)) return false;          // 首字必须是姓（复用既有单一真源，不新建表）
+  const rest = name.slice(1);
+  return rest.length > 0 && [...rest].every((c) => KINSHIP_TAIL_CHARS.has(c));
+}
 
 /** 判断是否为句子片段/普通名词（非人名）。供 gradeEntity 与 LLMEntityExtractor 复用。 */
 export function looksLikeSentenceFragment(name: string, fgWhitelist?: Set<string>): boolean {
@@ -107,6 +154,9 @@ export function looksLikeSentenceFragment(name: string, fgWhitelist?: Set<string
   // 2026-09-11: 名尾落在「非人名高频用字」→ 跨词边界的滑窗片段（"习累"/"满足"/"喜欢"）。
   // 放在尾部字面量判定之后、姓氏判定之前，使所有下游路径（含 hasSurname）都受益。
   if (fgWhitelist?.has(name)) return false;
+  // 🔴 F-34: 只豁免**尾字判据**这一条（三个黑名单在上，仍然照拦）——
+  //    豁免点越窄，误伤面越小。
+  if (isKinshipAddress(name)) return false;
   if (name.length >= 2 && NON_NAME_TAIL_CHARS.has(name[name.length - 1])) return true;
   return false;
 }

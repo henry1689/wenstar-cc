@@ -17,7 +17,7 @@
 import type { M8Engine } from '../../m8/M8Engine.js';
 import type { ClueSearchResult } from '../../m8/types/index.js';
 import { derivePhysiologicalSnapshot } from '../../m8/PhysiologicalDeriver.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { ClueTracker } from '../../m7/ClueTracker.js';
 import type { BionicSearchResult } from '../../adapter/bionic-adapter.js';
 import type { InteractionLog } from '../../m7/types/index.js';
@@ -37,7 +37,7 @@ export interface ClueQuestionConfig {
   /** 用户原始 Query */
   originalQuery: string;
   /** 可选的当前 M3 感知维度 */
-  perception?: Perception24D;
+  perception?: PerceptionState24;
   /** M8 引擎实例 */
   m8Engine: M8Engine;
   /** 可选的外部记忆检索结果（来自仿生智脑），用于生成区分性反问 */
@@ -206,7 +206,7 @@ export class M5ClueAssistant {
   private async searchWithClue(params: {
     originalQuery: string;
     userClue: string;
-    perception?: Perception24D;
+    perception?: PerceptionState24;
   }): Promise<ClueSearchResult> {
     const physiologicalState = params.perception
       ? derivePhysiologicalSnapshot({

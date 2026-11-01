@@ -23,16 +23,22 @@ export const FILE_SOURCE_TYPES = new Set([
 
 /** 系统自动生成的分析报告 */
 export const ANALYSIS_SOURCE_TYPES = new Set([
-  'dream_behavior',        // SleepTimeConsolidator - 梦境行为分析
-  'systems_consolidation', // SleepTimeConsolidator - 系统巩固
+  'systems_consolidation', // SleepTimeConsolidator - 系统巩固（⚠️ 见下方 P0-8a：写入端已停，存量已清）
   'prospective_simulation',// ProspectiveSimulator - 前瞻模拟
-  'monthly_topic',         // DailyMaintenanceScheduler - 月度话题
+  'monthly_topic',         // DailyMaintenanceScheduler - 月度话题（⚠️ 见下方 P0-8a：写入端已停，存量已清）
   'conflict',              // ConflictDetector - 冲突检测
+  'memsym_element',        // MemSym 通路B 要素元素（M7 元素化萃取落池，ADR-MEM-002 第三块；可检索供 pickElements）
 ]);
 
-/** 垃圾——永久排除检索 */
+/** 检索隔离区 —— 永久排除检索（**不是删除标记**：行仍在库里，只是不进搜索） */
 export const GARBAGE_SOURCE_TYPES = new Set([
   'landmark','milestone','dream','spec','query',
+  // 🔴 P0-8a(2026-10-07): dream_behavior 移入隔离区。
+  //   业主原话：「梦境不删，但需要设计隔离，避免污染搜索」。它不是文档，平均 234 字，
+  //   与"知识库只存文档 + 微信临时信息"的边界不符；但**内容本身要留**（由 M7/SleepTimeConsolidator
+  //   写入，是梦境功能的产物），故只隔离出检索，不删。
+  //   原位置 ANALYSIS_SOURCE_TYPES（可检索）—— 移出后梦境不再被注入对话上下文。
+  'dream_behavior',
 ]);
 
 /** 可检索的类型 = FILE ∪ ANALYSIS */

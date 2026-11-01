@@ -13,7 +13,9 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 
-const WENSTAR_ROOT = 'D:/wenstar';
+// 🔴 2026-10-31：原硬编码 'D:/wenstar'（旧根，且该目录真实存在）→ 会静默操作旧库。
+//   改为从脚本位置推导当前项目根，可用 WENSTAR_HOME 覆盖。
+const WENSTAR_ROOT = process.env.WENSTAR_HOME || path.resolve(__dirname, '..');
 const FM_PATH = path.join(WENSTAR_ROOT, 'data', 'webui', 'fusion_memory.db');
 const FG_PATH = path.join(WENSTAR_ROOT, 'data', 'knowledge', 'family_graph.db');
 const KB_MD_DIR = path.join(WENSTAR_ROOT, 'data', 'knowledge-md');

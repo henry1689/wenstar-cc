@@ -3,10 +3,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import { applyDecay, applyDecayOnly } from '../emotion-decay.js';
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
-function makeVector(values?: Partial<EmotionVector24D>): EmotionVector24D {
-  const base: EmotionVector24D = {
+function makeVector(values?: Partial<EmotionState24>): EmotionState24 {
+  const base: EmotionState24 = {
     joy: 30, sadness: 0, anger: 0, fear: 0,
     surprise: 10, disgust: 0, calm: 50, anxiety: 0,
     affection: 20, trust: 30, intimacy: 10, respect: 20,
@@ -53,7 +53,7 @@ describe('emotion-decay', () => {
     const vec = makeVector({ joy: 30, affection: 20 });
     const result = applyDecay({
       current: vec,
-      delta: { joy: 15, affection: 20 } as Partial<EmotionVector24D>,
+      delta: { joy: 15, affection: 20 } as Partial<EmotionState24>,
       deltaHours: 0, // 瞬时刺激
       relationStage: 'familiar',
     });
@@ -67,7 +67,7 @@ describe('emotion-decay', () => {
     const vec = makeVector({ joy: 95 });
     const result = applyDecay({
       current: vec,
-      delta: { joy: 20 } as Partial<EmotionVector24D>,
+      delta: { joy: 20 } as Partial<EmotionState24>,
       deltaHours: 0,
       relationStage: 'familiar',
     });

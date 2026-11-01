@@ -8,7 +8,7 @@
  * 玉瑶可在下次对话中反问确认。
  */
 import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { LEARNING_CONFIG } from '../../config/learning-config.js';
 
 interface ConflictRecord {
@@ -57,7 +57,7 @@ export class ConflictDetector {
     entityName: string,
     message: string,
     entityType: string,
-    perception: Perception24D,
+    perception: PerceptionState24,
     entityUuid?: string | null,
   ): Promise<ConflictRecord | null> {
     try {

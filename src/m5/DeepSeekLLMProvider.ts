@@ -416,6 +416,42 @@ export function gateOutgoingReply(text: string): string {
     return t;
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 通道分流（2026-10-30）：reply = 会晤/角色扮演的回复出口
+//                     raw   = 工具型调用（压缩摘要 / 实体终审 / 关系抽取 /
+//                             块摘要 / 记忆检索编号 / 发言人推断 …）
+// ════════════════════════════════════════════════════════════════════
+export type LlmChannel = 'reply' | 'raw';
+
+/**
+ * 🔴 raw 通道出口策略 —— 修「工具型调用被回复形状守卫误杀」。
+ *
+ * 【缺陷（S1 取证）】`rawCall` 经由 `callDeepSeekApi`，而后者**无条件**套用聊天回复的
+ *   `resolveReplyFromFields`。该函数里的 `isDraftShapedReply` 判据是「正常回复不会以列表项开头」——
+ *   对摘要 / 关系列表却是**正常形态** ⇒ 判空 ⇒ 抛 `No usable answer after reasoning strip`
+ *   ⇒ `rawCall` 里那句「取原始 content」的 V45 兑底**根本执行不到**（异常先抛出）。
+ *   实测：近 20 万行错误日志 1916 次（累计 2780 次），压缩摘要 / 实体终审 / 发言人推断全线受害，
+ *   并连带把**共享熔断器** `deepseek_llm` 打开 ⇒ 前台对话周期性降级。
+ *
+ * 【本函数做什么】**不做形状判定**，只保留两条真正指向泄漏的判据：
+ *   ① 自有哨兵串（`鸿艺对你说：`/`当前说话对象:`）⇒ 模型在复述输入
+ *   ② 中文元指令句式（`我要以XX身份回答`）⇒ 模型在复述系统指令
+ *   其余一律原样返回 —— 列表、JSON、第三人称摘要都是合法工具输出。
+ *
+ * 【取舍（已与业主确认）】raw 通道**不再是全 fail-closed**。若模型把思维链写进 `content`
+ *   （而非独立的 `reasoning_content`），摘要类消费方可能把它写进库。判定依据：
+ *   · `deepseek-v4-flash` 正常把思维链放在独立字段，`content` 自身是干净的；
+ *   · V22 那次泄漏的触发条件是 **content 为空**才回落 reasoning —— 该路径本函数不接管，
+ *     仍由 `resolveReplyFromFields(undefined, reasoning)` 严格剥离。
+ */
+export function resolveRawPayload(content?: string): string {
+    const c = (content || '').trim();
+    if (!c) return '';
+    if (hasSelfInjectedMarker(c)) return '';
+    if (CN_META_PLAN_RE.test(c)) return '';
+    return c;
+}
+
 /** V22c 思维链特征判据（fail-closed 判定用：区分「思维链」与「无标记的简洁答案」）
  *  ❗ 仅取强信号：英文起草/元推理、草稿列表形态、中文元指令（V23 补）。
  *    刻意不含 REFLECTIVE_VERB_RE 类宽泛元认知词（"考虑/结构" 等正常回复也会出现）——避免误拦合法回复。 */
@@ -1198,6 +1234,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
   ): Promise<string> {
     const result = await this.callDeepSeekApi(messages, maxTokens, temperature, {
       timeoutMs: 45_000,
+      // 🔴 2026-10-30：本方法语义即「原始调用」⇒ 走 raw 通道出口策略（见 resolveRawPayload）。
+      //   此前这里没有标记，于是继承了下方的【聊天回复】形状守卫 ⇒ 摘要类输出被判空并抛错，
+      //   导致下面这段「取原始 content」的 V45 兜底**根本执行不到**（异常先抛出）。
+      channel: 'raw',
       ...(opts?.reasoning_effort ? { reasoning_effort: opts.reasoning_effort } : {}),
     });
     // 🔴 V45(2026-10-09): 工具型通道取【未经思维链剥离的原始 content】—— 本方法语义即「原始调用」，
@@ -1230,22 +1270,40 @@ export class DeepSeekLLMProvider implements LLMProvider {
   });
 
   /**
+   * 🔴 2026-10-30 通道分流：工具通道独立熔断桶。
+   *   缺陷（S1 取证）：此前 11 个 `rawCall` 调用方与前台对话**共用一个** `deepseek_llm` 熔断器。
+   *   后台压缩摘要/实体抽取接连失败 → 熔断打开 → 用户正好这 30 秒说话 → 回复直接降级。
+   *   实测日志中 `[Breaker] deepseek_llm 熔断中` 与用户对话轮次反复交错出现。
+   *   现分桶：后台工具打自己的桶，**再也波及不到对话**。
+   *   cooldown 取 60s（比回复通道的 30s 长）—— 工具任务是后台批量，少打几次无损失，
+   *   反而少刷日志、少占全局限流。
+   *   🔴 命名保留旧桶 `deepseek_llm` 不变，日志与看板 grep 不受影响。
+   */
+  private readonly _toolBreaker = new RetrieverCircuitBreaker('deepseek_llm_tool', {
+    threshold: 3,
+    cooldownMs: 60_000,
+    timeoutMs: 180_000,
+  });
+
+  /**
    * 🔵 V31 丁：M 层埋点 + 丙 熔断包裹 —— 统一入口，所有 LLM 调用都经此处。
    *   埋点范式照 `m2.SQLiteAdapter`（`[Hook] module_entry/module_exit + 耗时`）。
    *   ⚠️ 本次根因定位被迫靠 `tokens/len` 分布反推，正是因为 m5 层此前**零埋点**。
    */
-  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
+  private async callDeepSeekApi(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number; channel?: LlmChannel } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
     const _t0 = Date.now();
     let _status = 'success';
-    console.log(`[Hook] module_entry module=m5.DeepSeekLLMProvider.callDeepSeekApi max_tokens=${maxTokens}`);
+    console.log(`[Hook] module_entry module=m5.DeepSeekLLMProvider.callDeepSeekApi max_tokens=${maxTokens} channel=${extraParams.channel ?? 'reply'}`);
     // 🔴 关键（实测踩过）：`RetrieverCircuitBreaker.call()` 在 catch 里
     //   `return fallback()` —— **任何异常都会被 fallback 接管**，原始错误不再上抛。
     //   而上层（generate → M5Orchestrator）正是靠 `err.noUsableAnswer` 判定「判空 ⇒ 降级重试」。
     //   故 fallback **必须原样转抛捕获到的原始异常**，只在**真正熔断**（fn 根本没被调用）时
     //   才给出熔断归因 —— 否则甲/乙 的整条重试链会被静默掐断。
+    // 🔴 2026-10-30 通道分桶：raw（工具）走独立熔断器，失败不再拖垮前台对话。
+    const _breaker = extraParams.channel === 'raw' ? this._toolBreaker : this._llmBreaker;
     let _lastErr: any = null;
     try {
-      return await this._llmBreaker.call(
+      return await _breaker.call(
         async () => {
           try {
             return await this._callDeepSeekApiInner(messages, maxTokens, temperature, extraParams, streamOpts);
@@ -1267,7 +1325,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     }
   }
 
-  private async _callDeepSeekApiInner(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
+  private async _callDeepSeekApiInner(messages: DeepSeekMessage[], maxTokens: number, temperature: number, extraParams: { frequency_penalty?: number; presence_penalty?: number; reasoning_effort?: string; level?: number; timeoutMs?: number; channel?: LlmChannel } = {}, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }): Promise<{ text: string; rawContent?: string; usage?: { prompt: number; completion: number } }> {
     // 🔴 P1-5 流式分支: onToken 提供时启用流式（token 增量旁路推送，重试只在首 token 前）
     if (streamOpts?.onToken) {
       const r = await this.streamChat(messages, maxTokens, temperature, extraParams, streamOpts.onToken);
@@ -1279,6 +1337,27 @@ export class DeepSeekLLMProvider implements LLMProvider {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const _dl = (extraParams as any).level ?? 0;
+        // 🔴 2026-10-30 raw 通道预算下限（诊断实测证据）：
+        //   `max_tokens` 是**含思维链在内**的总预算，而各调用方按「答案长度」传参
+        //   （压缩摘要 400 / 发言人推断 20）。实测失败样本 10/10 为：
+        //     channel=raw content_len=0 finish=length reasoning_len=542~1403
+        //   ⇒ 思维链把额度吃光，模型还没开始写答案就被截断，`content` 恒为空。
+        //   故工具通道给一个总预算下限；reply 通道仍用调用方原值，一字不变。
+        //   ⚠️ 调高上限不产生额外计费（按实际生成 token 计）。
+        //   🔴 2026-10-31 复核：下限 2000 仍不足 —— 生产日志实测失败样本已转为
+        //     channel=raw content_len=0 reasoning_len=2722~2926 finish=length
+        //   ⇒ 单是思维链就吃掉 ~2800 字符，2000 token 预算留给答案的余量为 0，
+        //     三次重试预算相同 ⇒ 必定同样失败。下限提到 6144（推理峰值约 3 倍余量），
+        //     仍是「只抬上限、不改变实际生成长度」。
+        const _effMaxTokens = extraParams.channel === 'raw' ? Math.max(maxTokens, 6144) : maxTokens;
+        // 🔴 2026-10-30 raw 通道推理强度默认（实测补强）：
+        //   预算提到 2000 后，剩余失败样本仍为 `content_len=0 finish=length reasoning_len=2621~3151`
+        //   ⇒ 单纯加预算只是把「快速失败」换成「更长的失败」；长生成还会撞上 maintenance 侧
+        //   20s 摘要超时。工具任务的本质是**压缩/抽取**，不需要深度推理 ⇒ 默认 'low'。
+        //   依据：仓库内已有同类机械 —— M5 判空降级重试即用 `reasoningEffortOverride: 'low'`。
+        //   调用方显式传 reasoning_effort 时以调用方为准；reply 通道不注入（原行为不变）。
+        const _effReasoningEffort = extraParams.reasoning_effort
+          ?? (extraParams.channel === 'raw' ? 'low' : undefined);
         // 优先使用场景配置传入的超时，否则按亲密等级降级
         const _timeoutMs = (extraParams as any).timeoutMs
           || (_dl >= 2 ? 30000 : _dl <= -2 ? 20000 : 30000);
@@ -1294,13 +1373,13 @@ export class DeepSeekLLMProvider implements LLMProvider {
           signal: controller.signal,
           body: JSON.stringify({
             model: this.model,
-            max_tokens: maxTokens,
+            max_tokens: _effMaxTokens,
             messages: messages.map(m => ({ ...m, content: sanitizeUTF16(m.content) })),
             temperature,
             top_p: 0.95,
             frequency_penalty: extraParams.frequency_penalty ?? 0.0,
             presence_penalty: extraParams.presence_penalty ?? 0.2,
-            ...(extraParams.reasoning_effort ? { reasoning_effort: extraParams.reasoning_effort } : {}),
+            ...(_effReasoningEffort ? { reasoning_effort: _effReasoningEffort } : {}),
           }),
         });
         clearTimeout(timeout);
@@ -1329,8 +1408,22 @@ export class DeepSeekLLMProvider implements LLMProvider {
         if (!String(msg?.content || '').trim() && !String(_rawReasoning || '').trim()) {
           throw new Error('Empty response from DeepSeek');
         }
-        const text = resolveReplyFromFields(msg?.content, _rawReasoning as string | undefined);
+        // 🔴 2026-10-30 通道分流（根因修复点）：
+        //   raw（工具）通道先走窄守卫 resolveRawPayload —— 列表/JSON/第三人称摘要都是合法工具输出，
+        //   不能被「聊天回复不会以列表项开头」这类形状判据误杀；
+        //   窄守卫判空时（content 空 / 含哨兵串 / 中文元指令）**回落**原严格剥离，
+        //   保证「content 为空 → reasoning 兜底」这条 V22 路径一字不变。
+        const _chan: LlmChannel = extraParams.channel === 'raw' ? 'raw' : 'reply';
+        const _rawPayload = _chan === 'raw' ? resolveRawPayload(msg?.content) : '';
+        const text = _rawPayload || resolveReplyFromFields(msg?.content, _rawReasoning as string | undefined);
         if (!text) {
+          // 诊断（只记元数据，不记正文）：区分「列表形状被误杀」与「content 为空/思维链吃光额度」。
+          console.warn(
+            '[DeepSeek] 无可用输出 channel=' + _chan +
+            ' content_len=' + String(msg?.content || '').length +
+            ' reasoning_len=' + String(_rawReasoning || '').length +
+            ' finish=' + (data.choices?.[0]?.finish_reason ?? '?'),
+          );
           const e: any = new Error('No usable answer after reasoning strip (fail-closed, 拒绝洩漏思维链)');
           e.noUsableAnswer = true;
           throw e;

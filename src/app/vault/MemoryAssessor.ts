@@ -8,14 +8,14 @@ import type { FusionStorageAdapter } from '../../m2/FusionStorageAdapter.js';
 import type { EntityGene } from '../../m1/types/dna.js';
 // C3(2026-09-11): 实体名解析收口到 m2/EntityNameCodec（唯一事实源）
 import { parseEntries, formatNames } from '../../m2/EntityNameCodec.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { EmotionalMemoryRecord } from '../../m2/types/index.js';
 import { initialStrength } from '../../m2/math.js';
 import { autoPromoteCandidatesV2, logVaultOperation } from './VaultManager.js';
 import { MEMORY_CONFIG } from '../../config/MemoryConfig.js';
 import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 
-const NEUTRAL_PERCEPTION: Perception24D = {
+const NEUTRAL_PERCEPTION: PerceptionState24 = {
   pleasure: 0,
   arousal: 0,
   dominance: 0,
@@ -106,7 +106,7 @@ function parseConversationEntities(raw: unknown): EntityGene[] {
     .filter((item): item is EntityGene => Boolean(item));
 }
 
-function parseSandPerception(raw: unknown): Perception24D {
+function parseSandPerception(raw: unknown): PerceptionState24 {
   if (typeof raw !== 'string' || raw.trim().length === 0) return { ...NEUTRAL_PERCEPTION };
 
   try {
@@ -143,7 +143,7 @@ function deriveNarrativeTag(text: string, topic: unknown): string | undefined {
   return undefined;
 }
 
-function derivePrimaryEmotion(perception: Perception24D): string {
+function derivePrimaryEmotion(perception: PerceptionState24): string {
   if (perception.intimacy >= 0.45) return '亲密';
   if (perception.pleasure >= 0.35) return '快乐';
   if (perception.pleasure <= -0.35) return '失落';

@@ -115,8 +115,12 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
   }
 
   // ── 多人会议记录 ──
-  if (ctx._entityMeeting?.isMultiParty()) {
-    ctx._entityMeeting.recordTurn('user', message, '鸿艺');
+  // 🔴 recordTurn 四参签名（方法内不读任何状态字段）；
+  //   isMulti 判定源 = GroupSession（唯一状态真源；2026-10-31 第三层固化后无开关）。
+  //   行为等价：recordTurn 内部 `if (!isMulti) return`，单人会晤依旧不记录。
+  if (ctx._entityMeeting) {
+    const _multi2 = ctx._groupSession?.multi === true;
+    ctx._entityMeeting.recordTurn('user', message, '鸿艺', _multi2);
   }
 
   // ── 会中换人检测 ──
@@ -135,8 +139,10 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
     //   "XX多大了"、"XX在干嘛"、"你妹妹叫什么"→ 不切换（只是闲聊提及）
     const switchTarget = EntityMeeting.detectSwitchIntent(message, allNames);
     if (switchTarget) {
-      await ctx._entityMeeting.switchTo(switchTarget);
-      console.log('[EntityMeeting] 会中切换: → ' + switchTarget);
+      // 🔴 2026-10-31 第三层固化：`EntityMeeting.switchTo()` 已随旧状态机删除。
+      //   主发言切换写 GroupSession（唯一写入口，ADR-013 硬约束②）；同人切换由 reducer 判空。
+      ctx._groupSession?.dispatch({ type: 'SPEAK', target: switchTarget, now: Date.now() });
+      console.log('[GroupSession] 会中切换: → ' + switchTarget);
     }
   }
 
@@ -166,8 +172,10 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
   const _exitTail =
     /(?:散会|结束.*会议|会议.*结束|不开了|今天就到这儿|今天就到这里|先这样|下了|拜拜|再见|聊到这儿|聊到这|就到这儿|就到这|下次再聊|改天聊|回聊|回头聊|下次聊|回头再聊)\s*(?:吧|了|啦|~|～|!|！|。|，|,)?\s*$/.test(_trimmedMsg);
   if (ctx._entityMeeting?.isActive() && (_exitTail || (_exitBare && _isShortMsg)) && !_prevTurnIsQuestion) {
-    const exitResult = await ctx._entityMeeting.exit();
-    if (exitResult?.minutes) console.log('[EntityMeeting] 多人会议结束，纪要已自动归档');
+    // 🔴 2026-10-31 第三层固化：`EntityMeeting.exit()` 已随旧状态机删除。
+    //   退出 = dispatch LEAVE（状态写入口唯一）+ endMeetingSideEffects（纪要/门卫副作用）。
+    ctx._groupSession?.dispatch({ type: 'LEAVE', now: Date.now() });
+    await ctx._entityMeeting.endMeetingSideEffects();
   }
 
   // ── 实体会晤意图检测 + 激活 ──
@@ -249,6 +257,27 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
         }
         _entityContextText = ecResult.systemText;
 
+        // 🔴 2026-10-31 在场感知：把「**此刻谁在场**」明确告诉模型。
+        //
+        //   缺陷：上下文里从来没有在场名单，模型只能从对话历史里猜。猜错时会出现两种相反的症状——
+        //     · 「她这会儿不在这头」：明明阿珍就在场，诗雨却说她不在（把缺席当默认）；
+        //     · 「我没听到」：明明全场都听见了，某个角色却说不知道刚才说了什么。
+        //   业主实测的第 5、6 条就是这个 —— 这不是可见性过滤算错了，是**模型根本没被告知**。
+        //   🔴 只陈述事实，不解释机制：不要让模型在回复里讨论「在场/不在场」的实现。
+        try {
+          const _gsAny = (ctx as any)._groupSession;
+          const _list: Array<{ name?: string }> =
+            (typeof _gsAny?.getParticipants === 'function' ? _gsAny.getParticipants() : null)
+            ?? (ctx._entityMeeting?.getParticipants?.() ?? []);
+          const _names = _list.map((p) => String(p?.name || '').trim()).filter(Boolean);
+          if (_names.length > 0) {
+            _entityContextText +=
+              '\n\n【当前在场】此刻能听见你这番话的人：' + _names.join('、') +
+              '（还有鸿艺本人）。' +
+              '除非有人明确离场，否则不要声称他们不在场、也不要声称自己没听见刚才的对话。';
+          }
+        } catch { /* 在场名单失败不影响主流程 */ }
+
         // KB 缓存（通过闭包引用 processChat 中的 Map）
         const _meetingKBCache: Map<string, string> = (ctx as any)._meetingKBCache;
         if (_meetingKBCache) {
@@ -265,10 +294,26 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
         }
 
         if (!isFirstTurn) {
-          const prevTurn = ctx.conversationHistory.slice(-2);
+          // 🔴 2026-10-29：原实现取**全局**最近 2 条（不过滤），且把所有 assistant 一律
+          //   标成当前实体名 —— 徐诗雨的话在阿珍的上下文里会变成「阿珍：…」，
+          //   这是业主实测「标签串台」的**直接成因**。
+          //   新：开关开启时按空间路由器视图取（判据=当时谁在场），并用真实 speakerName。
+          const _spaceAd = (ctx as any)._spaceAdapter as
+            | { turnsFor(u: string, pendingText?: string, opts?: { limit?: number }): Array<Record<string, any>> }
+            | undefined;
+          const _speakerUuid = ctx._entityMeeting?.getEntityUUID?.() ?? null;
+          // 🔴 2026-10-30 第一层固化：`WS_SPACE_ROUTER_VIEW` 开关已删除，视图可用即用。
+          const _useSpace = !!_spaceAd && !!_speakerUuid;
+          // 🔴 2026-10-31 性能：改用 limit 由内层**反向扫描**只取尾部 2 条。
+          //   旧写法 `.slice(-2)` 要先构造全量数组再截断 —— 长会晤时纯属白算。
+          const prevTurn = _useSpace
+            ? _spaceAd!.turnsFor(_speakerUuid!, undefined, { limit: 2 })
+            : ctx.conversationHistory.slice(-2);
           const continuityParts: string[] = [];
           for (const t of prevTurn) {
-            continuityParts.push(`${t.role === 'user' ? '鸿艺' : _meetingEntityName}：${(t.content || '').substring(0, 300)}`);
+            // 🔴 优先用真实说话人名；无该字段时退回原逻辑（开关关闭时逐字等价）
+            const _who = (t as any).speakerName ?? (t.role === 'user' ? '鸿艺' : _meetingEntityName);
+            continuityParts.push(`${_who}：${(t.content || '').substring(0, 300)}`);
           }
           if (continuityParts.length > 0) {
             _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n' + '⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';

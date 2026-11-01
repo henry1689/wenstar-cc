@@ -1,5 +1,5 @@
 /**
- * VectorReranker — 自有32D语义向量精排引擎 (V11.0)
+ * VectorReranker — 自有40D向量精排引擎 (V11.0；🔴 P072批2起 40D-only)
  * ==================================================
  * 对n-gram初筛后的候选记忆集合，用自有32维仿生心智向量做精细化重排。
  *
@@ -11,11 +11,11 @@
  *
  * 设计原则（蓝皮书级硬约束）：
  *   - 零外部API，全量本地计算
- *   - n-gram不参与最终排序，排序权完全交给自有32D向量
+ *   - n-gram不参与最终排序，排序权完全交给自有40D向量
  *   - 加权规则可配置
  */
 
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type { PerceptionV40 } from '../m3/types/perception-40d.js';
 import { PERCEPTION_40D_KEYS } from '../m3/types/perception-40d.js';
 import { decodePerceptionV40, cosineSimilarity40D, arrayToPerceptionV40 } from '../m2/PerceptionVector40DCodec.js';
@@ -64,8 +64,8 @@ export interface MemoryCandidate {
   id: string;
   text: string;                               // 记忆文本
   source: 'conversation' | 'memory' | 'black_diamond' | 'knowledge_base';
-  perceptionJson?: string | null;             // JSON: Perception24D
-  perception40d?: string | null;              // V20: JSON: PerceptionV40（40D 数组，混合检索优先用）
+  // 🔴 P072 批2: 原 perceptionJson(24D) 字段已删——向量字段唯一 = perception40d
+  perception40d?: string | null;              // V20: JSON: PerceptionV40（40D 数组，唯一合法向量字段）
   calciumScore?: number;
   calciumLevel?: number;
   confidenceScore?: number;
@@ -84,107 +84,25 @@ export interface RankedMemory {
 }
 
 /**
- * 余弦相似度
+ * 🔴 P072 批2（2026-10-24）：原 cosineSimilarity(24维)、perceptionToArray(24D→数组)、
+ * REVERSE_40_TO_24 反解、parseStoredVector(24兼容解析)、perceptionV40ObjectTo24DArray
+ * 已全部删除——精排唯一合法输入 = 40D（《40D 量纲统一法令》）。
  */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < n; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+
+/** 🔴 P072 批2 墓碑：原 REVERSE_40_TO_24 反解映射、perceptionV40ArrayTo24DArray、
+ * perceptionV40ObjectTo24DArray、parseStoredVector(24兼容解析) 已全部删除——
+ * 禁止 40D→24D 反解链（40D 量纲统一法令）。Offline 图改直用 40D（full-pipeline 测试已同步）。 */
 
 /**
- * 将 Perception24D 转为数值数组（保持固定24维顺序）
- */
-export function perceptionToArray(p: Perception24D): number[] {
-  return [
-    p.pleasure, p.arousal, p.dominance, p.aggression,
-    p.sincerity, p.humor, p.factual, p.logical,
-    p.certainty, p.abstract, p.temporal_focus, p.self_ref,
-    p.intimacy, p.power_diff, p.dependency, p.moral_judgment,
-    p.etiquette, p.belonging, p.sexual_attraction, p.sensory_craving,
-    p.energy_merge, p.possessiveness, p.ecstasy, p.safety,
-  ];
-}
-
-/** V12.4 阶段B 根除24D: 40D → 24D 反解映射（dim40 1-indexed → 24D 数组索引）。
- *  🔴 仅 14 维可反解（与 SQLiteAdapter.rowToRecord 同源），无槽位 10 维填中性 0.5。
- *  `perceptionJson` 字段现已承载 perception_40d v2 JSON，24D 回退路径需正确解码避免 NaN。 */
-const REVERSE_40_TO_24: ReadonlyArray<[number, number]> = [
-  [12, 0],  // D12 pleasure → 24D[0]
-  [36, 2],  // D36 dominance → 24D[2]
-  [35, 4],  // D35 sincerity → 24D[4]
-  [38, 5],  // D38 humor → 24D[5]
-  [9, 11],  // D09 self_ref → 24D[11]
-  [15, 12], // D15 intimacy → 24D[12]
-  [39, 14], // D39 dependency → 24D[14]
-  [37, 15], // D37 moral_judgment → 24D[15]
-  [19, 16], // D19 etiquette → 24D[16]
-  [17, 17], // D17 belonging → 24D[17]
-  [33, 18], // D33 sexual_attraction → 24D[18]
-  [34, 20], // D34 energy_merge → 24D[20]
-  [40, 21], // D40 possessiveness → 24D[21]
-  [14, 23], // D14 safety → 24D[23]
-];
-function perceptionV40ArrayTo24DArray(dims40: number[]): number[] {
-  const out = new Array(24).fill(0.5); // 无槽位 10 维中性
-  for (const [dim40, idx24] of REVERSE_40_TO_24) {
-    const v = Number(dims40[dim40 - 1]);
-    if (isFinite(v)) out[idx24] = v;
-  }
-  return out;
-}
-
-/** V12.4 阶段B 根除24D: PerceptionV40 对象 → 24D 数值数组（供 record.perceptionV40 反解，Offline 图等复用） */
-export function perceptionV40ObjectTo24DArray(p40: PerceptionV40): number[] {
-  const dims40 = PERCEPTION_40D_KEYS.map(k => p40[k] ?? 0);
-  return perceptionV40ArrayTo24DArray(dims40);
-}
-
-/**
- * 解析存储的 JSON 向量为数值数组（24D）
- * 兼容：24元素数组 / 24D 命名对象 / 40D v2对象({__v:2,dims}) / 40D v1纯数组(40元素)
- */
-export function parseStoredVector(json: string | null | undefined): number[] | null {
-  if (!json) return null;
-  try {
-    const parsed = JSON.parse(json);
-    if (Array.isArray(parsed) && parsed.length === 24 && parsed.every((v: unknown) => typeof v === 'number')) {
-      return parsed;
-    }
-    if (Array.isArray(parsed) && parsed.length === 40 && parsed.every((v: unknown) => typeof v === 'number')) {
-      return perceptionV40ArrayTo24DArray(parsed);
-    }
-    // 对象格式 → 40D v2（{__v:2,dims}）→ 反解；否则按 24D 命名对象转数组
-    if (parsed && typeof parsed === 'object') {
-      const dims = (parsed as { dims?: unknown }).dims;
-      if (Array.isArray(dims) && dims.length === 40 && dims.every((v: unknown) => typeof v === 'number')) {
-        return perceptionV40ArrayTo24DArray(dims as number[]);
-      }
-      return perceptionToArray(parsed as Perception24D);
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 对候选记忆集合做32D向量精排
+ * 对候选记忆集合做 40D 向量精排（🔴 P072 批2: 原 24 维 queryVec 参数已删——查询向量唯一合法形态 = queryVec40D 原生40D）
  *
  * @param candidates  n-gram初筛后的候选集
- * @param queryVec    查询向量（24维数组，来自当前感知/外源情绪）
  * @param mode        检索力度模式
+ * @param queryVec40D M3 原生 40D 查询向量
  * @returns 按综合得分降序排列的排序结果
  */
 export function rankByVector(
   candidates: MemoryCandidate[],
-  queryVec: number[],
   mode: SearchMode = 'balanced',
   queryVec40D?: number[] | null,
 ): RankedMemory[] {
@@ -197,7 +115,7 @@ export function rankByVector(
     // 1. 钙化门槛过滤
     if ((item.calciumLevel ?? 1) < cfg.minCalciumLevel) continue;
 
-    // V20: 混合检索 — 开关开启且有 40D 感知向量则走 40D 扇区加权余弦，无则回退 24D
+    // V20: 检索 — 有 40D 感知向量则走 40D 扇区加权余弦，无则按钙化基础分（P072批2: 24D回退已删）
     const p40 = isPerception40DEnabled() ? decodePerceptionV40(item.perception40d) : null;
     const q40 = p40 && queryVec40D && queryVec40D.length === 40 ? arrayToPerceptionV40(queryVec40D) : null;
     if (p40 && q40) {
@@ -217,55 +135,12 @@ export function rankByVector(
       continue;
     }
 
-    // 2b. 无 40D → 回退 24D 路径
-    const storedVec = parseStoredVector(item.perceptionJson);
-    if (!storedVec) {
-      // 无向量信息 → 只能用钙化分做基础得分
-      const score = (item.calciumScore ?? 0.5) / 10 * cfg.calciumWeight;
-      results.push({
-        item, score: Math.min(score, 1),
-        emotionSim: 0, fullSim: 0, decay: 1,
-      });
-      continue;
-    }
-
-    // 3. 情绪维度相似度（00-05维: pleasure/arousal/dominance/aggression/sincerity/humor）
-    const emotionSim = cosineSimilarity(
-      queryVec.slice(0, 6),
-      storedVec.slice(0, 6),
-    );
-
-    // 4. 全维度相似度
-    const fullSim = cosineSimilarity(queryVec, storedVec);
-
-    // 5. 衰减惩罚
-    const daysSinceCreation = item.createdAt
-      ? (Date.now() - new Date(item.createdAt).getTime()) / 86_400_000
-      : 1;
-    const decay = Math.exp(-cfg.decayLambda * daysSinceCreation);
-
-    // 6. 置信度增益
-    const confidence = 1 + ((item.confidenceScore ?? 0.5) - 0.5) * cfg.confidenceBeta;
-
-    // 7. 钙化归一化
-    const calcium = (item.calciumScore ?? 1) / 10;
-
-    // 8. 综合得分
-    let score = cfg.emotionWeight * emotionSim
-              + cfg.fullDimWeight * fullSim
-              + cfg.calciumWeight * calcium
-              + cfg.confidenceBeta * confidence  // confidence 系数重映射
-              + 0.10 * decay;
-
-    // 有效强度修正
-    if ((item.effectiveStrength ?? 1) < 0.3) score *= 0.7;
-
+    // 🔴 P072 批2（2026-10-24）：原「无 40D → 回退 24D 路径」（24 维解析+6维情绪余弦+24维全维余弦合成）
+    //  已整体删除——禁止任何 24 维量纲参与精排（40D 量纲统一法令）。无 40D 向量 → 钙化基础分。
+    const score = (item.calciumScore ?? 0.5) / 10 * cfg.calciumWeight;
     results.push({
-      item,
-      score: Math.min(score, 1),
-      emotionSim,
-      fullSim,
-      decay,
+      item, score: Math.min(score, 1),
+      emotionSim: 0, fullSim: 0, decay: 1,
     });
   }
 
@@ -281,4 +156,4 @@ export function getModeConfig(mode: SearchMode): RerankerConfig {
   return MODE_CONFIGS[mode];
 }
 
-export default { cosineSimilarity, perceptionToArray, parseStoredVector, rankByVector, getModeConfig };
+export default { rankByVector, getModeConfig };

@@ -3,7 +3,7 @@
  *
  * 40 维情感向量作为记忆的主索引，文本/实体/话题作为次级索引。
  */
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { EntityGene } from '../../m1/types/dna.js';
 
 /** 相似度检索模式 */
@@ -66,7 +66,7 @@ export interface EmotionalMemoryRecord {
   source_conversation_ids?: number[];
 
   /** ── 主索引：完整 40 维情感向量（perception_40d 列） ── */
-  perception: Perception24D;
+  perception: PerceptionState24;
   /** V20: 40D 感知向量（双轨，来自 perception_v2 列） */
   perceptionV40?: import('../../m3/types/perception-40d.js').PerceptionV40;
   calcium_score: number;
@@ -141,7 +141,9 @@ export type SearchScope = 'strict' | 'allow-unowned' | 'full';
 
 /** 检索查询 */
 export interface RetrievalQuery {
-  current_perception: Perception24D;
+  current_perception: PerceptionState24;
+  /** 🔴 P072 整改批：M3 原生 40D 查询向量（查询同源，法令第四条）；缺失时方法内回退仅供内部分析 */
+  p40?: import('../../m3/types/perception-40d.js').PerceptionV40;
   locus_path?: string;
   entities?: string[];
   similarity_mode: SimilarityMode;
@@ -197,13 +199,13 @@ export interface InductionSummary {
   period_end: string;
   summary_text: string;
   source_record_count: number;
-  dominant_mood: Perception24D | null;
+  dominant_mood: PerceptionState24 | null;
   trait_updates: Record<string, number> | null;
 }
 
 // ════════════════════════════════════════════════════════════
-// 24D 存储契约 —— 取代旧 M2 StorageAdapter/WriteResult/QueryOptions
-// 从此存储接口不再是"文本归档接口"，而是"24D 生命状态写入接口"
+// 感知向量存储契约（🔴 40D 量纲统一法令：量纲=40D；字段类型 PerceptionState24 属 P074 待废中间层）——
+// 取代旧 M2 StorageAdapter/WriteResult/QueryOptions；存储接口为生命状态写入接口。
 // ════════════════════════════════════════════════════════════
 
 /** 写入结果 */
@@ -221,7 +223,7 @@ export interface ReadResult {
 }
 
 /**
- * 查询选项（24D 增强版）
+ * 查询选项（感知向量增强版；🔴 P074 待废：perception_filter 等 24D 类型字段随中间层退役）
  * 支持按情感相似度、特定维度阈值、钙化等级进行检索
  */
 export interface QueryOptions {
@@ -229,9 +231,9 @@ export interface QueryOptions {
   offset?: number;
   ascending?: boolean;
 
-  /** 24D: 感知向量过滤 —— 按情感相似度检索 */
-  perception_filter?: Perception24D;
-  /** 24D: 相似度检索模式 */
+  /** 感知向量过滤 —— 按情感相似度检索（🔴 P074 待废：24D 类型字段） */
+  perception_filter?: PerceptionState24;
+  /** 相似度检索模式 */
   similarity_mode?: SimilarityMode;
   /** 24D: 情感相似度阈值 (0-1) */
   similarity_threshold?: number;

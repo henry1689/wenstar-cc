@@ -10,7 +10,7 @@
  *
  * 跨库阈值：重要度累计变化超过 30 分时提交 AQC 审核
  */
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
 export interface ReconsolidationInput {
   /** 记忆当前重要度 0-100 */
@@ -18,7 +18,7 @@ export interface ReconsolidationInput {
   /** 记忆当前鲜活度 0-100 */
   currentVividness: number;
   /** 检索时的情感向量 */
-  retrievalEmotion: EmotionVector24D;
+  retrievalEmotion: EmotionState24;
   /** 关系信任度 0-100 */
   trust: number;
   /** 记忆距今小时数 */

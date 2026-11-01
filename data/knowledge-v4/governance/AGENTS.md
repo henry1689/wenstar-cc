@@ -14,6 +14,8 @@
 |:--|------|:--|:--|
 | ① | [《太虚境户籍管理法》](taixu-household-registration-law.md) | V2.1 | 最高法律（实体身份登记）|
 | ①' | [《UUID户籍管理法》](../../../../../wenstar/docs/UUID户籍管理法-WS-HUKOU-LAW-V1.0.md) | V1.0 | 管线执法法（数据流动隔离）|
+| ①" | [《40D 量纲统一法令》](40d-unification-decree-v1.0.md) | V1.0 | **量纲最高法（凌驾一切 24D/32D/36D 条款）** |
+| ②" | [《信息管理系统管控总纲》](information-management-control-charter-v1.0.md) | V1.0 | **三链管控节点唯一权威地图与维修依据** |
 | ② | [fg-kinship-redlines.md](redlines/fg-kinship-redlines.md) | V3.5 | FG 操作铁律 |
 | ③ | [household-registration-blueprint.md](household-registration-blueprint.md) | V4.0 | 户籍制蓝皮书 |
 | ④ | [pae-profile-acquisition-engine.md](pae-profile-acquisition-engine.md) | V3.3 | PAE 技术文档 |

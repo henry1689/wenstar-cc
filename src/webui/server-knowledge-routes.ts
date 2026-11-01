@@ -224,7 +224,7 @@ export async function handleKnowledgeRoutes(deps: KnowledgeRouteDeps): Promise<b
     : '<div class="emp">暂无生长数据 — 聊起来就有了</div>')
         + '<h2>&#x2699;&#xFE0F; 运行时</h2>'
         + '<div class="sy"><div class="k">检索引擎</div><div class="v">BM25 + Zvec HNSW</div></div>'
-        + '<div class="sy"><div class="k">情感感知</div><div class="v">32D 扇区加权余弦</div></div>'
+        + '<div class="sy"><div class="k">情感感知</div><div class="v">40D 扇区加权余弦</div></div>'
         + '<div class="sy"><div class="k">自学习</div><div class="v">AutoLearn V2 &#xB7; 实体 &#xB7; 情感 &#xB7; 冲突</div></div>'
         + '<div class="sy"><div class="k">生命周期</div><div class="v">六阶生长链 &#xB7; 衰减 &#xB7; 反哺 M6</div></div>'
         + '<div class="hl">&#x1F4A1; 知识库是会生长的。</div></body></html>';

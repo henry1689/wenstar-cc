@@ -7,7 +7,7 @@
  */
 
 import type { DNA } from '../../../m1/types/dna.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 import type { MemorySummary, M4Context } from '../../../m4/types/index.js';
 
 // ─── 场景快照（海马→前额唯一输出） ───
@@ -108,7 +108,7 @@ export interface SceneSnapshotMaterials {
   /** M4 上下文（含决策、摘要、FG上下文） */
   m4Context: M4Context;
   /** 当前感知向量 */
-  perception: Perception24D;
+  perception: PerceptionState24;
   /** 会话ID */
   sessionId: string;
   /** 用户原始输入 */

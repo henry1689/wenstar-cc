@@ -13,7 +13,7 @@
  * 🔴 软连接铁律：本模块只消费瑶光 MCP 返回的 JSON 数据（经天权 RPC 透传），
  * 绝不 import 瑶光模块 / 读写瑶光库。瑶光不可达时由调用方降级（保持 M3 语义维）。
  */
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import { createEmptyPerceptionV40 } from '../m3/types/perception-40d.js';
 import type { PerceptionV40 } from '../m3/types/perception-40d.js';
 import { MAP_24_TO_40 } from './PerceptionVector40DCodec.js';
@@ -114,7 +114,7 @@ export function fillObjectiveDims(
 }
 
 /** 兼容旧接口：从 24D 合成一条完整 40D（供存量/降级路径，等价于 M3 内部投影） */
-export function buildFallbackV40(p24: Perception24D): PerceptionV40 {
+export function buildFallbackV40(p24: PerceptionState24): PerceptionV40 {
   const p40 = createEmptyPerceptionV40();
   for (const { key24, dim40 } of MAP_24_TO_40) {
     const key = keyForDim(dim40);

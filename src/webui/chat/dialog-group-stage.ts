@@ -8,13 +8,13 @@ import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 import { MemoryWriteGateway } from '../../m2/MemoryWriteGateway.js';
 // ADR-010 P1-A: `computeCalcium` 的 import 随 CHUNK 碎片写入退役一并移除
 //（它在本文件内的唯一用处是计算碎片钙分，见下方 tombstone 注释）
-import { map24DTo40D, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
+import { projectState24ToV40, encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
 import { getPeriod, getSeason, getLunarTerm } from '../../engine/temporal/global-types.js';
 // 2026-09-13 ②-1补漏: 归属脏值净化唯一入口（第三层兜底 SQL 取值时不得采信字符串 'null'）
 import { sanitizeBelongUuid } from '../../app/vault/belong-uuid.js';
 // 🔴 ADR-010 P1-B: 块价值判定 + 判据单一定义处（FEATURE_ROUND_RE 由此收拢）
 import { scoreBlock, FEATURE_ROUND_RE } from '../../app/memory/BlockValueScorer.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 // V13.0: 在线 DAG 建边（feature flag 控制，不阻塞闭组主流程）
 let _dagEdgeBuilders: { entity: any; causal: any; repo: any } | null = null;
 let _lastGroupCtx: any = null;  // V13: 上一个闭组上下文（供因果边构建）
@@ -176,7 +176,7 @@ export async function flushDialogGroup(
     const peakP = dg.perceptions[dg.maxCalciumRound] || dg.perceptions[0] || {};
     // V12.4 阶段B 根除24D: 锚点/碎片只写 40D（从 24D 派生，与 persistence-stage 一致）；24D 不再落库
     const vec40 = (p: any): string => {
-      try { return encodePerceptionV40(map24DTo40D(p as any)); }
+      try { return encodePerceptionV40(projectState24ToV40(p as any)); }
       catch { return 'null'; }
     };
 
@@ -246,7 +246,7 @@ export async function flushDialogGroup(
     // 失败不阻塞闭组主流程（与上方锚点写入同策略），但**必须告警可追责**（P-13 精神：
     // 丢弃必须可见）—— 块元数据是 P1-C 检索的全部依据，静默失败会让块层看起来"存在但空白"。
     try {
-      const _p24 = (dg.perceptions || []) as unknown as Perception24D[];
+      const _p24 = (dg.perceptions || []) as unknown as PerceptionState24[];
       const _score = scoreBlock({
         rounds: dg.rounds.map((r: any) => ({ q: String(r?.q ?? ''), a: String(r?.a ?? '') })),
         perceptions: _p24,

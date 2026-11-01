@@ -1,5 +1,8 @@
 # 搜索引擎能力与接入点审查报告
 
+> 🔴 **量纲封存声明（2026-10-24《40D 量纲统一法令》）**：本文档成文于旧量纲时代（24D/32D/36D/6D 等表述均为历史），其量纲相关内容**一律以 40D 为准，不得引用旧量纲条款**。当前权威：`data/knowledge-v4/governance/40d-unification-decree-v1.0.md`。
+
+
 > 日期：2026-08-07 · 性质：只读扫描 · 关联任务：《WenStarOS 天枢架构全局复盘与重设》
 > 范围：wenstar-cc 全搜索栈（UnifiedSearchEngine / MemoryRetriever / 知识库 / 检索底座 m4/retrieval）
 

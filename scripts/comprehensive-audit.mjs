@@ -17,7 +17,8 @@ async function main() {
   console.log('═══════════════════════════════════════');
 
   // 1a. 表存在
-  const requiredTables = ['memories','conversations','knowledge_base','search_index','memory_associations','state_spines','atom_address_timeline'];
+  // state_spines 已随 P071 底座1 废除删除，不再作必需表
+  const requiredTables = ['memories','conversations','knowledge_base','search_index','memory_associations','atom_address_timeline'];
   for (const t of requiredTables) {
     try { db.exec('SELECT 1 FROM '+t+' LIMIT 0'); check('表 '+t+' 存在', true); }
     catch { check('表 '+t+' 存在', false); }

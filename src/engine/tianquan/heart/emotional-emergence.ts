@@ -11,7 +11,7 @@
  *   vulnerabilityReveal — 脆弱袒露
  *   desireExpression    — 欲望表达
  */
-import type { EmotionVector24D, RelationState } from '../../bus/types.js';
+import type { EmotionState24, RelationState } from '../../bus/types.js';
 
 // ── 涌现类型 ──
 export type EmergenceType =
@@ -33,7 +33,7 @@ export interface EmergenceState {
 }
 
 export interface EmergenceContext {
-  emotion: EmotionVector24D;
+  emotion: EmotionState24;
   relationStage: RelationState;
   trust: number;
   timeOfDay: number;    // 0-23

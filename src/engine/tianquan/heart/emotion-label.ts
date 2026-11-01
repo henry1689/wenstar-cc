@@ -4,10 +4,10 @@
  * 级联判断，最细分的标签优先匹配。
  * 最终传给生成层的是「娇羞·中度」「委屈·轻度」等具象标签。
  */
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
 // ── 维度别名（简化调用） ──
-type V = EmotionVector24D;
+type V = EmotionState24;
 
 // ── 标签强度 ──
 export type LabelStrength = '轻度' | '中度' | '重度';
@@ -82,7 +82,7 @@ function determineStrength(v: V, rule: LabelRule): LabelStrength {
  * 24D → 情感标签
  * 返回最匹配的一条标签，及所有高匹配标签列表
  */
-export function classifyEmotion(vector: EmotionVector24D): {
+export function classifyEmotion(vector: EmotionState24): {
   primary: EmotionLabel;
   alternatives: EmotionLabel[];
 } {

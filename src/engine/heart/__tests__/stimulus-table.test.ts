@@ -3,9 +3,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { getStimulusDelta, getBaseStimulus, DECAY_HALFLIFE, type StimulusType } from '../stimulus-table.js';
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
-function defaultEmotion(): EmotionVector24D {
+function defaultEmotion(): EmotionState24 {
   return {
     joy: 30, sadness: 0, anger: 0, fear: 0,
     surprise: 10, disgust: 0, calm: 50, anxiety: 0,

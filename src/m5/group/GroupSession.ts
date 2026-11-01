@@ -6,9 +6,10 @@
  *   - 把 `diffEffects` 产出的副作用转交给注册的监听者（适配层做压栈/弹栈/门阀/日志）
  *   - 提供 serialize / restore（**纯字符串**，不含 IO）——持久化到 engine_store 属批 B 的 SessionStore
  *
- * 🔴 回滚开关 WS_GROUP_V2（ADR-013 §六）：默认 **false**。
- *   开关关闭时 `isEnabled()===false`，适配层据此完全走旧 EntityMeeting 路径；
- *   本类**不删任何旧代码**，回滚 = 关开关，不涉及数据迁移。
+ * 🔴 2026-10-31 第三层固化：回滚开关 `WS_GROUP_V2` 已**彻底删除**。
+ *   本类是群聊/会晤状态的**唯一真源**，不存在「关闭后走旧 EntityMeeting 状态机」这条路。
+ *   旧状态机方法（enter / enterMulti / exit / switchTo / addParticipant / restoreLastMeeting）
+ *   已随开关一并删除 —— 要回退只能 `git revert` 代码，配置层不再有任何开关可退回错误实现。
  *
  * 线程模型：单进程内存对象（与旧 EntityMeeting 同）；**不做隐式全局** ——
  *   实例由适配层显式创建并挂在 ctx 上，避免第 7 份副本式的模块级单例漂移。
@@ -27,16 +28,6 @@ import {
 } from './sessionReducer.js';
 import type { Action, ContextSlot, Participant, SessionEffect, SessionMode, SessionState } from './types.js';
 
-/** 开关环境变量名（单一真源） */
-export const GROUP_SESSION_FLAG = 'WS_GROUP_V2';
-
-/** 开关是否打开。默认关闭 —— 上线前 Phase 4 一律 false。 */
-export function isGroupSessionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = env[GROUP_SESSION_FLAG];
-  if (v === undefined || v === null || v === '') return false;
-  return v === '1' || v.toLowerCase() === 'true' || v.toLowerCase() === 'on';
-}
-
 /** 现场槽监听者（L5/L6 的压栈/弹栈落点；适配层负责与 ContextMemory/SceneAnchor 同步） */
 export type SlotListener = (slot: ContextSlot, kind: 'save' | 'restore') => void;
 /** 通用副作用监听者 */
@@ -45,15 +36,12 @@ export type EffectListener = (effect: SessionEffect, prev: SessionState, next: S
 export type EnterListener = (prev: SessionState, next: SessionState) => void;
 
 export interface GroupSessionOptions {
-  /** 覆盖开关取值（测试用；缺省读 process.env.WS_GROUP_V2） */
-  enabled?: boolean;
   /** 初始时间注入（测试用；缺省 Date.now()） */
   now?: () => number;
 }
 
 export class GroupSession {
   private _state: SessionState;
-  private readonly _enabled: boolean;
   private readonly _now: () => number;
   private readonly _onEnter: EnterListener[] = [];
   private readonly _onEffect: EffectListener[] = [];
@@ -63,13 +51,9 @@ export class GroupSession {
   private static readonly TRAIL_CAP = 200;
 
   constructor(opts: GroupSessionOptions = {}) {
-    this._enabled = opts.enabled ?? isGroupSessionEnabled();
     this._now = opts.now ?? (() => Date.now());
     this._state = createSessionState(this._now());
   }
-
-  /** 回滚开关状态（false ⇒ 适配层必须走旧路径） */
-  isEnabled(): boolean { return this._enabled; }
 
   /** 只读取状态（外部无法修改；对象本身仍是内部实例，勿直接改字段） */
   getState(): SessionState { return this._state; }

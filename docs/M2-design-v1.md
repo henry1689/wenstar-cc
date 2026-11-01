@@ -1,5 +1,8 @@
 # M2 5大语义区存储适配器 · 设计文档
 
+> 🔴 **量纲封存声明（2026-10-24《40D 量纲统一法令》）**：本文档成文于旧量纲时代（24D/32D/36D/6D 等表述均为历史），其量纲相关内容**一律以 40D 为准，不得引用旧量纲条款**。当前权威：`data/knowledge-v4/governance/40d-unification-decree-v1.0.md`。
+
+
 > **文档状态**: **ARCHIVED** — 设计已实现，模块已退役  
 > **替代者**: `src/fusion/FusionStorageAdapter`（融合存储，24D 情感向量作为主索引）  
 > **关联规格书**: `docs/project-spec-v1.md` §4  

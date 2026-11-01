@@ -18,7 +18,7 @@
  */
 import type { SQLiteAdapter } from '../../../m2/SQLiteAdapter.js';
 import type { DNA } from '../../../m1/types/dna.js';
-import type { Perception24D } from '../../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../../m3/types/perception.js';
 import { createHash } from 'node:crypto';
 
 export interface NoveltyAssessment {
@@ -44,7 +44,7 @@ export class NoveltyDetector {
   /**
    * 评估一条新记忆的新颖度
    */
-  assess(dna: DNA, perception?: Perception24D): NoveltyAssessment {
+  assess(dna: DNA, perception?: PerceptionState24): NoveltyAssessment {
     // 1. 查 hippocampal_index
     const sig = this._computeRawSignature(dna, perception);
     const indexResult = this._checkIndex(sig);
@@ -169,7 +169,7 @@ export class NoveltyDetector {
   }
 
   // ── 上下文签名 ──
-  private _computeRawSignature(dna: DNA, perception?: Perception24D): string {
+  private _computeRawSignature(dna: DNA, perception?: PerceptionState24): string {
     const domain = dna.locus_path?.split('.').slice(0, 2).join('.') || 'root';
     const persons = (dna.entity_genes || [])
       .filter(e => e.type === 'person' && e.name !== '我')

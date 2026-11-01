@@ -111,43 +111,36 @@ describe('EntityMeeting — 本体隔离（category=S 不可会晤）', () => {
     } as any;
   }
 
-  it('玉瑶（category=S）enter 返回 null，不进入会晤', () => {
+  /**
+   * 🔴 2026-10-31 第三层固化：`enter()/exit()/setStorage()` 已随旧状态机删除，
+   *   本体隔离判据（原 `_resolveEntity` 的 `category === 'S'`）迁到静态方法
+   *   `EntityMeeting.isMeetableEntity`，由 chat.ts 的 WAKE 路径在 dispatch 前调用。
+   *   这里改为直接守该判据本身 —— 它才是红线，调用点位置不应成为测试耦合点。
+   */
+  it('玉瑶（category=S）不可会晤', () => {
     const fg = makeFG([
       { name: '玉瑶', uuid: 'TXS-000000001', category: 'S' },
       { name: '熊梓铭', uuid: 'TXS-000000003', category: 'G' },
     ]);
-    const em = new EntityMeeting(fg);
-    expect(em.enter('玉瑶')).toBeNull();          // 系统本体不可会晤
-    expect(em.isActive()).toBe(false);
+    expect(EntityMeeting.isMeetableEntity(fg, '玉瑶')).toBe(false);   // 系统本体是回答者，不是可会晤实体
   });
 
-  it('真人（category=G）enter 正常进入会晤', () => {
+  it('真人（category=G）可会晤', () => {
     const fg = makeFG([
       { name: '熊梓铭', uuid: 'TXS-000000003', category: 'G' },
     ]);
-    const em = new EntityMeeting(fg);
-    const st = em.enter('熊梓铭');
-    expect(st).not.toBeNull();
-    expect(st?.entityName).toBe('熊梓铭');
-    expect(em.isActive()).toBe(true);
+    expect(EntityMeeting.isMeetableEntity(fg, '熊梓铭')).toBe(true);
   });
 
-  it('exit 清除 engine_store 持久化（防 restoreLastMeeting 拉回）', async () => {
-    const written: Array<{ key: string; sql: string }> = [];
-    const sqlite = {
-      queryAll: () => [] as any[],
-      writeRaw: (sql: string, ...params: any[]) => { written.push({ key: String(params[0]), sql }); },
-    };
-    const storage = { getSQLite: () => sqlite };
-    const fg = makeFG([{ name: '熊梓铭', uuid: 'TXS-000000003', category: 'G' }]);
-    const em = new EntityMeeting(fg);
-    (em as any).setStorage(storage);
-    em.enter('熊梓铭');
-    await em.exit();
-    // exit 后应执行 DELETE FROM engine_store，而非只有 INSERT（enter 时写）
-    const deletes = written.filter(w => w.sql.startsWith('DELETE FROM engine_store'));
-    expect(deletes.length).toBeGreaterThanOrEqual(1);
-    expect(em.isActive()).toBe(false);
+  it('FG 查不到的人名一律不可会晤（防伪造名字进入席位）', () => {
+    const fg = makeFG([]);
+    expect(EntityMeeting.isMeetableEntity(fg, '查无此人')).toBe(false);
+  });
+
+  it('FG 缺失 / 名称为空时拒绝（防未初始化时放行）', () => {
+    expect(EntityMeeting.isMeetableEntity(null, '熊梓铭')).toBe(false);
+    expect(EntityMeeting.isMeetableEntity(undefined, '熊梓铭')).toBe(false);
+    expect(EntityMeeting.isMeetableEntity(makeFG([]), '')).toBe(false);
   });
 });
 

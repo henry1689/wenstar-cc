@@ -3,9 +3,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { applyReconsolidation, evaluateLibraryPromotion } from '../reconsolidation.js';
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
-function neutralEmotion(): EmotionVector24D {
+function neutralEmotion(): EmotionState24 {
   return {
     joy: 30, sadness: 0, anger: 0, fear: 0,
     surprise: 10, disgust: 0, calm: 50, anxiety: 0,

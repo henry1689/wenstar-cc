@@ -1,64 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "WenStar 三域共享用户状态合约",
-  "description": "TS端(heart 24D) + Python端(yaoling 32D + yaoguang 6D) 的统一用户状态数据契约。三域各自填充自己负责的维度。PFC 消费完整合约。",
+  "description": "三域统一 40D 状态合约（依据《40D 量纲统一法令 V1.0》：全系统唯一合法量纲=40D）。TS端 heart / Python端 yaoling+yaoguang 统一按 40D 扇区填充 perception_40d；原 emotional_24d/somatic_32d/environmental_6d 旧量纲字段已废除。PFC 消费完整合约。",
   "type": "object",
-  "required": ["emotional_24d", "somatic_32d", "environmental_6d", "timestamp"],
+  "required": ["perception_40d", "timestamp"],
   "properties": {
-    "emotional_24d": {
-      "description": "TS端 heart 域填充 — 24D 情感向量 [0,100]",
-      "type": "object",
-      "properties": {
-        "joy": { "type": "number", "minimum": 0, "maximum": 100 },
-        "sadness": { "type": "number", "minimum": 0, "maximum": 100 },
-        "anger": { "type": "number", "minimum": 0, "maximum": 100 },
-        "fear": { "type": "number", "minimum": 0, "maximum": 100 },
-        "surprise": { "type": "number", "minimum": 0, "maximum": 100 },
-        "disgust": { "type": "number", "minimum": 0, "maximum": 100 },
-        "calm": { "type": "number", "minimum": 0, "maximum": 100 },
-        "anxiety": { "type": "number", "minimum": 0, "maximum": 100 },
-        "affection": { "type": "number", "minimum": 0, "maximum": 100 },
-        "trust": { "type": "number", "minimum": 0, "maximum": 100 },
-        "intimacy": { "type": "number", "minimum": 0, "maximum": 100 },
-        "respect": { "type": "number", "minimum": 0, "maximum": 100 },
-        "arousal": { "type": "number", "minimum": 0, "maximum": 100 },
-        "fatigue": { "type": "number", "minimum": 0, "maximum": 100 },
-        "excitement": { "type": "number", "minimum": 0, "maximum": 100 },
-        "boredom": { "type": "number", "minimum": 0, "maximum": 100 },
-        "dominance": { "type": "number", "minimum": 0, "maximum": 100 },
-        "compliance": { "type": "number", "minimum": 0, "maximum": 100 },
-        "warmth": { "type": "number", "minimum": 0, "maximum": 100 },
-        "coldness": { "type": "number", "minimum": 0, "maximum": 100 },
-        "nostalgia": { "type": "number", "minimum": 0, "maximum": 100 },
-        "curiosity": { "type": "number", "minimum": 0, "maximum": 100 },
-        "shyness": { "type": "number", "minimum": 0, "maximum": 100 },
-        "jealousy": { "type": "number", "minimum": 0, "maximum": 100 }
-      }
-    },
-    "somatic_32d": {
-      "description": "Python端 yaoling 域填充 — 32D 体感通道关键维度 [0,100]",
-      "type": "object",
-      "properties": {
-        "d1_muscle": { "type": "number", "description": "肌肉疲劳/乳酸" },
-        "d4_endocrine": { "type": "number", "description": "皮质醇/内分泌" },
-        "d8_sleep": { "type": "number", "description": "睡眠质量" },
-        "d11_anxiety": { "type": "number", "description": "SAS焦虑" },
-        "d12_enjoyment": { "type": "number", "description": "催产素/幸福感" },
-        "d26_memory": { "type": "number", "description": "记忆强度" },
-        "d32_holistic": { "type": "number", "description": "综合健康指数" }
-      }
-    },
-    "environmental_6d": {
-      "description": "Python端 yaoguang 域填充 — 6D 环境上下文",
-      "type": "object",
-      "properties": {
-        "temperature_c": { "type": "number" },
-        "noise_db": { "type": "number" },
-        "light_lux": { "type": "number" },
-        "crowd_density": { "type": "number", "minimum": 0, "maximum": 1 },
-        "urgency": { "type": "number", "minimum": 0, "maximum": 1 },
-        "circadian_shift": { "type": "number", "description": "昼夜节律偏移 [0,1]" }
-      }
+    "perception_40d": {
+      "description": "三域统一 40D 感知向量（d01-d40 固定键序；heart 填语义扇区、yaoling 填肉身扇区、yaoguang 填时空环境扇区），值域 [0,1]（d36/d37 双极 [-1,1]）",
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 40,
+      "maxItems": 40
     },
     "overall_health_level": {
       "type": "string",

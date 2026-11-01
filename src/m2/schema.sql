@@ -279,7 +279,9 @@ CREATE TABLE IF NOT EXISTS search_index (
     position INTEGER DEFAULT 0,      -- term在原文中的位置
     PRIMARY KEY (term, source_type, source_id)
 );
-CREATE INDEX IF NOT EXISTS idx_si_term ON search_index(term);
+-- 🛑 检索架构 v11 §S1(2026-10-27): 删除纯冗余索引 idx_si_term(term)。
+--   PRIMARY KEY(term, source_type, source_id) 的最左前缀已覆盖 (term) 查询 ⇒ 该索引只增写入成本。
+--   idx_si_source(source_type, source_id) 不是最左前缀，保留。
 CREATE INDEX IF NOT EXISTS idx_si_source ON search_index(source_type, source_id);
 
 -- AQC质检表

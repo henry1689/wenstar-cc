@@ -10,7 +10,7 @@ export type NodeType = 'person' | 'place' | 'thing' | 'concept' | 'object' | 'fe
 // 3=熟人层  4=商务层  5=泛泛之交
 export type CircleLevel = 0 | 1 | 2 | 3 | 4 | 5;
 
-// ─── 关系权重（映射24D社交/亲密象限） ───
+// ─── 关系权重（映射感知向量社交/亲密象限；🔴 中间层属 P074 待废） ───
 export interface RelationWeights {
   trust?: number;              // 信任度 0-1
   intimacy?: number;           // 亲密度 0-1
@@ -106,7 +106,7 @@ export interface FamilyGraph {
   _generateUUID(category: string): string;
 }
 
-// ─── 关系权重默认值（映射24D社交/亲密象限） ───
+// ─── 关系权重默认值（映射感知向量社交/亲密象限；🔴 中间层属 P074 待废） ───
 export const DEFAULT_BASE_INTIMACY: Record<string, number> = {
   // 亲属
   mother_of: 0.9, father_of: 0.85, spouse_of: 0.95, sibling_of: 0.8,

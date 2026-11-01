@@ -8,13 +8,12 @@
  */
 
 import { buildNgrams } from './SearchIndexBuilder.js';
-import { rankByVector, perceptionToArray, type MemoryCandidate, type RankedMemory, type SearchMode } from './VectorReranker.js';
-import type { Perception24D } from '../m3/types/perception.js';
-import { map24DTo40D, decodePerceptionV40, cosineSimilarity40D } from '../m2/PerceptionVector40DCodec.js';
-import { isPerception40DEnabled, isPerception40DOnly } from '../config/perception-40d-config.js';
-import { PERCEPTION_40D_KEYS } from '../m3/types/perception-40d.js';
+import { rankByVector, type MemoryCandidate, type RankedMemory, type SearchMode } from './VectorReranker.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
+import { decodePerceptionV40, cosineSimilarity40D } from '../m2/PerceptionVector40DCodec.js';
+import { isPerception40DEnabled } from '../config/perception-40d-config.js';
+import { PERCEPTION_40D_KEYS, type PerceptionV40 } from '../m3/types/perception-40d.js';
 import { buildSqlClause, passes as policePasses } from '../governance/police/UUIDPoliceFilter.js';
-import type { PerceptionV40 } from '../m3/types/perception-40d.js';
 
 // ── V12.0 新管线模块 ──
 import { weightedRRF, buildIdToItem, DEFAULT_RRF_CONFIG, type RRFConfig } from './RRFFusion.js';
@@ -50,6 +49,8 @@ export interface SearchResultV13 extends SearchResult {
 export interface SearchOptions {
   /** 检索力度模式 */
   mode?: SearchMode;
+  /** 🔴 P072 批2: M3 原生 40D 查询向量（唯一合法查询量纲，禁 24D 投影——法令第四条） */
+  p40?: PerceptionV40 | null;
   /** 实体UUID过滤（可选，传入当前对话的实体UUID列表） */
   entityUuids?: string[];
   /** 时间范围过滤（可选，ISO 8601 起止时间） */
@@ -73,14 +74,14 @@ export interface SearchResult {
  *
  * @param db     sql.js Database 实例
  * @param query  用户消息原文
- * @param perception 当前24D感知向量（用于向量精排）
+ * @param perception 当前感知向量（🔴 中间层 P074 待废；精排用 p40 原生40D）
  * @param opts   搜索选项
  * @returns 搜索结果
  */
 export function search(
   db: any,
   query: string,
-  perception?: Perception24D | null,
+  perception?: PerceptionState24 | null,
   opts: SearchOptions = {},
 ): SearchResult {
   const mode = opts.mode || 'balanced';
@@ -186,8 +187,7 @@ export function search(
           enriched.push({
             id: String(id), text: String(rawInput || '').substring(0, 800),
             source: 'memory',
-            perceptionJson: pJson ? String(pJson) : null,   // V12.4 根除24D: 实为 perception_40d v2 JSON（24D 回退解析兼容）
-            perception40d: pJson ? String(pJson) : null,    // S4 P1-3 修复: 供 rankByVector 40D 扇区加权分支（此前恒 null 空转）
+            perception40d: pJson ? String(pJson) : null,    // S4 P1-3 修复: 供 rankByVector 40D 扇区加权分支（P072批2: 原 perceptionJson 冗余旧名字段已删）
             calciumScore: Number(caScore) || 0, calciumLevel: Number(caLevel) || 1,
             confidenceScore: Number(confScore) || 0.5, effectiveStrength: Number(effStr) || 1,
             createdAt: String(createdAt || ''), entityUuid: euuid ? String(euuid) : null,
@@ -215,8 +215,7 @@ export function search(
           enriched.push({
             id: String(id), text: String(summary || '').substring(0, 500),
             source: 'black_diamond',
-            perceptionJson: eVec ? String(eVec) : null,
-            perception40d: eVec ? String(eVec) : null,   // S4 P1-3 修复: 黑钻 emotion_vector(40D v2) 供 40D 精排分支
+            perception40d: eVec ? String(eVec) : null,   // S4 P1-3 修复: 黑钻 emotion_vector(40D v2) 供 40D 精排（P072批2: 原 perceptionJson 冗余旧名字段已删）
             calciumScore: Number(caLevel) || 1, calciumLevel: Number(caLevel) || 1,
             confidenceScore: 0.7, effectiveStrength: 1,
             createdAt: String(createdAt || ''), entityUuid: euuid ? String(euuid) : null,
@@ -252,15 +251,11 @@ export function search(
   }
 
   // ═══════════ 第2层: 40D 向量精排 ═══════════
-  // V3.1: 40D 主模式（PERCEPTION_40D_ONLY）— 全面停止 24D 精排，只用 40D 余弦。
-  // queryVec 用中性值（不参与 24D 排序），queryVec40D 正常生成供 40D 扇区加权余弦。
-  const queryVec = isPerception40DOnly()
-    ? new Array(24).fill(0.5)
-    : (perception ? perceptionToArray(perception) : new Array(24).fill(0.5));
-  // V20: 混合检索 — 生成 40D 查询向量（原始值，由 cosineSimilarity40D 统一归一化，避免双极性维二次平移）
-  const queryVec40D = perception ? PERCEPTION_40D_KEYS.map(k => map24DTo40D(perception)[k]) : null;
+  // 🔴 P072 批2（2026-10-24）：24 维 queryVec 合成与 projectState24ToV40 查询投影已删——
+  //   查询向量唯一来源 = SearchOptions.p40（M3 原生 40D，写入/查询同源，法令第四条）。
+  const queryVec40D = opts.p40 ? PERCEPTION_40D_KEYS.map(k => opts.p40![k]) : null;
 
-  const ranked = rankByVector(enriched, queryVec, mode, queryVec40D);
+  const ranked = rankByVector(enriched, mode, queryVec40D);
 
   // ═══════════ 格式化输出 ═══════════
   const items: string[] = [];
@@ -286,7 +281,7 @@ export function searchByEntity(
   db: any,
   query: string,
   entityUuids: string[],
-  perception?: Perception24D | null,
+  perception?: PerceptionState24 | null,
   opts: SearchOptions = {},
 ): Map<string, SearchResult> {
   const results = new Map<string, SearchResult>();
@@ -354,7 +349,7 @@ function getCrossEncoder(): CrossEncoderReranker {
  * @param db         sql.js Database 实例
  * @param multiRank  来自 MemoryRetriever.retrieveMultiRank() 的四路排名
  * @param query      用户查询原文（供 Cross-Encoder 使用）
- * @param perception 当前 24D 感知向量（旧管线兼容参数，V12 暂不直接使用）
+ * @param perception 当前感知向量（旧管线兼容参数，V12 暂不直接使用；🔴 中间层 P074 待废）
  * @param opts       搜索选项
  * @returns 搜索结果（格式与旧 search() 兼容）
  */
@@ -362,7 +357,7 @@ export function searchV12(
   db: any,
   multiRank: MultiRankResult,
   query: string,
-  perception?: Perception24D | null,
+  perception?: PerceptionState24 | null,
   opts: SearchOptions = {},
 ): SearchResult {
   const mode = opts.mode || 'balanced';
@@ -484,11 +479,11 @@ export async function searchV13(
   db: any,
   multiRank: MultiRankResult,
   query: string,
-  perception?: Perception24D | null,
+  perception?: PerceptionState24 | null,
   opts: SearchOptions = {},
   pipelineConfig?: Partial<FullSearchPipelineConfig>,
   dagRepo?: MemoryAssociationRepository | null,
-  /** V3: M3 直接产出的 40D 感知向量 — 优先用作 40D 查询向量（与 24D 同源） */
+  /** V3: M3 产出的 40D 感知向量 — 40D 查询向量（唯一合法查询量纲） */
   perceptionV40?: PerceptionV40 | null,
 ): Promise<SearchResultV13> {
   const t0 = Date.now();
@@ -651,8 +646,8 @@ export async function searchV13(
   // 候选 id 匹配 memories.id（emotion/keyword/locus/entity 路）或 global_uid（spine 路）。
   if (isPerception40DEnabled() && (perceptionV40 || perception) && candidates.length > 1) {
     try {
-      // V3: M3 产出的 perceptionV40 优先；缺失时回退 24D 派生
-      const q40 = perceptionV40 ?? (perception ? map24DTo40D(perception) : null);
+      // 🔴 P072 批2: 24D 投影回退已删——查询向量唯一来源 = M3 原生 perceptionV40，缺失即跳过精排
+      const q40 = perceptionV40;
       if (!q40) throw new Error('无 40D 查询向量');
       const ids = candidates.map(c => c.id).slice(0, 100);
       const placeholders = ids.map(() => '?').join(',');

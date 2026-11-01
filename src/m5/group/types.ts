@@ -73,7 +73,19 @@ export interface ContextSlot {
 }
 
 /** 会话模式 —— 派生值，不入库 */
-export type SessionMode = 'yuyao' | 'meeting';
+/**
+ * 会话模式（**纯派生，不入库**）。
+ *
+ * 2026-11-01 三值化：原为 `'yuyao' | 'meeting'` 两值，但运行时实际有四个态 ——
+ * 独处态（散会后无人在场）与玉瑶态在状态机里是**同一个值**，只能靠调用方的模块级
+ * 标志区分，进程重启即丢。现在把「曾经建立过席位」提升为状态字段
+ * `SessionState.everHadSeats`，模式随之可派生为三个值：
+ *
+ *   - `'yuyao'`  —— 从未建立过席位（首聊、或全新安装）
+ *   - `'alone'`  —— 曾建立过席位，此刻空场（散会之后）。**跨重启保留**
+ *   - `'meeting'`—— 此刻有席位；单/多由 `isMulti` 再派生
+ */
+export type SessionMode = 'yuyao' | 'alone' | 'meeting';
 
 /** 群聊会话的**唯一**状态对象（可 JSON 序列化） */
 export interface SessionState {
@@ -90,6 +102,48 @@ export interface SessionState {
   lastActivityAt: number;
   /** 会晤开始时的 conversationHistory 索引（沿用 EntityMeeting V5.0 语义） */
   meetingStartHistoryIndex: number;
+  /**
+   * 独处态过渡提示是否已发过（2026-11-01）。
+   *
+   * 🔴 用途：散会后从「有人应答」切到「完全静默」是一步跳变，体验生硬。
+   *   进入独处态的**第一轮**给一句固定收尾文案（不过 LLM），之后彻底静默。
+   *   本字段记录「这一轮独处是否已经提示过」：
+   *     · WAKE / LEAVE 清空至空场 ⇒ 重置 false（下次独处重新提示）
+   *     · ALONE_ACK ⇒ 置 true
+   *   🔴 放 State 而非模块级变量：模块标志进程重启即丢（同 `_hadMeeting` 的教训）。
+   * 🔴 向后兼容：schemaVersion **不 bump**，旧快照缺失时由 normalizeState 补 false。
+   */
+  aloneNotified: boolean;
+  /**
+   * 临时点名应答的**原主 UUID**（2026-11-01 D2）；`null` = 没有待恢复的临时切换。
+   *
+   * 🔴 用途：会晤中「@阿珍」或「阿珍，……」这类**点名**过去被当成永久换主（`switch`），
+   *   业主说完一句，主发言者就永远停在被点名者身上，再也回不去。
+   *   现在点名只顶替**本轮**：reduce 记下原主 UUID 到这里，下一轮请求开头由
+   *   `chat.ts` dispatch `SPEAK` 回原主。明确的「换XX来」仍是永久切换（不动指针）。
+   * 🔴 何时清空：WAKE / LEAVE / 普通 SPEAK 一律清空 —— 会话结构一变，
+   *   旧的回退目标可能已不在场，留着就是错主。
+   * 🔴 向后兼容：schemaVersion **不 bump**，旧快照缺失时由 `normalizeState` 补 null。
+   */
+  transientSpeakerFrom: string | null;
+  /**
+   * 是否**曾经**建立过席位（WAKE 置 true，永不回落）。
+   *
+   * 🔴 用途：把「散会之后」与「从未会晤」区分开 —— 前者是独处态（业主一个人，
+   *   系统不该应答），后者是玉瑶态（正常对话）。旧实现靠 chat.ts 的模块级标志
+   *   `_hadMeeting` 承担同一职责，进程重启即丢；本字段让它成为可持久化真状态。
+   * 🔴 向后兼容：schemaVersion **不 bump**，旧快照缺失时由 `normalizeState` 补
+   *   `participants.length > 0`（等价于旧实现「重启后丢失会晤记忆」）。
+   */
+  everHadSeats: boolean;
+  /**
+   * P090 · P096 §1.2：askAll 待发言队列（UUID，按 participants 加入序）；**空 = 不在轮答中**。
+   * 只存 UUID（reducer 内不做名称解析）；含当前发言人（P094 裁决①，一律全答不跳过）。
+   * 与 `speakerUuid` 正交 —— 推进靠适配层出队 + `SPEAK`，状态机只负责存取队列。
+   * 🔴 向后兼容：schemaVersion **不 bump**（bump 会让旧快照整份被拒 ⇒ 重启无法恢复会晤），
+   *   旧快照缺失本字段时由 `normalizeState` 补 `[]`。
+   */
+  askAllQueue: string[];
 }
 
 /**
@@ -117,8 +171,31 @@ export type Action =
       now?: number;
     }
   | { type: 'LEAVE'; target?: string; now?: number }
+  /**
+   * 独处态过渡提示已发出（2026-11-01）。
+   *
+   * 单独成 Action 而非手改 state：ADR-013 硬约束② —— 状态只有 `reduce` 一处写。
+   * 调用方（chat.ts）发完固定文案后 dispatch 本 action，使下文不再重复提示。
+   */
+  | { type: 'ALONE_ACK'; now?: number }
+  /**
+   * 本轮点名应答（2026-11-01 D2）。
+   *
+   * 与 `SPEAK` 的区别：`SPEAK` 是**永久**换主（业主明确说「换XX来」），会清掉回退指针；
+   * 本 action 是「只说这一轮」—— 第一次设置时记下当时的 `speakerUuid` 到
+   * `transientSpeakerFrom`，由调用层在**下一轮**请求开头 `SPEAK` 回去。
+   * 🔴 连续点名保留**最初**的原主，不把上一个被点名者当成原主。
+   */
+  | { type: 'TRANSIENT_SPEAK'; target: string; now?: number }
   | { type: 'RESUME'; state: SessionState; now?: number }
-  | { type: 'IDLE'; now: number };
+  | { type: 'IDLE'; now: number }
+  /**
+   * P090 · P096 §1.1「向全员提问」一次性入队。
+   * 单独成 Action 而非给 SPEAK 塞队列标记：ADR-013 §2.2 的 6 个 Action 语义单一，
+   * SPEAK =「指定某人发言」，塞进队列会让它同时承载「指定」与「轮询」，破坏单一职责。
+   * 入队内容与顺序由 reduce 依 `participants` 原序派生（含当前发言人，P094 裁决①）。
+   */
+  | { type: 'ASK_ALL'; now?: number };
 
 /**
  * 状态变化的副作用描述（由 `diffEffects(prev, next)` 派生，不在 reducer 内执行）。
@@ -131,4 +208,9 @@ export type SessionEffect =
   | { type: 'meetingEnded' }
   | { type: 'participantJoined'; uuid: string }
   | { type: 'participantLeft'; uuid: string }
-  | { type: 'speakerChanged'; from: string | null; to: string | null };
+  | { type: 'speakerChanged'; from: string | null; to: string | null }
+  /**
+   * P090 · P096 §1.4：askAll 首次入队（`prev.askAllQueue` 空 且 `next` 非空，仅派生一次）。
+   * 推进阶段**不派生新 effect** —— 每次出队都会 `SPEAK`，`speakerChanged` 已覆盖日志与持久化。
+   */
+  | { type: 'askAllStarted'; uuids: string[] };

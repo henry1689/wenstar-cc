@@ -14,8 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { captureSlot, applySlot } from '../contextBridge.js';
-import { createSessionState, reduce, popSlot, pushSlot } from '../sessionReducer.js';
-import { projectMeetingState, detectDrift, type MeetingSnapshot } from '../project.js';
+import { createSessionState, reduce, diffEffects, popSlot, pushSlot } from '../sessionReducer.js';
 import { getAnchor, setAnchor, resetAnchor } from '../../SceneAnchor.js';
 import { getSceneSnapshot, setSceneSnapshot, resetContext } from '../../ContextMemory.js';
 import type { ContextSlot } from '../types.js';
@@ -24,9 +23,6 @@ const T0 = 1_700_000_000_000;
 const A = { uuid: 'TXS-1', name: '徐诗雨', category: 'G' };
 const B = { uuid: 'TXS-2', name: '熊梓铭', category: 'G' };
 
-const idleSnap: MeetingSnapshot = { active: false, speakerUuid: null, speakerName: null, participants: [] };
-const meetingSnap: MeetingSnapshot = { active: true, speakerUuid: A.uuid, speakerName: A.name, participants: [A] };
-const meeting2Snap: MeetingSnapshot = { active: true, speakerUuid: B.uuid, speakerName: B.name, participants: [A, B] };
 
 /** 把三份现场都置成「可辨识的玉瑶态」，用于验证恢复是否真的还原了它 */
 function seedYuyaoScene(): void {
@@ -149,24 +145,27 @@ describe('[批C] applySlot — 恢复（空槽拒绝，防把现场抹成白板�
 });
 
 describe('[批C] 完整进出会晤 — 压栈弹栈端到端', () => {
+  /**
+   * 🔴 2026-10-31 第三层固化：本文件原用 `projectMeetingState()`（批B 投影层）把
+   *   「会晤快照」投影成 action 序列来驱动状态机。投影层已随第三层拆除删除
+   *   （生产零消费者，`project.ts` 已删）—— 现在直接 dispatch 真实 action，
+   *   语义等价且更贴近生产路径（chat.ts 就是直接 dispatch 的）。
+   */
   it('WAKE 带 slot → LEAVE 产出 restoreSlot → 恢复后现场还原', () => {
     seedYuyaoScene();
     const slot = captureSlot(null, { savedRole: 'lover', now: T0 });
 
-    let s = createSessionState(T0);
-    const actions = projectMeetingState(s, meetingSnap, T0, slot);
-    expect(actions[0].type).toBe('WAKE');
-    for (const a of actions) s = reduce(s, a);
+    let s = reduce(createSessionState(T0), { type: 'WAKE', targets: [A], now: T0, slot });
     expect(s.contextStack.some(c => c.uuid === null)).toBe(true);   // 玉瑶现场已入栈
 
     // 会晤期间现场被污染（模拟 M5 每轮覆盖）
     polluteScene();
 
-    // 退出
-    const leaveActions = projectMeetingState(s, idleSnap, T0, slot);
-    expect(leaveActions.map(a => a.type)).toEqual(['LEAVE']);
-    for (const a of leaveActions) s = reduce(s, a);
+    // 散会：清空参与者，玉瑶槽仍留在栈上，由 diffEffects 产出 restoreSlot
+    const effects = diffEffects(s, reduce(s, { type: 'LEAVE', now: T0 }));
+    s = reduce(s, { type: 'LEAVE', now: T0 });
     expect(s.participants).toHaveLength(0);
+    expect(effects.some(e => e.type === 'restoreSlot')).toBe(true);
 
     // 弹栈恢复
     const { slot: restored } = popSlot(s.contextStack, null);
@@ -177,31 +176,24 @@ describe('[批C] 完整进出会晤 — 压栈弹栈端到端', () => {
   });
 
   it('🔴 换人（SPEAK）不压新栈 —— 现场栈不随切换次数膨胀', () => {
-    let s = createSessionState(T0);
-    for (const a of projectMeetingState(s, meetingSnap, T0, captureSlot(null, { now: T0 }))) s = reduce(s, a);
-    const depthBefore = s.contextStack.length;
+    let s = reduce(createSessionState(T0), { type: 'WAKE', targets: [A], now: T0, slot: captureSlot(null, { now: T0 }) });
+    s = reduce(s, { type: 'JOIN', target: B, now: T0 });
+    expect(s.contextStack.filter(c => c.uuid === null)).toHaveLength(1);
 
     for (let i = 0; i < 5; i++) {
-      for (const a of projectMeetingState(s, i % 2 ? meetingSnap : meeting2Snap, T0, captureSlot(null, { now: T0 }))) s = reduce(s, a);
+      s = reduce(s, { type: 'SPEAK', target: i % 2 ? A.uuid : B.uuid, now: T0 });
     }
     // 集合在单人/多人间来回切，但玉瑶现场按 uuid 原位覆盖，栈深始终 1
     expect(s.contextStack.filter(c => c.uuid === null)).toHaveLength(1);
-    expect(depthBefore).toBe(1);
   });
 
-  it('投影后状态与真源仍一致（批B 安全网在批C 改动后依旧成立）', () => {
+  it('多轮进出不膨胀 —— 同一现场原位覆盖，栈深恒 ≤1', () => {
     let s = createSessionState(T0);
-    for (const snap of [meetingSnap, meeting2Snap, idleSnap, meetingSnap]) {
-      for (const a of projectMeetingState(s, snap, T0, captureSlot(null, { now: T0 }))) s = reduce(s, a);
-      expect(detectDrift(s, snap)).toBeNull();
+    for (let i = 0; i < 3; i++) {
+      s = reduce(s, { type: 'WAKE', targets: [A], now: T0, slot: captureSlot(null, { now: T0 }) });
+      s = reduce(s, { type: 'LEAVE', now: T0 });
     }
-  });
-
-  it('不传 slot 时批A/B 行为不变（slot 参数向后兼容）', () => {
-    const a1 = projectMeetingState(createSessionState(T0), meetingSnap, T0);
-    const a2 = projectMeetingState(createSessionState(T0), meetingSnap, T0, undefined);
-    expect(a1).toEqual(a2);
-    expect((a1[0] as { slot?: ContextSlot }).slot).toBeUndefined();
+    expect(s.contextStack.filter(c => c.uuid === null).length).toBeLessThanOrEqual(1);
   });
 
   it('pushSlot 原位覆盖 —— 同一现场不会重复入栈', () => {

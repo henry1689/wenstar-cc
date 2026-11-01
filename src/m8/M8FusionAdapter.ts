@@ -7,7 +7,7 @@
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { EmotionalMemoryRecord } from '../m2/types/index.js';
 import type { M8Engine } from './M8Engine.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 import type {
   WriteParams, WriteResponse, ClueSearchParams, ClueSearchResult,
   ClueSearchResultEntry, ConflictCheckParams, ConflictCheckResult,
@@ -122,7 +122,7 @@ export class M8FusionAdapter implements M8Engine {
     const calcium = params.calcium ?? 0;
     if (calcium < 0.3 || !params.perception) return null;
 
-    const perception24D = params.perception as Perception24D;
+    const perception24D = params.perception as PerceptionState24;
     const tag = params.emotion || '日常';
     const input = params.input || '';
 

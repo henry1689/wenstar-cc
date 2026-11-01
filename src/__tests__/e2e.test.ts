@@ -6,10 +6,10 @@ import { promises as fs, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DNAEncoder } from '../m1/DNAEncoder.js';
 import { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
 
 /** 测试用中性感知向量 */
-function neutralPerception(): Perception24D {
+function neutralPerception(): PerceptionState24 {
   return {
     pleasure: 0, arousal: 0.3, dominance: 0, aggression: 0, sincerity: 0.5, humor: 0,
     factual: 0.5, logical: 0.5, certainty: 0.5, abstract: 0.3, temporal_focus: 0, self_ref: 0.5,

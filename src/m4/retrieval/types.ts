@@ -16,7 +16,7 @@
  *   - 与旧类型 `src/m4/types/retrieval.ts` 通过映射桥（rankedItemToHit）渐进兼容
  */
 
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import type { PerceptionV40 } from '../../m3/types/perception-40d.js';
 import type { SearchMode } from '../types/retrieval.js';
 import type { PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
@@ -114,7 +114,7 @@ export interface RetrievalContext {
   /** 统一过滤策略（编排层用 buildPolicePolicy 构造，适配器必带） */
   policy: PolicePolicy;
   /** 当前 24D 感知向量 */
-  perception?: Perception24D;
+  perception?: PerceptionState24;
   /** M3 直出 40D 感知向量（V3） */
   perception40d?: PerceptionV40 | null;
   /** 活跃实体 UUID（会晤白名单） */
@@ -184,10 +184,11 @@ export function dedupeKeyOf(hit: SearchHit): string {
  * RankedItem → SearchHit 映射桥（MemoryAdapter 内部用）。
  * 存量召回路映射规则：
  *   - work 路 → work 域（id 是 work_id）
- *   - 其余路（emotion/keyword/spine/locus/entity）→ memory 域（id 是 memories.id / spine global_uid）
+ *   - 其余路（emotion/keyword/locus/entity）→ memory 域（id 是 memories.id）
  *
- * 🔴 注意：spine 路 id 是 state_spines.global_uid（非 memories.id），text 恒为空串，
- *   映射后需 backfillBackrefs 校验剔除假 id（V13 fake id 修复的一环）。
+ * 🔴 P071(2026-10-23): spine 路已随 state_spines 底座1 废除删除。
+ *   source 联合类型中的 'spine' 保留为兼容枚举（无生产者）；
+ *   遗留的 spine→black_diamond 假映射分支成为死分支，无害保留（backfillBackrefs 仍兑底）。
  */
 export function rankedItemToHit(r: {
   id: string;

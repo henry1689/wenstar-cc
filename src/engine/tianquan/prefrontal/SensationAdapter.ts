@@ -11,7 +11,7 @@
  * 注意: Python 端 GlobalBus 推送链路未开通时，方法返回原始 emotionVector，零影响。
  */
 
-import { mapSomaticToHeart, mapEnvToThresholdAdjustments, DIM_MAPPING } from '../heart/dim_mapping_24d_32d.js';
+import { mapSomaticToHeart, mapEnvToThresholdAdjustments, DIM_MAPPING } from '../heart/heart-dim-mapping.js';
 
 export interface SomaticSnapshot {
   /** yaoling 32D 体感值 Map<channelId, value[0,100]> */

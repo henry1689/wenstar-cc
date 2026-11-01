@@ -53,7 +53,7 @@ afterEach(() => vi.restoreAllMocks());
 
 /** 预置到「双人在会晤中、主发言=A」的稳定起点（避免每个用例重复铺垫） */
 function seeded(): GroupSession {
-  const gs = new GroupSession({ enabled: true, now: () => T0 });
+  const gs = new GroupSession({ now: () => T0 });
   gs.dispatch({ type: 'WAKE', targets: [A], now: T0, slot: SLOT });
   gs.dispatch({ type: 'JOIN', target: B, now: T0 });
   return gs;
@@ -161,7 +161,7 @@ describe('[P055 任务1] GroupSession.dispatch — M 层埋点', () => {
       expect(gs.getTrail().length, 'WAKE+JOIN+本次 SPEAK').toBe(3);
       // 监听者照常触发
       let seen = 0;
-      const gs2 = new GroupSession({ enabled: true, now: () => T0 });
+      const gs2 = new GroupSession({ now: () => T0 });
       gs2.onEffect(() => { seen++; });
       gs2.dispatch({ type: 'WAKE', targets: [A], now: T0, slot: SLOT });
       expect(seen).toBeGreaterThan(0);

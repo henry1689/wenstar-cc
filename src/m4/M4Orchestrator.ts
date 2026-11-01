@@ -29,7 +29,8 @@ import { PatternCompleter } from '../engine/tianquan/temporal/PatternCompleter.j
 import { HippocampalIndex } from '../engine/tianquan/temporal/HippocampalIndex.js';
 import { SceneSnapshotBuilder } from '../engine/tianquan/temporal/SceneSnapshotBuilder.js';
 import type { SceneSnapshot, SceneSnapshotMaterials, EmotionTrend, NoveltyLevel } from '../engine/tianquan/temporal/types.js';
-import type { Perception24D } from '../m3/types/perception.js';
+import type { PerceptionState24 } from '../m3/types/perception.js';
+import type { PerceptionV40 } from '../m3/types/perception-40d.js';
 
 // P0-4: FG 摘要 30s 缓存
 interface FGCacheEntry {
@@ -121,6 +122,14 @@ export class M4Orchestrator {
     _mark("decompose+uuid");
     let memories = await this.memoryRetriever.retrieveMemories(locusPath, enhancedEntities, {
       perception: decision.enhanced.perception,
+      // 🔴 F-32（2026-10-28）：原漏传 40D 感知向量 ⇒ `options.p40` 恒 undefined ⇒
+      //    `_v11FenceToDnas` / `_shadowRecall` 收到的语义路输入恒缺失 ⇒ 语义路整条跳过、
+      //    `scoreAndRank` 三权重重归一化 ⇒ `w_semantic=0.10` 形同虚设（影子实测 95.1% 被跳过）。
+      //    这是**生产主链**唯一缺 p40 的入口（chat.ts:1544 → orchestrate）。
+      //    蓝皮书 §2.3「无原生 40D 则跳过」是**降级条款**，不是设计意图；此处是数据漏传，不是有意关闭。
+      //    ⚠️ 改动效果：语义路开始参与精排 ⇒ 排序会变、围栏耗时会升（P95 已 203ms 超 150ms 预算），
+      //       观察期基线须重建。回滚 = git revert 本行（无开关、无依赖变更）。
+      p40: decision.enhanced.perceptionV40,
       entityUuids: personUuids.length > 0 ? personUuids : undefined,
       // 🔴 2026-09-12 召回窗口修复: 显式抬升检索窗口（原为默认 5 条）。
       //   会晤实体记忆量大（实测徐诗雨 570 条），默认窗口下实体通道候选被挤出 merged
@@ -513,7 +522,7 @@ export class M4Orchestrator {
   retrieveAsSnapshot(
     m4Context: M4Context,
     extra: {
-      perception: Perception24D;
+      perception: PerceptionState24;
       sessionId: string;
       rawInput?: string;
       locationFingerprint?: string;
@@ -552,7 +561,7 @@ export class M4Orchestrator {
   async retrieveMultiRankForSearch(
     locusPath: string,
     entities: Array<{ name: string; type: string }>,
-    opts?: { perception?: Perception24D; entityUuids?: string[]; sessionId?: string },
+    opts?: { perception?: PerceptionState24; p40?: PerceptionV40; queryText?: string; entityUuids?: string[]; sessionId?: string },
   ): Promise<MultiRankResult> {
     return this.memoryRetriever.retrieveMultiRank(locusPath, entities, opts);
   }

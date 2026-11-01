@@ -29,7 +29,20 @@ function mkMeeting(): EntityMeeting {
     saveLastMeeting: () => {},
   };
   const em = new EntityMeeting(fg);
-  em.enterMulti(['徐诗雨', '阿珍', '王全芬', '熊梓铭']); // 主发言=徐诗雨，另3位参会者
+  // 🔴 2026-10-31 第三层固化：`EntityMeeting.enterMulti()` 已随旧状态机删除。
+  //   会晤状态真源是 GroupSession —— 这里用**只读视图**注入等价状态（主发言=徐诗雨，另3位参会者），
+  //   与生产接线方式（chat.ts 的 setSessionView）同形。
+  em.setSessionView({
+    isAvailable: () => true,
+    isActive: () => true,
+    isMulti: () => true,
+    getSpeakerUuid: () => 'TXS-000',
+    getParticipants: () => ['徐诗雨', '阿珍', '王全芬', '熊梓铭'].map((n, i) => ({
+      uuid: `TXS-${String(i).padStart(3, '0')}`,
+      name: n,
+      category: 'G',
+    })),
+  });
   return em;
 }
 

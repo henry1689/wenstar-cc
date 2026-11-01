@@ -50,7 +50,7 @@ describe('[C1] 实体名读路径端到端：写侧落库 → 三引擎可检索
         id: `mem_e2e_${STAMP}_${i}`,
         seqPos: 990000 + i,
         createdAt: new Date(Date.now() - i * 60_000).toISOString(),
-        perceptionJson: JSON.stringify({ pleasure: 0.6, arousal: 0.4, intimacy: 0.7 }),
+        perceptionV40: JSON.stringify({ __v: 2, dims: new Array(40).fill(0.35) }),  // P072 批1: 24D 夹具改 40D
         calciumScore: 0.6,
         calciumLevel: 3,
         locusPath: 'e2e.entity.read',

@@ -4,8 +4,8 @@
  * 4. DAG闭包 → 5. Foresight → 6. 叙事组装
  */
 import { describe, it, expect } from 'vitest';
-// V12.4 阶段B 根除24D: 离线边用 perception_40d（parseStoredVector 兼容 40D v2 反解 24D 数组）
-import { parseStoredVector } from '../m4/VectorReranker.js';
+// V12.4 阶段B 根除24D: 离线边用 perception_40d（🔴 P072 批2: parseStoredVector 已删，改 40D 原生解码）
+import { decodePerceptionV40, toNormalizedVector40D } from '../m2/PerceptionVector40DCodec.js';
 
 describe('七层全开 · 熊梓铭纪实小说检索', () => {
   it('全链路打通', async () => {
@@ -112,7 +112,7 @@ describe('七层全开 · 熊梓铭纪实小说检索', () => {
     console.log(`  实体边建完: ${entityEdges} 条新增, 总边数: ${totalEdges[0].values[0][0]}`);
 
     // ══════════════════════════════════════════════
-    // Step 3: 离线语义边 — 按 24D 向量余弦建边
+    // Step 3: 离线语义边 — 按 40D 向量余弦建边（🔴 P072 批2: 原「24D 向量余弦」已改 40D）
     // ══════════════════════════════════════════════
     console.log('\n═══ Step 3: 离线语义边 + 情绪边 ═══');
     // 取最近 200 条有向量的记忆（V12.4 根除24D: 读 perception_40d 反解 24D 数组）
@@ -123,7 +123,7 @@ describe('七层全开 · 熊梓铭纪实小说检索', () => {
     if (mems.length && mems[0].values) {
       const memList = mems[0].values.map((r: any) => ({
         uid: String(r[0]), euuid: String(r[1]||''),
-        vec: parseStoredVector(String(r[2] ?? null)) ?? [],
+        vec: (() => { const p = decodePerceptionV40(String(r[2] ?? null)); return p ? Array.from(toNormalizedVector40D(p)) : []; })(),
         ts: r[3] ? new Date(String(r[3])).getTime() : 0,
       })).filter((m: any) => m.vec.length >= 6);
 

@@ -4,10 +4,10 @@
  * 基于 Heart 层输出的情感标签和关系状态，动态注入表达基调。
  */
 import type { PromptFragment } from '../types.js';
-import type { EmotionVector24D } from '../../bus/types.js';
+import type { EmotionState24 } from '../../bus/types.js';
 
 export function buildEmotionFragments(
-  emotionVector: EmotionVector24D,
+  emotionVector: EmotionState24,
   relationState: string,
   atmosphere: string,
 ): PromptFragment[] {

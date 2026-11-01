@@ -3,7 +3,7 @@
  *
  * PromptFragment 结构为 S3 提示词拆分预留
  */
-import type { EmotionVector24D, RelationState, Atmosphere } from '../bus/types.js';
+import type { EmotionState24, RelationState, Atmosphere } from '../bus/types.js';
 
 /** 提示词片段（S3 充实） */
 export interface PromptFragment {
@@ -16,7 +16,7 @@ export interface PromptFragment {
 /** 生成请求上下文 */
 export interface GenerationContext {
   fragments: PromptFragment[];
-  emotionVector: EmotionVector24D;
+  emotionVector: EmotionState24;
   relationState: RelationState;
   atmosphere: Atmosphere;
   userMessage: string;

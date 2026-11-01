@@ -14,15 +14,16 @@
 import type { RoleType } from '../../app/role/RoleClassifier.js';
 import { resolveIdentity, type ResolvedIdentity } from '../identity/resolveIdentity.js';
 import { sessionMode, speaker } from './sessionReducer.js';
-import type { SessionState } from './types.js';
+import type { SessionState, SessionMode } from './types.js';
 
 export interface StateIdentity extends ResolvedIdentity {
   /** 会晤态主发言者 UUID（供检索过滤直接使用）；玉瑶态恒 null */
   speakerUuid: string | null;
   /** 会晤参与者名单（name+uuid），供 prompt 里的「其他人只给摘要」用 */
   participantsDigest: Array<{ uuid: string; name: string }>;
-  /** 当前会话模式 */
-  mode: 'yuyao' | 'meeting';
+  /** 当前会话模式（跨车道修复 2026-11-01：直接引用 SessionMode —— types 已新增 'alone'（散会空场）
+   *   而此处字面量未跟上致全仓 tsc 断裂；引用后未来漂移免疫。isMeeting 按 ==='meeting' 独立计算，alone 安全归非会晤。 */
+  mode: SessionMode;
 }
 
 /**

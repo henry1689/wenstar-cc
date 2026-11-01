@@ -6,20 +6,20 @@
  *
  * 🔴 R1 单写者语义（ADR-013 §四 + P051）：
  *   - 唯一键 `group_session_state`；本类是该键的**唯一写者**。
- *   - 过渡期严格单写者：新架构（WS_GROUP_V2 开启的 GroupSession 分支）接管写入后，
- *     旧路径（EntityMeeting）**不写此键**（旧路径本就无此键，天然只读兼容）。
+ *   - 新架构（GroupSession）是唯一状态源，旧路径（EntityMeeting 状态机）已于 2026-10-31
+ *     随 `WS_GROUP_V2` 开关一并删除，**不再有任何分支会绕过本类写会话状态**。
  *   - 一次对话轮结束时由适配层调 `saveSession`，启动时调 `loadSession`。
  *
  * 🔴 restore 整份拒绝语义：GroupSession.restore() 校验失败**返回 false 且状态保持原样**
  * （绝不半恢复 —— 半错状态会让 speakerUuid 指向不存在的参与者 → 检索白名单错 → 串档）。
  *   本函数把该 false **原样上抛**给调用方；调用方据此不得信任本次恢复结果。
  *
- * 🔴 回滚开关 WS_GROUP_V2（默认 false）：关闭时 save/load 均为空操作（no-op），
- *   与改动前逐字一致 —— 回滚 = 关开关，不涉及数据迁移。
+ * 🔴 2026-10-31 第三层固化：`WS_GROUP_V2` 门控已删除。save/load/clear 无条件生效 ——
+ *   不再有「关闭时 no-op」的回滚语义（回滚只能 `git revert`，见 GroupSession.ts 头注释）。
  *
  * 数据零写入约束（P051）：仅写本类自有新键，绝不 UPDATE/DELETE 任何既有行。
  */
-import { isGroupSessionEnabled, type GroupSession } from './GroupSession.js';
+import type { GroupSession } from './GroupSession.js';
 
 /** 单键名（单一真源；勿与其他键前缀冲突 —— 现有 group* 键数为 0） */
 export const GROUP_SESSION_STORE_KEY = 'group_session_state';
@@ -31,21 +31,11 @@ export interface EngineStoreSqlite {
 }
 
 /**
- * 开关是否开启。**直接委托 `isGroupSessionEnabled()`**（P062 问题2）——
- *   原本两处各自实现一遍判定逻辑（逐字相同），将来扩展取值（如支持 `yes`）需改两处、易漏改一处。
- *   现委托单一实现，取值规则只有一处真源（GroupSession）。
- */
-export function isStoreEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return isGroupSessionEnabled(env);
-}
-
-/**
- * 把当前会话状态持久化到单键。**仅在 WS_GROUP_V2 开启时写**；关闭时 no-op（返回 false）。
+ * 把当前会话状态持久化到单键。
  *
- * @returns true=已写入；false=开关关闭或写入不可用（sqlite 缺 writeRaw）
+ * @returns true=已写入；false=写入不可用（sqlite 缺 writeRaw）或序列化抛错
  */
 export function saveSession(sqlite: EngineStoreSqlite | null | undefined, session: GroupSession): boolean {
-  if (!isStoreEnabled()) return false;
   if (!sqlite || typeof sqlite.writeRaw !== 'function') return false;
   try {
     const json = session.serialize();
@@ -62,20 +52,19 @@ export function saveSession(sqlite: EngineStoreSqlite | null | undefined, sessio
 }
 
 /**
- * 从单键恢复会话状态。**仅在 WS_GROUP_V2 开启时读**；关闭时 no-op（返回 false）。
+ * 从单键恢复会话状态。
  *
  * 🔴 **整份拒绝语义**：键不存在 / sqlite 不可用 / restore 校验失败 → 一律返回 false，
  * 调用方**不得信任**恢复结果。restore 内部已保证失败时状态保持原样（不半恢复）。
  *
  * 🔴 **返回值消费现状（P062 问题3）**：当前唯一调用方 chat.ts **丢弃本返回值**，
  *   只 try/catch 不读 boolean。契约安全依赖的是「失败时 GroupSession 内部保持空状态」，
- *   而**非**返回值 —— 投影会从空状态 WAKE，等价首次运行。返回值留给未来调用方
+ *   而**非**返回值 —— 失败等价首次运行。返回值留给未来调用方
  *   （如需显式感知恢复失败并告警）使用；当前无消费者不构成缺陷，但契约与消费现状在此对齐。
  *
- * @returns true=恢复成功且状态可信；false=未恢复（键缺失/开关关闭/校验失败）
+ * @returns true=恢复成功且状态可信；false=未恢复（键缺失/校验失败/写入不可用）
  */
 export function loadSession(sqlite: EngineStoreSqlite | null | undefined, session: GroupSession): boolean {
-  if (!isStoreEnabled()) return false;
   if (!sqlite || typeof sqlite.queryAll !== 'function') return false;
   try {
     const rows = sqlite.queryAll('SELECT value FROM engine_store WHERE key = ?', [GROUP_SESSION_STORE_KEY]);
@@ -93,16 +82,9 @@ export function loadSession(sqlite: EngineStoreSqlite | null | undefined, sessio
 
 /**
  * 清除会话快照（仅在**会话确定结束/需丢弃**时调用；不删任何其他键）。
- * 过渡期单写者原则：只有本键的写者（本类）可清它。
- *
- * 🔴 P062 问题1：**补上与 save/load 一致的 WS_GROUP_V2 门控**（方案A）。
- *   原本无门控 ⇒ 开关关闭时仍会真删键，违反「关闭 = 与改动前逐字一致」的回滚契约
- *   （虽然当前全仓零调用点、未构成事故，但是「将来直接调用就踩」的地雷）。
- *   选补门控而非删除：保留本函数供未来的会话清理路径使用，且与另两个函数门控行为对齐；
- *   门控后即使将来被直接调用，关闭态下也不会误删键。
+ * 单写者原则：只有本键的写者（本类）可清它。
  */
 export function clearSession(sqlite: EngineStoreSqlite | null | undefined): void {
-  if (!isStoreEnabled()) return;
   if (!sqlite || typeof sqlite.writeRaw !== 'function') return;
   try {
     sqlite.writeRaw('DELETE FROM engine_store WHERE key = ?', [GROUP_SESSION_STORE_KEY]);

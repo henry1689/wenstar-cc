@@ -537,8 +537,56 @@ export function promoteToBlackDiamond(sqlite: SQLiteAdapter, memoryId: string): 
   return entry;
 }
 
+/**
+ * 🔴 T068任务1 U3：情感/关系类 narrative_tag 关键词（MemoryAssessor 衰减分类 + DB 实测值收拢）。
+ *   覆盖：情感/亲密/感情/恋爱/情人/恋人/暧昧/伴侣/婚姻/家庭/家人/关系/朋友/同事/怀旧/回忆/角色扮演
+ *   + 点分前缀 user.emotion / user.family / user.relation。
+ */
+export const EMOTION_REL_TAGS: ReadonlyArray<string> = [
+  '情感', '亲密', '感情', '恋爱', '情人', '恋人', '暧昧', '伴侣', '婚姻',
+  '家庭', '家人', '关系', '朋友', '同事', '怀旧', '回忆', '角色扮演',
+  'user.emotion', 'user.family', 'user.relation',
+];
+
+/** narrative_tag 是否情感/关系类（子串匹配） */
+export function isEmotionalRelationalTag(tag: unknown): boolean {
+  if (typeof tag !== 'string' || !tag) return false;
+  return EMOTION_REL_TAGS.some((k) => tag.includes(k));
+}
+
+/**
+ * 🔴 T068任务1 U3-A 内容补充判据：亲密内容关键词。
+ *   背景：徐诗韵等亲密记忆 narrative_tag 多为 NULL/梦境沉淀/日常印记（分类缺口），
+ *   仅靠 narrative_tag 判据 0 命中；内容判据可跨分类覆盖（与 P052 亲密关键词呼应）。
+ */
+export const INTIMATE_CONTENT_KEYWORDS: ReadonlyArray<string> = [
+  '亲热', '亲密', '温存', '亲吻', '缠绵', '拥抱', '抚摸', '暧昧',
+  '做爱', '性爱', '推倒', '诱惑', '脱光', '裸体', '床笫', '缠绵',
+];
+
+/** 记忆内容（raw_input+summary）是否含亲密词 */
+export function hasIntimateContent(memory: Record<string, any>): boolean {
+  const text = String(memory.raw_input ?? '') + String(memory.summary ?? '');
+  if (!text) return false;
+  return INTIMATE_CONTENT_KEYWORDS.some((k) => text.includes(k));
+}
+
+/** 是否情感/关系记忆：narrative_tag 情感类 OR 内容含亲密词（U3-A 判据） */
+export function isEmotionalRelationalMem(memory: Record<string, any>): boolean {
+  return isEmotionalRelationalTag(memory.narrative_tag) || hasIntimateContent(memory);
+}
+
+/** 三量纲钙分归一到 0-1（T068 U3 判据用）：≤1→原值；1<x≤5→÷5；>5→÷10。 */
+export function normalizeCalcium01(raw: number): number {
+  const n = Number(raw) || 0;
+  if (n <= 1) return n;
+  if (n <= 5) return n / 5;
+  return n / 10;
+}
+
 export function evaluateDiamondPromotion(memory: Record<string, any>): DiamondPromotionDecision {
-  // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不具备黑钻晋升资格（与钙化分无关）
+  // 🔴 T068任务1 U3：情感/关系类低钙独立晋升通道（不改量纲/阈值，只加一条 OR）。
+  //   narrative_tag 属情感/关系类 且 归一化钙分>=emotionMinNormalizedCalcium 且 recall>=emotionMinRecall。
   if (isMetaDiscourse(memory.raw_input) || isMetaDiscourse(memory.summary)) {
     return { eligible: false, reason: 'meta-discourse', targetState: 'candidate' };
   }
@@ -572,6 +620,18 @@ export function evaluateDiamondPromotion(memory: Record<string, any>): DiamondPr
   if (recallCount >= 5) {
     return { eligible: true, reason: 'recall>=5', targetState: 'promoted' };
   }
+  // 🔴 T068任务1 U3 情感/关系通道：narrative_tag 情感/关系类 且 归一化钙分>=emotionMinNormalizedCalcium
+  //   且 recall>=emotionMinRecall ⇒ 晋升。低钙但高情感/关系价值的记忆不因量纲+阈值卡死在金库。
+  //   阈值从 MemoryConfig.goldToDiamond 读（归一到 0-1 量纲比较，适配三量纲混用）。
+  if (isEmotionalRelationalMem(memory)) {
+    const cfg = MEMORY_CONFIG.goldToDiamond;
+    const norm01 = normalizeCalcium01(_rawCalcium);
+    const minNorm = Number((cfg as any).emotionMinNormalizedCalcium ?? 0.3);
+    const minRecall = Number((cfg as any).emotionMinRecall ?? 1);
+    if (norm01 >= minNorm && recallCount >= minRecall) {
+      return { eligible: true, reason: `emotion-channel:norm=${norm01.toFixed(3)}>=${minNorm}&recall>=${minRecall}`, targetState: 'promoted' };
+    }
+  }
   const factors: string[] = [];
   let score = 0;
   if (isLandmark) { score += 2; factors.push('landmark'); }
@@ -604,6 +664,11 @@ export function autoPromoteCandidatesV2(sqlite: SQLiteAdapter, limit = 5): Black
       .filter(Boolean),
   );
 
+  // 🔴 T068任务1 U3：情感通道阈值（配置驱动），作为候选 SQL 参数（recall、归一钙 0-1 量纲）。
+  const _emotionCfg = MEMORY_CONFIG.goldToDiamond as any;
+  const _emotionRecall = Number(_emotionCfg.emotionMinRecall ?? 1);
+  const _emotionNorm = Number(_emotionCfg.emotionMinNormalizedCalcium ?? 0.3);
+
   const candidates = sqlite.queryAll(
     `SELECT id, raw_input, calcium_score, calcium_level, recall_count, narrative_tag,
             dna_root_id, is_landmark, scar_type, lifecycle_state, promoted_to_diamond,
@@ -612,14 +677,42 @@ export function autoPromoteCandidatesV2(sqlite: SQLiteAdapter, limit = 5): Black
      WHERE COALESCE(promoted_to_diamond, 0) = 0
        AND lifecycle_state IN ('candidate', 'active', 'healed')
        AND COALESCE(namespace, 'default') <> 'test'  -- 🔴 2026-09-22 测试隔离 (#D)：测试流量不参与黑钻晋升
-       AND (calcium_score >= 0.9 OR calcium_score >= 4.5 OR recall_count >= 3 OR is_landmark = 1)
+       AND (calcium_score >= 0.9 OR calcium_score >= 4.5 OR recall_count >= 3 OR is_landmark = 1
+            -- 🔴 U3 情感/关系通道(T068任务1)：narrative_tag 情感类 且 recall>=? 且 归一钙(0-1)>=?
+            --   归一：≤1→原值；1<x≤5→÷5；>5→÷10（适配三量纲混用）。阈值配置驱动。
+            OR (COALESCE(recall_count, 0) >= ?
+                AND (CASE WHEN calcium_score <= 1 THEN calcium_score WHEN calcium_score <= 5 THEN calcium_score / 5.0 ELSE calcium_score / 10.0 END) >= ?
+                AND ((narrative_tag IS NOT NULL AND narrative_tag <> ''
+                      AND (narrative_tag LIKE '%情感%' OR narrative_tag LIKE '%亲密%' OR narrative_tag LIKE '%感情%'
+                           OR narrative_tag LIKE '%恋爱%' OR narrative_tag LIKE '%情人%' OR narrative_tag LIKE '%恋人%'
+                           OR narrative_tag LIKE '%暧昧%' OR narrative_tag LIKE '%伴侣%' OR narrative_tag LIKE '%婚姻%'
+                           OR narrative_tag LIKE '%家庭%' OR narrative_tag LIKE '%家人%' OR narrative_tag LIKE '%关系%'
+                           OR narrative_tag LIKE '%朋友%' OR narrative_tag LIKE '%同事%' OR narrative_tag LIKE '%怀旧%'
+                           OR narrative_tag LIKE '%回忆%' OR narrative_tag LIKE '%角色扮演%'
+                           OR narrative_tag LIKE 'user.emotion%' OR narrative_tag LIKE 'user.family%' OR narrative_tag LIKE 'user.relation%'))
+                     -- U3-A 内容判据：亲密内容覆盖 narrative_tag 缺口（如 NULL/梦境沉淀/日常印记）
+                     OR (COALESCE(raw_input, '') LIKE '%亲热%'
+                         OR COALESCE(raw_input, '') LIKE '%亲密%'
+                         OR COALESCE(raw_input, '') LIKE '%温存%'
+                         OR COALESCE(raw_input, '') LIKE '%亲吻%'
+                         OR COALESCE(raw_input, '') LIKE '%缠绵%'
+                         OR COALESCE(raw_input, '') LIKE '%拥抱%'
+                         OR COALESCE(raw_input, '') LIKE '%抚摸%'
+                         OR COALESCE(raw_input, '') LIKE '%暧昧%'
+                         OR COALESCE(raw_input, '') LIKE '%做爱%'
+                         OR COALESCE(raw_input, '') LIKE '%性爱%'
+                         OR COALESCE(raw_input, '') LIKE '%推倒%'
+                         OR COALESCE(raw_input, '') LIKE '%诱惑%'
+                         OR COALESCE(raw_input, '') LIKE '%脱光%'
+                         OR COALESCE(raw_input, '') LIKE '%裸体%'
+                         OR COALESCE(raw_input, '') LIKE '%床笫%'))))
      -- 🔴 2026-09-22：排序改用归一后的分值（≤1 视为 0-1 量纲，按 ×5 归到 0-5）——
      --   否则混量纲下高数值行（如 2.4 的高量纲值）会把真正合格行（如 0.9 = 4.5）挤在
      --   LIMIT 窗口之外，导致每次调用都是同一批不合格行、永远升不动。
      --   （注意：SQL 注释里不得出现反引号——会提前终结 TS 模板字符串。）
      ORDER BY (CASE WHEN calcium_score <= 1 THEN calcium_score * 5 ELSE calcium_score END) DESC, recall_count DESC, is_landmark DESC
      LIMIT ?`,
-    [limit],
+    [_emotionRecall, _emotionNorm, limit],
   ) as any[];
 
   const results: BlackDiamondEntry[] = [];

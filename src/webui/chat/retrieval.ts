@@ -8,16 +8,16 @@
  */
 import type { ConversationTurn } from '../../m5/types/index.js';
 import type { BionicSearchResult } from '../../adapter/bionic-adapter.js';
-import type { Perception24D } from '../../m3/types/perception.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { bionic } from '../../adapter/bionic-adapter.js';
 
 // P0-2: VAD 服务可用性标志 + 本地缓存池
 let _vadAvailable = true;
 const VAD_CACHE_SIZE = 200;
-const _vadCache: Array<{ timestamp: string; perception: Perception24D }> = [];
+const _vadCache: Array<{ timestamp: string; perception: PerceptionState24 }> = [];
 
-/** 记录 24D 感知到 VAD 缓存池 */
-export function pushToVadCache(perception: Perception24D): void {
+/** 记录感知向量到 VAD 缓存池（🔴 参数类型中间层属 P074 待废） */
+export function pushToVadCache(perception: PerceptionState24): void {
   _vadCache.push({ timestamp: new Date().toISOString(), perception });
   if (_vadCache.length > VAD_CACHE_SIZE) _vadCache.shift();
 }

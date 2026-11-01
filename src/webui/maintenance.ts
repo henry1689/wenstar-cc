@@ -17,6 +17,7 @@ type AnyStorage = { getStatus(): Promise<{ totalRecords: number }> | { totalReco
 import { SURNAME_LIST, SURNAME_CHARS } from '../config/app-identity.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — 人名抢救也过闸门(句子残留以姓开头假名不入户籍)
 import { checkPersonEntity } from '../m4/household/EntityWriteGate.js';
+import { FGHealthCheck } from '../app/fg/FGHealthCheck.js';
 // 🔴 V23.1(2026-09-13): 压缩/窗口参数唯一事实源 —— 原为本地硬编码，与 MemoryConfig、config.ts
 //   三处漂移（40/20 vs 200/100）。现统一从 MEMORY_CONFIG.compaction 取。
 import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
@@ -32,6 +33,11 @@ export interface HealthReport {
     heapUsedMB: number;
     heapTotalMB: number;
     rssMB: number;
+    // 🔴 2026-10-28 补齐堆外视野：`--max-old-space-size` 只约束 heapUsed，而实测堆只用
+    //   117MB、rss 却达 867MB（差额 ~700MB 全在堆外）。external / arrayBuffers 正是
+    //   sql.js 的 WASM 内存与 db.export() 缓冲的归属地 —— 不报就看不见「零日志死亡」的真凶。
+    externalMB: number;
+    arrayBuffersMB: number;
   };
   conversations: {
     total: number;
@@ -55,6 +61,19 @@ export interface HealthReport {
 export interface MaintenanceConfig {
   /** 批13: 实体离线终审间隔（默认 24h；建档不频繁，低频即可） */
   entityTriageInterval?: number;
+  /**
+   * V50 终审吞吐(2026-10-12): 每个 24h 周期内连跑几轮终审。默认 14 轮 × 单批 15 = 210。
+   *
+   * 🔴 每日吞吐由**轮数**承担，单批 15 **不可加大** —— 这是实证结论，不是保守取值：
+   *    pm2 日志 75 次实测，单批 22/23/24/26/30 **全部**落在 `观察N`（整轮未判定），
+   *    成功轮次一律 `观察0`；`EntityTriageService.ts:90` 亦注明 DEFAULT_TRIAGE_BATCH
+   *    与 JUDGE_MAX_TOKENS 是一组、**勿单独调其一**（30→15 正是为修此故障调下来的）。
+   *    2026-10-12 实测单批 22/23/24/26/30 **整轮白跑**（现象，**机制未归因**——勿套用
+   *    V45 已证伪的「输出被截断」说，那条已由剥离器修复 fb7e924 解决）。
+   * 业主 2026-10-12 目标「每天 200 个」，故 14 轮（210 ≥ 200）。
+   * **后续调整吞吐只改这一个数。**
+   */
+  entityTriageRounds?: number;
   /** 对话压缩间隔 (ms) — 默认 5 分钟 */
   compactionInterval: number;
   /** 存储 GC 间隔 (ms) — 默认 30 分钟 */
@@ -98,8 +117,25 @@ interface ConversationTurn {
   timestamp?: string;
 }
 
-/** 🔴 B（2026-09-22）：LLM 摘要超时（毫秒）—— 压缩流程不得被摘要久等阻塞 */
-const COMPACTION_SUMMARY_TIMEOUT_MS = 20_000;
+/**
+ * 🔴 B（2026-09-22）：LLM 摘要超时（毫秒）—— 压缩流程不得被摘要久等阻塞
+ *
+ * 🔴 2026-10-30 对齐修正：20s → 50s。
+ *   外层定时器必须**严格大于** LLM 调用自身的超时，否则它只是提前杀死本可成功的调用。
+ *   内层（DeepSeekLLMProvider rawCall）＝45s，而本常量原为 20s ⇒ 外层恒先到。
+ *   实测：本轮 47 次摘要失败中 **46 次是 `compaction summary timeout`**，摘要长期退化成
+ *   「取前 160 字」的机械压缩。现取 50s，让调用自己的 45s 说了算，本常量只作最后兜底。
+ *   ⚠️ 改这里时必须同步检查内层超时，二者是同一件事的两端。
+ */
+const COMPACTION_SUMMARY_TIMEOUT_MS = 50_000;
+
+/**
+ * V50 终审吞吐(2026-10-12): 默认轮数 = 14（14 × 单批 15 = 210 ≥ 业主目标 200/天）。
+ * 单批 15 的上限依据见 `MaintenanceConfig.entityTriageRounds` 注释，勿改单批。
+ */
+const TRIAGE_ROUNDS_DEFAULT = 14;
+/** V50: 终审轮间延迟（毫秒）—— 14 轮串行直打 LLM，留间隔避免连发 */
+const TRIAGE_ROUND_GAP_MS = 2_000;
 
 /**
  * 🔴 B：把 LLM 输出规范成“单段摘要”（纯函数，便于单测）
@@ -145,6 +181,7 @@ export class MaintenanceService {
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private decayTimer: ReturnType<typeof setInterval> | null = null;
   private entityTriageTimer: ReturnType<typeof setInterval> | null = null;
+  private slidingJunkCheckTimer: ReturnType<typeof setInterval> | null = null;
   /** 批13: 实体离线终审执行器（注入式 —— Maintenance 不感知 LLM 与 FamilyGraph） */
   private entityTriageRunner: (() => Promise<{ scanned: number; promoted: number; annotated: number; kept: number; skipped: boolean; error?: string }>) | null = null;
 
@@ -164,21 +201,82 @@ export class MaintenanceService {
   }
 
   /**
-   * 批13: 执行一轮实体离线终审。无候选时 runner 内部直接跳过（零 LLM 调用）。
-   * 失败只记录，绝不影响其他维护任务。
+   * 批13 → V50 终审吞吐(2026-10-12): 执行一个 24h 周期内的**多轮**实体离线终审。
+   * 无候选时 runner 内部直接跳过（零 LLM 调用）。失败只记录，绝不影响其他维护任务。
+   *
+   * 为什么是多轮而不是把单批改大：见 `MaintenanceConfig.entityTriageRounds` 注释 ——
+   * 单批 15 是实证安全上限，每日吞吐只能由轮数承担。
+   *
+   * fail-fast 判据 = **本轮零进展**（promoted + annotated === 0）：
+   *   `applyJudgments` 的入参只有 promote/annotate 两组，`keepObserving` **不传进去**
+   *   ⇒ 判成 unknown 的节点不写任何 `_judge` 标记 ⇒ 下一轮 `collectCandidateItems`
+   *   会原样再取到同一批。零进展后继续跑等于空转重复计费（历史 `扫描30 观察30`×11 即此形态）。
    */
   private async runEntityTriage(): Promise<void> {
     if (!this.entityTriageRunner) return;
+    const rounds = this.config.entityTriageRounds ?? TRIAGE_ROUNDS_DEFAULT;
+    const sum = { scanned: 0, promoted: 0, annotated: 0, kept: 0 };
+    let completed = 0;
+    let stopped: string | null = null;
+
+    for (let i = 0; i < rounds; i++) {
+      let r: { scanned: number; promoted: number; annotated: number; kept: number; skipped: boolean; error?: string };
+      try {
+        r = await this.entityTriageRunner();
+      } catch (e: any) {
+        stopped = '第' + (i + 1) + '轮异常: ' + (e?.message || e);
+        break;
+      }
+      // skipped 含「无候选」与「已有终审在进行中」两种，二者都不应继续消耗剩余轮次
+      if (r.skipped) { stopped = r.error || '无候选可判'; break; }
+      if (r.error) { console.warn('[Maintenance] 实体终审失败(非阻塞): ' + r.error); stopped = r.error; break; }
+
+      sum.scanned += r.scanned; sum.promoted += r.promoted;
+      sum.annotated += r.annotated; sum.kept += r.kept;
+      completed++;
+
+      if (r.promoted + r.annotated === 0) {
+        stopped = '第' + (i + 1) + '轮零进展（观察' + r.kept + '）— 队列未前进，停止以免空转';
+        break;
+      }
+      // 轮间小延迟，避免连续直打 LLM；最后一轮不等
+      if (i < rounds - 1) await new Promise((res) => setTimeout(res, TRIAGE_ROUND_GAP_MS));
+    }
+
+    // 完全无候选 → 沿用原语义静默（不刷日志）；其余情况必须可见（含部分完成）
+    if (completed === 0) {
+      if (stopped && stopped !== '无候选可判') console.warn('[Maintenance] 实体终审未开跑: ' + stopped);
+      return;
+    }
+    console.log(
+      '[Maintenance] 实体终审: ' + completed + '/' + rounds + '轮' +
+      ' 扫描' + sum.scanned + ' 提升' + sum.promoted +
+      ' 标注' + sum.annotated + ' 观察' + sum.kept +
+      (stopped ? ' | 停止: ' + stopped : ''),
+    );
+  }
+
+  /**
+   * 滑窗垃圾实体自检（2026-10-23，长期兑底预警）
+   * 复用 FGHealthCheck.detectSlidingWindowJunk（判据单一真源）。
+   * 只预警不自动 void —— 避免误杀真人，是否清除由人工/离线终审定夺。
+   * 发现疑似即 console.warn 高亮，供每日体检/日志回溯。
+   */
+  private runSlidingWindowSelfCheck(): void {
+    const fg = this.familyGraph ?? (this._fgGetter ? this._fgGetter() : null);
+    if (!fg) return;
     try {
-      const r = await this.entityTriageRunner();
-      if (r.skipped) return;                     // 无候选 → 静默
-      if (r.error) { console.warn('[Maintenance] 实体终审失败(非阻塞): ' + r.error); return; }
-      console.log(
-        '[Maintenance] 实体终审: 扫描' + r.scanned + ' 提升' + r.promoted +
-        ' 标注' + r.annotated + ' 观察' + r.kept,
-      );
+      const report = new FGHealthCheck(fg);
+      const suspects = report.detectSlidingWindowJunk();
+      if (suspects.length > 0) {
+        const names = suspects.map(s => s.name + '(尾:' + s.tail + ',提及' + s.mentions + ')').join(', ');
+        console.warn('[FG SelfCheck] ⚠️ 疑似滑窗垃圾实体 ' + suspects.length + ' 个，建议人工核实后 void: ' + names);
+      } else {
+        console.log('[FG SelfCheck] 滑窗垃圾自检通过：无疑似实体');
+      }
     } catch (e: any) {
-      console.warn('[Maintenance] 实体终审异常(非阻塞): ' + (e?.message || e));
+      // 自检失败绝不阻塞主链路
+      console.warn('[FG SelfCheck] 自检失败(非阻塞):', e?.message || e);
     }
   }
 
@@ -305,8 +403,11 @@ export class MaintenanceService {
     }, this.config.decayInterval);
 
     // 🔵 批13: 实体离线终审 —— 消费 FG 观察区(candidate)队列，用 LLM 批量判定。
-    // 低频（每日）即可：建档不频繁、不特急，但很重要（用户 2026-09-20）。
-    // 保守策略：只提升真人，噪声仅标注（永不自动回收）。
+    // 低频（每日一次触发）即可：建档不频繁、不特急，但很重要（用户 2026-09-20）。
+    // 保守策略：只提升真人 + 标注噪声；置信度阈值见 FamilyGraph.applyJudgments。
+    //   ⚠️ 原注释写「噪声仅标注（永不自动回收）」—— 已过时。V50 E2（业主 2026-10-12 裁决）
+    //      起，noise 且 confidence≥0.95 且 status=candidate 会**自动回收 void**（带审计与清边）；
+    //      低置信仍只写标记（保留 2026-09-20 保护档）。单次触发内连跑多轮，见 runEntityTriage。
     this.entityTriageTimer = setInterval(async () => {
       // 🔴 2026-09-20：补齐 catch —— 否则实体离线终审失败只会落 unhandledRejection（静默不执行），
       //   与 M9 巩固链路同类问题（见 docs/data-storage-reference.md「④ 批处理失败可见性」）。
@@ -316,6 +417,23 @@ export class MaintenanceService {
         console.error('[Maintenance] 实体离线终审失败(非阻塞，下轮重试):', e?.message || e);
       }
     }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
+
+    // 🔵 滑窗垃圾实体自检（2026-10-23）：每日一次，只预警不自动清除（判据见 FGHealthCheck.detectSlidingWindowJunk）
+    this.slidingJunkCheckTimer = setInterval(() => {
+      try {
+        this.runSlidingWindowSelfCheck();
+      } catch (e: any) {
+        console.warn('[Maintenance] 滑窗自检失败(非阻塞，下轮重试):', e?.message || e);
+      }
+    }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
+    // 首轮延迟 15 分钟（等 FG 稳定后再跑，避免启动期误报）
+    setTimeout(() => {
+      try {
+        this.runSlidingWindowSelfCheck();
+      } catch (e: any) {
+        console.warn('[Maintenance] 首轮滑窗自检失败(非阻塞):', e?.message || e);
+      }
+    }, 15 * 60_000);
 
     // 首轮尽快执行
     // 🔴 2026-09-20：原先两处 `.catch(() => {})` 静默吞错 ⇒ 改为告警（失败可见）
@@ -352,6 +470,7 @@ export class MaintenanceService {
     // 🔴 批13 评审 F3: 必须清理 —— 否则 /api/reset → initPipeline → start() 后
     // 旧 interval 残留 + 新建 = 每重置一次多跑一份每日终审（重复 LLM 计费）。
     if (this.entityTriageTimer) clearInterval(this.entityTriageTimer);
+    if (this.slidingJunkCheckTimer) clearInterval(this.slidingJunkCheckTimer);
     if (this.knowledgeGcTimer) clearInterval(this.knowledgeGcTimer);
     console.log('[Maintenance] 维护引擎已停止');
   }
@@ -377,6 +496,10 @@ export class MaintenanceService {
         heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024 * 10) / 10,
         heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024 * 10) / 10,
         rssMB: Math.round(mem.rss / 1024 / 1024 * 10) / 10,
+        // 堆外：sql.js 的 WASM 内存与 db.export() 缓冲都在这里，--max-old-space-size 管不到。
+        //   实测 heapUsed 117MB / rss 867MB ⇒ ~700MB 全在堆外，是「零日志死亡」的真凶所在。
+        externalMB: Math.round((mem.external || 0) / 1024 / 1024 * 10) / 10,
+        arrayBuffersMB: Math.round((mem.arrayBuffers || 0) / 1024 / 1024 * 10) / 10,
       },
       conversations: {
         total: history.length,
@@ -502,7 +625,19 @@ export class MaintenanceService {
             if (summaryText) {
               // 🔴 V23.1: 传 isSummary=1 —— 摘要必须可被识别（否则 is_summary 恒 0，摘要通道失效）。
               //   is_compacted 保持 0：摘要是压缩产物，不应被归档流程压掉。
-              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 600), { seqPos: 0, isSummary: 1 } as any);
+              // 🔴 2026-10-30 摘要行必须携带归属（与其它会话行同源）：
+              //   空间视图按「任期 ∧ 归属」过滤，**无归属的 assistant 行会被判为 unknown speaker 丢弃**
+              //   ⇒ 长会晤里早期压缩记忆在视图模式下不可见（「聊久了忘了开头」的一部分）。
+              //   实测：conversations 共 167 条摘要、139 条 belong 为空；而无归属的 assistant 行
+              //   100% 都是摘要行 —— 真实对话轮零丢失，丢的只是摘要。
+              //   归属口径：被压缩轮次若同属一个实体则继承其 UUID；跨实体则留空（不猜，户籍管理法第五条）。
+              const _belongSet = new Set<string>();
+              for (const _t of toCompact) {
+                const _b = (_t as { belongEntityUuid?: string })?.belongEntityUuid;
+                if (typeof _b === 'string' && _b) _belongSet.add(_b);
+              }
+              const _summaryBelong = _belongSet.size === 1 ? Array.from(_belongSet)[0] : undefined;
+              sqlite.insertConversation('assistant', '【对话摘要】' + summaryText.substring(0, 600), { seqPos: 0, isSummary: 1, belongEntityUuid: _summaryBelong } as any);
             }
           }
           const cutoff = remaining.length > 0 ? remaining[0].timestamp : null;
