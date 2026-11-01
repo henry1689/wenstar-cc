@@ -367,13 +367,29 @@ export class BArchiveReader {
 
       const oldCount = Number(row.consume_count) || 0;
       const oldCalcium = Number(row.block_calcium_score) || 0;
+      const now = new Date().toISOString();
 
       // 节流只作用于用户侧：运维回填是显式批量操作，不该被「刚消费过」挡住
+      // 🔴 只算出标记、**不在此处 return** —— 留痕必须先于节流分支（见下）
+      let throttled = false;
       if (kind === 'USER_CONSUME' && row.last_consumed_at) {
         const last = Date.parse(String(row.last_consumed_at));
-        if (Number.isFinite(last) && Date.now() - last < CONSUME_THROTTLE_MS) {
-          return { counted: false, reason: 'throttled', consumeCount: oldCount, calciumScore: oldCalcium };
-        }
+        if (Number.isFinite(last) && Date.now() - last < CONSUME_THROTTLE_MS) throttled = true;
+      }
+
+      // 🔴 唤醒留痕（P145 微调 5）：`awakened` 与 `consumer_counted` 是**两个独立事件**
+      //   · awakened        = 卷宗被唤醒（每次回放都记，**含节流期**）
+      //   · consumer_counted = 消费计数与钙分回写（只在实际计数时记）
+      //   若把留痕放到节流 return 之后，节流窗口内的回放将完全无痕 ——
+      //   「这卷宗被唤醒过几次」就永久不可追溯，与「append_log 可追溯」的意图相悖。
+      appendGroupLog(this.sql, gid, makeLogEntry('awakened', 'BArchiveReader', {
+        kind,
+        throttled,
+        consume_count: oldCount,
+      }, now));
+
+      if (throttled) {
+        return { counted: false, reason: 'throttled', consumeCount: oldCount, calciumScore: oldCalcium };
       }
 
       const capped = kind === 'USER_CONSUME' && oldCount >= CONSUME_MAX_COUNTED;
@@ -381,7 +397,6 @@ export class BArchiveReader {
       const delta = counted ? CONSUME_DELTA : 0;
       const newCount = oldCount + 1;
       const newCalcium = Math.round(Math.min(CALCIUM_SCORE_MAX, oldCalcium + delta) * 100) / 100;
-      const now = new Date().toISOString();
 
       assertAnchoredRead(SQL_CONSUME_WRITE);
       this.sql.writeRaw(SQL_CONSUME_WRITE, [newCount, now, newCalcium, gid]);

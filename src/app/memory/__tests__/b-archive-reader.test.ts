@@ -189,7 +189,7 @@ describe('BArchiveReader · 单点读取', () => {
 });
 
 describe('BArchiveReader · 消费计数', () => {
-  it('USER_CONSUME 首计：consume_count+1、钙分+0.3、append_log 增一条', () => {
+  it('USER_CONSUME 首计：consume_count+1、钙分+0.3、awakened 与 consumer_counted 双记', () => {
     const sql = seed();
     const reader = new BArchiveReader(sql);
     const r = reader.recordConsume('dg-1', 'USER_CONSUME');
@@ -199,6 +199,9 @@ describe('BArchiveReader · 消费计数', () => {
 
     const g = sql.groups.get('dg-1')!;
     const log = JSON.parse(g.append_log || '[]');
+    // 🔴 awakened 与 consumer_counted 是两个独立事件（微调 5）：
+    //   前者 = 卷宗被唤醒（每次回放都记），后者 = 消费计数与钙分回写（实际计数时才记）
+    expect(log.some((e: any) => e.type === 'awakened' && e.detail.kind === 'USER_CONSUME')).toBe(true);
     expect(log.some((e: any) => e.type === 'consumer_counted' && e.detail.kind === 'USER_CONSUME')).toBe(true);
   });
 
@@ -210,6 +213,24 @@ describe('BArchiveReader · 消费计数', () => {
     expect(second.counted).toBe(false);
     expect(second.reason).toBe('throttled');
     expect(sql.groups.get('dg-1')!.consume_count).toBe(1);
+  });
+
+  it('🔴 节流期回放仍写 awakened，但不写 consumer_counted（唤醒留痕不可丢）', () => {
+    const sql = seed();
+    const reader = new BArchiveReader(sql);
+    reader.recordConsume('dg-1', 'USER_CONSUME');
+
+    const before = JSON.parse(sql.groups.get('dg-1')!.append_log || '[]').length;
+    const second = reader.recordConsume('dg-1', 'USER_CONSUME');
+    expect(second.reason).toBe('throttled');
+
+    const log = JSON.parse(sql.groups.get('dg-1')!.append_log || '[]');
+    expect(log.length).toBe(before + 1);                 // 只多一条
+    const added = log[log.length - 1];
+    expect(added.type).toBe('awakened');                 // 且必须是 awakened
+    expect(added.detail.throttled).toBe(true);           // 如实标注本次被节流
+    // 节流期没有真正计数 ⇒ consumer_counted 仍只有首计那一条
+    expect(log.filter((e: any) => e.type === 'consumer_counted').length).toBe(1);
   });
 
   it('OPS_BACKFILL 只计数记日志，**不改钙分**', () => {
