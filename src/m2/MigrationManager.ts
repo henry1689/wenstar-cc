@@ -1161,6 +1161,41 @@ const MIGRATIONS: Migration[] = [
       } catch (e) { console.warn('[Migration] v30 MemSym 要素池失败:', e); }
     },
   },
+
+  // v31 → P145 批 A（2026-11-01，业主批准）：B 链路「沉睡卷宗」卷宗化列。
+  //   依据：T002 Phase 3 六项要求 + P145 六项微调定稿。
+  //   全部可空 ⇒ 现有读写路径零影响（没有列也能跑）；写入侧与存量回填在后续批次接入。
+  //   · perception_40d_snapshot —— 组级 40D 聚合快照。**刻意不用** T002 的 event_state_40d：
+  //     memories 已有行级 perception_40d 列，同名会让人以为是同一个东西。
+  //     JSON 形态（微调 1）：{ dims, agg, dim_version, generated_at, vector }。
+  //   · content_hash —— **只覆盖 conversations 原文**（微调 4）：摘要会重生成、原文不会，
+  //     混在一算则每次重生成摘要都要全量重算，且分不清是原文变了还是摘要变了。
+  //   · summary_hash —— block_summary 的独立哈希。
+  //   · append_log —— 只追加 JSON 数组，条目 {ts,type,actor,detail}（微调 5）。
+  //     type 枚举：snapshot_created / summary_generated / summary_regenerated /
+  //     calcium_promoted / lifecycle_changed / awakened / consumer_counted / erratum。
+  {
+    version: 31,
+    description: 'P145: dialog_groups 卷宗化（40D 快照 / 内容哈希 / 摘要哈希 / 追加日志）',
+    apply: (db: any) => {
+      const _cols: Array<[string, string]> = [
+        ['perception_40d_snapshot', 'TEXT'],
+        ['content_hash', 'TEXT'],
+        ['summary_hash', 'TEXT'],
+        ['append_log', 'TEXT'],
+      ];
+      let _added = 0;
+      for (const [name, type] of _cols) {
+        // 每列单独 try：sql.js 对已存在的列抛错，不能让它中断其余列
+        try { db.run(`ALTER TABLE dialog_groups ADD COLUMN ${name} ${type}`); _added++; }
+        catch { /* 列已存在 */ }
+      }
+      try {
+        db.run('CREATE INDEX IF NOT EXISTS idx_dg_content_hash ON dialog_groups(content_hash)');
+      } catch { /* 索引失败不阻断迁移 */ }
+      console.log(`[Migration] v31 ✅ dialog_groups 卷宗化列就绪（本次新增 ${_added}/${_cols.length}）`);
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════
