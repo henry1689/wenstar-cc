@@ -165,12 +165,14 @@ export async function flushDialogGroup(
         if (_fi === anchorIdx) continue;
         const _ftext = dg.rounds[_fi].q + dg.rounds[_fi].a;
         if (FEATURE_ROUND_RE.test(_ftext)) {
-          _featRounds.push('【第' + (_fi + 1) + '轮】\n用户: ' + dg.rounds[_fi].q + '\n玉瑶: ' + dg.rounds[_fi].a);
+          _featRounds.push('【第' + (_fi + 1) + '轮】\n用户: ' + dg.rounds[_fi].q + '\n' + _who(dg.rounds[_fi]) + _whisperMark(dg.rounds[_fi]) + ': ' + dg.rounds[_fi].a);
           if (_featRounds.length >= 2) break;
         }
       }
     }
-    let anchorText = '【核心】\n用户: ' + dg.rounds[anchorIdx].q + '\n玉瑶: ' + dg.rounds[anchorIdx].a;
+    // 🔴 P145 批 C：核心轮同样取真实说话人（旧块无字段 ⇒ 回退「玉瑶」）。
+    //   L200 一带的 resolveAnchorSpeaker 后处理保留，作为历史块的整组兜底。
+    let anchorText = '【核心】\n用户: ' + dg.rounds[anchorIdx].q + '\n' + _who(dg.rounds[anchorIdx]) + _whisperMark(dg.rounds[anchorIdx]) + ': ' + dg.rounds[anchorIdx].a;
     if (_featRounds.length > 0) {
       anchorText += '\n\n【重要补充】\n' + _featRounds.join('\n\n');
       console.log(`[DG·特征轮] 组 ${dg.id} 锚点补充 ${_featRounds.length} 个特征轮(承诺/约定/引文)`);
