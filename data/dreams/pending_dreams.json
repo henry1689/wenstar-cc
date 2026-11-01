@@ -1,5 +1,82 @@
 [
   {
+    "id": "dream_mvhtt4nj_77nj",
+    "source": "M3",
+    "content": "鸿艺提到: 徐诗雨",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1042",
+    "created_at": "2026-10-21T08:04:15.439Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhtua1c_rgny",
+    "source": "M3",
+    "content": "鸿艺提到: 阿芬，我准备走了，今天又带了大半天，不得不走了",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1052",
+    "created_at": "2026-10-21T08:05:09.072Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhtvz9u_oc02",
+    "source": "M3",
+    "content": "鸿艺提到: 你就别出门送了，别人看到也不好，轻轻叫一声，爸爸",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1058",
+    "created_at": "2026-10-21T08:06:28.434Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhtxcpf_qdh3",
+    "source": "M3",
+    "content": "鸿艺提到: 找徐诗雨和阿珍过来聊聊",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1062",
+    "created_at": "2026-10-21T08:07:32.499Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhu2ef0_w62p",
+    "source": "M3",
+    "content": "鸿艺提到: 诗雨，你给阿珍说好了今天一起回家吗",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1070",
+    "created_at": "2026-10-21T08:11:27.996Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhu5qqq_gb7q",
+    "source": "M3",
+    "content": "鸿艺提到: 明白，到时就看你的眼色和听你的话音行事",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1076",
+    "created_at": "2026-10-21T08:14:03.938Z",
+    "status": "pending"
+  },
+  {
+    "id": "dream_mvhuluwo_uyai",
+    "source": "M3",
+    "content": "鸿艺提到: 我说门外那个",
+    "affected_traits": [
+      "extraversion"
+    ],
+    "related_memory_id": "evt_20261021_1214",
+    "created_at": "2026-10-21T08:26:35.832Z",
+    "status": "pending"
+  },
+  {
     "id": "dream_mvxqhbcc_jf64",
     "source": "M3",
     "content": "鸿艺提到: 徐诗雨",
