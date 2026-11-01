@@ -1224,6 +1224,35 @@ const MIGRATIONS: Migration[] = [
       console.log(`[Migration] v32 ✅ dialog_groups 消费计数列就绪（本次新增 ${_added}/${_cols.length}）`);
     },
   },
+  // ═══════════════════════════════════════════════════════════════════
+  // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：n-gram 倒排索引整表下线。
+  //
+  //   前置（均已落地）：B1 对话块召回接入 v11、B2 删摘要写入、B3a 删全部
+  //   写入方与读取方、B3b-1 删 schema 建表与 SearchIndexBuilder 构建能力。
+  //   至此 search_index 无任何生产读写路径，本迁移执行 DROP。
+  //
+  //   ⚠️ **不可逆**。回滚唯一途径 = 从停服前备份恢复：
+  //      data/backups/fusion_memory-pre-b3b-drop-20261102T030345Z.db.gz
+  //      （44.7MB，gzip -t 已校验；备份时 webui 处于 stopped 状态，无并发写入）
+  //
+  //   预期收益：主库回收约 110MB。
+  // ═══════════════════════════════════════════════════════════════════
+  {
+    version: 33,
+    description: '检索架构 v11 §S4: DROP TABLE search_index（n-gram 倒排索引整表下线）',
+    apply: (db: any) => {
+      // 索引先删：DROP TABLE 会自动带走表上索引，但显式删除可在表已不存在时仍保持幂等
+      try { db.run('DROP INDEX IF EXISTS idx_si_source'); } catch { /* 索引可能已不存在 */ }
+      try { db.run('DROP INDEX IF EXISTS idx_si_term'); } catch { /* 历史索引，可能已删 */ }
+      try {
+        db.run('DROP TABLE IF EXISTS search_index');
+        console.log('[Migration] v33 ✅ search_index 已下线（n-gram 倒排索引整表移除）');
+      } catch (e) {
+        // 不静默失败：DDL 失败必须可见，但不中断启动（其余迁移与主链路不受影响）
+        console.warn('[Migration] v33 ⚠️ DROP TABLE search_index 失败:', (e as Error)?.message);
+      }
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

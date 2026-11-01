@@ -268,23 +268,22 @@ CREATE TABLE IF NOT EXISTS black_diamond_terms (
 CREATE INDEX IF NOT EXISTS idx_bd_terms_term ON black_diamond_terms(term);
 CREATE INDEX IF NOT EXISTS idx_bd_terms_bd_id ON black_diamond_terms(bd_id);
 
--- V11.0: 统一语义搜索索引 — n-gram倒排表，覆盖四层存储
--- n-gram仅作前置围栏过滤器，不参与最终排序。
--- 最终排序由自有32D语义向量 完成。
-CREATE TABLE IF NOT EXISTS search_index (
-    term TEXT NOT NULL,              -- 2-3字中文n-gram
-    source_type TEXT NOT NULL,       -- 'conversation'|'memory'|'black_diamond'|'knowledge_base'
-    source_id TEXT NOT NULL,         -- 对应表的id
-    belong_entity_uuid TEXT,         -- 实体归属
-    position INTEGER DEFAULT 0,      -- term在原文中的位置
-    PRIMARY KEY (term, source_type, source_id)
-);
--- 🛑 检索架构 v11 §S1(2026-10-27): 删除纯冗余索引 idx_si_term(term)。
---   PRIMARY KEY(term, source_type, source_id) 的最左前缀已覆盖 (term) 查询 ⇒ 该索引只增写入成本。
---   idx_si_source(source_type, source_id) 不是最左前缀，保留。
---   （2026-11-01 合并说明：本处曾残留 git stash pop 的冲突标记，冲突两侧均为注释、
---     均声明已删除 idx_si_term，DDL 完全一致；保留 upstream 侧较新注释，删除标记。）
-CREATE INDEX IF NOT EXISTS idx_si_source ON search_index(source_type, source_id);
+-- 🛑 2026-11-02 业主裁决「彻底拆除 n-gram」：search_index 表已整表下线。
+--
+--   原表（《统一语义搜索引擎 V11.0》2026-07-27 建立）是四层存储的 2-3 字 n-gram
+--   倒排索引，用作检索的前置围栏过滤器。
+--
+--   下线依据（实测）：
+--     · 对话块域：3,076 行 / 0.48MB 摘要，却维护 769,131 行 / 110.4MB 索引（230 倍），
+--       且查询 258.4ms vs v11 结构化召回 27.4ms；
+--     · 72.1% 的 term 只出现 1 次（跨词边界碎片），高频 term 全是摘要模板套话；
+--     · 记忆/知识/黑钻/作品四域在 v11 之后均无读取方。
+--
+--   替代：v11 结构化召回（recallByStructured）直接对源表文本做分片 LIKE 围栏，
+--         切词复用 SearchIndexBuilder.buildNgrams，**但不建索引**（白皮书 §4.2.2）。
+--
+--   已存库由迁移 v33 执行 DROP TABLE；本处不再建表，故新库天然不含此表。
+--   备份：data/backups/fusion_memory-pre-b3b-drop-20261102T030345Z.db.gz
 
 -- AQC质检表
 CREATE TABLE IF NOT EXISTS aqc_records (

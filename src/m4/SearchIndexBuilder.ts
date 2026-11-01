@@ -1,16 +1,17 @@
 /**
- * SearchIndexBuilder — n-gram倒排索引构建器 (V11.0)
- * ==================================================
- * 对四层存储（砂金/金库/黑钻/知识库）的文本内容做中文2-3字n-gram切词，
- * 写入 search_index 表。提供增量索引和存量回填两个入口。
+ * SearchIndexBuilder — 中文 n-gram 分词器（2026-11-02 由索引构建器降级为纯分词工具）
+ * ==================================================================================
+ * 历史：本文件原为《统一语义搜索引擎 V11.0》（2026-07-27）的索引构建器，
+ *   负责把四层存储的文本切成 2-3 字 n-gram 写入 search_index 倒排表。
  *
- * n-gram仅作性能优化前置过滤器，不参与最终相关性排序。
- * 最终排序权完全交给 VectorReranker 的自有40D向量。
+ * 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」后的现状：
+ *   · search_index 表的全部写入方与读取方已删除（B1–B3a），表由 v33 迁移 DROP；
+ *   · 本文件只剩 **buildNgrams 切词能力** —— 被 v11 结构化召回的分片围栏复用
+ *     （StructuredRecall.buildKeywordShards、meeting-recall、Backfill、
+ *      MemoryRetriever、SurprisalGate、MMRDiversifier 六处）。
+ *   · 这正是白皮书 §4.2.2 的原设计：「与 buildNgrams 相同的切分逻辑，**但不建索引**」。
  *
- * 设计原则：
- *   - 零外部依赖，纯本地n-gram切词
- *   - 停用词过滤，减少噪声term
- *   - 批量写入（每100条commit一次），控制SQLite写入开销
+ * 保留的切词口径与历史逐字一致（停用词表 + 2/3-gram 滑窗），以保证已有检索行为不变。
  */
 
 // ── 中文停用词（高频虚词，不参与索引） ──
@@ -54,214 +55,10 @@ export function buildNgrams(text: string): string[] {
   return [...ngrams];
 }
 
-/**
- * 索引单条文档 — 写入 search_index 表。
- * 幂等：INSERT OR REPLACE，同文档重复索引覆盖。
- *
- * @param db     sql.js Database 实例（需有 run 方法）
- * @param sourceType 'conversation' | 'memory' | 'black_diamond' | 'knowledge_base'
- * @param sourceId  对应表的主键
- * @param text      要索引的文本内容
- * @param entityUuid 实体归属UUID（可选）
- */
 
-/**
- * 🔴 2026-11-01 检索架构 v11 §S4（业主裁决）：已退役的 n-gram 索引分区。
- *
- *   v11 / V13 主链都不再查询这些分区，其唯一消费方是旧链路兜底；
- *   而启动自愈（server.ts 的 V11.0 回填）会把它们全量重建到 265 万行 / 827MB 库。
- *
- *   本函数是这 5 类写入的**唯一汇聚点**（KnowledgeEngine / MemoryAssessor /
- *   rebuildAllIndexes 全部经此），故只此一处拦截即可全仓断写。
- *
- *   🔴 2026-11-02 更新（业主裁决「彻底拆除 n-gram」）：'dialog_group' 也不再有写入方。
- *   B1 已把 DialogGroupAdapter 切到 `recallByStructured(domain='dialog_group')`
- *   （直接对 block_summary 做分片 LIKE 围栏），B2 已删除 BlockSummaryService.indexSummary
- *   —— 摘要不再切 n-gram 入索引。至此 search_index 的全部 6 类分区均无写入方，
- *   B3 将整表下线。
- *
- *   ⚠️ 本集合仍保留 'dialog_group' 之外的五类，是因为它定义的是「哪些 source_type
- *   不允许写入」；'dialog_group' 从未经本函数写入（旧写入方是 BlockSummaryService
- *   的裸 SQL），故无需在集合里声明。
- */
-export const RETIRED_SOURCE_TYPES: ReadonlySet<string> = new Set([
-  'conversation', 'memory', 'black_diamond', 'knowledge_base', 'work',
-]);
-
-export function indexDocument(
-  db: any,
-  sourceType: string,
-  sourceId: string,
-  text: string,
-  entityUuid?: string,
-): number {
-  if (!db || !text) return 0;
-  if (RETIRED_SOURCE_TYPES.has(sourceType)) return 0;
-
-  const ngrams = buildNgrams(text);
-  if (ngrams.length === 0) return 0;
-
-  let count = 0;
-  for (let pos = 0; pos < ngrams.length; pos++) {
-    try {
-      db.run(
-        `INSERT OR REPLACE INTO search_index (term, source_type, source_id, belong_entity_uuid, position)
-         VALUES (?, ?, ?, ?, ?)`,
-        [ngrams[pos], sourceType, sourceId, entityUuid || null, pos],
-      );
-      count++;
-    } catch {
-      // 重复term跳过
-    }
-  }
-  return count;
-}
-
-/**
- * 存量回填 — 扫描全部四层存储，构建完整n-gram索引。
- * 仅在 search_index 为空时执行（避免重复回填）。
- *
- * @returns 索引的文档总数
- */
-export function rebuildAllIndexes(db: any): { total: number; bySource: Record<string, number> } {
-  if (!db) return { total: 0, bySource: {} };
-
-  const bySource: Record<string, number> = { conversation: 0, memory: 0, black_diamond: 0, knowledge_base: 0, work: 0 };
-
-  // ═══ 1. 砂金库 — conversations（🛑 检索架构 v11 §S1 已停建） ═══
-  // 🔴 2026-10-27: conversation 的 n-gram 倒排索引已判废，本函数不再为其建索引
-  //   （原 V34 的「全量覆盖、不带 is_compacted 过滤」逻辑随之撤销）。
-  //   bySource.conversation 保留键位并恒为 0，维持调用方统计口径的字段形状不变。
-  //   读取侧影响见 §S1.1 变更台账：会晤倒排路退化为时间窗兜底。
-  //   🔴 2026-11-02：dialog_group 摘要路也已改走 v11 结构化召回，不再依赖本索引。
-
-  // ═══ 2. 金库 — memories ═══
-  try {
-    const mems = db.exec(
-      "SELECT id, raw_input, belong_entity_uuid FROM memories WHERE raw_input IS NOT NULL ORDER BY id"
-    );
-    if (mems.length && mems[0].values) {
-      for (const [id, rawInput, entityUuid] of mems[0].values) {
-        const n = indexDocument(db, 'memory', String(id), String(rawInput), entityUuid ? String(entityUuid) : undefined);
-        if (n > 0) bySource.memory++;
-      }
-    }
-    console.log(`[SearchIndex] 金库索引: ${bySource.memory} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 金库索引失败:', (e as Error).message);
-  }
-
-  // ═══ 3. 黑钻 — black_diamond ═══
-  try {
-    const bds = db.exec(
-      "SELECT id, summary, belong_entity_uuid FROM black_diamond WHERE summary IS NOT NULL ORDER BY id"
-    );
-    if (bds.length && bds[0].values) {
-      for (const [id, summary, entityUuid] of bds[0].values) {
-        const n = indexDocument(db, 'black_diamond', String(id), String(summary), entityUuid ? String(entityUuid) : undefined);
-        if (n > 0) bySource.black_diamond++;
-      }
-    }
-    console.log(`[SearchIndex] 黑钻索引: ${bySource.black_diamond} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 黑钻索引失败:', (e as Error).message);
-  }
-
-  // ═══ 4. 知识库 — knowledge_base ═══
-  try {
-    const kbs = db.exec(
-      "SELECT id, content, belong_entity_uuid FROM knowledge_base WHERE content IS NOT NULL ORDER BY id"
-    );
-    if (kbs.length && kbs[0].values) {
-      for (const [id, content, entityUuid] of kbs[0].values) {
-        // 只索引标题和内容
-        const text = String(content);
-        const n = indexDocument(db, 'knowledge_base', String(id), text.substring(0, 5000), entityUuid ? String(entityUuid) : undefined);
-        if (n > 0) bySource.knowledge_base++;
-      }
-    }
-    console.log(`[SearchIndex] 知识库索引: ${bySource.knowledge_base} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 知识库索引失败:', (e as Error).message);
-  }
-
-  // ═══ 5. 作品 — works（长文召回元数据桥，全文切块索引） ═══
-  try {
-    const works = db.exec(
-      "SELECT work_id, full_text, belong_entity_uuid FROM works WHERE full_text IS NOT NULL ORDER BY created_at DESC"
-    );
-    if (works.length && works[0].values) {
-      for (const [workId, fullText, entityUuid] of works[0].values) {
-        const n = indexWorkChunks(db, String(workId), String(fullText), entityUuid ? String(entityUuid) : undefined);
-        if (n > 0) bySource.work = (bySource.work || 0) + 1;
-      }
-    }
-    console.log(`[SearchIndex] 作品索引: ${bySource.work || 0} 条`);
-  } catch (e) {
-    console.warn('[SearchIndex] 作品索引失败:', (e as Error).message);
-  }
-
-  const total = Object.values(bySource).reduce((a, b) => a + b, 0);
-  return { total, bySource };
-}
-
-/**
- * 作品全文切块索引（V22 长文召回）。
- * 长文（小说/文章 3000+ 字）整体 buildNgrams 会产生海量 term，且 n-gram 检索上限 100 条/term
- * 会稀释关键命中。按 800 字切块，逐块索引——让"星落之城"这类内容词在任一块都能命中。
- *
- * @param db        sql.js Database 实例
- * @param workId    作品主键（works.work_id）
- * @param fullText  作品全文
- * @param entityUuid 作品归属UUID（可选）
- * @returns 索引的文档块数
- */
-export function indexWorkChunks(
-  db: any,
-  workId: string,
-  fullText: string,
-  entityUuid?: string,
-): number {
-  if (!db || !fullText) return 0;
-  const CHUNK_SIZE = 800;
-  let count = 0;
-  for (let i = 0; i < fullText.length; i += CHUNK_SIZE) {
-    const chunk = fullText.substring(i, i + CHUNK_SIZE);
-    const n = indexDocument(db, 'work', workId, chunk, entityUuid);
-    count += n > 0 ? 1 : 0;
-  }
-  return count;
-}
-
-/**
- * 🛑 检索架构 v11 §S1（2026-10-27）：砂金库 n-gram 增量回填**已停用**。
- *
- * 原职责（V34 2026-09-25）：补齐 `rebuildAllIndexes` 覆盖不到的对话，是砂金库倒排召回主路径的补写通道。
- * 现状：conversation 的 n-gram 倒排索引整体判废（重建侧与实时写入侧均已停），本函数退化为**空操作**。
- *
- * 刻意保留函数与签名：调用方 `src/webui/chat/retrieval-stage.ts` 仍在启动期调用一次，
- * 直接删除会改动对话主链的 import 与调用点。返回 0 的语义是「本次回填 0 条」，调用方无需感知。
- *
- * @param db         保留参数（已不使用），维持调用方零改动
- * @param batchLimit 保留参数（已不使用），维持调用方零改动
- * @returns 恒为 0
- */
-export function backfillConversationIndex(db: any, batchLimit = 0): number {
-  void db;          // 保留形参：调用点零改动（见上方说明）
-  void batchLimit;  // 保留形参：调用点零改动（见上方说明）
-  return 0;
-}
-
-/**
- * 检查 search_index 是否为空
- */
-export function isIndexEmpty(db: any): boolean {
-  try {
-    const r = db.exec('SELECT COUNT(*) as cnt FROM search_index');
-    return !r.length || !r[0].values.length || r[0].values[0][0] === 0;
-  } catch {
-    return true;
-  }
-}
-
-export default { buildNgrams, indexDocument, indexWorkChunks, rebuildAllIndexes, backfillConversationIndex, isIndexEmpty };
+// 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：本文件的索引构建能力
+//   （RETIRED_SOURCE_TYPES / indexDocument / rebuildAllIndexes /
+//    indexWorkChunks / backfillConversationIndex / isIndexEmpty）已全部删除。
+//   n-gram 倒排索引表 search_index 由 v33 迁移整表下线；
+//   本文件只保留**切词能力** buildNgrams，供 v11 结构化召回的分片围栏复用
+//   （白皮书 §4.2.2：「与 buildNgrams 相同的切分逻辑，但不建索引」）。
