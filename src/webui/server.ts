@@ -1243,40 +1243,20 @@ async function initPipeline(): Promise<void> {
   }, 5 * 60 * 1000));
   console.log('  DualHelix 失败重试已启动 ✓ (5min周期)');
 
-  // ── V11.0: n-gram索引存量回填（启动时检测，为空则自动构建）──
-  (async () => {
-    try {
-      const _si = storage.getSQLite();
-      // 🆕 P3 修复: sql.js 内存态无 rawDb → fallback 到 _si 本身（sql.js Database 有 run/exec 方法）
-      // 根因: rebuildAllIndexes 原只接受 better-sqlite3 原始实例，导致 memory 索引永不上线
-      const _idxDb = _si?.rawDb ?? _si;
-      if (_idxDb) {
-        const { isIndexEmpty, rebuildAllIndexes } = await import('../m4/SearchIndexBuilder.js');
-        if (isIndexEmpty(_idxDb)) {
-          console.log('[SearchIndex] 首次启动，开始存量回填…');
-          const _report = rebuildAllIndexes(_idxDb);
-          console.log(`[SearchIndex] 回填完成: ${_report.total} 条文档 (砂金${_report.bySource.conversation || 0} 金库${_report.bySource.memory || 0} 黑钻${_report.bySource.black_diamond || 0} 知识库${_report.bySource.knowledge_base || 0})`);
-        } else {
-          // V12.1: 检查各 source_type 索引是否缺失，缺失则增量补建
-          try {
-            const _bdCnt = (_idxDb as any).exec("SELECT COUNT(*) as cnt FROM search_index WHERE source_type='black_diamond'");
-            if (_bdCnt[0]?.values[0]?.[0] === 0) {
-              console.log('[SearchIndex] 黑钻索引缺失，增量补建…');
-              const _report = rebuildAllIndexes(_idxDb);
-              console.log(`[SearchIndex] 黑钻增量: ${_report.bySource.black_diamond || 0} 条`);
-            }
-            // 🆕 P3: memory 索引缺失检查
-            const _memCnt = (_idxDb as any).exec("SELECT COUNT(*) as cnt FROM search_index WHERE source_type='memory'");
-            if (_memCnt[0]?.values[0]?.[0] === 0) {
-              console.log('[SearchIndex] memory 索引缺失，补建…');
-              const _report = rebuildAllIndexes(_idxDb);
-              console.log(`[SearchIndex] memory 补建: ${_report.bySource.memory || 0} 条`);
-            }
-          } catch { /* 非关键 */ }
-        }
-      }
-    } catch { /* 回填失败不阻塞启动 */ }
-  })();
+  // ── V11.0: n-gram 索引存量回填 —— 🛑 2026-11-01 已按检索架构 v11 §S4 退役 ──
+  //   原逻辑：整表为空 → rebuildAllIndexes()；black_diamond 或 memory 分区为 0 →
+  //   同样调 rebuildAllIndexes()，而它是**全量重建整张索引表**，不是只补那一个分区。
+  //
+  //   🔴 实测后果：主库清到 254MB 后，webui 每次重启被这段自愈灌回 827MB
+  //      （memory 由 0 涨到 265 万行、black_diamond 62 万行、knowledge_base 25 万行）。
+  //      2026-11-01 连续复现三次（254MB → 859MB → 827MB）。
+  //
+  //   退役依据：conversation 索引已于 2026-10-27 按 §S1 判废停建；
+  //   其余分区 v11 / V13 主链均不查询，唯一消费方是旧链路兜底。
+  //   'dialog_group' 分区不受影响 —— 它由 BlockSummaryService 在写摘要时建立，
+  //   不走本回填，DialogGroupAdapter 通道②照常可用。
+  //
+  //   回滚：恢复本提交之前的 IIFE 即可（索引会在下次启动时重建）。
 
   // ── P0-4: UUID 健康报告（启动时输出） ──
   (async () => {

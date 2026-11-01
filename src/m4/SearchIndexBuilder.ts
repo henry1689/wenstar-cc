@@ -64,6 +64,24 @@ export function buildNgrams(text: string): string[] {
  * @param text      要索引的文本内容
  * @param entityUuid 实体归属UUID（可选）
  */
+
+/**
+ * 🔴 2026-11-01 检索架构 v11 §S4（业主裁决）：已退役的 n-gram 索引分区。
+ *
+ *   v11 / V13 主链都不再查询这些分区，其唯一消费方是旧链路兜底；
+ *   而启动自愈（server.ts 的 V11.0 回填）会把它们全量重建到 265 万行 / 827MB 库。
+ *
+ *   本函数是这 5 类写入的**唯一汇聚点**（KnowledgeEngine / MemoryAssessor /
+ *   rebuildAllIndexes 全部经此），故只此一处拦截即可全仓断写。
+ *
+ *   ⚠️ 'dialog_group' **不在**退役集合内 —— DialogGroupAdapter 通道②
+ *   （块摘要命中，config: enable_dialog_group_memory=true）仍依赖它，
+ *   且它由 BlockSummaryService 用裸 SQL 写入，不经本函数。
+ */
+export const RETIRED_SOURCE_TYPES: ReadonlySet<string> = new Set([
+  'conversation', 'memory', 'black_diamond', 'knowledge_base', 'work',
+]);
+
 export function indexDocument(
   db: any,
   sourceType: string,
@@ -72,6 +90,7 @@ export function indexDocument(
   entityUuid?: string,
 ): number {
   if (!db || !text) return 0;
+  if (RETIRED_SOURCE_TYPES.has(sourceType)) return 0;
 
   const ngrams = buildNgrams(text);
   if (ngrams.length === 0) return 0;
