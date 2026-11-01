@@ -156,6 +156,13 @@ related: [T001, P001]
 ## 关联文档
 
 - 项目路线图：`docs/memory-system-reconstruction-roadmap.md`
-- T002任务书：`01-tasks/T002-20261018-AB双链路记忆体系落实建设.md`
-- 法典体系：待修订（宪章§7 / 真值规范V3.0 / 户籍法§12 / 运维审计规范）
-- ADR-0012：待编写（双链路记忆架构）
+- T002任务书：`09-archive/T002-20261018-AB双链路记忆体系落实建设.md`（已归档，现行版本见 `active/P145-*`）
+- **双链路架构 ADR**：`docs/adr/ADR-015-20261102-AB双链路记忆架构与B链路卷宗化.md` ✅ 已落地
+  （T002 原文写作「ADR-0012」，该号已被 FG 法律对齐占用，以 ADR-015 为准）
+- 法典体系实况（2026-11-02 核实）：
+  | T002 Phase 5 要求 | 实况 |
+  |---|---|
+  | 真值规范 V3.0 | ✅ `data/knowledge-v4/governance/wenstaros-truth-subject-world-domain-v3.0.md`（首个实体化版本，V2.0 原文从未存在） |
+  | 运维审计规范 | ✅ `data/knowledge-v4/governance/memory-ops-audit-standard-v1.0.md` |
+  | 户籍法 §12 | 📝 草案，见 ADR-015 §5.1。**待业主裁决**方可入正文（且应为第四十二条，第十二条已被占用） |
+  | 宪章 §7 | ⛔《WenStarOS 系统根本宪章》仓内无实体文件，不凭空新建；原则由真值规范 §4.0 承担 |

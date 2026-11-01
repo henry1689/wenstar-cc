@@ -2,7 +2,7 @@
 
 > 🔴 **本文件是全部治理文件的唯一权威入口。改动任何代码/数据前，先读本表对应的法律/规约。**
 > Canonical 主板块：`D:\tools\wenstar-cc`
-> 最后更新：2026-09-03（治理文件收编后）
+> 最后更新：2026-11-02（P145 批 D：真值规范 V3.0 + 运维审计规范 V1.0 入表，ADR-015 登记）
 
 ---
 
@@ -22,11 +22,14 @@
 | ③ | [DNA 双螺旋编码规范](data/knowledge-v4/governance/dna-double-helix-encoding-v2.0.md) | V2.0 | DNA 双螺旋完整编码 |
 | ③ | [天权工程蓝皮书](data/knowledge-v4/governance/tianquan-engineering-blueprint-v3.0.md) | V3.0 | 天权工程架构 |
 | ③ | [三体全域仿生白皮书](data/knowledge-v4/governance/tianquan-tribody-whitepaper-v3.0.md) | V3.0 | 三体全域仿生认知系统 |
+| ③ | [真值、主体与世界域专项规范](data/knowledge-v4/governance/wenstaros-truth-subject-world-domain-v3.0.md) | **V3.0** | 真值判定 / 主体标识 / 世界域 / **记忆体系 A/B 双链路接口规范**（2026-11-02 首个实体化版本） |
 | ④ | [PAE 档案采集引擎](data/knowledge-v4/governance/pae-profile-acquisition-engine.md) | V3.3 | 人物档案 LLM 采集 |
 | ④ | [实体生命周期治理](data/knowledge-v4/governance/entity-lifecycle-governance.md) | V1.0 | 实体四态流转 |
 | ④ | [系统健康守卫](data/knowledge-v4/governance/system-health-guard.md) | V1.0 | 完整性守护 |
+| ④ | [记忆系统运维审计规范](data/knowledge-v4/governance/memory-ops-audit-standard-v1.0.md) | **V1.0** | 记忆域留痕义务 / 停服备份 / 法典修订五步流程 / 告警分级 |
 | ④ | [编码体系规约](docs/编码体系规约.md) | V1.1 | 编码规范 |
 | ④ | [FG 档案录入治理](docs/fg-profile-entry-governance.md) | — | FG 档案录入管控 |
+| ④ | [FG 结构规范](docs/FG-结构规范-V1.0.md) | V1.0 草案 | FG nodes/dossier/edges 结构 + 采集/去重/读取规范（2026-10-21 T010，待验收） |
 | ⑤ | [FG 亲属白皮书](docs/blueprint/白皮书_fg-kinship-v4.md) | V4 | FG 亲属关系设计 |
 | ⑤ | [上下文注入蓝皮书](docs/blueprint/蓝皮书_context-injection-v10.md) | V10 | 上下文注入 |
 | ⑤ | [会晤模式蓝皮书](docs/blueprint/蓝皮书_meeting-mode-v5.md) | V5 | 会晤模式 |
@@ -60,14 +63,23 @@ data/knowledge-v4/governance/_archive/
 ## 决策记录（ADR）
 
 ```
-docs/adr/  （编号 001-011，序号唯一：新 ADR = 当前最大 +1）
-├── ADR-010-dialog-group-memory-unit.md   （记忆单元由单消息迁移至对话块，2026-10-06）
-└── ADR-011-memory-retrieval-orchestration.md （记忆「取」的架构：分层候选 + 统一编排，2026-10-06）
+docs/adr/  （编号 001-015 + ADR-MEM-*，序号唯一：新 ADR = 当前最大 +1 = 016）
+├── ADR-001 ~ 009                （L0 纯规则 / 分类生长 / 最小语义单元 / m1-m2 边界 / 冷启动
+│                                  / 分离原则 / 模块边界 / 钙化统一 / chat 拆分）
+├── ADR-010-dialog-group-memory-unit.md        （记忆单元由单消息迁移至对话块，2026-10-06）
+├── ADR-011-memory-retrieval-orchestration.md  （记忆「取」的架构：分层候选 + 统一编排，2026-10-06）
+├── ADR-012-FG法律对齐架构决策.md              （FG：单一字典 + 单一采集引擎 + 单一读取入口，2026-10-21 草案）
+├── ADR-014-20261026-...                        （⚠️ 已归档废弃，内容并入 ADR-MEM-002）
+├── ADR-015-20261102-AB双链路记忆架构与B链路卷宗化.md  （★ A/B 双链路定稿 + B 链路卷宗化，2026-11-02）
+├── ADR-MEM-002-...                             （MemSym 双通路记忆共生协议，法条本文）
+└── ADR-MEM-003-20261102-...                    （记忆生命周期与受控遗忘，M 层基础法案）
 ```
 
-> ⚠️ `ADR-011` 在《P0 记忆体系止血任务书》V1–V3 中被记为「ADR-0012」（V1 沿用业主原文，无人核对序号）。
-> 按本文档「治理纪律 5」取当前最大序号 +1 = **011**。该 ADR 正文不引用自身序号，
-> 若业主另有 011 规划，整体改号成本为零。
+> ⚠️ **编号沿革（两处历史误记，已核实）**：
+> ① `ADR-011` 在《P0 记忆体系止血任务书》V1–V3 中被记为「ADR-0012」；
+> ② T002 任务书 §Phase 5 要求的「ADR-0012（双链路架构）」—— 该号早已被 FG 法律对齐占用。
+> 双链路 ADR 实际编号为 **ADR-015**（2026-11-02 落地，见其 §〇 编号更正）。
+> **ADR-013 在 `docs/adr/` 中无实体文件**（仅被 ADR-014 引用过一次），编号不复用。
 
 ---
 
