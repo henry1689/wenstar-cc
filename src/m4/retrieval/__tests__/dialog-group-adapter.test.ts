@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import initSqlJs from 'sql.js';
 import { migrateSchema } from '../../../m2/MigrationManager.js';
 import { DialogGroupAdapter } from '../adapters/DialogGroupAdapter.js';
-import { indexDocument } from '../../SearchIndexBuilder.js';
 import { createDefaultRegistry } from '../index.js';
 import type { RetrievalContext } from '../types.js';
 import type { PolicePolicy } from '../../../governance/police/UUIDPoliceFilter.js';
@@ -80,15 +79,18 @@ function seedBlock(
       "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
       [role, content, '2026-10-06T00:00:00.000Z', ++seq, dgId, uuid],
     );
-    const row = q(db, 'SELECT id FROM conversations WHERE seq_pos = ?', [seq])[0];
-    // 🔴 用生产同一份索引写入函数 —— 块域复用 conversation 索引，不另建
-    indexDocument(db, 'conversation', String(row.id), content, uuid ?? undefined);
   }
+  // 🔴 2026-11-02：不再调 indexDocument 写 search_index（该通道已按业主裁决拆除）。
+  //   B 链路现在的召回源是 block_summary 本身 —— v11 围栏直接对它做分片 LIKE，
+  //   与 BlockSummaryService 的产出闭环。
+  // 标签从各块自身内容派生（不得给所有块塞同一组标签，否则「正文不串块」断言失效）
+  const tags = contents.map(([, c]) => c.slice(0, 6)).join('、');
+  const summary = `【标签】${tags}\n【叙事】${contents.map(([, c]) => c).join('；')}\n【情感】平静`;
   db.run(
-    "INSERT OR REPLACE INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at) " +
-    "VALUES (?,?,?,?,?,?,?,'active',0,?)",
+    "INSERT OR REPLACE INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at,block_summary) " +
+    "VALUES (?,?,?,?,?,?,?,'active',0,?,?)",
     [dgId, uuid ?? '', meta?.tag ?? 'neutral', meta?.calcium ?? 5, meta?.hash ?? 'h-' + dgId,
-     meta?.turns ?? contents.length, meta?.reason ?? 'topic_switch', '2026-10-06T00:00:00.000Z'],
+     meta?.turns ?? contents.length, meta?.reason ?? 'topic_switch', '2026-10-06T00:00:00.000Z', summary],
   );
 }
 
@@ -158,13 +160,13 @@ describe('[ADR-010 P1-C1] 户籍 fail-closed —— 宁缺勿泄', () => {
     expect(hits, 'strict 模式不得放行无归属块').toEqual([]);
   });
 
-  it('enforce=false（离线巡检）时不设 UUID 过滤', async () => {
+  it('🔴 巡检模式也走 UUID 闸门 —— B1 行为收紧（见白皮书附录 D.5）', async () => {
     const db = await buildDb();
     seedBlock(db, 'DG_B', UUID_B, [['user', '杭州的机票订了吗']]);
     const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db, {
       policy: { visibleUuids: new Set(), enforce: false, searchScope: 'full' } as PolicePolicy,
     }));
-    expect(hits.length, '离线巡检应能全库搜').toBe(1);
+    expect(hits, '对话块一律走 UUID 闸门：空白名单零返回').toEqual([]);
   });
 });
 
@@ -190,19 +192,17 @@ describe('[ADR-010 P1-C1] 退化输入与异常隔离', () => {
 });
 
 describe('[ADR-010 P1-C1] 架构不变量：复用索引 + 开关可控', () => {
-  it('🔴 块域走既有 conversation 索引 —— 不得出现 source_type=dialog_group 的索引行', async () => {
+  it('🔴 块域不写任何 search_index 行 —— 召回直接读 block_summary', async () => {
     const db = await buildDb();
     seedBlock(db, 'DG1', UUID_A, [['user', '杭州的机票订了吗']]);
-    const kinds = q(db, 'SELECT DISTINCT source_type FROM search_index').map((r) => r.source_type);
-    expect(kinds, '块不另建索引（ADR-010 P1-C1 细化 4：search_index 已占全库约 80% 体积）')
-      .not.toContain('dialog_group');
-    expect(kinds).toContain('conversation');
+    const rows = q(db, 'SELECT COUNT(*) AS c FROM search_index')[0].c;
+    expect(rows, '2026-11-02 拆除 n-gram 后，块域不应再产生任何索引行').toBe(0);
   });
 
   it('开关默认开 ⇒ 默认注册表含 dialog_group 域', () => {
     const reg = createDefaultRegistry({ sqlite: { queryAll: () => [] } } as any);
     const domains = reg.all().map((a) => a.domain);
-    expect(domains, 'dialog_group 应进入默认注册（当前 yaml enable_dialog_group_memory=true）')
+    expect(domains, 'dialog_group 应进入默认注册（当前 yaml dialog_group_v11_recall=true）')
       .toContain('dialog_group');
   });
 

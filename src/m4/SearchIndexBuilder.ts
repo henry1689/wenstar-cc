@@ -74,9 +74,15 @@ export function buildNgrams(text: string): string[] {
  *   本函数是这 5 类写入的**唯一汇聚点**（KnowledgeEngine / MemoryAssessor /
  *   rebuildAllIndexes 全部经此），故只此一处拦截即可全仓断写。
  *
- *   ⚠️ 'dialog_group' **不在**退役集合内 —— DialogGroupAdapter 通道②
- *   （块摘要命中，config: enable_dialog_group_memory=true）仍依赖它，
- *   且它由 BlockSummaryService 用裸 SQL 写入，不经本函数。
+ *   🔴 2026-11-02 更新（业主裁决「彻底拆除 n-gram」）：'dialog_group' 也不再有写入方。
+ *   B1 已把 DialogGroupAdapter 切到 `recallByStructured(domain='dialog_group')`
+ *   （直接对 block_summary 做分片 LIKE 围栏），B2 已删除 BlockSummaryService.indexSummary
+ *   —— 摘要不再切 n-gram 入索引。至此 search_index 的全部 6 类分区均无写入方，
+ *   B3 将整表下线。
+ *
+ *   ⚠️ 本集合仍保留 'dialog_group' 之外的五类，是因为它定义的是「哪些 source_type
+ *   不允许写入」；'dialog_group' 从未经本函数写入（旧写入方是 BlockSummaryService
+ *   的裸 SQL），故无需在集合里声明。
  */
 export const RETIRED_SOURCE_TYPES: ReadonlySet<string> = new Set([
   'conversation', 'memory', 'black_diamond', 'knowledge_base', 'work',
@@ -126,7 +132,8 @@ export function rebuildAllIndexes(db: any): { total: number; bySource: Record<st
   // 🔴 2026-10-27: conversation 的 n-gram 倒排索引已判废，本函数不再为其建索引
   //   （原 V34 的「全量覆盖、不带 is_compacted 过滤」逻辑随之撤销）。
   //   bySource.conversation 保留键位并恒为 0，维持调用方统计口径的字段形状不变。
-  //   读取侧影响见 §S1.1 变更台账：会晤倒排路退化为时间窗兜底，dialog_group 摘要路不受影响。
+  //   读取侧影响见 §S1.1 变更台账：会晤倒排路退化为时间窗兜底。
+  //   🔴 2026-11-02：dialog_group 摘要路也已改走 v11 结构化召回，不再依赖本索引。
 
   // ═══ 2. 金库 — memories ═══
   try {

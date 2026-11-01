@@ -31,7 +31,6 @@
  */
 
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
-import { buildNgrams } from '../../m4/SearchIndexBuilder.js';
 
 /** 与 ProfileAcquisitionEngine.RawLLMCaller 同签名，复用 server.ts 的 llmProvider.rawCall */
 export type BlockSummaryRawCaller = (
@@ -63,9 +62,6 @@ export interface BlockSummaryBatchResult {
   failed: number;
   pending: number;
 }
-
-/** search_index 的 source_type；与 DialogGroupAdapter 共用同一字面量 */
-export const BLOCK_SUMMARY_SOURCE_TYPE = 'dialog_group';
 
 /** 摘要上限：过长会稀释 n-gram 精度，也拉高注入 token */
 const MAX_SUMMARY_CHARS = 600;
@@ -241,17 +237,13 @@ export class BlockSummaryService {
     }
     const summary = parsed.text;
 
-    const meta = sql.queryAll<{ belong_entity_uuid: string | null }>(
-      'SELECT belong_entity_uuid FROM dialog_groups WHERE dialog_group_id = ?',
-      [dgId],
-    )[0];
-    const uuid = meta?.belong_entity_uuid ?? null;
-
+    // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：摘要只写 block_summary 文本，
+    //   不再调 indexSummary 切 n-gram 入 search_index。检索侧（DialogGroupAdapter）
+    //   已改为 v11 结构化召回，直接对 block_summary 做分片 LIKE 围栏，产出与消费闭环。
     sql.writeRaw(
       'UPDATE dialog_groups SET block_summary = ?, summary_state = ?, updated_at = ? WHERE dialog_group_id = ?',
       summary, 'done', new Date().toISOString(), dgId,
     );
-    this.indexSummary(sql, dgId, summary, uuid);
     this.attempts.delete(dgId);
     return 'done';
   }
@@ -321,22 +313,6 @@ export class BlockSummaryService {
     if (out.replace(/\s/g, '').length < 10) return { text: '', complete: false };
     const bounded = out.slice(0, MAX_SUMMARY_CHARS);
     return { text: bounded, complete: this.isStructured(bounded) };
-  }
-
-  /**
-   * 摘要写入 search_index（source_type='dialog_group'）。
-   * 🔴 摘要不是 conversations 的聚合副本，而是**新增内容** —— 故必须单独建索引，
-   *    否则「原文没有字面命中、只有摘要能命中」的查询永远召不回该组。
-   */
-  private indexSummary(sql: SQLiteAdapter, dgId: string, summary: string, uuid: string | null): void {
-    const grams = buildNgrams(summary);
-    for (let i = 0; i < grams.length; i++) {
-      sql.writeRaw(
-        'INSERT OR REPLACE INTO search_index (term, source_type, source_id, belong_entity_uuid, position) ' +
-        'VALUES (?, ?, ?, ?, ?)',
-        grams[i], BLOCK_SUMMARY_SOURCE_TYPE, String(dgId), uuid, i,
-      );
-    }
   }
 
   private markState(sql: SQLiteAdapter, dgId: string, state: 'failed' | 'skipped', error?: string): void {
