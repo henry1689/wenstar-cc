@@ -182,8 +182,8 @@ export class BlockSummaryService {
       return 'skipped';
     }
 
-    const convs = sql.queryAll<{ role: string; content: string }>(
-      'SELECT role, content FROM conversations ' +
+    const convs = sql.queryAll<{ role: string; content: string; belong_entity_uuid: string | null }>(
+      'SELECT role, content, belong_entity_uuid FROM conversations ' +
       'WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0) ' +
       'ORDER BY timestamp ASC, seq_pos ASC',
       [dgId],
@@ -193,9 +193,30 @@ export class BlockSummaryService {
       return 'skipped';
     }
 
+    // 🔴 P145 批 C（2026-11-01）空间对齐：回答者不再一律写「玉瑶」。
+    //   assistant 行的 belong_entity_uuid 就是真实说话人（阿珍/诗雨…），旧实现把它
+    //   整行抹成「玉瑶」⇒ 摘要与 B 链路召回入口的主体全错。
+    //   取名：批量查一次 FG 实体表（nodes: uuid→name），只读名称、不参与检索、
+    //   不引入 FamilyGraph 依赖。查不到 / 异常一律回退「玉瑶」，绝不阻断摘要生成。
+    const _uuidToName = new Map<string, string>();
+    try {
+      const _uuids = [...new Set(
+        convs.map((c) => c.belong_entity_uuid).filter((u): u is string => typeof u === 'string' && u.length > 0),
+      )];
+      if (_uuids.length > 0) {
+        const _rows = sql.queryAll<{ uuid: string; name: string }>(
+          `SELECT uuid, name FROM nodes WHERE uuid IN (${_uuids.map(() => '?').join(',')})`,
+          _uuids,
+        );
+        for (const _r of _rows) {
+          if (_r && typeof _r.uuid === 'string' && typeof _r.name === 'string' && _r.name) _uuidToName.set(_r.uuid, _r.name);
+        }
+      }
+    } catch { /* 名称解析失败 ⇒ 回退「玉瑶」 */ }
+
     // 单条截断 500 字：摘要只需要语义骨架，原文仍完整保留在 conversations
     const transcript = convs
-      .map((c) => `${c.role === 'user' ? '用户' : '玉瑶'}: ${String(c.content || '').slice(0, 500)}`)
+      .map((c) => `${c.role === 'user' ? '用户' : (_uuidToName.get(String(c.belong_entity_uuid ?? '')) ?? '玉瑶')}: ${String(c.content || '').slice(0, 500)}`)
       .join('\n');
 
     if (transcript.replace(/\s/g, '').length < this.minChars) {

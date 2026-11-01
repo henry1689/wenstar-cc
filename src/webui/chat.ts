@@ -177,7 +177,13 @@ interface DialogGroupState {
   id: string;
   topic: string;
   locusPath: string;
-  rounds: Array<{ q: string; a: string; seqPos: number; time: number }>;
+  /**
+   * 🔴 P145 批 C（2026-11-01）空间对齐 —— 与 `prefrontal/types.ts` 的同名结构保持同构。
+   *   本文件有自己的本地定义（历史遗留的两份定义），两处必须同时补字段，
+   *   否则 rounds.push 传新字段会触发 TS2353。
+   *   全部可选 ⇒ 旧快照 / 旧块回退「玉瑶」，逐字兼容。
+   */
+  rounds: Array<{ q: string; a: string; seqPos: number; time: number; speakerUuid?: string | null; speakerName?: string; audience?: { kind: 'room' } | { kind: 'seat'; uuid: string }; whisperTo?: string }>;
   perceptions: Record<string, number>[];
   maxCalcium: number;
   maxCalciumRound: number;
@@ -3248,7 +3254,16 @@ if (_meetingExited) {
 
       // 🔴 P1-1: 结束语那轮 _dg 已置 null（_meetingExited），跳过本轮加入
       // 🔴 2026-10-18: 进入指令轮同理（_meetingEntered 置 null 后此处自然跳过）
-      _dg?.rounds.push({ q: message, a: reply, seqPos, time: Date.now() });
+      // 🔴 P145 批 C（2026-11-01）空间对齐：轮次带上**真实说话人**与**听觉范围**。
+      //   此前 rounds 只有 q/a，落库时（dialog-group-stage / BlockSummaryService）
+      //   只能一律写「玉瑶:」——会晤中阿珍、诗雨的发言被记成玉瑶说的，并随 wiki
+      //   摘要进入 B 链路召回入口，主体错乱且写进去就不可逆。
+      //   · speakerUuid 取 GroupSession 当前 speaker（玉瑶态为 null）
+      //   · speakerName 同上取参与者名，玉瑶态固定「玉瑶」（与旧行为一致）
+      //   · audience/whisperTo 记录本轮**业主发言**的听觉范围（耳语 = seat）
+      //   字段在 DialogGroupState 里全部可选 ⇒ 旧块与重启恢复不受影响。
+      const _dgS = ctx._groupSession?.getState?.(); const _dgU = _dgS?.speakerUuid ?? null; const _dgN = _dgU ? (_dgS!.participants.find((x: any) => x.uuid === _dgU)?.name ?? '玉瑶') : '玉瑶';
+      _dg?.rounds.push({ q: message, a: reply, seqPos, time: Date.now(), speakerUuid: _dgU, speakerName: _dgN, audience: _whisperToUuid ? { kind: 'seat', uuid: _whisperToUuid } : { kind: 'room' }, ...(_whisperToUuid ? { whisperTo: _whisperToUuid } : {}) });
       _dg?.perceptions.push({ ...p });
       if (_dg && decision.enhanced.calcium_score > _dg.maxCalcium) {
         _dg.maxCalcium = decision.enhanced.calcium_score;

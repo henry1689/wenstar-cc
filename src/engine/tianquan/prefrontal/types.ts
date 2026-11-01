@@ -85,7 +85,28 @@ export interface DialogGroupState {
   id: string;
   topic: string;
   locusPath: string;
-  rounds: Array<{ q: string; a: string; seqPos: number; time: number }>;
+  rounds: Array<{
+    q: string;
+    a: string;
+    seqPos: number;
+    time: number;
+    /**
+     * 🔴 P145 批 C（2026-11-01）空间对齐 —— 每轮**回答者**的真实身份。
+     *
+     * 背景：本结构此前只有 q/a，落库时（dialog-group-stage / BlockSummaryService）
+     * 只能把回答一律标成「玉瑶」。会晤中阿珍、诗雨的发言因此被记成玉瑶说的，
+     * 并随 wiki 摘要进入 B 链路召回入口 —— 主体错乱且不可逆。
+     *
+     * 全部字段**可选**：旧块（本批之前产生）缺这些字段时，落库侧回退「玉瑶」，
+     * 与改动前逐字一致；玉瑶态本身也回退「玉瑶」（speakerUuid 为 null）。
+     */
+    speakerUuid?: string | null;
+    speakerName?: string;
+    /** 该轮**业主发言**的听觉范围（room = 全场；seat = 只此一人可闻） */
+    audience?: { kind: 'room' } | { kind: 'seat'; uuid: string };
+    /** 耳语目标（与 audience.kind==='seat' 同源，便于落库侧快速判定） */
+    whisperTo?: string;
+  }>;
   perceptions: Record<string, number>[];
   maxCalcium: number;
   maxCalciumRound: number;

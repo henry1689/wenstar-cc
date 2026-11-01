@@ -131,8 +131,15 @@ export async function flushDialogGroup(
     if (!sql) return;
     const gw = new MemoryWriteGateway(sql);
 
+    // 🔴 P145 批 C（2026-11-01）空间对齐：下列三处曾硬编码「玉瑶」——
+    //   会晤中阿珍、诗雨的发言因此被记成玉瑶说的，并随卷宗正文与 wiki 摘要进入
+    //   B 链路召回入口，主体错乱且写进去不可逆。
+    //   统一改为读轮次上的真实说话人；旧块（无该字段）回退「玉瑶」，逐字兼容；
+    //   耳语轮加标记，使卷宗能区分「当众说的」与「私下说的」。
+    const _who = (r: any): string => (typeof r?.speakerName === 'string' && r.speakerName) ? r.speakerName : '玉瑶';
+    const _whisperMark = (r: any): string => (r?.whisperTo || r?.audience?.kind === 'seat') ? '（耳语）' : '';
     const combined = dg.rounds.map((r: any, i: number) =>
-      '【第' + (i + 1) + '轮】\n用户: ' + r.q + '\n玉瑶: ' + r.a
+      '【第' + (i + 1) + '轮】\n用户: ' + r.q + '\n' + _who(r) + _whisperMark(r) + ': ' + r.a
     ).join('\n\n');
     const now = new Date().toISOString();
 
