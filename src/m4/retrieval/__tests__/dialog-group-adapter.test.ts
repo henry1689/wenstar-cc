@@ -18,8 +18,9 @@ import type { PolicePolicy } from '../../../governance/police/UUIDPoliceFilter.j
  *   ③ **元数据透传**：块钙分 / 场景指纹 / 衰减类别 / 轮数进 payload（P1-C2 分层注入要用）
  *   ④ **异常隔离**：SQL 出错返回空数组而非抛出（不得阻塞其他检索路）
  *
- * 另锁一条**架构不变量**：本域复用既有 conversation 索引，**不另建索引**
- * （ADR-010 P1-C1 细化 4 —— search_index 已占全库约 80% 体积）。
+ * 另锁一条**架构不变量**：本域**不另建任何索引**，召回直接读 block_summary
+ * （2026-11-02 业主裁决拆除 n-gram，search_index 整表下线；v11 围栏对 block_summary
+ *  做分片 LIKE，与 BlockSummaryService 的产出闭环）。
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -192,11 +193,15 @@ describe('[ADR-010 P1-C1] 退化输入与异常隔离', () => {
 });
 
 describe('[ADR-010 P1-C1] 架构不变量：复用索引 + 开关可控', () => {
-  it('🔴 块域不写任何 search_index 行 —— 召回直接读 block_summary', async () => {
+  it('🔴 search_index 表已整表下线 —— 块域召回直接读 block_summary', async () => {
     const db = await buildDb();
     seedBlock(db, 'DG1', UUID_A, [['user', '杭州的机票订了吗']]);
-    const rows = q(db, 'SELECT COUNT(*) AS c FROM search_index')[0].c;
-    expect(rows, '2026-11-02 拆除 n-gram 后，块域不应再产生任何索引行').toBe(0);
+    const rows = q(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='search_index'");
+    expect(
+      rows.length,
+      '2026-11-02 拆除 n-gram 后该表应整表下线（schema.sql 不再建表 + v33 迁移 DROP）；' +
+        '若它又出现，说明有人把倒排索引悄悄接了回来',
+    ).toBe(0);
   });
 
   it('开关默认开 ⇒ 默认注册表含 dialog_group 域', () => {

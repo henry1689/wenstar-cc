@@ -86,14 +86,8 @@ beforeEach(async () => {
     is_test INTEGER,
     belong_entity_uuid TEXT
   )`);
-  db.run(`CREATE TABLE search_index (
-    term TEXT NOT NULL,
-    source_type TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    belong_entity_uuid TEXT,
-    position INTEGER DEFAULT 0,
-    PRIMARY KEY (term, source_type, source_id)
-  )`);
+  // 🔴 2026-11-02 拆除 n-gram：不再建 search_index —— 块摘要直接落在 dialog_groups.block_summary，
+  //   由 v11 结构化召回的分片 LIKE 围栏消费（白皮书 §4.2.2），无中间索引表。
 
   sql = {
     queryAll: (q: string, p?: unknown[]) => {
@@ -112,7 +106,7 @@ beforeEach(async () => {
 });
 
 describe('BlockSummaryService 三层契约', () => {
-  it('正常 JSON → done，三层齐全并写入索引', async () => {
+  it('正常 JSON → done，三层齐全（摘要即召回源，无中间索引）', async () => {
     addGroup('DG_OK', 'topic_switch');
     const svc = makeService(async () => VALID_JSON);
     const r = await svc.runBatch();
@@ -123,8 +117,6 @@ describe('BlockSummaryService 三层契约', () => {
     expect(row.block_summary).toContain('【标签】');
     expect(row.block_summary).toContain('【叙事】');
     expect(row.block_summary).toContain('【情感】');
-    const idx = sql.queryAll("SELECT COUNT(*) AS n FROM search_index WHERE source_type='dialog_group' AND source_id='DG_OK'")[0];
-    expect(Number(idx.n)).toBeGreaterThan(0);
   });
 
   it('首次非 JSON、重试成功 → done', async () => {
@@ -138,7 +130,7 @@ describe('BlockSummaryService 三层契约', () => {
     expect(groupRow('DG_RETRY').block_summary).toContain('【叙事】');
   });
 
-  it('两次都不是 JSON → skipped + summary_error，不写摘要/索引（不伪造契约）', async () => {
+  it('两次都不是 JSON → skipped + summary_error，不写摘要（不伪造契约）', async () => {
     addGroup('DG_BAD', 'topic_switch');
     const svc = makeService(async () => PROSE);
     const r = await svc.runBatch();
@@ -148,8 +140,6 @@ describe('BlockSummaryService 三层契约', () => {
     expect(row.summary_state).toBe('skipped');
     expect(row.summary_error).toBe('llm_unstructured_after_retry');
     expect(row.block_summary).toBeNull();
-    const idx = sql.queryAll("SELECT COUNT(*) AS n FROM search_index WHERE source_type='dialog_group' AND source_id='DG_BAD'")[0];
-    expect(Number(idx.n)).toBe(0);
   });
 
   it('meeting_entry → 直接 skipped，不调用 LLM', async () => {

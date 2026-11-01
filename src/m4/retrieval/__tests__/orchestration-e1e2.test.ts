@@ -61,12 +61,9 @@ function seedBlock(db: any, dgId: string, state: string, calcium = 5): void {
       "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
       ['user', content, '2026-10-06T00:00:00.000Z', ++seq, dgId, UUID_A],
     );
-    const row = q(db, 'SELECT id FROM conversations WHERE seq_pos = ?', [seq])[0];
-    q(db, 'SELECT 1'); // no-op keep seq stable
-    db.run(
-      "INSERT INTO search_index (term,source_type,source_id,belong_entity_uuid,position) VALUES ('杭州','conversation',?, ?, 0)",
-      [String(row.id), UUID_A],
-    );
+    // 🔴 2026-11-02 拆除 n-gram：原此处向 search_index 播种 term 行，该表已由 v33 迁移整表下线。
+    //   块路（dialog_group）的召回源是 block_summary 本身（v11 围栏直接分片 LIKE），
+    //   高钙路走 recallByStructured，两者都不再读倒排表 —— 会话行本身即足够。
   }
   db.run(
     "INSERT OR REPLACE INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at,block_summary,summary_state,last_ts) " +

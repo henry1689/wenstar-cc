@@ -17,42 +17,9 @@ describe('七层全开 · 熊梓铭纪实小说检索', () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database(buffer);
 
-    // ══════════════════════════════════════════════
-    // Step 1: 确保 search_index 表存在 + 有数据
-    // ══════════════════════════════════════════════
-    console.log('\n═══ Step 1: search_index 表状态 ═══');
-    let idxCount = 0;
-    try {
-      const r = (db as any).exec("SELECT COUNT(*) FROM search_index");
-      idxCount = r[0]?.values[0]?.[0] ?? 0;
-    } catch { /* 表不存在 */ }
-    console.log(`  search_index: ${idxCount} 条`);
-
-    if (idxCount === 0) {
-      console.log('  建表 + 回填中...');
-      // 先删再建，确保列数正确（之前可能残留3列表）
-      try { db.run("DROP TABLE IF EXISTS search_index"); } catch {}
-      db.run(`CREATE TABLE search_index (
-        term TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
-        belong_entity_uuid TEXT, position INTEGER DEFAULT 0,
-        PRIMARY KEY (term, source_type, source_id)
-      )`);
-      for (const [table, col] of [['memories','raw_input'],['conversations','content'],['knowledge_base','content']]) {
-        const rows = db.exec(`SELECT id, ${col} FROM ${table} WHERE ${col} IS NOT NULL LIMIT 3000`);
-        if (rows.length && rows[0].values) {
-          for (const [id, text] of rows[0].values) {
-            const cleaned = String(text || '').replace(/[，。！？、；：""''（）《》【】\s\d-]/g,'').trim();
-            if (cleaned.length < 2) continue;
-            const ngrams = new Set<string>();
-            for (let i=0;i<cleaned.length-1;i++) ngrams.add(cleaned.substring(i,i+2));
-            for (let i=0;i<cleaned.length-2;i++) ngrams.add(cleaned.substring(i,i+3));
-            for (const g of ngrams) db.run("INSERT OR IGNORE INTO search_index VALUES(?,?,?,NULL,0)",[g,table==='memories'?'memory':table==='conversations'?'conversation':'knowledge_base',String(id)]);
-          }
-        }
-      }
-      const c = db.exec("SELECT COUNT(*) FROM search_index");
-      console.log(`  回填完成: ${c[0].values[0][0]} 条`);
-    }
+    // Step 1（原「建 search_index 并回填 n-gram」）已整段删除 ——
+    //   🔴 2026-11-02 业主裁决拆除 n-gram，该表由 v33 迁移整表下线；
+    //   种子召回改由 Step 4 直接对 memories.raw_input 做分片 LIKE（与 v11 同口径）。
 
     // ══════════════════════════════════════════════
     // Step 2: 在线实体边 — 按对话组粒度建边
@@ -185,17 +152,19 @@ describe('七层全开 · 熊梓铭纪实小说检索', () => {
     for (let i=0;i<cleaned.length-2;i++) qNgrams.add(cleaned.substring(i,i+3));
     const gramList = [...qNgrams];
 
-    // 查 search_index 找到候选记忆
+    // 🔴 2026-11-02：原查 search_index 的 term 倒排，改为直接对源表做分片 LIKE ——
+    //   这正是 v11 结构化召回（recallByStructured.buildKeywordShards）的同口径做法：
+    //   复用同样的 n-gram 切分，但**不建索引**（白皮书 §4.2.2）。
     const seedIds = new Set<string>();
     for (const gram of gramList.slice(0, 6)) {
       try {
-        const rows = (db as any).exec("SELECT source_id FROM search_index WHERE term=? LIMIT 50", [gram]);
+        const rows = (db as any).exec("SELECT id FROM memories WHERE raw_input LIKE ? LIMIT 50", [`%${gram}%`]);
         if (rows.length && rows[0].values) {
           for (const [id] of rows[0].values) seedIds.add(String(id));
         }
       } catch {}
     }
-    console.log(`  n-gram 种子候选: ${seedIds.size} 条唯一记忆`);
+    console.log(`  关键词分片 LIKE 种子候选: ${seedIds.size} 条唯一记忆`);
 
     // 查这些记忆的 global_uid
     const seedUids = new Set<string>();

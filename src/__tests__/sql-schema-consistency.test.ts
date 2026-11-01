@@ -557,8 +557,8 @@ const TABLE_CRITICAL_COLUMNS: Record<string, readonly string[]> = {
   vault_log: ['belong_entity_uuid'],
   // 实体表：V5.0 TXS-ID 户籍标识（无它无法参与户籍体系）
   entities: ['uuid'],
-  // 统一语义搜索索引：V11.0 实体归属
-  search_index: ['belong_entity_uuid'],
+  // 🔴 2026-11-02：search_index 已整表下线（业主裁决拆除 n-gram，v33 迁移 DROP）。
+  //   登记项同步移除 —— 否则「登记表零命中 ⇒ 守卫失效」的 deadRegistrations 断言必红。
   // FG 节点表（family_graph.db）：节点身份
   nodes: ['uuid'],
 };
@@ -606,18 +606,9 @@ const SITE_EXEMPTIONS: ReadonlyArray<{
       'DROP COLUMN，只有 vault 库的 memories 保留它（全仓已 grep 确认唯一命中）。' +
       '同仓 [D8-全表] 守卫已用 REPLACE_GUARD_EXEMPT_FILE 豁免同一行 —— 此前两个守卫对同一点判定相反，本条即对齐。',
   },
-  {
-    kind: 'derived-index',
-    table: 'search_index',
-    columns: '*',
-    marker: 'INSERT OR IGNORE INTO search_index(term, source_type, source_id)',
-    reason:
-      'MigrationManager v10 的 n-gram 存量回填（term 粒度，一行一个三元组，INSERT OR IGNORE ' +
-      '不覆盖已有行）。索引行的归属由**源表**承载，并由权威写入方 SearchIndexBuilder.indexDocument ' +
-      '（INSERT OR REPLACE ... belong_entity_uuid, position）补齐；实测 search_index 中 ' +
-      "source_type='memory' 的 337,021 行归属缺失数为 0。注意本指纹**不含**权威写入方" +
-      '（它是 REPLACE + 带空格写法），故 Statement 侧仍受守卫约束。',
-  },
+  // 🔴 2026-11-02：原 search_index 的 derived-index 豁免随该表整表下线一并移除。
+  //   MigrationManager v10 的 n-gram 存量回填同样在下线批次中清理，指纹不再存在 ——
+  //   留着会成为「登记腐化 → 静默放行」的口子（D8v2-判据 组要求豁免依据可被源码证实）。
 ];
 
 /**
