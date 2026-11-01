@@ -787,6 +787,21 @@ async function initPipeline(): Promise<void> {
     console.warn('  ⚠️ 对话组摘要装配失败（不影响主链路）:', e?.message || e);
   }
 
+  // ── P145 批 A2: B 链路卷宗归档（content_hash + append_log）──
+  //   与摘要服务同范式：后台扫 `content_hash IS NULL` 的组，空闲零开销；失败不影响主链路。
+  //   为什么放后台：闭组时 conversations 可能还缺最后一轮 ⇒ 哈希漏内容且不可逆。
+  //   ⚠️ 未装配时卷宗仍可读（哈希只是校验能力，不是召回前提）。
+  try {
+    const { BlockArchiveService } = await import('../app/memory/BlockArchiveService.js');
+    const blockArchiveSvc = new BlockArchiveService({
+      getSql: () => storage?.getSQLite?.() ?? null,
+    });
+    blockArchiveSvc.start();
+    console.log('  卷宗归档 (BlockArchiveService) 已装配 ✓  (后台异步，空闲零调用)');
+  } catch (e: any) {
+    console.warn('  ⚠️ 卷宗归档装配失败（不影响主链路）:', e?.message || e);
+  }
+
   // 🔴 T011 Phase 1 · 启动断言：FG 关系字典完整性（fail-fast，违例即阻断启动）
   //   三项：reverse悬空 / 缺中文label / 关系名格式。不放 try 里 —— 必须阻断，不是警告。
   {
