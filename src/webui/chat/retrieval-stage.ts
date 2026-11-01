@@ -182,14 +182,6 @@ const SANDBOX_MAX_RATIO_OF_MEMORY = (() => {
   const v = Number(getRetrievalFusionConfig()?.budget?.sandbox_max_ratio_of_memory);
   return Number.isFinite(v) && v > 0 ? v : 0.3;
 })();
-/** 砂金库索引启动补齐：单次最多回填条数（0 = 不限） */
-const SANDBOX_INDEX_BACKFILL_BATCH = (() => {
-  const v = Number(MEMORY_CONFIG.compaction.sandboxIndexBackfillBatch);
-  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 1000;
-})();
-/** 砂金库索引补齐：每进程只做一次（幂等；重复调用是空转） */
-let SANDBOX_INDEX_BACKFILL_DONE = false;
-
 /**
  * C LLM 兜底挑选（2026-09-12）
  *
@@ -393,18 +385,10 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       }
       const _sqlite = ctx.storage?.getSQLite?.();
       if (_entityUuid && _sqlite && typeof _sqlite.queryAll === 'function') {
-        // 🔴 V34 #3: 砂金库索引**启动补齐**（每进程一次，幂等，失败不阻塞）。
-        //   倒排索引是砂金库召回的主路径 ⇒ 索引缺一条，那条就永远捞不回来。
-        //   `rebuildAllIndexes` 只在索引为空时跑，故"执行之后新增的对话"与
-        //   "当时因 is_compacted=0 被排除、V34 才恢复可见的归档对话"会长期缺席。
-        //   ⚠️ 已知技术债（debt_mug7q19z_ef4mx4）：写入侧尚无增量索引，靠本补齐兜底。
-        if (!SANDBOX_INDEX_BACKFILL_DONE) {
-          SANDBOX_INDEX_BACKFILL_DONE = true;
-          try {
-            const { backfillConversationIndex } = await import('../../m4/SearchIndexBuilder.js');
-            backfillConversationIndex(_sqlite, SANDBOX_INDEX_BACKFILL_BATCH);
-          } catch { /* 索引补齐失败不阻塞对话 */ }
-        }
+        // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：砂金库索引启动补齐段已删除。
+        //   它补的是 search_index 的 conversation 分区 —— 该分区自 2026-10-27 起停建、
+        //   索引整表已随本次拆除下线。砂金库召回改走 v11 结构化召回的 conversation 域
+        //   （recallByStructured，直接对 conversations 内容做分片 LIKE 围栏）。
         // 🔴 P1-3: 会晤记忆检索排序 — 废弃单一 ORDER BY calcium_score DESC（把近期低钙化记忆挤出 TOP20，
         // 实测"树林记忆 0.56 排第21+ 检索不到"即此根因）。改为**近期+历史双槽位**：
         //   近期槽（当日 <1天）：保底命中当天对话记忆（"回头就忘"直接修复）；
