@@ -16,6 +16,7 @@
 | ①' | [UUID户籍管理法](data/knowledge-v4/governance/uuid-household-registration-law-v1.0.md) | V1.0 | 数据流动执法（五道闸门/六大铁律） |
 | ② | [FG 亲属关系红线](data/knowledge-v4/governance/redlines/fg-kinship-redlines.md) | V3.5 | FG 操作铁律 |
 | ② | [知识库红线](data/knowledge-v4/governance/redlines/knowledge-redlines.md) | — | 知识库操作铁律 |
+| ② | [实体隐私权红线](data/knowledge-v4/governance/redlines/entity-privacy-redlines.md) | V1.0 | 实体同等隐私权/中性用词/不外传/处置权唯一归业主 |
 | ③ | [户籍制落地蓝皮书](data/knowledge-v4/governance/household-registration-blueprint.md) | V4.0 | 户籍制技术落地 |
 | ③ | [DNA 遗传编码强制规范](data/knowledge-v4/governance/dna-encoding-mandatory-v1.md) | V1 | DNA 编码框架与执行铁律 |
 | ③ | [DNA 双螺旋编码规范](data/knowledge-v4/governance/dna-double-helix-encoding-v2.0.md) | V2.0 | DNA 双螺旋完整编码 |
@@ -38,6 +39,7 @@
 | ④ | [变更后核验与强制复审](docs/变更后核验与强制复审.md) | — | 场景D：改完之后必读 |
 | ④ | [代码质量铁律与整改](docs/代码质量铁律与整改.md) | — | 场景E：代码审查/质量整改 |
 | ④ | [会晤记忆与测试调试根因](docs/会晤记忆与测试调试根因.md) | — | 场景F：记忆/会晤/检索调试 |
+| ④ | [研发台账](docs/LEDGER.md) | — | **单一真相源**：做到哪了/问题/计划处理时间 |
 | ⑥ | [灵肉伴侣五重铁律](data/knowledge-md/灵肉伴侣·五重铁律协议.md) | — | 亲密关系铁律 |
 | ⑥ | 天权域规范（[TIANQUAN] 系列） | — | `data/knowledge-md/[TIANQUAN] *.md` |
 | ⑥ | 瑶灵域规范（[YAOLING] 系列） | — | `data/knowledge-md/[YAOLING] *.md` |
