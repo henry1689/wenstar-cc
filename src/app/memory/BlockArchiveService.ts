@@ -108,7 +108,11 @@ export class BlockArchiveService {
     try {
       const rows = sql.queryAll<{ dialog_group_id: string }>(
         'SELECT dialog_group_id FROM dialog_groups ' +
+        // 🔴 P145 批B：第三项是 **summary_hash 存量回填**。该列 v31 才建，
+        //   而存量摘要（实测 2586 组）早于列存在 ⇒ 必须纳入同一套断点续传扫描，
+        //   否则「摘要哈希」这一半口径永远是空的。已有值不重算（见 fillOne 的幂等判定）。
         'WHERE content_hash IS NULL OR perception_40d_snapshot IS NULL ' +
+        "OR (summary_hash IS NULL AND block_summary IS NOT NULL AND block_summary <> '') " +
         'ORDER BY first_ts ASC LIMIT ?',
         [this.batchSize],
       );
@@ -141,12 +145,20 @@ export class BlockArchiveService {
     let did = false;
 
     // 幂等前提：已有值不重算（否则每批都会重写一遍）
-    const cur = sql.queryAll<{ content_hash: string | null; perception_40d_snapshot: string | null }>(
-      'SELECT content_hash, perception_40d_snapshot FROM dialog_groups WHERE dialog_group_id = ?',
+    const cur = sql.queryAll<{
+      content_hash: string | null;
+      perception_40d_snapshot: string | null;
+      summary_hash: string | null;
+      block_summary: string | null;
+    }>(
+      'SELECT content_hash, perception_40d_snapshot, summary_hash, block_summary ' +
+      'FROM dialog_groups WHERE dialog_group_id = ?',
       [dgId],
     ) || [];
     const needHash = !cur[0]?.content_hash;
     const needSnap = !cur[0]?.perception_40d_snapshot;
+    // 摘要哈希存量回填（微调 4）：只对「已有摘要、尚无哈希」的组生效
+    const needSummaryHash = !cur[0]?.summary_hash && !!cur[0]?.block_summary;
 
     if (needHash) {
       const convs = sql.queryAll<{ role: string; content: string | null; seq_pos: number | null }>(
@@ -180,6 +192,26 @@ export class BlockArchiveService {
     // ── 组级 40D 快照（P145 微调 1）──
     if (needSnap) {
       if (await this.fillSnapshot(sql, dgId)) did = true;
+    }
+
+    // ── 摘要哈希存量回填（P145 批B / 微调 4）──
+    //   摘要会重生成 ⇒ 单独哈希，不与原文哈希混算。空摘要不写（保持 NULL，不伪造）。
+    if (needSummaryHash) {
+      const { computeSummaryHash } = await import('./bArchiveHash.js');
+      const summaryHash = computeSummaryHash(cur[0]?.block_summary);
+      if (summaryHash) {
+        const now = new Date().toISOString();
+        sql.writeRaw(
+          'UPDATE dialog_groups SET summary_hash = ?, updated_at = ? ' +
+          'WHERE dialog_group_id = ? AND summary_hash IS NULL',
+          [summaryHash, now, dgId],
+        );
+        appendGroupLog(sql, dgId, makeLogEntry('summary_generated', 'BlockArchiveService', {
+          source: 'archive_backfill',
+          hash_prefix: summaryHash.slice(0, 8),
+        }, now));
+        did = true;
+      }
     }
 
     return did ? 'filled' : 'skipped';
