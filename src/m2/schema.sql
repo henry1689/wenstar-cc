@@ -282,6 +282,8 @@ CREATE TABLE IF NOT EXISTS search_index (
 -- 🛑 检索架构 v11 §S1(2026-10-27): 删除纯冗余索引 idx_si_term(term)。
 --   PRIMARY KEY(term, source_type, source_id) 的最左前缀已覆盖 (term) 查询 ⇒ 该索引只增写入成本。
 --   idx_si_source(source_type, source_id) 不是最左前缀，保留。
+--   （2026-11-01 合并说明：本处曾残留 git stash pop 的冲突标记，冲突两侧均为注释、
+--     均声明已删除 idx_si_term，DDL 完全一致；保留 upstream 侧较新注释，删除标记。）
 CREATE INDEX IF NOT EXISTS idx_si_source ON search_index(source_type, source_id);
 
 -- AQC质检表
