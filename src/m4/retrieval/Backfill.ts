@@ -27,7 +27,20 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FUSION_MEMORY_DB } from '../../common/const/paths.js';
-import { LEDGER_FILE, type GapLedgerRecord } from './GapLedger.js';
+// 🔴 2026-11-02 业主裁决「甲」（拆除计划 §3.2）：缺口台账模块（GapLedger.ts）已整体下线。
+//   本文件仍保留**只读**解析历史台账的能力 —— 它是 S3-B6 回捞验收的唯一输入清单来源，
+//   文件本身按「只增不删」原则保留在磁盘上。台账写入方随 n-gram 拆除下线后，
+//   这里不再产生新记录；台账缺失时按「无待核清单」处理，跳过而非报失败。
+const LEDGER_FILE = resolve(process.cwd(), 'data', 'retrieval-v11', 'gap-ledger.jsonl');
+
+/** 历史台账单日记录（只保留回捞核验实际用到的字段） */
+interface GapLedgerRecord {
+  date: string;
+  n_gap: number;
+  first_gap_id: string;
+  last_gap_id: string;
+  [k: string]: unknown;
+}
 import { recallByStructured, scoreAndRank } from './StructuredRecall.js';
 import { buildNgrams } from '../SearchIndexBuilder.js';
 import { RERANK_TOP_K } from './Flags.js';
@@ -121,7 +134,8 @@ export function asQueryAll(raw: {
 function readLedgerNotes(): { records: GapLedgerRecord[]; notes: string[] } {
   const notes: string[] = [];
   if (!existsSync(LEDGER_FILE)) {
-    notes.push(`[SELFCHECK_FAIL] 台账文件不存在: ${LEDGER_FILE}（退化窗口尚未产生记录，或计划任务未跑）`);
+    // 🔴 2026-11-02：台账模块已下线，缺失不再是「验收失败」，而是「无待核清单」。
+    notes.push(`[INFO] 台账文件不存在: ${LEDGER_FILE}（缺口台账已随 n-gram 拆除下线，无待核清单，跳过）`);
     return { records: [], notes };
   }
   const lines = readFileSync(LEDGER_FILE, 'utf-8').split('\n').filter((l) => l.trim().length > 0);

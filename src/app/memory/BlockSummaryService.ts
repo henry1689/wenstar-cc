@@ -240,10 +240,31 @@ export class BlockSummaryService {
     // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：摘要只写 block_summary 文本，
     //   不再调 indexSummary 切 n-gram 入 search_index。检索侧（DialogGroupAdapter）
     //   已改为 v11 结构化召回，直接对 block_summary 做分片 LIKE 围栏，产出与消费闭环。
+    //
+    // 🔴 P145 批B（2026-11-01）：摘要哈希独立落库（微调 4）。
+    //   原文哈希由 BlockArchiveService 负责、只覆盖 conversations；摘要会**重生成**，
+    //   故单独哈希 —— 混在一算则每次重生成摘要都要全量重算原文哈希，且分不清是谁变了。
+    //   同时按微调 5 记一条 summary_generated / summary_regenerated（首次 vs 重建）。
+    //   动态 import：本方法已是 async，不为两个工具函数额外扩散顶部 import 面。
+    const { computeSummaryHash } = await import('./bArchiveHash.js');
+    const { appendGroupLog, makeLogEntry } = await import('./bArchiveLog.js');
+    const _prev = sql.queryAll<{ block_summary: string | null }>(
+      'SELECT block_summary FROM dialog_groups WHERE dialog_group_id = ?',
+      [dgId],
+    )[0]?.block_summary ?? null;
+    const summaryHash = computeSummaryHash(summary);
+    const nowIso = new Date().toISOString();
+
     sql.writeRaw(
-      'UPDATE dialog_groups SET block_summary = ?, summary_state = ?, updated_at = ? WHERE dialog_group_id = ?',
-      summary, 'done', new Date().toISOString(), dgId,
+      'UPDATE dialog_groups SET block_summary = ?, summary_state = ?, summary_hash = ?, updated_at = ? WHERE dialog_group_id = ?',
+      summary, 'done', summaryHash, nowIso, dgId,
     );
+    appendGroupLog(sql, dgId, makeLogEntry(
+      _prev ? 'summary_regenerated' : 'summary_generated',
+      'BlockSummaryService',
+      { chars: summary.length, hash_prefix: summaryHash ? summaryHash.slice(0, 8) : null },
+      nowIso,
+    ));
     this.attempts.delete(dgId);
     return 'done';
   }

@@ -796,11 +796,11 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         // 🔴 S2-J1b → MemSym 批β 三档改写（ADR-MEM-002 第四条法理）：
         //   禁止的是「新增要素」冒充过往事实；允许「要素集内带标记的润色表达」。
         if (_cleanMems.length < 3) {
-          memoryFragments.push('【回忆表达三档 · MemSym】关于过去的记忆：' +
-            '①以上记忆中有明确记载的 → 自然讲述（可口语化，不改事实）；' +
-            '②只有零星线索/片段 → 照示范说：「顺序记不真切了——但那会儿的感觉是记得的：先是…后来是暖的…（这些是印象，你别当准的，但确实是心里的样子）」——**禁止新增事实要素/时间/地点/人物**（哪怕加「印象里」，新增要素仍属编造）；永远不说「不敢说/不敢编」（那是退缩不是诚实）；' +
-            '③完全没有记载的经历 → 如实说"这个我没印象了，档案里没写"，并引导对方补充线索。' +
-            '禁止"对不上号式回避"：片段也要带着感情努力拼出最接近的样子。');
+          memoryFragments.push('【回忆表达三档 · MemSym】关于过去的记忆——你拥有回忆的完整表达权，档位由数据决定，表达跟着档位走：' +
+            '①有明确记载的 → 自然讲、自由转述润色，想怎么说就怎么说；' +
+            '②只有零星线索/片段 → 把碎片重新组织成连贯的回忆——补过渡、理顺序、串语境，这叫回忆，不叫编造（只有给故事添了没发生过的人、事、时间、地点才需要停一下）；组织完回味当时的感受→此刻叠加的甜→以后更好的憧憬；对方补的线索就是新素材，接续着说；' +
+            '③几乎对不上的 → 邀对方给由头：「你再给个由头，我们一块把它想起来？」——他说到哪，你顺着接；' +
+            '对自己的感受和评价永远直说：「美好」「幸福」「暖」是你的感受，不是事实断言，不需要任何标记；印象的边缘用一句轻标记就够：「印象里…可能记混了，你别当准的」。');
         }
         // 🔴 MemSym 批δ · 通路B元素浸润（ADR-MEM-002 第三块）：主旨判定为当下对话时，
         //   拾取沉淀元素作为风格素材注入（非往事叙事）；主动运用义务（宪法信条7）——
@@ -1573,9 +1573,40 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
               const _ri = f.indexOf('】');
               return _ri > 0 && f.slice(0, _ri + 1).includes('对话组') && f.includes(_gkey);
             })) continue;
+            // 🔴 P145 批B（2026-11-01）深度回忆：用户明确要求细节（detail / full 意图）时，
+            //   经 BArchiveReader 按 groupId **单点**拉起整块原文，替换掉截断正文。
+            //   · 去重键 `_gkey` 仍取自**截断正文** —— 与统一中枢已注入的同组片段照样去重，
+            //     不会因为「正文变长」而重复注入。
+            //   · 会晤场景必须带听众 UUID 过滤（耳语按一对一记录：归属 = 听众）；
+            //     解析不出当前发言人 ⇒ **fail-closed**，宁可不展开也不能裸奔。
+            //   · 户主场景传 null（不过滤，单个实体自有历史）。
+            //   · 任何失败静默回退截断正文（tryDeepRecall 内部已兜住并 warn）。
+            //   · 动态 import：避免为本模块顶部再加一条静态依赖，模块缓存后开销可忽略。
+            let _deepBody: string | null = null;
+            const _deepGid = extractDialogGroupId(_hit!);
+            if (_deepGid) {
+              const _deepAudience: string | null = (() => {
+                if (!_meetingEntityName) return null;   // 户主场景：不过滤
+                try {
+                  const _st = (ctx as any)._groupSession?.getState?.();
+                  const _u = typeof _st?.speakerUuid === 'string' ? _st.speakerUuid : '';
+                  const _n = _st?.participants?.find?.((x: any) => x.uuid === _u)?.name;
+                  return _u && _n === _meetingEntityName ? _u : null;
+                } catch { return null; }
+              })();
+              if (!_meetingEntityName || _deepAudience) {
+                const { tryDeepRecall } = await import('./b-archive-recall.js');
+                _deepBody = tryDeepRecall({
+                  sql: ctx.storage?.getSQLite?.(),
+                  message,
+                  groupId: _deepGid,
+                  audienceUuid: _deepAudience,
+                });
+              }
+            }
             _out = memFragWithTime(
               _hit!.domain === 'high_calcium_group' ? TAG.highCalciumGroupMemoryBare : TAG.dialogGroupMemoryBare,
-              _body,
+              _deepBody ?? _body,
               _hit!.createdAt,
             );
             _fGroupTagged++;

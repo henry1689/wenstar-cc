@@ -69,7 +69,12 @@ beforeEach(async () => {
     summary_state TEXT,
     summary_error TEXT,
     first_ts TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    -- 🔴 P145（v31/v32 生产结构对齐）：摘要哈希与追加日志。
+    --   缺这两列时 BlockSummaryService 的 UPDATE 会命中不存在的列，
+    --   被 catch 吞掉后表现为「done=0」，测试红成「摘要没生成」——掩盖真实原因。
+    summary_hash TEXT,
+    append_log TEXT
   )`);
   db.run(`CREATE TABLE conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

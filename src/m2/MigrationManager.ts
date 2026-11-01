@@ -1196,6 +1196,34 @@ const MIGRATIONS: Migration[] = [
       console.log(`[Migration] v31 ✅ dialog_groups 卷宗化列就绪（本次新增 ${_added}/${_cols.length}）`);
     },
   },
+  // v31 → v32: 🔴 P145 批B（2026-11-01）B 链路消费计数列。
+  //   · consume_count    —— 该卷宗被「深度回忆」消费过的次数（USER_CONSUME + OPS_BACKFILL 之和）
+  //   · last_consumed_at —— 最近一次消费时间，供 30 分钟同组节流使用
+  //   写入方唯一：BArchiveReader.recordConsume（src/app/memory/BArchiveReader.ts）。
+  //   为什么不从 append_log 派生：
+  //     ① 节流判定每轮都可能发生，解析 JSON 数组比读一列贵得多；
+  //     ② 块级钙化的 δ 项需要可还原的基准（base = calcium − 0.3×min(count,10)），
+  //        计数必须是一等数据，不能依赖日志文本。
+  //   纯增量列：历史行为不读它们，回退时忽略即可，不删列不删数据。
+  {
+    version: 32,
+    description: 'P145 批B: dialog_groups 消费计数列（consume_count / last_consumed_at）',
+    apply: (db: any) => {
+      const _cols: Array<[string, string]> = [
+        ['consume_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['last_consumed_at', 'TEXT'],
+      ];
+      let _added = 0;
+      for (const [name, type] of _cols) {
+        // 每列单独 try：sql.js 对已存在的列抛错，不能让它中断其余列
+        try { db.run(`ALTER TABLE dialog_groups ADD COLUMN ${name} ${type}`); _added++; }
+        catch { /* 列已存在 */ }
+      }
+      // 存量行显式补齐默认值（部分 SQLite 版本的 ADD COLUMN DEFAULT 只对新行为生效）
+      try { db.run('UPDATE dialog_groups SET consume_count = 0 WHERE consume_count IS NULL'); } catch { /* 非致命 */ }
+      console.log(`[Migration] v32 ✅ dialog_groups 消费计数列就绪（本次新增 ${_added}/${_cols.length}）`);
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════

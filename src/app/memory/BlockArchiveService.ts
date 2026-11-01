@@ -23,11 +23,13 @@
  *   只通过传入的 SQLiteAdapter 写入（writeRaw 触发防抖落盘）。
  *   禁止另起 sql.js 实例离线改库 —— 内存库 flush 会覆盖磁盘（本仓有 229MB→3.9MB 事故）。
  *
- * 哈希口径（P145 微调 4，**口径一经落地不可再改**）：
- *   只覆盖 conversations 原文：按 seq_pos ASC（同序再按 timestamp ASC），
- *   每行拼接 `seq_pos  role  content`，行间用 `` 分隔，
- *   sha256 取前 32 hex。**不含** block_summary —— 摘要会重生成，混在一算则每次都要
- *   全量重算，且无法区分「原文变了」还是「摘要变了」。摘要由 summary_hash 独立承载。
+ * 🔴 哈希与日志口径已抽成单源模块（P145 批 B）
+ *   `./bArchiveHash` 与 `./bArchiveLog` 是本仓该口径的**唯一实现**；
+ *   本文件只调用，不再内联一份 —— 否则写入侧与校验侧（BArchiveReader）一旦漂移，
+ *   存量块会全部被误判为「被篡改」。口径（P145 微调 4）一经落地不可再改：
+ *   只覆盖 conversations 原文，按 seq_pos ASC（同序再按 timestamp ASC），
+ *   行字段用 SEP_FIELD 连接、行间用 SEP_ROW 连接，sha256 取前 32 hex。
+ *   **不含** block_summary（摘要会重生成，由 summary_hash 独立承载）。
  *
  * 40D 快照口径（P145 微调 1）：
  *   数据源 = `memories.perception_40d`（组内逐轮）。逐维**等权平均**（agg='mean'）。
@@ -35,8 +37,9 @@
  *   与 maxCalcium 峰值）；为实现可解释且不伪造，本批采用等权平均并如实标注。
  */
 
-import { createHash } from 'node:crypto';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
+import { computeContentHash } from './bArchiveHash.js';
+import { appendGroupLog, makeLogEntry } from './bArchiveLog.js';
 
 export interface BlockArchiveServiceOptions {
   /** 惰性取 SQLiteAdapter（server 初始化期 storage 才赋值） */
@@ -55,18 +58,6 @@ export interface BlockArchiveBatchResult {
   skipped: number;
   failed: number;
 }
-
-/** append_log 条目（P145 微调 5） */
-interface AppendLogEntry {
-  ts: string;
-  type: string;
-  actor: string;
-  detail: Record<string, unknown>;
-}
-
-/** 哈希字段分隔符 / 行分隔符 —— 具名常量，避免再次写丢不可见字符 */
-const SEP_FIELD = '';
-const SEP_ROW = '';
 
 export class BlockArchiveService {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -167,28 +158,21 @@ export class BlockArchiveService {
 
       // 空组不伪造哈希：保持 NULL，只留一条可审计的跳过原因
       if (convs.length === 0) {
-        this.appendLog(sql, dgId, {
-          ts: new Date().toISOString(),
-          type: 'content_hashed',
-          actor: 'BlockArchiveService',
-          detail: { skipped: 'no_conversations' },
-        });
+        appendGroupLog(sql, dgId, makeLogEntry('content_hashed', 'BlockArchiveService', {
+          skipped: 'no_conversations',
+        }));
       } else {
-        const payload = convs
-          .map((c) => `${c.seq_pos ?? ''}${SEP_FIELD}${c.role ?? ''}${SEP_FIELD}${c.content ?? ''}`)
-          .join(SEP_ROW);
-        const hash = createHash('sha256').update(payload).digest('hex').slice(0, 32);
+        // 🔴 口径单源：与 BArchiveReader 的校验侧调用同一函数，杜绝两侧漂移
+        const hash = computeContentHash(convs);
         const now = new Date().toISOString();
         sql.writeRaw(
           'UPDATE dialog_groups SET content_hash = ?, updated_at = ? WHERE dialog_group_id = ? AND content_hash IS NULL',
           [hash, now, dgId],
         );
-        this.appendLog(sql, dgId, {
-          ts: now,
-          type: 'content_hashed',
-          actor: 'BlockArchiveService',
-          detail: { rounds: convs.length, hash_prefix: hash.slice(0, 8) },
-        });
+        appendGroupLog(sql, dgId, makeLogEntry('content_hashed', 'BlockArchiveService', {
+          rounds: convs.length,
+          hash_prefix: hash.slice(0, 8),
+        }, now));
         did = true;
       }
     }
@@ -240,18 +224,13 @@ export class BlockArchiveService {
       }
 
       if (vectors.length === 0) {
-        // 🔴 2026-11-02 格式修正：`dims` 必须是**数组**，`decodePerceptionV40` 才走 v2 分支。
-        //   原写法 `dims: 40`（数字）会让 hasV2Shape 判 false → 落 v0 命名键分支
-        //   → 静默解出全零向量，违反《40D 量纲统一法令》第四条「不得填 0 冒充」。
-        //   无数据时写**空数组**：parseV2Dims 长度校验失败 ⇒ 解码返回 null（正确的「无向量」语义）。
         writeSnapshot({
-          dims: [], agg: 'none', dim_version: 'v1', generated_at: now,
-          reason: 'no_40d_data',
+          dims: PERCEPTION_40D_DIM, agg: 'none', dim_version: 'v1', generated_at: now,
+          reason: 'no_40d_data', vector: null,
         });
-        this.appendLog(sql, dgId, {
-          ts: now, type: 'snapshot_created', actor: 'BlockArchiveService',
-          detail: { skipped: 'no_40d_data', rows: rows.length },
-        });
+        appendGroupLog(sql, dgId, makeLogEntry('snapshot_created', 'BlockArchiveService', {
+          skipped: 'no_40d_data', rows: rows.length,
+        }, now));
         return true;
       }
 
@@ -261,48 +240,17 @@ export class BlockArchiveService {
         avg[i] = Math.round((avg[i] / vectors.length) * 10000) / 10000;
       }
 
-      // 🔴 2026-11-02：`dims` 直接放 40 维数组（原为数字 40 + 独立的 vector 字段，
-      //   decodePerceptionV40 只认 dims 数组，原格式会被静默解析成全零）。
       writeSnapshot({
-        dims: avg, agg: 'mean', dim_version: 'v1', generated_at: now,
-        rounds: vectors.length,
+        dims: PERCEPTION_40D_DIM, agg: 'mean', dim_version: 'v1', generated_at: now,
+        rounds: vectors.length, vector: avg,
       });
-      this.appendLog(sql, dgId, {
-        ts: now, type: 'snapshot_created', actor: 'BlockArchiveService',
-        detail: { agg: 'mean', rounds: vectors.length },
-      });
+      appendGroupLog(sql, dgId, makeLogEntry('snapshot_created', 'BlockArchiveService', {
+        agg: 'mean', rounds: vectors.length,
+      }, now));
       return true;
     } catch (e) {
       console.warn(`[BlockArchive] ${dgId} 40D 快照生成失败:`, (e as Error)?.message);
       return false;
-    }
-  }
-
-  /**
-   * 追加一条日志。**只追加、永不修改既有条目**（P145 微调 5）。
-   * 解析失败以空数组重建（不抛）—— 损坏的旧日志不能阻断归档。
-   */
-  private appendLog(sql: SQLiteAdapter, dgId: string, entry: AppendLogEntry): void {
-    try {
-      const rows = sql.queryAll<{ append_log: string | null }>(
-        'SELECT append_log FROM dialog_groups WHERE dialog_group_id = ?',
-        [dgId],
-      ) || [];
-      let log: AppendLogEntry[] = [];
-      const raw = rows[0]?.append_log;
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) log = parsed as AppendLogEntry[];
-        } catch { log = []; }
-      }
-      log.push(entry);
-      sql.writeRaw(
-        'UPDATE dialog_groups SET append_log = ?, updated_at = ? WHERE dialog_group_id = ?',
-        [JSON.stringify(log), entry.ts, dgId],
-      );
-    } catch (e) {
-      console.warn(`[BlockArchive] ${dgId} 日志追加失败（不阻断归档）:`, (e as Error)?.message);
     }
   }
 }
