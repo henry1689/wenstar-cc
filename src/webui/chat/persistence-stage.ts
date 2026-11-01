@@ -13,8 +13,7 @@
  *   v3 - 改用原生 db.prepare + 同步重试队列，彻底解决静默丢数据
  */
 import type { DNA } from '../../m1/types/dna.js';
-import type { Perception24D } from '../../m3/types/perception.js';
-import { encodeEmotionVector, encodeEmotionVectorWithFingerprint } from '../../m2/EmotionVectorCodec.js';
+import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { encodePerceptionV40 } from '../../m2/PerceptionVector40DCodec.js';
 import { buildFallbackV40 } from '../../m2/YaoguangNormalizer.js';
 import type { PerceptionV40 } from '../../m3/types/perception-40d.js';
@@ -22,6 +21,7 @@ import type { M3Decision } from '../../m3/types/perception.js';
 import { detectForesight } from '../../m3/ForesightDetector.js';
 import { getPeriod, getSeason, getLunarTerm } from '../../engine/temporal/global-types.js';
 import { enqueueYaoguangBackfill } from './yaoguang-backfill.js';
+import { enqueueYaolingSensation } from './yaoling-sensation-pipeline.js';
 import { detectWork } from '../../app/works/WorkDetector.js';
 import { WorkRepository } from '../../app/works/WorkRepository.js';
 import type { ChatContext } from '../chat.js';
@@ -32,7 +32,7 @@ export interface PersistInput {
   reply: string;
   seqPos: number;
   dna: DNA;
-  p: Perception24D;
+  p: PerceptionState24;
   decision: M3Decision;
   context?: string[];         // 对话历史（用于话题推断）
   dialogGroupId?: string | null;  // 当前对话组ID
@@ -40,6 +40,30 @@ export interface PersistInput {
   isMeetingEntry?: boolean;
   /** 🔴 P0-2.1: 本条消息是否触发了会晤「退出」（同上） */
   isMeetingExit?: boolean;
+  /**
+   * 🔴 2026-10-31 独处态：空间里有过席位、但此刻无人在场。
+   *   命中时**只写用户轮**，不产生助手轮（没有回复，只有业主的自言自语）。
+   *   缺省 undefined = 非独处，行为与加参前逐字一致。
+   */
+  soloMode?: boolean;
+  /**
+   * 🔴 2026-10-31 耳语：该轮业主发言的唯一听众（席位 UUID）。
+   *   只写进**内存对话轮**，供空间适配器下轮重新摄取时还原 `audience: seat`。
+   *   ⚠️ 落库无对应列，重启后重新摄取会退化为全场可闻（已记为技术债）。
+   */
+  whisperToUuid?: string;
+  /**
+   * P090 · P096 §2.3：askAll 逐人生成时跳过**用户消息**的持久化。
+   *
+   * 为什么需要：askAll 轮答对同一条用户消息会完整调用 N 次 `processChat`
+   * （N=参与者数，每段各自走完整单实体链路）。若每次都落一次用户消息，
+   * 同一条消息会被写进对话组与记忆 **N 遍**，直接污染对话组划分与召回。
+   *
+   * 语义：仅跳过「用户消息」这一侧；**assistant 回复侧照常写** ——
+   * 每个人的回复都是独立生成的，正是 askAll 要留下的东西。
+   * 缺省 undefined ⇒ 现有行为逐字不变（非 askAll 场景零影响）。
+   */
+  skipUserPersist?: boolean;
 }
 
 /**
@@ -142,21 +166,19 @@ export function detectTopic(message: string, context?: string[]): string {
 }
 
 // 批次3: 实时计算时空标签（无需依赖 aggregator，直接算）
-/** V13: 使用文本指纹编码，确保中性文本也有微量可区分的向量基线 */
-function buildPerceptionJson(p: Perception24D, text?: string): string {
-  if (text) return encodeEmotionVectorWithFingerprint(p, text);
-  return encodeEmotionVector(p);
-}
+// 🔴 P072 二遍清洗批1（2026-10-24）：原 buildPerceptionJson（24D EmotionVectorCodec+指纹编码）已删除——
+//   其产物传 writeMemory 后由 projectState24ToV40 派生写入，随即被 writePerceptionV40Dual 的 M3 原生 40D
+//   覆写 = 算完即弃的违法双轨残骸（感知量纲 EmotionVectorCodec 已整文件删除）。现统一传原生 40D。
 
 /**
- * V3: 写 perception_40d 列 — M3 直接产出的 40D 语义维（严格走 24D 原路径）。
- * 优先用 `perceptionV40`（M3 decide 产出，与 24D 同源）；缺失时回退 buildFallbackV40。
+ * V3: 写 perception_40d 列 — M3 产出的 40D 语义维（当前经中间层投影；🔴 P074 改直产）。
+ * 优先用 `perceptionV40`（M3 decide 产出）；缺失时回退 buildFallbackV40（🔴 P072-B 待废）。
  * 客观维（D01-D08/D21-D32）由瑶光异步回填（yaoguang-backfill），此处语义维已就绪。
  */
 function writePerceptionV40Dual(
   sqlite: { writeRaw(sql: string, ...params: unknown[]): void },
   id: string,
-  p: Perception24D,
+  p: PerceptionState24,
   perceptionV40?: PerceptionV40,
 ): void {
   try {
@@ -186,9 +208,6 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   const nowTs = new Date().toISOString();
   const topic = detectTopic(input.message);
   let hadError = false;
-  // P1-C: 记录真实 conversations.id（增量索引 source_id 需与回填索引一致，非 dna_root_id）
-  let _convUserRowId: number | null = null;
-  let _convAsstRowId: number | null = null;
 
   // ── Step 0: 实体归属解析（单一真源，必须最先执行）──
   // 🔴 V35(2026-10-05): 归属解析原位于 Step 2 之前，却在 **Step 1（内存 push）之后** ——
@@ -221,14 +240,34 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     ownerEntityName = '玉瑶';
   }
 
+  // 🔴 2026-10-31 耳语（业主裁决）：**按一对一的方式记录** —— 归属改成听众本身，
+  //   而不是当前发言人。耳语不是一种状态，它只是「人多时两个人的私下说话」：
+  //   记录方式与私聊完全相同，区别仅在于不进入群聊共享上下文。
+  if (input.whisperToUuid) {
+    belongUUID = input.whisperToUuid;
+  }
+
   // ── Step 1: conversationHistory（内存）──
   // 🔴 V35: 内存镜像必须与数据库同源带上归属 —— 两者曾不一致（库填、内存不填），
   //   导致「取 80 条上下文」这条主链路拿到的全是无归属轮次，下游只能靠名字猜。
-  input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic, belongEntityUuid: belongUUID ?? undefined } as any);
-  input.ctx.saveConversationHistory();
+  // P090 · P096 §2.3：askAll 逐人生成时，用户消息**只在首轮写一次** ——
+  //   后续每段调用各自只写自己的回复。缺省 undefined ⇒ 与加参前逐字一致。
+  if (!input.skipUserPersist) {
+    // 🔴 2026-10-31 耳语：whisperToUuid 随内存轮一起存 —— 空间适配器下一轮重新摄取时
+    //   据此还原 `audience: seat`，其余席位只看到占位（看得见、听不到）。
+    input.ctx.conversationHistory.push({ role: 'user', content: input.message, timestamp: nowTs, topic, belongEntityUuid: belongUUID ?? undefined, whisperToUuid: input.whisperToUuid } as any);
+    input.ctx.saveConversationHistory();
+  }
   if (input.ctx.conversationHistory.length > 500) {
     input.ctx.conversationHistory.splice(0, input.ctx.conversationHistory.length - 500);
   }
+
+  // 🔴 2026-10-31 独处态（业主裁决 A）：**无人在场时不产生助手轮** —— 只保留业主自己的发言。
+  //
+  //   为什么放在用户轮写入**之后**：独处时消息仍要落库（记在本体 UUID 名下），
+  //   这叫「自言自语」；只是不该凭空生成一个空的助手轮。
+  //   缺省 undefined ⇒ 与加参前逐字一致，多人与私聊路径完全不受影响。
+  if (input.soloMode) return;
 
   // ── Step 2: conversations.db（对话历史库） ──
   // 🔴 P0-2: 实体识别结果独立输出 mentioned_entity_uuids[]（不干预 belong，供 FG 图谱/PAE/M4）
@@ -268,7 +307,10 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   }
 
   try {
-    const _convUserId = input.ctx.conversationDB?.insertConversation('user', input.message, {
+    // P090 · P096 §2.3：askAll 后续轮**不写用户行**（用户消息已在首轮落库）。
+    // 🛑 检索架构 v11 §S1(2026-10-27)：原此处记录 rowid 是给增量 n-gram 索引做 source_id 的，
+    //   索引已停写 ⇒ rowid 记录链（_convUserRowId/_convAsstRowId）一并撤销，对话行写入行为不变。
+    if (!input.skipUserPersist) input.ctx.conversationDB?.insertConversation('user', input.message, {
       seqPos: input.seqPos, topic,
       // 🔴 2026-09-22 测试隔离（#D）：测试流量写入 namespace='test' ⇒ 可辨识、可清理、且被检索侧排除
       namespace: input.ctx.testMode ? 'test' : 'default',
@@ -282,8 +324,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       belongEntityUuid: belongUUID || undefined,
       mentionedEntityUuids: mentionedEntityUuids,
     });
-    if (_convUserId) _convUserRowId = _convUserId;
-    const _convAsstId = input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
+    input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
       seqPos: input.seqPos + 1, topic,
       namespace: input.ctx.testMode ? 'test' : 'default',
       // 🔴 D1 修复(2026-09-11): assistant 轮补 entityNames。
@@ -316,7 +357,6 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       isTest: input.ctx.testMode ? 1 : 0,
       mentionedEntityUuids: mentionedEntityUuids,
     });
-    if (_convAsstId) _convAsstRowId = _convAsstId;
   } catch (e: any) {
     console.error('[Persist] ❌ conversations.db 写入失败:', e?.message);
     hadError = true;
@@ -326,9 +366,13 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   // 🔴 P0-2.1: 会晤路由指令（进入/退出）不写 memories —— 只写 conversations（下方 Step 2 已记）。
   //   跳过时 Step 4 写后验证一并跳过（否则会对未写的行报假失败）。
   const _skipMemWrite = shouldSkipMemoryWrite(input);
+  // 🔴 2026-10-30：助手回复的落库形态在此**唯一**计算，写入端（Step 3）与写后验证（Step 4）共用。
+  //   原声明在 Step 3 的 try 块内，而 Step 4 在该 try 之外 ⇒ 验证侧不可见，
+  //   于是一直用未剥离场景描写的 `input.reply` 去比对以 `cleanReply` 写入的行 —— 必然不等。
+  //   保留在块内会造成同一变换规则出现第二份实现（不变量#7 禁止）。
+  const cleanReply = input.reply.replace(/（[^）]*）/g, '').trim();
   try {
     const sqlite = input.ctx.storage.getSQLite();
-    const pJson = buildPerceptionJson(input.p, input.message);
     const calciumScore = input.decision.enhanced.calcium_score ?? 0.5;
     const calciumLevel = input.decision.enhanced.calcium_level ?? 1;
     const locusPath = (input.dna as any).locus_path || 'chat';
@@ -348,7 +392,8 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       console.log(`[Persist] ✂️ P0-2.1 会晤路由指令跳过 memories 写入 (seq=${input.seqPos} entry=${!!input.isMeetingEntry} exit=${!!input.isMeetingExit}): "${input.message.substring(0, 20)}"`);
     } else if (!sqlite.writeMemory({
       id: idUser, seqPos: input.seqPos, createdAt: now,
-      perceptionJson: pJson, calciumScore, calciumLevel,
+      perceptionV40: input.decision.enhanced.perceptionV40 ? encodePerceptionV40(input.decision.enhanced.perceptionV40) : undefined,
+      calciumScore, calciumLevel,
       locusPath, leafZone: 'user', rawInput: input.message,
       namespace: input.ctx.testMode ? 'test' : 'default',
       primaryEmotion, memoryType: 'dialog',
@@ -407,13 +452,18 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     // 写助理回复 — 剥离场景描写后再存储
     //     LLM 的回复含"（我趴在浴缸边…）"等动作描写。这是生成产物，不是语义记忆。
     //     原样存储 → 下次检索注入 → LLM 读到自己的场景文本 → 重新走进那个场景 → 死循环。
+    // 🔴 P138 缺口1持久基础（2026-10-31）：耳语记忆打标 whisper:<target>（走既有 tagMemory API，
+    //   不改 SQLiteAdapter；非耳语轮不调用，行为不变）——为二期「B 链路排除耳语资产」提供持久判据。
+    if (!_skipMemWrite && input.whisperToUuid) {
+      try { sqlite.tagMemory(idUser, `whisper:${input.whisperToUuid}`); } catch { /* 打标失败不阻塞写入 */ }
+    }
+
     //     存储时剥离括号场景描写，只保留语义内容（"我记得那次你说…我姐…"）。
     const idAssist = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const cleanReply = input.reply.replace(/（[^）]*）/g, '').trim();
-    const asstPJson = buildPerceptionJson(input.p, cleanReply);
     if (!_skipMemWrite && !sqlite.writeMemory({
       id: idAssist, seqPos: input.seqPos + 1, createdAt: now,
-      perceptionJson: asstPJson, calciumScore, calciumLevel,
+      perceptionV40: input.decision.enhanced.perceptionV40 ? encodePerceptionV40(input.decision.enhanced.perceptionV40) : undefined,
+      calciumScore, calciumLevel,
       locusPath, leafZone: 'assistant', rawInput: cleanReply,
       namespace: input.ctx.testMode ? 'test' : 'default',
       primaryEmotion, memoryType: 'dialog',
@@ -433,6 +483,10 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       lunarTerm: getLunarTerm(new Date()),
     })) {
       hadError = true;
+    }
+    // 🔴 P138 缺口1持久基础（2026-10-31）：助手轮同样打标（耳语回应同属该耳语事件）。
+    if (!_skipMemWrite && input.whisperToUuid) {
+      try { sqlite.tagMemory(idAssist, `whisper:${input.whisperToUuid}`); } catch { /* 打标失败不阻塞写入 */ }
     }
     // V3: 40D — 助理回复写 perception_40d（M3 直接产出的语义维，瑶光客观维异步回填）
     if (!_skipMemWrite) writePerceptionV40Dual(sqlite, idAssist, input.p, input.decision.enhanced.perceptionV40);
@@ -455,6 +509,15 @@ export async function persistConversation(input: PersistInput): Promise<void> {
         memoryIds: [idUser, idAssist],
         p40Semantic: v40Semantic,
       });
+      // ── P140 路径一：瑶灵主观体感（情境驱动，fire-and-forget 同纪律） ──
+      // M3 情绪态 → 瑶灵 wf_sensation_pipeline → workflow_result → 双路仲裁(v1补位) → 写 D01-D08。
+      enqueueYaolingSensation(input.ctx, {
+        dnaRootId: (input.dna as any).dna_root_id ?? input.dna.branch_id ?? '',
+        locationFingerprint: input.dna.location_fingerprint ?? '0'.repeat(32),
+        sceneTags: input.dna.scene_tags,
+        emotion: { pleasure: input.p?.pleasure, arousal: input.p?.arousal, intimacy: input.p?.intimacy },
+        memoryIds: [idUser, idAssist],
+      });
     } catch (e) {
       console.warn('[Persist] 瑶光回填入队跳过:', (e as Error)?.message);
     }
@@ -470,7 +533,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       const { writeToDualHelix } = await import('../../m2/DualHelixWriter.js');
       const dhResult = writeToDualHelix(dhsqlite.rawDb, {
         globalUid: input.dna.global_uid,
-        perceptionJson: buildPerceptionJson(input.p),
+        perceptionJson: '',  // P072 批1: 24D 链已删（此参数已被 DualHelixWriter 停止消费，仅存接口兼容）
+        vineGroupId: input.dialogGroupId || undefined,  // P071-Phase2: 藤蔓组（事件主干）
+        entityBelongUuid: belongUUID || asstUUID || undefined,  // P071-Phase2批B: 归属轴 TXS-ID（户籍法）
         seqPos: input.seqPos,
         createdAt: new Date().toISOString(),
         locationFingerprint: input.dna.location_fingerprint,
@@ -515,10 +580,17 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     //   （批4 修复：避免 UNIQUE 冲突抛入无 catch 的批处理路径），调用方持有的仍是旧值
     //   ⇒ 写后验证必然假失败（实测 68 次 `[Persist] 写后验证失败`）。
     //   选内容核对而非 id：内容在作用域内、且与 seq_pos 分配无关（id 变量在别的块作用域里）。
+    // 🔴 2026-10-30 同源修复（业主批准）：
+    //   ① 判据对齐去重口径 —— 去重是 `TRIM(raw_input)=? AND leaf_zone=?`，验证原先却是
+    //      `raw_input=? AND leaf_zone=?`（不 TRIM）。同一事实两份口径 ⇒ 去重拦下后验证必然找不到，
+    //      实测「去重拦下(zone=user) 27 次 ↔ 写后验证失败 26 次」一一配对。
+    //   ② 助手轮改用 **cleanReply** —— 写入端（本文件 428 行）存的就是 `input.reply` 剔除括号场景描写
+    //      后 trim 的版本，而验证用 `input.reply` ⇒ 两者必然不等，那句告警是**必然而非偶发**。
+    //   验证失败仍照常报错：真实的 IO/约束失败不会被吞掉。
     const byContent = (text: string, zone: string) =>
-      verifySqlite.queryAll<any>('SELECT raw_input FROM memories WHERE raw_input = ? AND leaf_zone = ? LIMIT 1', [text, zone]);
+      verifySqlite.queryAll<any>('SELECT raw_input FROM memories WHERE TRIM(raw_input) = ? AND leaf_zone = ? LIMIT 1', [String(text ?? '').trim(), zone]);
     const userCheck = byContent(input.message, 'user');
-    const asstCheck = byContent(input.reply, 'assistant');
+    const asstCheck = byContent(cleanReply, 'assistant');
     if (!userCheck.length) {
       console.error(`[Persist] ❌ 写后验证失败: 用户轮未落库（seq=${input.seqPos}）`);
       hadError = true;
@@ -570,37 +642,9 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     }
   } catch (_indErr) { /* 归纳失败不阻塞 */ }
 
-  // ── V11.0: 增量n-gram索引写入（异步，fire-and-forget）──
-  try {
-    const _sqlite = input.ctx.storage?.getSQLite();
-    if (_sqlite?.rawDb) {
-      const { indexDocument } = await import('../../m4/SearchIndexBuilder.js');
-      // P1-C 修复: source_id 用真实 conversations.id（与 rebuildAllIndexes 一致），
-      // 不再用 dna_root_id（两者不同，导致增量索引关联错乱、检索 source 串号）。
-      //
-      // 🔴 V34(2026-09-25) 孤儿索引行修复：rowid 取不到时**不再**回退 `'conv_' + Date.now()`。
-      //   原因：v34 起砂金库召回主路径改走倒排索引，按 `JOIN conversations c ON
-      //   c.id = CAST(s.source_id AS INTEGER)` 取原文；而 `'conv_1758…'` CAST 成 0 ⇒ **永远 JOIN 不上**，
-      //   等于在索引里堆了一批"检索不可达"的行 —— 白占空间、还会让索引覆盖率统计虚高。
-      //   取不到 rowid 时**跳过写入**，交给检索侧的幂等增量回填（backfillConversationIndex）
-      //   用真实 id 补写；跳过必须**可见**（不静默吞错，P0 禁止静默失败）。
-      if (!_convUserRowId || !_convAsstRowId) {
-        console.warn(
-          '[Persistence] 增量索引跳过本次写入（对话 rowid 不可用: user=' + String(_convUserRowId) +
-          ' asst=' + String(_convAsstRowId) + '）— 将由检索侧幂等回填用真实 id 补写',
-        );
-      } else {
-        // 索引用户消息
-        if (input.message?.length > 5) {
-          indexDocument(_sqlite.rawDb, 'conversation', String(_convUserRowId), input.message, (input.dna as any)?.belong_entity_uuid);
-        }
-        // 索引助手回复
-        if (input.reply?.length > 5) {
-          indexDocument(_sqlite.rawDb, 'conversation', String(_convAsstRowId), input.reply, (input.dna as any)?.belong_entity_uuid);
-        }
-      }
-    }
-  } catch { /* 索引写入不阻塞主流程 */ }
+  // 🛑 检索架构 v11 §S1(2026-10-27)：原「V11.0 增量 n-gram 索引写入」块已整体移除。
+  //   conversation 的 n-gram 倒排索引判废，实时写入 / 启动重建 / 增量回填三侧同步停用；
+  //   读取侧兜底与退化范围见 §S1.1 变更台账（会晤倒排路退化，其余路径不受影响）。
 
   // ── V12.1: 新实体即时UUID回填（P0-2: 仅 FG 未收录的新 person 触发回填，保留 PAE 建档能力，避免每次全扫描）──
   const _paFg = input.ctx.m4?.getFamilyGraph?.();

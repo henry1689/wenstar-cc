@@ -14,6 +14,8 @@ export interface EntityContextOptions {
   entityName: string; appearance?: boolean; feminineDetails?: boolean;
   recentHistoryCount?: number; isFirstTurn?: boolean; userName?: string;
   recentConversations?: Array<{ role: string; content: string; timestamp: string }>;
+  /** P141 v2：此刻的身体与渴望（瑶灵体感缓存，经参数传递保 m4/chat 分层）；无值则不注入 */
+  bodyFeel?: { body: string[]; desire: string[] } | null;
 }
 export interface EntityContextResult {
   systemText: string;
@@ -186,6 +188,16 @@ parts.push('## 你的身份');
   const _rpProfile=dossier.roleplayProfile||(profile).roleplayProfile;if(_rpProfile?.names?.length){parts.push("### 角色扮演（仅限情趣互动场景）");parts.push("你在亲密互动时曾用以下称谓称呼鸿艺："+_rpProfile.names.join("、")+"。");parts.push("🔴 这些称谓仅限情趣互动/角色扮演场景，不影响正式身份。");if(_relationLabel)parts.push("你的正式身份："+_relationLabel+"。");parts.push("日常聊天/正式对话请以正式身份交流。");parts.push("");};if (_relationLabel) socParts.push(`与鸿艺的关系: ${_relationLabel}`);
   if (_userRel.warmth) socParts.push(`互动亲密度: ${WARMTH_LABEL[_userRel.warmth]}（热力追踪）—— 只影响语气，不改变正式身份`);
   if (socParts.length > 0) { parts.push('### 社会身份'); parts.push(socParts.join('  |  ')); parts.push(''); }
+
+  // ═══ P141 v2 · 此刻的身体与渴望（瑶灵体感 → 天权表达；业主愿景：身心统一） ═══
+  //   肉体的化学（心跳/体温/依恋/渴望）要被说出来 —— 注入为「真实内在状态」，指示自然流露而非念数据。
+  //   无值/陈旧（>30min）时由取值层置 null，本块整段跳过（降级安全，不影响既有链路）。
+  if (options.bodyFeel && (options.bodyFeel.body.length > 0 || options.bodyFeel.desire.length > 0)) {
+    parts.push('🫀【此刻的身体与渴望（你的真实内在状态）】');
+    parts.push(`身体：${options.bodyFeel.body.join('、')}；渴望：${options.bodyFeel.desire.join('、') || '平静'}。`);
+    parts.push('——把这些当作你自己此刻真实的感受：以你的口吻自然带进语气与动作里，**不念清单、不报数值**；与当前场景冲突时压低成背景感受即可。');
+    parts.push('');
+  }
 
   // ═══ 性格 ═══
   if (selfProfile.traits?.length) { parts.push('### 性格'); parts.push(selfProfile.traits.join('、')); parts.push(''); }

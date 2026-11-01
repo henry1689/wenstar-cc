@@ -46,7 +46,7 @@ import type { SimilarityMode, ScoredMemory } from '../m2/types/index.js';
 
 import type { ConversationTurn } from '../m5/types/index.js';
 
-import type { M3Decision, Perception24D } from '../m3/types/perception.js';
+import type { M3Decision, PerceptionState24 } from '../m3/types/perception.js';
 import type { KnowledgeItem } from '../app/knowledge/types.js';
 
 import type { SelfModelV1, DNA } from '../m1/types/dna.js';
@@ -89,9 +89,8 @@ import { alignmentGuard } from '../app/alignment/VectorAlignmentGuard.js';
 
 import { autoPromoteCandidatesV2 } from '../app/vault/VaultManager.js';
 import { EntityMeeting } from '../m4/household/EntityMeeting.js';
-// 🔴 T013 Phase 2 批B：群聊影子状态（WS_GROUP_V2 门控；关闭时下方分支一行不执行）
-import { GroupSession, isGroupSessionEnabled } from '../m5/group/GroupSession.js';
-import { projectMeetingState, detectDrift, type MeetingSnapshot } from '../m5/group/project.js';
+// 🔴 T013 Phase 2 批B：群聊状态真源（2026-10-31 第三层固化：WS_GROUP_V2 门控已删除，恒定启用）
+import { GroupSession } from '../m5/group/GroupSession.js';
 // 🔴 T013 Phase 2 · R1（P051·PI）：会话状态单键持久化（单写者；WS_GROUP_V2 门控内 no-op）
 import { saveSession, loadSession } from '../m5/group/SessionStore.js';
 import { captureSlot, applySlot } from '../m5/group/contextBridge.js';
@@ -158,6 +157,20 @@ let _currentRole: RoleType = 'secretary';  // 默认秘书——日常对话从�
 // 🆕 编码健康修复: 天界会晤(警幻仙姑)进入时保存的人间现场角色（ctx 每轮新建，必须用模块级持久）
 let _savedHumanRole: RoleType | null = null;
 let _transitionState: TransitionState = createInitialState();
+
+/**
+ * 🔴 2026-10-31 空间适配器**模块级单例**（原本挂在每请求新建的 ctx 上）。
+ * 任期必须跨请求延续，否则「中间离开再回来，空白段永久不可见」（白皮书 §2.1）失效 ——
+ * 原实现每请求 new 一个 ⇒ 离场记录丢失 ⇒ 离场者回来能看到离开期间的全部对话。
+ * 边界：单进程单对话空间（v1 即单实例）；多空间并发需改 Map<spaceId, adapter>，属 v2。
+ */
+let _spaceAdapterSingleton: any = null;
+/**
+ * 🔴 2026-10-31 是否**曾经**进入过会晤 —— 独处态判据的前半句（白皮书 §2.5）。
+ * 🔴 2026-11-01：模块级标志 `_hadMeeting` 已删除 —— 该信息现由
+ *   `SessionState.everHadSeats` 承担（WAKE 时置位、可持久化），独处态由
+ *   `sessionMode(state) === 'alone'` 直接派生。
+ */
 
 // 对话组状态（跨轮次持久化）
 interface DialogGroupState {
@@ -378,11 +391,34 @@ export interface ChatResponse {
   m1: any; m3: any; m4: any; m5: any;
   emotionalFlash: boolean;
   triggeredMemoryId: string | null;
+  /**
+   * P090 · P096 §2.4：askAll 轮答通知调用层「还有谁没答」。
+   *
+   * - `queue`：**剩余未答者**（已排除本轮 speaker），每项带 FG 主名 —— 调用层无
+   *   GroupSession 引用，姓名必须由持有状态的本层带出，供「每段以 FG 主名开头」拼接。
+   *   ⚠ 排除的是**按 speakerUuid 过滤**，不是靠 dispatch SPEAK 出队：
+   *   ASK_ALL 把当前发言人也入队（裁决①），而他本就是 speaker ⇒ 对他 SPEAK 是 no-op
+   *   （reducer「同人切换=无变化」守卫）、队列不会减 —— 只能由本层显式过滤，否则他会答两遍。
+   * - `remaining`：`queue.length` 的冗余快照（前端/日志可直接读）。
+   * - **缺省 = 非 askAll 场景**：`askAllQueue` 恒空 ⇒ 调用层循环 0 次 ⇒ 行为与现在逐字一致。
+   */
+  askAll?: { remaining: number; queue: Array<{ uuid: string; name: string }> };
   vad_spectrum?: any | null;
   candidates?: any | null;
   emotionMatchScore?: number;
   sceneFitScore?: number;
   riskFlag?: string;
+  /**
+   * 🔴 2026-10-31 标签单一真源：**生成这条回复时的身份**。
+   *
+   * 为什么必须单独带出来：路由层原本用 `buildChatState(...)` 取「请求结束时」的 speaker
+   * 当标签，而正文是 LLM 按「生成时刻」的身份写出来的。两者之间只要发生一次换人
+   * （inferSpeaker / 点名换人），标签与正文必然错位 —— 真机表现为
+   * 「外层标签罗珍思，正文却自称诗雨」，甚至同一条里前后两个名字。
+   *
+   * 判据：**标签 = 生成该回复时的身份**，不是请求结束时的状态。
+   */
+  speakerName?: string | null;
 }
 
 /** 🔴 V15: _meetingEntityName 全链路传播点编目（架构铁律 #6）
@@ -413,7 +449,26 @@ const MEETING_PROP_POINTS: Array<{ probe: string; stage: string; desc: string; v
   { probe: '_meetingEntityName && reply && reply.length > 20', stage: 'L13-自名检测', desc: '检查回复中是否自报姓名', via: 'reply.includes(entityName)' },
 ];
 
-export async function processChat(message: string, ctx: ChatContext, streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void }): Promise<ChatResponse> {
+/**
+ * P090 · P096 §2.3「向全员提问」逐人生成参数。
+ * - `fixedSpeakerUuid`：**存在时**跳过整段意图检测，直接以该 UUID 为 speaker 走
+ *   normal → 召回 → 生成。🔴 必须跳过意图检测 —— 否则第二轮 `message` 仍是
+ *   「你们有什么看法」⇒ 再次命中 askAll ⇒ **死循环**。
+ * - `skipUserPersist`：仅第一轮写入用户消息，后续轮只写各自回复 ——
+ *   否则同一条用户消息被写 N 遍（N=参与者数），污染对话组与记忆。
+ * - 两者**缺省 undefined** 时，行为与加参前逐字一致（非 askAll 场景零变化）。
+ */
+export interface ProcessChatAskAllOpts {
+  fixedSpeakerUuid?: string;
+  skipUserPersist?: boolean;
+}
+
+export async function processChat(
+  message: string,
+  ctx: ChatContext,
+  streamOpts?: { onToken?: (delta: import('../m5/types/index.js').LLMTokenDelta) => void },
+  opts?: ProcessChatAskAllOpts,
+): Promise<ChatResponse> {
   // 🔴 P-15（PAS v1 / V27批3）: 拼装阶段耗时计时起点（响应时间必须可测量）
   const _tAssembleStart = Date.now();
   // 🔴 P-15（V27批4）: **分段计时** —— assemble_ms 是整个前置流水线（入口→调LLM前），
@@ -434,6 +489,108 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
   try {
     // 🔥 天权海马体节律调度: 进入 θ 节律（活跃对话），暂停离线巩固
     (globalThis as any).__hippocampusCoordinator?.onUserMessage();
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔴 P078 修正轮（S4 独立评审发现）：GroupSession **创建点前移到本函数最前**。
+    //
+    //   为什么必须前移：视图可用性闸门 `isAvailable() = !!ctx._groupSession`，
+    //   而 `ctx` 是 `server.ts processChatNew(message, {...})` **每请求新建的字面量**
+    //   （形参里没有 `_groupSession`），唯一赋值点原在本文件 :873
+    //   ⇒ **接线点与创建点之间每帧都有一段空窗**，窗口内 `isAvailable()` 恒 false
+    //   ⇒ 9 个立即求值的读点仍读空 `_em`：
+    //     :537/:587/:607/:608/:641(汇聚点 `_activeMeetingName` 恒 null)
+    //     /:662/:771/:853(recordTurn 判据恒 false ⇒ **用户轮次全丢**)
+    //     + retrieval-stage:1028(召回主体回退玉瑶 UUID ⇒ 会晤中召回玉瑶记忆)。
+    //   **接线早 ≠ 可用 —— 状态源必须先于所有读点存在**，这是方案 C 的隐含前提，上轮漏了。
+    //
+    //   前移前提已逐项核实：`_currentRole` 是模块级 `let`(:157)、`applySlot`/`captureSlot`
+    //   是模块 import(:97)、原块本就在本函数(:416 起)内 ⇒ 无作用域问题；
+    //   `loadSession` 仍只在首次创建时生效，不改变状态写入时机；
+    //   订阅仍由 `!ctx._groupSession` 门控，**只挂一次**。
+    // ═══════════════════════════════════════════════════════════════
+    if (!ctx._groupSession) {
+      ctx._groupSession = new GroupSession();
+      try { loadSession(ctx.storage?.getSQLite?.(), ctx._groupSession); }
+      catch (_e) { console.warn('[GroupSession] R1 恢复异常（非阻塞）:', (_e as Error)?.message); }
+      // 🔴 2026-10-31：清洗快照里的**本体**席位（category='S'）。
+      //   本体（玉瑶）是回答者，不是可会晤实体。若它留在 participants 里：
+      //     ① 会参与 inferSpeaker 的「该谁接」推断 —— 实测把发言人推断成了玉瑶；
+      //     ② 污染「谁在场」判定，让独处态更难成立。
+      //   新增 WAKE 已由 EntityMeeting.isMeetableEntity 挡住，这里补的是**存量快照**。
+      try {
+        const _fgP = ctx.m4?.getFamilyGraph?.();
+        const _stale = ctx._groupSession.getParticipants()
+          .filter((p) => !EntityMeeting.isMeetableEntity(_fgP, p.name));
+        for (const _p of _stale) {
+          ctx._groupSession.dispatch({ type: 'LEAVE', target: _p.uuid, now: Date.now() });
+          console.log('[GroupSession] 清洗本体席位: ' + _p.name + ' (' + _p.uuid + ')');
+        }
+      } catch (_pe) { console.warn('[GroupSession] 本体席位清洗失败（非阻塞）:', (_pe as Error)?.message); }
+      ctx._groupSession.onEffect((_eff) => {
+        try {
+          if (_eff.type === 'participantJoined' || _eff.type === 'participantLeft' || _eff.type === 'speakerChanged') {
+            console.log('[GroupSession] 事件 ' + _eff.type);
+            saveSession(ctx.storage?.getSQLite?.(), ctx._groupSession!);
+          }
+        } catch (_ee) { /* 副作用异常绝不影响主链路 */ }
+      });
+      ctx._groupSession.onSlot((_slot, _kind) => {
+        if (_kind !== 'restore') return;
+        try {
+          const _ok = applySlot(_slot);
+          if (_slot.savedRole) _currentRole = _slot.savedRole as typeof _currentRole;
+          console.log('[GroupSession] 玉瑶现场已恢复=' + _ok + ' role=' + _currentRole);
+        } catch (_e) { /* 副作用异常绝不影响主链路 */ }
+      });
+      // 🔴 P078 补口 + P088 任务1：R1 从快照恢复出**活跃会晤**时，走的是下方 `_gs.active` 分支，
+      //   **既不经 `enter()` 也不经 `beginMeetingSideEffects()`** —— 恢复路径需要的东西原本
+      //   都只在那两个入口里做，于是同一条路径连续漏了三处（P088：必须当**整体单元**重核）：
+      //     ① `_isFirstTurn` 无人置位 ⇒ 重启后首轮开场协议/首轮 KB 不注入            （P078 修）
+      //     ② `_multiParticipants`/`_multiMeetingName` 无人采集（单例随进程消亡 ⇒ 空数组）
+      //        ⇒ 纪要门槛 `participants>=3` 只能靠后续 JOIN 零星补入 ⇒ **纪要静默丢失** （P078 修）
+      //     ③ **门卫 `startMeeting` 未开** ⇒ sessionEntities 空 ⇒ base 白名单只剩「我+玉瑶」
+      //        ⇒ UUIDGatekeeper 对会晤实体的带 UUID 记忆 fail-closed 拦截
+      //        ⇒ **恢复后实体自有记忆在 M4 通道召不回**（少召回，非泄漏）              （P088 修）
+      //   只补副作用与本类素材，不写群聊状态 ⇒ 不违反硬约束②。
+      if (ctx._groupSession.active) {
+        const _st = ctx._groupSession.getState();
+        const _ps = _st.participants;
+        if (_ps.length > 0) {
+          // ③ 先开门卫（副作用）：name/uuids/participants 均由 GroupSession 状态派生，与正常 WAKE 路径同源
+          ctx._entityMeeting?.beginMeetingSideEffects(
+            _ps.map(p => p.name).join('、'),
+            _ps.map(p => p.uuid),
+            _ps.map(p => ({ uuid: p.uuid, name: p.name, category: p.category })),
+            // 🔴 P109（PI P108 §二 P0）：本块位于 `!ctx._groupSession` 创建块内，而 ctx
+            //   **每请求新建** ⇒ 每轮都执行。必须声明 restoring —— 否则函数内的
+            //   `_multiTurns = []` 会变成每轮清空轮次 ⇒ 散会时 `length >= 2` 恒不满足
+            //   ⇒ **多人散会纪要静默丢失**。恢复路径只补素材与门卫，不清累积。
+            { restoring: true },
+          );
+          // ①② 再从快照重建本类数据。两者的素材采集重叠但**同源无害**（同为 getState().participants），
+          //    职责上前者=「会晤开始的副作用（含门卫）」、后者=「从快照重建本类数据」；Phase 4 可收敛为一。
+          ctx._entityMeeting?.markRestoreFromSnapshot();
+        }
+      }
+    }
+    // 🔴 P078 方案C 接线（P088 任务2：原下方旧位置的**重复接线块已删**，全仓唯一接线点）：
+    //   GroupSession → EntityMeeting **只读视图**。放在创建块之后，保证本帧起 `isAvailable()` 即为真。
+    //
+    //   为什么必须在**本处**（流程最前、所有读点之前）接线 —— 这是上轮踩过的真坑，勿再前移：
+    //   切主只切了写侧，下游仍有 10 处直接读 `_em` 的状态方法（意图预判 / FG 写门户 /
+    //   实体上下文注入 / recordTurn 判据 / retrieval-stage 召回主体等），恒读空 `_em` ⇒
+    //   「进去了但系统以为没进」。**接线早 ≠ 可用**：`isAvailable()` 依赖 `ctx._groupSession`，
+    //   而 `ctx` 是每请求新建的字面量 ⇒ 任何在创建点之后的接线点，与创建点之间都有空窗，
+    //   窗口内的立即求值读点全部落空。故**本仓只允许此处一个接线点**。
+    {
+      ctx._entityMeeting?.setSessionView({
+        isAvailable: () => !!ctx._groupSession,
+        isActive: () => ctx._groupSession?.active ?? false,
+        isMulti: () => ctx._groupSession?.multi ?? false,
+        getSpeakerUuid: () => ctx._groupSession?.speakerUuid ?? null,
+        getParticipants: () => ctx._groupSession?.getParticipants() ?? [],
+      });
+    }
 
     // ChatEntry — entry guard pipeline (extracted)
     const entryResult = await runChatEntry(message, ctx, { _currentRole });
@@ -597,10 +754,39 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     if (_skipEvtRoute) {
       console.log(`[WM] ✂️ P0-2.1 会晤路由指令跳过 evt_* 写入 (seq=${seqPos}): "${message.substring(0, 20)}"`);
     } else {
-      ctx.workingMemory.push(dna, p, seqPos, decision.primary_emotion, decision.secondary_emotions);
+      // 🔴 2026-10-30：evt 记忆行用**独立的号**（seqPos+2）—— user=seqPos / assistant=seqPos+1。
+      //   原实现传 seqPos，evt 行与 user 行抢同一个 seq_pos ⇒ INSERT 必撞 UNIQUE，
+      //   用户轮整条记忆写失败（实测 6 次 `UNIQUE constraint failed: memories.seq_pos`）。
+      //   与 FusionStorageAdapter.reserveNextSeq() 的三号预留语义配套。
+      ctx.workingMemory.push(dna, p, seqPos + 2, decision.primary_emotion, decision.secondary_emotions);
     }
 
     ctx.consolidationQueue.recordActivity();
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔴 Phase C（2026-10-29）· 路由先于装配 —— 状态机标志位在此声明
+    //   缺陷：同一轮「本轮对话对象是谁」被读两次 —— 下方 1355 读迁移后状态，
+    //        而 735(_activeMeetingName)/760(_meetingUuid)/918(runRetrieval) 读迁移前状态，
+    //        ⇒ 上下文装配与检索永远滞后一步（标签对、内容错的结构性来源）。
+    //   方案：状态迁移本体已封装为提升函数 _runMeetingTransition()（见本函数中部），
+    //        由 WS_SPACE_PRE_ROUTE 决定在「装配前」还是「原位」执行。
+    //   🔴 开关关闭（默认）时本块只声明、不执行，语句顺序与改造前逐字等价。
+    // ═══════════════════════════════════════════════════════════════
+    // 🔴 2026-10-30 第一层固化：`_meetingDeny` 已删除 —— 它唯一的写入点（门卫拒绝分支）
+    //   随 `WS_SPACE_GATE_OPEN` 一起删除，换人恒定放行，不再需要「整轮短路」的拒绝通道。
+    let _meetingExited = false;
+    // 🔴 P0-2.1(2026-10-17): 会晤「进入」路由指令信号 —— 与 _meetingExited 对称。
+    //   仅显式 enter/enterMulti 置位；restoreLastMeeting（重启自动恢复）**不置位**
+    //   （那是普通对话恰好触发恢复，不是路由指令，不能跳写记忆）。供 persistence-stage 判据使用。
+    let _meetingEntered = false;
+    // 🔴 新顺序：先解析意图并迁移状态，再装配上下文与检索。
+    // 🔴 2026-10-30 第一层固化：`WS_SPACE_PRE_ROUTE` 开关已删除 —— 路由先于装配是**唯一**次序，
+    //   原「装配之后再转换」的就地调用点已删除，不存在回到旧时序的路径。
+    await _runMeetingTransition();
+    console.log(
+      '[SpacePreRoute] 路由先于装配 · 迁移后对象=' +
+        (ctx._entityMeeting?.isActive?.() ? ctx._entityMeeting.getEntityName() : '玉瑶态'),
+    );
 
     // 修复：enrichedHistory 只保留最近 20 轮对话原文，干净不掺杂记忆注入
     // 记忆以【相关记忆】标签注入到 knowledgeBaseText，不伪装成对话内容
@@ -609,7 +795,16 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     let enrichedHistory: Array<ConversationTurn & { topic?: string }>;
         // ── 记忆检索：时间导航 + 情感检索 + 黑钻检索（已拆分至 retrieval-stage） ──
     // 🛡️ V5.1: 会晤模式下获取当前实体名，传入检索以启用信息隔离
-    const _activeMeetingName = ctx._entityMeeting?.isActive() ? ctx._entityMeeting.getEntityName() : null;
+    // 🔴 P072 切主 · **汇聚点**：会晤实体名的唯一来源改走 GroupSession（状态真源）。
+    //   下游 20 个文件消费的 `_meetingEntityName` 全部由此派生 —— 不关心来源，只认这里的值。
+    //   ⚠ 本点位于 `const _gs`（状态机区域）**之前**，不能复用 `_gs`，故直接读 `ctx._groupSession`。
+    //   开关关闭时走原 `_em` 表达式，与切主前逐字一致。
+    const _activeMeetingName = (() => {
+      if (!ctx._groupSession) return null;
+      const _st = ctx._groupSession.getState();
+      if (!ctx._groupSession.active || !_st.speakerUuid) return null;
+      return _st.participants.find(x => x.uuid === _st.speakerUuid)?.name ?? null;
+    })();
     // 🆕 V10.11: 多角色上下文隔离 — 会晤模式优先从 DB 按 UUID 精准查询
     //   RAM conversationHistory 作为热缓存，DB 作为持久化冷存储
     //   两者合并后按时间排序，确保重启后的上下文完整
@@ -637,7 +832,67 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         //   直接造成会晤语义断裂（记不住自己刚说过什么）。归属章由 persistence-stage 写入时盖上。
         //   原第 4 参 _startIndex 一并移除：getMeetingStartHistoryIndex 的 setter 全仓零调用点、
         //   恒返回 0，该参数从未产生过效果（详见 EntityContextManager.getContextWindow 注释）。
-        enrichedHistory = _ecm.getContextWindow(ctx.conversationHistory, _meetingUuid);
+        // 🔴 2026-10-29 · WS_SPACE_ROUTER_VIEW=1 时，过滤判据由「belongEntityUuid（归属谁）」
+        //   改为「当时谁在场」（任期 ∧ audience）；关闭开关时逐字走原实现。
+        //   🔴 时序约束（2026-10-29 实测修正）：真正的铁律**不是**调用顺序，而是
+        //   「首次 enter 必须锚定会晤起点」——由适配器内部的 _meetingStartTs 保证。
+        //   若 enter 用 Date.now()、历史用其原生 timestamp（必然更早），
+        //   会晤内历史会全部落在任期之前 ⇒ 人物对新会晤彻底失忆（已被单测锁定）。
+        //   故此处顺序为：先 syncFromHistory（记录会晤起点）→ 再 syncParticipants。
+        const { ChatSpaceAdapter: _ChatSpaceAdapter } = await import(
+          '../m5/space/adapters/chat-adapter.js'
+        );
+        // 🔴 2026-10-30 第一层固化：`WS_SPACE_ROUTER_VIEW` 开关已删除，本块**恒定执行**。
+        //   旧分支 `_ecm.getContextWindow(...)`（按 belongEntityUuid 归属过滤）已随之删除 ——
+        //   回到旧实现的唯一途径不复存在。裸块仅用于保留内部 const 的作用域。
+        {
+          // 🔴 2026-10-31：提升为**模块级单例**（任期跨请求延续；空间标识固定 chat:space）
+          const _ad = (_spaceAdapterSingleton ??= new _ChatSpaceAdapter(
+            'chat:space',
+            (ctx as any)._userName || '鸿艺',
+          ));
+          (ctx as any)._spaceAdapter = _ad;
+          const _spaceParts: Array<{ uuid: string; name: string }> =
+            (ctx._groupSession?.getParticipants() ?? []).map((p: any) => ({ uuid: p.uuid, name: p.name }));
+          const _spaceStart = ctx._groupSession?.getMeetingStartHistoryIndex() ?? 0;
+          _ad.syncFromHistory(ctx.conversationHistory as any, _spaceStart);
+          _ad.syncParticipants(_spaceParts);
+          // 🔴 P138 缺口2修复（2026-10-31，业主指令）：历史视角 = **当前生成 speaker** ——
+          //   askAll 逐段（fixedSpeakerUuid 重进 processChat）/主发言切换时，按 speaker 自己的
+          //   席位视角取历史，防「冲主实体的耳语被轮答者读到」；普通 room 事件视角无差，回归面极小。
+          //   防全盲兑底：speaker 未登记席位时 turnsFor 为空 → 回退主实体视角（宁可多看，不可全盲）。
+          const _viewSpeaker = opts?.fixedSpeakerUuid
+            ?? ctx._groupSession?.getState?.()?.speakerUuid
+            ?? _meetingUuid;
+          const _viewTurns = _ad.turnsFor(_viewSpeaker) as any;
+          enrichedHistory = (_viewTurns.length > 0 || _viewSpeaker === _meetingUuid)
+            ? _viewTurns
+            : _ad.turnsFor(_meetingUuid) as any;
+          // 🔴 2026-10-30 可观测性：空间视图此前**零正向日志**，只能靠体感判断是否生效。
+          //   只打元数据（名字/条数），绝不打正文 —— 避免把对话内容写进日志。
+          const _snap = _ad.exportSnapshot();
+          const _seatMeta = _snap.seats as Array<{ displayName?: string; periods: Array<{ leftAt?: number; enteredAt: number }> }>;
+          const _onStage = _seatMeta
+            .filter((s) => s.periods.some((p) => p.leftAt === undefined)).length;
+          console.log(
+            `[SpaceView] 对象=${_activeMeetingName ?? '(无)'} 历史=${enrichedHistory.length}条` +
+              ` 席位=${_snap.seats.length}(在场${_onStage}) 事件=${_snap.eventCount}` +
+              ` 诊断=${_snap.diagnostics.length}`,
+          );
+          // 席位明细：名字 / 任期段数 / 在场或离场 / 首段入场时间戳 ——
+          // 用来区分「席位根本没登记」与「任期不覆盖这些事件」这两种「历史=0条」。
+          console.log(
+            `[SpaceView] uuid=${_meetingUuid} ts范围=${_snap.lastTs} 席位明细: ` +
+              _seatMeta.map((s) =>
+                `${s.displayName ?? '(无名)'}[${s.periods.length}段` +
+                  `${s.periods.some((p) => p.leftAt === undefined) ? '/在场' : '/离场'}` +
+                  `${s.periods.length > 0 ? '@' + s.periods[0].enteredAt : '@无'}]`,
+              ).join(' '),
+          );
+          if (_snap.diagnostics.length > 0) {
+            console.warn('[SpaceView] 诊断: ' + _snap.diagnostics.slice(-5).join(' | '));
+          }
+        }
         // Phase 2: DB 侧精准补充 — 如果 startIndex 未覆盖，从 conversations 表按 UUID 补
         if (enrichedHistory.length < _refillBelow) {
           try {
@@ -808,28 +1063,85 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     // ── P1-1 意图前置校验门卫（统一三类指令：结束语/唤醒/普通消息）──
     // 🔴 状态机：私聊-玉瑶(_meeting=null) → 唤醒允许 enter；私聊-XX/群聊 → 唤醒/换人拒绝（提示先结束）；
     //    结束语 → flush 对话组+锚点+清session+回玉瑶；群聊加人/换主发言 → 放行。
-    let _meetingDeny: string | null = null;
-    let _meetingExited = false;
-    // 🔴 P0-2.1(2026-10-17): 会晤「进入」路由指令信号 —— 与 _meetingExited 对称。
-    //   仅显式 enter/enterMulti 置位；restoreLastMeeting（重启自动恢复）**不置位**
-    //   （那是普通对话恰好触发恢复，不是路由指令，不能跳写记忆）。供 persistence-stage 判据使用。
-    let _meetingEntered = false;
+    // 🔴 Phase C：_meetingDeny / _meetingExited / _meetingEntered 三个标志位已上移至
+    //   上下文装配之前声明（见本函数上方「路由先于装配」块），此处不再重复声明。
 
     // V4.0 实体会晤：多人会议时记录用户发言
-    if (ctx._entityMeeting?.isMultiParty()) {
-      ctx._entityMeeting.recordTurn('user', message, '我');
+    // 🔴 P072 任务A 切主：isMulti 判定源改走 GroupSession（recordTurn 的 A1 新签名由调用方传入判定）
+    if (ctx._entityMeeting) {
+      const _rtMulti = ctx._groupSession?.multi === true;
+      ctx._entityMeeting.recordTurn('user', message, '我', _rtMulti);
     }
 
+    // 🔴 Phase C（2026-10-29）：状态迁移本体封装为**函数声明**——声明提升，故本函数
+    //   可在 processChat 的任意位置调用（调用点由 WS_SPACE_PRE_ROUTE 决定在装配前还是原位）。
+    //   原 `if (_em) { … }` 的右花括号（「推断失败保持当前发言人」之后的 `}`）现闭合本函数。
+    //   ⚠️ 函数体内缩进保留原样，避免 318 行整体重排产生不可审阅的 diff。
+  async function _runMeetingTransition(): Promise<void> {
     const _em = ctx._entityMeeting;
-    if (_em) {
+    if (!_em) return;
       const fg = ctx.m4?.getFamilyGraph?.();
       const allNames: string[] = fg?.getAllPersonNames?.() || [];
       // 🆕 UUID 立法: 传入 FG 别名映射（诗韵/韵韵→徐诗韵），任意称呼都能唤醒会晤
       const aliasMap: Map<string, string> = fg?.getAllPersonNamesWithAliases?.() ?? new Map<string, string>();
+
+      // ═══════════════════════════════════════════════════════════════
+      // 🔴 P072 任务A · 切主（P071 方案A）：状态源 = GroupSession
+      //   `_em`（EntityMeeting）此后**只作门卫/纪要副作用执行器 + 轮次采集器**，
+      //   状态判定与写入一律走 GroupSession —— ADR-013 硬约束②「状态只有一处写（reduce）」。
+      //   `WS_GROUP_V2` 关闭时下面所有分支都退化为原 `_em` 路径，行为与切主前逐字一致。
+      //
+      //   P088 任务2：原此处的 `new GroupSession` 创建块已删 —— GroupSession 在本函数最前
+      //   （`processChat` 入口）创建并完成 loadSession + onEffect/onSlot 订阅，本处的
+      //   `!ctx._groupSession` 自 P078 修正1 前移后恒为 false ⇒ 整块永不执行，属死代码。
+      //   订阅语义未变（仍只挂一次、仍只做观测与持久化，门卫/纪要仍在状态机区域执行）。
+      // ═══════════════════════════════════════════════════════════════
+      // 🔴 2026-10-31 第三层固化：`_gs` 恒为 GroupSession（无开关、无 undefined 回退）。
+      //   入口创建点保证本函数执行时它已存在；判空只为类型收窄，正常路径不可达。
+      const _gs = ctx._groupSession;
+      /** 当前主发言者名字（从 GroupSession 派生；唯一状态真源） */
+      const _gsSpeakerName = (() => {
+        if (!_gs) return null;
+        const _st = _gs.getState();
+        if (!_st.speakerUuid) return null;
+        return _st.participants.find(x => x.uuid === _st.speakerUuid)?.name ?? null;
+      })();
+
       // 🔴 P2-2: 会晤中传 inMeeting=true → detectUserIntent 严格模式（提名字不触发唤醒门卫）
-      const intent = EntityMeeting.detectIntent(message, allNames, _em.isActive(), aliasMap);
-      const _isActive = _em.isActive();
-      const _isMulti = _em.isMultiParty();
+      const _isActive = _gs?.active === true;
+      const _isMulti = _gs?.multi === true;
+      // 🔴 P091：第5参 isMulti——askAll 判定前提（单人会晤不触发全员）；旧调用不传则默认 false 行为不变
+      // 🔴 P090 · P096 §2.3：askAll 逐人生成时，**本轮不做任何意图判定**。
+      //   `message` 仍是首轮那句「你们有什么看法」—— 重判必然再次命中 askAll ⇒ **死循环**。
+      //   故 fixedSpeakerUuid 存在时直接钉死为 normal，exit/wake/switch/addParticipant/askAll
+      //   全部跳过；speaker 已由调用层 dispatch SPEAK(fixedSpeakerUuid) 定好。
+      //   缺省（undefined）时原表达式逐字执行 ⇒ 非 askAll 场景零行为变化。
+      const intent = opts?.fixedSpeakerUuid
+        ? ({ kind: 'normal', targets: [] } as import('../m4/household/EntityMeeting.js').MessageIntent)
+        : EntityMeeting.detectIntent(message, allNames, _isActive, aliasMap, _isMulti);
+
+      // P090 · P096 §2.4：askAll 逐人生成 —— 本轮发言人由调用层显式指定。
+      //   🔴 发言人指定**必须在持有 GroupSession 的本层做**：调用层无 `_gs` 引用
+      //   （ctx 是每请求新建的字面量），且 ADR-013 硬约束②「状态只有一处写(reduce)」
+      //   ⇒ 只能 dispatch SPEAK 交给 reduce 出队，不在本层手改 state。
+      //   非参与者 / 同人切换由 reduce 自行判空（sessionReducer SPEAK 分支），此处不重复判断。
+      if (opts?.fixedSpeakerUuid) {
+        _gs!.dispatch({ type: 'SPEAK', target: opts.fixedSpeakerUuid, now: Date.now() });
+      }
+
+      // 🔴 2026-11-01 D2：上一轮是**点名顶替**（不是明确换主）⇒ 先把主发言还给原主。
+      //   放在意图处理最前面是刻意的：恢复点在**下一个请求的开头**，结构上不可能漏 ——
+      //   若改成本轮内来回 dispatch，恢复点要穿过 processChat 数千行的多个 return 分支，
+      //   漏一个就把业主永久留在被点名者身上（这正是 D2 要修的病）。
+      //   · 本轮仍是 addressOnly（连续点名）→ 不恢复，由 reduce 保留最初原主；
+      //   · askAll 逐人生成（fixedSpeakerUuid）→ 不动，发言人由调用层钉死。
+      if (!opts?.fixedSpeakerUuid && intent.kind !== 'addressOnly') {
+        const _transientFrom = _gs?.getState().transientSpeakerFrom ?? null;
+        if (_transientFrom) {
+          _gs!.dispatch({ type: 'SPEAK', target: _transientFrom, now: Date.now() });
+          console.log('[GroupSession] 点名轮结束，主发言回原主: ' + _transientFrom);
+        }
+      }
 
       if (!_isActive) {
         // ── 状态 A: 私聊-玉瑶 / 无会晤 → 唤醒允许，普通消息放行 ──
@@ -841,18 +1153,35 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           // 🔴 P2-2: 会晤边界修复 — 用户确认「会晤=用户+2人及以上实体」。
           // 原 >=3 才 enterMulti → 2 人（如熊梓铭+徐诗雨）被错判为单人会晤。
           if (_enterTargets.length >= 2) {
-            _em.enterMulti(_enterTargets);
+            // 🔴 状态写入 GroupSession（唯一写入口）；门卫走 EntityMeeting 纯副作用入口
+            const _uuidOf = (n: string) => String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(n) || n);
+            const _seeds = _enterTargets.map(n => ({ uuid: _uuidOf(n), name: n, category: '' }));
+            _gs!.dispatch({
+              type: 'WAKE', targets: _seeds, now: Date.now(),
+              slot: captureSlot(null, { emotion: { pleasure: p?.pleasure, arousal: p?.arousal, intimacy: p?.intimacy }, savedRole: _currentRole }),
+            });
+            // 🔴 P078 任务2：把完整 seed 传给副作用层，供纪要素材采集（原只传 uuid ⇒ 名单恒空 ⇒ 纪要永不生成）
+            _em.beginMeetingSideEffects(_enterTargets.join('、'), _seeds.map(s => s.uuid), _seeds);
             _meetingEntered = true;
-            console.log('[EntityMeeting] 多人会晤启动: ' + _enterTargets.join(', '));
+            console.log('[GroupSession] 多人会晤启动: ' + _enterTargets.join(', '));
           } else {
             // 🆕 编码健康修复: 天界域实体（警幻仙姑）会晤前保存人间会话现场（角色状态），退出后复原
             if (isCelestialEntity(_enterTargets[0])) {
               _savedHumanRole = _currentRole;
               console.log('[EntityMeeting] 天界会晤进入: ' + _enterTargets[0] + '，人间现场已保存 (role=' + _currentRole + ')');
             }
-            _em.enter(_enterTargets[0]);
-            _meetingEntered = true;
-            console.log('[EntityMeeting] 单人会晤启动: ' + _enterTargets[0]);
+            {
+              const _u = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(_enterTargets[0]) || _enterTargets[0]);
+              _gs!.dispatch({
+                type: 'WAKE', targets: [{ uuid: _u, name: _enterTargets[0], category: '' }], now: Date.now(),
+                slot: captureSlot(null, { emotion: { pleasure: p?.pleasure, arousal: p?.arousal, intimacy: p?.intimacy }, savedRole: _currentRole }),
+              });
+              // 🔴 P078 任务2：单人会晤也登记纪要素材（否则"单人转多人"后纪要参与者缺原主体）；
+              //   纪要条件仍为 participants>=3，单人不会误生成。
+              _em.beginMeetingSideEffects(_enterTargets[0], [_u], [{ uuid: _u, name: _enterTargets[0], category: '' }]);
+              _meetingEntered = true;
+              console.log('[GroupSession] 单人会晤启动: ' + _enterTargets[0]);
+            }
           }
         } else if (intent.kind === 'normal' || intent.kind === 'exit') {
           // 🔴 S2-G1: 重启后自动恢复上次会晤实体（用户上次在会晤中，重启后继续以该实体身份回应）
@@ -862,11 +1191,38 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           const _yuyaoMention = /玉瑶|瑶瑶|瑶儿/.test(message);
           const _explicitExit = /^(?:和|跟|找|叫|让)?\s*(?:玉瑶|瑶瑶|瑶儿)\s*(?:聊聊|谈谈|说说话|聊一下|聊天)?\s*$/.test(message.trim())
             || /^(?:切回|回到|换回|变回|退出|散会|结束).*(?:玉瑶|瑶瑶|瑶儿)?\s*$/.test(message.trim());
-          if (!_yuyaoMention && !_explicitExit && _em.restoreLastMeeting?.()) {
-            console.log('[EntityMeeting] 消息无会晤意图，自动恢复上次会晤: ' + _em.getEntityName());
+          if (!_yuyaoMention && !_explicitExit) {
+            // 🔴 重启恢复由 **R1 的 loadSession** 承担（GroupSession 单键 `group_session_state`，
+            //   流程开头已加载）。旧 EntityMeeting lastMeeting 恢复链已随第三层拆除删除 ——
+            //   两条恢复链并存会打架（一条恢复状态机、一条恢复 GroupSession ⇒ 必然分叉）。
+            //   若快照存在则本轮已是会晤态（_gs.active），无需再做任何事。
+            if (_gs!.active) {
+              console.log('[GroupSession] 重启自动恢复会晤（R1 快照）: ' + (_gsSpeakerName || _gs!.getState().speakerUuid));
+              // 🔴 D3（2026-11-01）：重启后第一次回到会晤，先通报一声 ——
+              //   否则业主看到的第一个回复突然是「某实体」说的，不知道发生了什么。
+              //   🔴 标记放 `globalThis` 而非 SessionState：这里恰好需要「**进程重启才重置**」
+              //   的语义（每进程提示一次），而 D1 的 aloneNotified 恰好相反（要跨重启保留）。
+              //   写成模块级 `let` 也可行，但本文件已有 `__hippocampusCoordinator` 等
+              //   globalThis 惯例，且不必为一行标记再占一个模块级变量名。
+              const _gRestore = globalThis as { __groupRestoreNotified?: boolean; __groupRestoreNotice?: string };
+              if (_gRestore.__groupRestoreNotified !== true) {
+                _gRestore.__groupRestoreNotified = true;
+                _gRestore.__groupRestoreNotice =
+                  '（上次与' + (_gsSpeakerName || _gs!.getState().speakerUuid || '对方') + '的会晤已恢复。）';
+              }
+            }
           }
         }
         // exit 在玉瑶态无意义（不恢复、不 enter，玉瑶正常回复）
+      } else if (intent.kind === 'askAll') {
+        // P090 · P096 §1.3 + P094 裁决①：向全员提问 —— **全量入队（含当前发言人，一律全答）**。
+        //   队列由 reduce 统一维护（ADR-013 硬约束②：状态只有一处写），本层只 dispatch，不手改 state。
+        //   入队后立即 dispatch SPEAK(队头) 出队首位 ⇒ 本轮正常生成**第一人**的回复；
+        //   其余人由调用层按 `result.askAll.queue` 逐个驱动（P096 §2.4）。
+        _gs!.dispatch({ type: 'ASK_ALL', now: Date.now() });
+        const _askHead = _gs!.getState().askAllQueue[0];
+        if (_askHead) _gs!.dispatch({ type: 'SPEAK', target: _askHead, now: Date.now() });
+        console.log('[GroupSession] 向全员提问: 1 人本轮作答，另 ' + _gs!.getState().askAllQueue.length + ' 人待答');
       } else if (intent.kind === 'exit') {
         // ── 结束语: 关闭对话组 + 锚点 + 清 session + 强制退回私聊-玉瑶 ──
         // 🔴 P1-1: 对话组 flush 由对话组管理段（_meetingExited → _shouldCloseGroup）统一执行，
@@ -886,8 +1242,13 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
           resetAnchor();
         } catch { /* 非阻塞 */ }
         console.log('[MeetExit] 转场回玉瑶: 场景锚点/情感基线已重置');
-        const _exitUuid = _em.getEntityUUID();
-        const exitResult = await _em.exit();
+        // 🔴 状态写入 GroupSession（LEAVE）；纪要+门卫走 EntityMeeting 纯副作用入口。
+        //   `_exitUuid` 取自 LEAVE 前的主发言（GroupSession speakerUuid）。
+        let _exitUuid: string | null;
+        _exitUuid = _gs!.getState().speakerUuid;
+        _gs!.dispatch({ type: 'LEAVE', now: Date.now() });
+        await _em.endMeetingSideEffects();   // 纪要生成 + 关门卫 + 清轮次
+        console.log('[GroupSession] 会晤结束' + (_exitUuid ? '（主发言 ' + (_gsSpeakerName || _exitUuid) + '）' : ''));
         // 🔴 户籍管理法（第九条 搜索闸门·收口）: 退出会晤时清除会话实体 UUID，
         // 恢复户主钥匙视角（不再限制知识库检索范围）。
         try {
@@ -905,9 +1266,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             });
           } catch { /* 非致命 */ }
         }
-        if (exitResult?.minutes) {
-          console.log('[EntityMeeting] 多人会议结束，纪要已自动归档');
-        }
+        // 纪要日志不再在此接收返回值：切主后由 `_em.endMeetingSideEffects()` 内部打出
+        // 「会议结束 → 纪要已生成」，旧路径由 `_em.exit()` 内部同样打出 —— 两条路径均有日志。
         // 🔴 转场彻底隔离(2026-08-23): 记录退出实体 UUID —— 退出消息归属原实体（不污染玉瑶历史），
         // 玉瑶转场后=全新会话（玉瑶专属历史过滤，看不到转场消息）；下一轮 processChat 开头清除。
         (ctx as any)._exitEntityUuid = _exitUuid;
@@ -921,123 +1281,148 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
         } else {
           _currentRole = 'secretary';
         }
-      } else if (_isMulti && intent.kind === 'addParticipant' && intent.targets.length === 1) {
+      } else if (intent.kind === 'addParticipant' && intent.targets.length === 1 && _isActive) {
         // ── 群聊加人（addParticipant ≠ 唤醒拒绝）──
-        _em.addParticipant(intent.targets[0]);
-        console.log('[EntityMeeting] 群聊加人: +' + intent.targets[0]);
+        // 🔴 P129 任务2：去掉 _isMulti 前提 —— 单人会晤态也直接 JOIN 扩员（单人→多人，
+        //    participants 1→2 后 isMulti 由 GroupSession state 派生自动变 true）。
+        //    语义依据：叫人来 ≠ 换主发言；本块已在会晤中（_isActive 恒真，显式保留防结构漂移）。
+        {
+          // 🔴 JOIN 写入 GroupSession；门卫走纯副作用入口
+          const _joinU = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(intent.targets[0]) || intent.targets[0]);
+          _gs!.dispatch({ type: 'JOIN', target: { uuid: _joinU, name: intent.targets[0], category: '' }, now: Date.now() });
+          // 🔴 P078 任务2：补 name —— 否则纪要素材名单里只有 uuid，纪要参与者名不可读
+          _em.addSessionEntitySideEffect(_joinU, intent.targets[0]);
+          console.log('[GroupSession] 群聊加人: +' + intent.targets[0]);
+        }
+      } else if (intent.kind === 'addressOnly' && intent.targets.length === 1) {
+        // ── D2（2026-11-01）：会晤中点名 = **本轮由她答，下一轮自动回原主** ──
+        //   与下方 switch 的区别：switch 是业主明确要换人（「换阿珍来」）⇒ 永久；
+        //   点名只是「这句话我问她」⇒ reduce 记下原主 UUID，下一轮请求开头回退。
+        //   🔴 不在这里手改 speakerUuid：ADR-013 硬约束②，状态只有 reduce 一处写。
+        const _addrU = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(intent.targets[0]) || intent.targets[0]);
+        _gs!.dispatch({ type: 'TRANSIENT_SPEAK', target: _addrU, now: Date.now() });
+        console.log('[GroupSession] 点名应答（仅本轮）: → ' + intent.targets[0]);
       } else if (_isMulti && intent.kind === 'switch' && intent.targets.length === 1) {
         // ── 群聊换主发言（switch）──
-        await _em.switchTo(intent.targets[0]);
-        console.log('[EntityMeeting] 群聊换主发言: → ' + intent.targets[0]);
+        {
+          _gs!.dispatch({ type: 'SPEAK', target: intent.targets[0], now: Date.now() });
+          console.log('[GroupSession] 群聊换主发言: → ' + intent.targets[0]);
+        }
+      } else if (intent.kind === 'wake' && intent.targets.length >= 2 && !_isMulti) {
+        // ── P129 任务2 · 单人态多目标“找X和Y一起聊聊” → 扩员（叫人来 ≠ 换主发言）──
+        //   仅 JOIN 新增者：过滤当前已在场发言对象（如“找徐诗雨和阿珍”中的徐诗雨），防重复入列；
+        //   已在场目标全部命中时本轮状态无变化（幂等，作普通对话放行）；
+        //   多人群聊（_isMulti）与单目标 wake/switch 行为一字不变（仍走下方 deny 或既有分支）。
+        const _curUuid = _gs!.getState().speakerUuid;
+        for (const _t of intent.targets) {
+          const _tU = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(_t) || _t);
+          if (_tU && _tU === _curUuid) continue;
+          _gs!.dispatch({ type: 'JOIN', target: { uuid: _tU, name: _t, category: '' }, now: Date.now() });
+          _em.addSessionEntitySideEffect(_tU, _t);
+          console.log('[GroupSession] 单人态扩员: +' + _t);
+        }
       } else if (intent.kind === 'wake' || intent.kind === 'switch' || intent.kind === 'addParticipant') {
-        // ── 会晤中唤醒/换人 → 拒绝，提示先结束当前对话 ──
-        const curName = _em.getEntityName() || '当前实体';
-        const targetName = intent.targets[0] || '';
-        _meetingDeny = _isMulti
-          ? `（现在开着会呢，先结束会议${targetName ? '再单独找' + targetName : '吧'}～）`
-          : `（正和${curName}聊着呢，${targetName ? '想找' + targetName + '聊得' : '想换人得'}先说"结束/再见"回到玉瑶哦～）`;
-        console.log('[EntityMeeting] 门卫拒绝: ' + intent.kind + ' targets=' + intent.targets.join(',') + ' → ' + _meetingDeny);
+        // 🔴 2026-10-29 · 空间模式：不再拒绝，直接把目标换上来（拆掉「先散会才能换人」这道门卫）
+        //   旧行为：整轮被短路成硬编码提示（_meetingDeny → 2861 行 reply = _meetingDeny），LLM 完全没参与。
+        //   业主实测：「诗雨，你别忘了把那个带上」（带逗号）被拒，「诗雨你别忘了…」（无逗号）正常——
+        //   差别只在 EntityMeeting 把前者识别为 wake/switch 意图，而这里一律置 deny。
+        // 🔴 2026-10-30 第一层固化：`WS_SPACE_GATE_OPEN` 开关已删除 —— 换人**恒定放行**。
+        //   旧行为（整轮短路成 _meetingDeny 硬编码提示、LLM 完全不参与）已随之删除；
+        //   `_meetingDeny` 因此恒为 null，其变量本体将在第二层随大块重写一并删除。
+        //   ⚠️ 说话人身份仍有多个来源（_activeMeetingName / Stage2 _meetingEntityName /
+        //   GroupSession.speakerUuid / outputGuard 标签），第二层收敛为单一真源。
+        {
+          const _curUuidG = _gs!.getState().speakerUuid;
+          // 🔴 P0（2026-10-30 回归修复）：换人判据收紧 —— 只有**显式指向**才换人。
+          //
+          //   缺陷：旧实现「无句首称呼时回退 intent.targets」，而 intent.targets 是**全句扫人名**。
+          //   门卫删除后，任何提及都会把人叫上来：
+          //     「诗雨，阿珍知道吗」                    → 阿珍被拉进来
+          //     「诗雨知道吗，就是布吉街道那个半岛苑」   → 同上
+          //   这与真实人际完全不同：**提到某人 ≠ 叫某人**。
+          //
+          //   判据（与内核 detectAddressee 对齐，只认三种显式形态）：
+          //     ① 句首称呼 + 标点  「阿珍，…」            → 换到阿珍
+          //     ② 显式动词 + 名字  「叫/让/请/找/喊 + 阿珍」
+          //     ③ 名字 + 位移词    「阿珍过来 / 诗雨走吧」
+          //   其余一律**不换人**（句中顺带提及不动任何席位）。
+          const _msgT = String(message || '').trim().replace(/^@/, '');
+          const _vocM = _msgT.match(/^([一-龥A-Za-z]{2,10})\s*[，,、:：]/);
+          const _verbM = _msgT.match(/(?:叫|让|请|找|喊)([一-龥A-Za-z]{2,10})(?=\s*(?:过来|来一下|进来|来吧|一趟|聊聊|说说|说|讲|$|[，,、。！？?!]))/);
+          const _moveM = _msgT.match(/^([一-龥A-Za-z]{2,10})\s*(?:过来|来一下|进来|来吧|先走|走吧|出去|退出|回去)/);
+          const _candName = _vocM?.[1] ?? _verbM?.[1] ?? _moveM?.[1] ?? '';
+          const _candU = _candName
+            ? String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(_candName) || '')
+            : '';
+          if (_candU && _candU !== _curUuidG) {
+            {
+              const _alreadyIn = _gs!.getParticipants().some((p: any) => p.uuid === _candU);
+              if (!_alreadyIn) {
+                _gs!.dispatch({ type: 'JOIN', target: { uuid: _candU, name: _candName, category: '' }, now: Date.now() });
+                _em.addSessionEntitySideEffect(_candU, _candName);
+              }
+              _gs!.dispatch({ type: 'SPEAK', target: _candU, now: Date.now() });
+            }
+            console.log('[SpaceMode] 换人: → ' + _candName);
+          } else if (!_candU) {
+            // 🔴 本轮最重要的行为变化：**提及 ≠ 召唤**。句中无显式指向 ⇒ 一个席位都不动。
+            console.log(
+              '[SpaceMode] 未换人：无显式指向（' + intent.kind + ' targets=' + intent.targets.join(',') + '）',
+            );
+          }
+        }
       }
       // normal → 放行
 
       // ── T012 发言人推断（多人群聊/会议·自然聊天）──
       // 无显式点名/换人时，判断"这句话最该谁接"：内容提及→其接 / LLM待办归属(方案A)→其接 / 默认当前发言人。
       // 微信群聊/语音自然聊天通用：点名谁谁说话（P1-3），聊到谁负责的事谁接（本段）。
-      if (_isMulti && _isActive && intent.kind === 'normal') {
+      // P090：askAll 逐人生成时跳过发言人推断 —— 本轮 speaker 由调用层显式指定，
+      //   再让 inferSpeaker 依据「仍是首轮那句话」重判会覆盖指定的发言人。
+      if (_isMulti && _isActive && intent.kind === 'normal' && !opts?.fixedSpeakerUuid) {
         try {
           const _inferred = await _em.inferSpeaker(message, aliasMap, ctx.llmProvider);
-          if (_inferred && _inferred !== _em.getEntityName()) {
-            await _em.switchTo(_inferred);
-            console.log('[EntityMeeting] 发言人推断: → ' + _inferred);
+          const _curSpeaker = _gsSpeakerName;
+          if (_inferred && _inferred !== _curSpeaker) {
+            // 🔴 主发言切换写 GroupSession（SPEAK）。inferSpeaker 本身不换 speakerResolver（语义不同，另议）。
+            _gs!.dispatch({ type: 'SPEAK', target: _inferred, now: Date.now() });
+            console.log('[GroupSession] 发言人推断: → ' + _inferred);
           }
         } catch { /* 推断失败保持当前发言人 */ }
       }
     }
 
+  // 🔴 2026-10-30 第一层固化：原「开关关闭时在此就地转换」的第二个调用点已删除。
+  //   状态转换现在**只有** processChat 顶部的那一个调用点（见函数开头的路由前置块）。
+
     // ═══════════════════════════════════════════════════════════════
-    // 🔴 T013 Phase 2 批B（B1）：群聊影子状态并线
-    //   EntityMeeting 在本阶段仍是**唯一真源**；此处只把它的真实状态投影成 action
-    //   交给 GroupSession，不参与任何决策（ADR-013 §2.3 逐段替换的第一段）。
-    //   `WS_GROUP_V2` 未设置时整个分支一行不执行 ⇒ 行为与改动前逐字一致。
-    //   🔴 影子侧任何异常都必须被吞掉 —— 新架构出问题绝不能伤及用户。
+    // 🔴 T013 Phase 2 批B（B1）：群聊状态每轮落盘（R1 单写者）
+    //   GroupSession 是唯一状态真源；本块只做「状态定稿后写回 engine_store 单键」，
+    //   不做任何投影/判定。2026-10-31 第三层固化后不再有开关门控 —— 每轮恒定执行。
+    //   🔴 任何异常都必须被吞掉 —— 落盘失败绝不能伤及用户。
     // ═══════════════════════════════════════════════════════════════
-    if (isGroupSessionEnabled()) {
+    {
       try {
-        if (!ctx._groupSession) {
-          ctx._groupSession = new GroupSession({ enabled: true });
-          // 🔴 R1（P051·PI）：启动时从单键恢复会话状态。整份拒绝语义在 restore 内建 ——
-          //   校验失败返回 false 且状态保持原样（不半恢复），此处无需额外处理。
-          try { loadSession(ctx.storage?.getSQLite?.(), ctx._groupSession); }
-          catch (_e) { console.warn('[GroupShadow] R1 恢复异常（非阻塞）:', (_e as Error)?.message); }
-          // 🔴 加人减人回调接线（P051·PI，ADR-013 协作接口#3）：订阅副作用事件，
-          //   命中 participantJoined/participantLeft/speakerChanged 时打点并持久化（单写者=本会话）。
-          //   订阅仅在首次创建时挂一次；影子侧异常一律吞掉，绝不伤及主链路。
-          ctx._groupSession.onEffect((_eff) => {
-            try {
-              if (_eff.type === 'participantJoined' || _eff.type === 'participantLeft' || _eff.type === 'speakerChanged') {
-                console.log('[GroupSession] 事件 ' + _eff.type);
-                saveSession(ctx.storage?.getSQLite?.(), ctx._groupSession!);
-              }
-            } catch (_ee) { /* 影子侧异常不影响主链路 */ }
-          });
-        }
+        // P088 任务2：原此处的 `new GroupSession` 创建 + loadSession + onEffect 订阅已删 ——
+        //   GroupSession 在本函数最前（processChat 入口）创建并完成 R1 恢复与订阅，
+        //   此处的 `!ctx._groupSession` 自 P078 修正1 前移后恒为 false ⇒ 整块永不执行，属死代码。
+        //   ⚠️ 下方外层每轮 `saveSession` **必须保留** —— 它是 R1 会晤重启恢复的唯一每轮保障。
+        // 🔴 P072 切主：**投影已移除** —— GroupSession 现在是状态真源（状态由状态机区域直接
+        //   `gs.dispatch` 写入），不再需要把 EntityMeeting 的状态投影进来。此处每轮只做 R1 落盘。
+        //   现场恢复（批C applySlot）与事件观测已前移到 GroupSession 创建点的 onSlot/onEffect 订阅。
         const _gs = ctx._groupSession;
-        const _emSnap = ctx._entityMeeting;
-        const _snapActive = !!_emSnap?.isActive?.();
-        const _snapParticipants = _snapActive
-          ? (() => {
-              const _list = ((_emSnap?.getParticipants?.() ?? []) as any[])
-                .filter(p => p?.uuid && p?.name)
-                .map(p => ({ uuid: String(p.uuid), name: String(p.name), category: p.category }));
-              // 🔴 T013 批B 缺陷（2026-10-22 实测发现）：getParticipants() 返回的是
-              //   EntityMeeting._multiParticipants，**只在多人路径赋值**（:165/:230/:327/:815），
-              //   单人会晤从不碰它 → 恒为 [] → projectMeetingState 命中「无效快照」守卫返回
-              //   空序列 → 影子侧在最常用的单人会晤场景下**永不激活**（零日志零埋点）。
-              //   project.ts 的接口契约写的是「单人时只含主发言者」—— 此处兑现它。
-              //   category 在 MeetingSnapshot 中可选，toSeeds 只校验 keyOf 与 name，空串安全。
-              if (_list.length === 0) {
-                const _u = _emSnap?.getEntityUUID?.() ?? null;
-                const _n = _emSnap?.getEntityName?.() ?? null;
-                if (_u && _n) return [{ uuid: String(_u), name: String(_n), category: '' }];
-              }
-              return _list;
-            })()
-          : [];
-        const _snap: MeetingSnapshot = {
-          active: _snapActive,
-          speakerUuid: _snapActive ? (_emSnap?.getEntityUUID?.() ?? null) : null,
-          speakerName: _snapActive ? (_emSnap?.getEntityName?.() ?? null) : null,
-          participants: _snapParticipants,
-        };
-        // 🔴 T013 批C：进入会晤前采样玉瑶现场并压栈。
-        //   时序依据（chat.ts 每轮）：`:831 enter()` → `:947 本投影块` → `:2502 orchestrate()`；
-        //   `M5Orchestrator:63` 每轮调 `extractAnchor()` **用会晤内容覆盖模块单例**，
-        //   故此刻单例里仍是**玉瑶现场**（本轮 M5 还没跑）—— 采样不会采到会晤污染。
-        //   旧代码做不到这件事：它在 `:855` 用 `resetSession()` **归零**，且位置在 exit 之前。
-        const _yuyaoSlot = captureSlot(null, { emotion: { pleasure: p?.pleasure, arousal: p?.arousal, intimacy: p?.intimacy }, savedRole: _currentRole });
+        // 🔴 P072 切主：投影所需的快照构造（_snapActive / _snapParticipants / _snap / _yuyaoSlot）
+        //   已随投影调用一并移除 —— 其中批B 的「单人补位」修复与批C 的「玉瑶现场采样」逻辑
+        //   分别改由状态机区域的 enter 分支（dispatch WAKE 时 captureSlot）与创建点的 onSlot
+        //   订阅承接，语义不变、位置更贴近日志本体。
 
-        // 投影产出的是 action **序列**（集合重建 + 主发言对齐可能各需一步），逐个派发
-        const _actions = projectMeetingState(_gs.getState(), _snap, Date.now(), _yuyaoSlot);
-        if (_actions.length > 0) {
-          let _next = _gs.getState();
-          for (const _a of _actions) _next = _gs.dispatch(_a);
-          const _drift = detectDrift(_next, _snap);
-          if (_drift) console.warn('[GroupShadow] 🔴 影子状态与真源漂移: ' + _drift);
-
-          // ── T013 批C：退出会晤 → **弹栈恢复**玉瑶现场，而非 reset 归零（修 P039 缺陷②）──
-          //   恢复落在本块之后、`:2502 orchestrate` 之前 ⇒ 本轮回复就是用恢复后的玉瑶现场生成的。
-          const _yuyaoRestored = [..._next.contextStack].reverse().find(sl => sl.uuid === null);
-          if (_actions.some(a => a.type === 'LEAVE') && _yuyaoRestored) {
-            const _ok = applySlot(_yuyaoRestored);
-            // 修 P039 缺陷③：普通会晤退出不再无条件硬置 secretary，而是复原进入前的角色
-            //   （原 `_savedHumanRole` 被 `isCelestialEntity` 分支包住 ⇒ 普通会晤丢失角色现场）
-            if (_yuyaoRestored.savedRole) _currentRole = _yuyaoRestored.savedRole as typeof _currentRole;
-            console.log('[GroupShadow] 玉瑶现场已恢复=' + _ok + ' role=' + _currentRole);
-          }
-        }
-        // 🔴 R1（P051·PI）：每轮状态定稿后落盘到单键（含上方批C 弹栈恢复后的最终态）。
-        //   单写者=本会话；saveSession 内部 WS_GROUP_V2 关闭时 no-op。失败非阻塞。
-        saveSession(ctx.storage?.getSQLite?.(), _gs);
+        // 🔴 P072 切主：投影调用（projectMeetingState / detectDrift）与批C 弹栈恢复**均已移除**。
+        //   状态真源是 GroupSession：状态由状态机区域直接 `gs.dispatch` 写入，此处再投影只会
+        //   用「已不再被维护的 EntityMeeting 状态」覆盖新架构状态（判定与状态分叉）。
+        //   批C 现场恢复（applySlot + 复原角色）改由创建点的 `onSlot` 订阅承接，语义不变。
+        // 🔴 R1：每轮状态定稿后落盘到单键。单写者=本会话。失败非阻塞。
+        //   入口已保证 `ctx._groupSession` 非空，判空只为健壮性。
+        if (_gs) saveSession(ctx.storage?.getSQLite?.(), _gs);
       } catch (_gsErr) {
         console.warn('[GroupShadow] 影子状态投影失败（不影响主链路）:', (_gsErr as Error)?.message);
       }
@@ -1051,6 +1436,16 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
     // V27 结构修复: 会晤铁律结构化承载（EntityContextBuilder.rules → PromptAssembler）
     let _entityRules: Array<{ id: string; content: string }> = [];
     let _meetingEntityName: string | null = null;
+    // 🔴 2026-10-31 标签单一真源：**生成这条回复时的身份** —— 标签只认它，不认请求结束时的 speaker。
+    //   换人（inferSpeaker / 点名）发生后两者必然错位，见 ChatResponse.speakerName 注释。
+    let _genSpeakerName: string | null = null;
+    // 🔴 2026-10-31 独处态（业主裁决 A）：空间里**有过席位、但此刻无人在场** ⇒ 不生成回复。
+    //   「没人应就证明只有自己」；业主的发言仍照常落库（记在本体 UUID 名下）。
+    let _soloMode = false;
+    // 🔴 2026-10-31 耳语（业主裁决：看得见、听不到）：本条业主发言的唯一听众。
+    //   识别条件：句中含「耳语/悄悄/私下/悄悄话」且点到**当前在场者**的名字。
+    //   命中 ⇒ 该条事件 audience 收窄到目标；其余在场者只看到一条占位。
+    let _whisperToUuid: string | undefined;
     // V12.7(批3): 提升会晤实体 UUID 到顶层 — 供 knowledgeBase.search 补 UUID 门
     const _meetingEntityUuid: string | null = ctx._entityMeeting?.getEntityUUID?.() ?? null;
     // 🔴 P0-2D 盖章②（会晤状态落定后，覆盖 WorkingMemory 缓冲路径）:
@@ -1159,6 +1554,8 @@ export async function processChat(message: string, ctx: ChatContext, streamOpts?
             isFirstTurn,
             userName: (ctx as any)._userName || '鸿艺',
             recentConversations: recentConversations.length > 0 ? recentConversations : undefined,
+            // 🔴 P141 v2：此刻的身体与渴望（瑶灵体感缓存；无值/陈旧时 null → 注入层整段跳过）
+            bodyFeel: (await import('./chat/yaoling-sensation-pipeline.js')).getBodyStateSnapshot?.() ?? null,
           });
           _entityContextText = ecResult.systemText;
           // V27 结构修复: 会晤铁律的结构化输出（由 PromptAssembler 统一承载与去重，见下方 assembler 段）
@@ -2438,8 +2835,8 @@ try {
 let _lawSceneCache: { entity: string; location: string; action: string; at: number } | null = null;
 
 // 🗺️ 2026-08-24 高德实时路线: 检测位置意图 → 调瑶光 wf_amap_route → 实时数据注入 finalKnowledgeText。
-// 静默失败（总线/高德不可用绝不影响聊天）；仅玉瑶态触发（会晤/门卫拒绝/转场轮跳过）。
-if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny && !_meetingEntityName && message.length > 3) {
+// 静默失败（总线/高德不可用绝不影响聊天）；仅玉瑶态触发（会晤/转场轮跳过）。
+if (!_meetingExited && !_ruleEngineBlocked && !_meetingEntityName && message.length > 3) {
   try {
     const _ROUTE_PLACES: Record<string, string> = {
       '家': 'xinghai_mingcheng', '星海名城': 'xinghai_mingcheng',
@@ -2472,8 +2869,8 @@ if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny && !_meetingEntityNa
 // 🧠 2026-08-24 瑶光物理客观规律: 读场景锚点 → wf_physical_laws → 一致性约束注入。
 // 仅在关键场景触发（浴室/床/裸露/亲密动作），普通聊天零开销；静默失败不影响主流程。
 // 🔴 2026-08-24 会晤扩展: 不再排除 _meetingEntityName——物理规律基于「本轮消息+历史」推断场景，
-// 会晤模式（如熊梓铭在浴室）同样适用裸身客观规律。仅排除转场轮/门卫拒绝轮。
-if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny) {
+// 会晤模式（如熊梓铭在浴室）同样适用裸身客观规律。仅排除转场轮。
+if (!_meetingExited && !_ruleEngineBlocked) {
   try {
     // 🔴 2026-08-24 触发改进: 用「本轮消息 + 最近历史」实时推断场景（不依赖上一轮锚点），
     // 保证"去浴室冲凉吧"这一轮就注入——否则玉瑶首轮自由发挥建立错误叙述（如穿着短衫）后难以纠正。
@@ -2512,7 +2909,7 @@ if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny) {
 
 // 🚄 2026-08-24 火车时刻查询(12306): "深圳到广州南的高铁几点" / "G1102经过哪些站" → wf_train_schedule。
 // 触发词: 高铁/火车/车次/余票/动车/班次 + 站名对 或 车次号+经过；静默失败不影响聊天。
-if (!_meetingExited && !_ruleEngineBlocked && !_meetingDeny && !_meetingEntityName && message.length > 3) {
+if (!_meetingExited && !_ruleEngineBlocked && !_meetingEntityName && message.length > 3) {
   try {
     const _trainNoMT = message.match(/([GCDZKT]\d{1,5})/);
     if (/高铁|火车|车次|余票|动车|班次/.test(message) || (_trainNoMT && /经过|经停|停靠|哪些站|沿途|路过/.test(message))) {
@@ -2607,18 +3004,80 @@ if (_meetingExited) {
       + ' | stage_ms: ' + _stageDetail
       + ' final_kb_chars=' + (finalKnowledgeText || '').length
       + ' mode=' + (_meetingEntityName ? 'meeting' : 'normal'));
-    if (_meetingDeny) {
-      reply = _meetingDeny;
+    // 🔴 2026-10-30 第一层固化：原 `if (_meetingDeny) { reply = _meetingDeny; }` 分支已删除
+    //   （它让整轮对话被硬编码提示短路、LLM 完全不参与）。
+    //
+    // 🔴 2026-10-31 独处态（业主裁决 A）：空间里**有过席位、但此刻零人在场** ⇒ 不生成回复。
+    //   「没人应就证明只有自己」—— 白皮书 §3.3「空间空 = 业主独处，无人应答」的首次真实接线。
+    //   判据刻意保守：只看**已经有过任期**的空间。若从未建立过任何席位，维持既有玉瑶态，
+    //   避免把「第一次聊天」误判成独处、让系统看起来像死掉。
+    // 🔴 2026-10-31 耳语识别（放在同一处：此时席位已同步，目标可从在场名单里取）
+    _whisperToUuid = (() => {
+      try {
+        if (!/耳语|悄悄|私下|悄悄话/.test(message)) return undefined;
+        const _adW = (ctx as any)._spaceAdapter;
+        const _snapW = _adW?.exportSnapshot?.();
+        if (!_snapW) return undefined;
+        const _on = (_snapW.seats as Array<{ uuid: string; displayName?: string; periods: Array<{ leftAt?: number }> }>)
+          .filter((s) => s.periods.some((p) => p.leftAt === undefined));
+        // 🔴 2026-10-31：全名 + **短名**双匹配。
+        //   只比全名时「诗雨」≠「徐诗雨」⇒ 真机说「诗雨，我悄悄跟你说句话」永不触发。
+        //   短名口径与 EntityMeeting._fuzzyFindName 一致：≥3 字的全名取末尾 2 字。
+        const _hit = _on.find((s) => {
+          const _n = s.displayName;
+          if (!_n) return false;
+          if (message.includes(_n)) return true;
+          const _short = _n.length >= 3 ? _n.slice(-2) : null;
+          return !!_short && message.includes(_short);
+        });
+        return _hit?.uuid;
+      } catch {
+        return undefined;
+      }
+    })();
+    if (_whisperToUuid) console.log('[Whisper] 本条仅对目标可闻: ' + _whisperToUuid);
+
+    _soloMode = (() => {
+      try {
+        // 🔴 2026-11-01：判据改为**纯派生** —— `sessionMode(state) === 'alone'`
+        //   （曾经建立过席位 ∧ 此刻零人在场）。该信息由 SessionState.everHadSeats
+        //   承担并可持久化 ⇒ 进程重启后独处态仍然成立，不再依赖模块级标志
+        //   （旧实现在重启后会把独处态退回玉瑶态）。
+        //   R1 快照恢复的会晤走同一判定：快照里带 everHadSeats 或非空 participants。
+        return ctx._groupSession?.mode === 'alone';
+      } catch { return false; }
+    })();
+
+    if (_soloMode) {
+      // 🔴 2026-11-01 转场体验：从「有人应答」到「完全静默」原本是一步跳变。
+      //   进入独处态的**第一轮**给一句固定收尾（不调 LLM），之后彻底静默。
+      //   文案由业主指定：「（人都走了，房间里安静了下来。）」
+      //   标记存 SessionState（aloneNotified），不放模块级变量 —— 后者进程重启即丢。
+      try {
+        const _gsState = ctx._groupSession?.getState();
+        if (_gsState && _gsState.aloneNotified !== true) {
+          reply = '（人都走了，房间里安静了下来。）';
+          ctx._groupSession!.dispatch({ type: 'ALONE_ACK', now: Date.now() });
+          console.log('[SoloMode] 独处过渡提示已发出（仅首次）');
+        } else {
+          // 不调 LLM、不产生助手轮；reply 保持空串，持久化侧只写业主这一句。
+          reply = '';
+          console.log('[SoloMode] 无人在场 —— 不生成回复，业主发言照常落库');
+        }
+      } catch {
+        // 任何异常退化为原有行为
+        reply = '';
+      }
     } else {
       // 🔴 T013 Phase2-0（ADR-013 §2.1「身份解析在状态之后」）:
       //   身份交给 resolveIdentity 纯函数一次性决定 —— role 与 isMeeting 在同一个分支产生，
       //   结构上不可能出现「会晤态 + 玉瑶角色」的组合（原缺陷靠 M5Orchestrator 内部兜底）。
       const { resolveIdentity: _resolveIdentity } = await import('../m5/identity/resolveIdentity.js');
-      // 🔴 T013 Phase 2 批B（B3）: `WS_GROUP_V2` 开启时身份改由**状态**决定
-      //   （ADR-013 硬约束③「身份解析在状态之后」）；关闭时完全保留原调用，行为逐字不变。
-      //   🔴 一致性守卫：只有影子状态与真源（_meetingEntityName）在「是否会晤」上一致时才走状态路径。
-      //     若两者冲突（说明投影出错），立即回退原路径 —— 影子侧的 bug 绝不能改变用户看到的身份。
-      const _gsState = isGroupSessionEnabled() ? ctx._groupSession?.getState() : undefined;
+      // 🔴 T013 Phase 2 批B（B3）: 身份由**状态**决定
+      //   （ADR-013 硬约束③「身份解析在状态之后」）。
+      //   🔴 一致性守卫：只有状态与真源（_meetingEntityName）在「是否会晤」上一致时才走状态路径。
+      //     若两者冲突（说明状态装配出错），立即回退纯函数路径 —— 绝不能改变用户看到的身份。
+      const _gsState = ctx._groupSession?.getState();
       const _identity = _gsState && (_gsState.participants.length > 0) === !!_meetingEntityName
         ? (await import('../m5/group/identityFromState.js')).resolveIdentityFromState(_gsState, _currentRole)
         : _resolveIdentity({
@@ -2626,6 +3085,9 @@ if (_meetingExited) {
             speakerName: _meetingEntityName,
             yuyaoRole: _currentRole,
           });
+      // 🔴 2026-10-31：此刻的身份就是**生成这条回复的身份** —— 存下来随返回体带出，
+      //   路由层用它做标签，保证「标签 == 正文自称」。
+      _genSpeakerName = _identity.speakerName ?? null;
       console.log('[Identity] ' + _identity.role + ' meeting=' + _identity.isMeeting + ' speaker=' + (_identity.speakerName ?? '玉瑶'));
       reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity);
     }
@@ -2814,9 +3276,17 @@ if (_meetingExited) {
 
     // ── 持久化：对话写入 + 话题标记（已拆分至 persistence-stage） ──
     // V4.0 实体会晤：多人会议时记录 AI 回复
-    if (ctx._entityMeeting?.isMultiParty()) {
-      const speakerName = ctx._entityMeeting.getEntityName() || '玉瑶';
-      ctx._entityMeeting.recordTurn('assistant', reply, speakerName);
+    // 🔴 P072 切主：isMulti 与 speakerName 判定源改走 GroupSession（recordTurn A1 新签名）。
+    if (ctx._entityMeeting) {
+      const _rtMulti2 = ctx._groupSession?.multi === true;
+      const _rtSpeaker2 = (() => {
+        if (ctx._groupSession) {
+          const _st = ctx._groupSession.getState();
+          return _st.speakerUuid ? (_st.participants.find(x => x.uuid === _st.speakerUuid)?.name ?? null) : null;
+        }
+        return ctx._entityMeeting.getEntityName();
+      })();
+      ctx._entityMeeting.recordTurn('assistant', reply, _rtSpeaker2 || '玉瑶', _rtMulti2);
     }
 
 	    persistConversation({
@@ -2827,6 +3297,12 @@ if (_meetingExited) {
 	      //   不在 persistence-stage 猜正文（正则扫正文 = V3 任务书明令禁止的旧方案）。
 	      isMeetingEntry: _meetingEntered,
 	      isMeetingExit: _meetingExited,
+	      // P090 · P096 §2.3：askAll 后续轮不重复写用户消息（首轮已写），回复侧照常写
+	      skipUserPersist: opts?.skipUserPersist,
+	      // 🔴 2026-10-31：独处态只写用户轮，不产生空的助手轮
+	      soloMode: _soloMode,
+	      // 🔴 2026-10-31 耳语：该轮只对目标可闻，其余席位只看到占位
+	      whisperToUuid: _whisperToUuid,
 	    }).catch((_e: any) => console.warn('[Persist] 异步失败:', _e?.message));
 
     // 躯体感知记录（SomaticMemory — 五重铁律协议③）
@@ -3371,7 +3847,55 @@ if (_meetingExited) {
 
 (globalThis as any).__hippocampusCoordinator?.afterResponse();
 
+    // 🔴 D3（2026-11-01）：重启恢复提示的**消费点**。
+    //   设置点在意图区（`_gs!.active` 恢复分支），标记放 `globalThis` —— 每进程只提示一次；
+    //   这里在一切回复加工**之前**拼接，保证业主看到的第一句就是它。
+    //   独处态（`_soloMode`，无人在场）不提示：那时房间是空的，说「会晤已恢复」是自相矛盾。
+    {
+      const _gNotice = globalThis as { __groupRestoreNotice?: string };
+      if (_gNotice.__groupRestoreNotice && reply && !_soloMode) {
+        reply = _gNotice.__groupRestoreNotice + reply;
+        delete _gNotice.__groupRestoreNotice;
+      }
+    }
+
+    // P090 · P096 §2.4 + P097 裁决②：askAll 轮答 —— 「每段以 FG 主名开头」拼接（前端零改动）。
+    //   🔴 前缀与队列**只在 askAll 场景产出**：判据 = 队列非空（首轮/中间轮）或本轮发言人由
+    //   调用层指定（fixedSpeakerUuid，最后一人出队后队列已空）。两者在非 askAll 场景均不成立
+    //   ⇒ 零行为变化。
+    //   姓名取自 FG 主名（参与者 name），不猜正文、不依赖 LLM 输出。
+    //   ⚠ 此处位于意图块**之外**（return 前），内层的 `_gs`/`_useGS` 局部量不可见 ——
+    //   直接取 `ctx._groupSession`（它由入口创建点赋值，与内层 `_gs` 同源）。
+    let _askAllOut: ChatResponse['askAll'];
+    if (ctx._groupSession) {
+      const _gsR = ctx._groupSession;
+      const _stAsk = _gsR.getState();
+      const _isAskAllTurn = _stAsk.askAllQueue.length > 0 || !!opts?.fixedSpeakerUuid;
+      if (_isAskAllTurn) {
+        const _spkP = _stAsk.speakerUuid ? _gsR.getParticipantByUuid(_stAsk.speakerUuid) : null;
+        if (_spkP) reply = _spkP.name + '：' + reply;
+        // 🔴 步骤4 守卫测试（P105 §三）抓出的缺陷：ASK_ALL 把**当前发言人**也入队
+        //   （P094 裁决①），而 WAKE 首位即当前 speaker ⇒ 首轮对队头 dispatch SPEAK
+        //   必然触发 reducer 的「同人切换 = 无变化」守卫（返回原引用）⇒ **队列不减**
+        //   ⇒ 已答者仍在队列里。若原样返回，调用层会再让他答一次
+        //   ⇒ **同一个人的回复出现两遍**。故此处按 speakerUuid 过滤掉本轮已答者。
+        //   过滤后为空 ⇒ 不发 askAll 字段 ⇒ 调用层循环 0 次（与非 askAll 场景同路径）。
+        const _remainingAsk = _stAsk.askAllQueue.filter((u: string) => u !== _stAsk.speakerUuid);
+        if (_remainingAsk.length > 0) {
+          _askAllOut = {
+            remaining: _remainingAsk.length,
+            queue: _remainingAsk.map((u: string) => ({ uuid: u, name: _gsR.getParticipantByUuid(u)?.name || u })),
+          };
+        }
+      }
+    }
+
     return {
+
+      askAll: _askAllOut,
+
+      // 🔴 2026-10-31 标签单一真源：带出**生成该回复时的身份**（非请求结束时的 speaker）。
+      speakerName: _genSpeakerName ?? _meetingEntityName,
 
       reply, turn_count: Math.floor(ctx.conversationHistory.length / 2),
 
