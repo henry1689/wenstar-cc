@@ -116,15 +116,19 @@ export interface RetrievalFusionConfig {
    */
   recall_quota: RecallQuotaConfig;
   /**
-   * 🔴 ADR-010 P1-C1: 对话块记忆总开关。
+   * 🔴 对话块召回开关（2026-11-02 由 v11 召回实现取代 n-gram 版本）。
    *
-   * 关 = 不注册 DialogGroupAdapter ⇒ 检索链路完全回到「单条消息」旧行为，可一键回退。
-   * 开 = 块作为一种检索域参与多路融合（Foundation 适配器注册表，不触碰 V13/V11 主链）。
+   * 开 = 注册 DialogGroupAdapter，其内部走 `recallByStructured(domain='dialog_group')`
+   *      + `scoreAndRank`（与记忆召回同一套 UUID 闸门、分片围栏与四权重精排）。
+   * 关 = 该路不注册，检索链路回到「单条消息」。
+   *
+   * 🔴 业主 2026-11-02 裁决「绝对不用旧方案兜底」：关闭本开关**不会**回退到
+   *    n-gram 倒排实现——旧实现在 B2 批次已删除，不存在第二条路径。
    *
    * 之所以是**注册级**开关而非查询级：注册表在编排层构造，关掉即整条路不存在，
    * 不存在"开关关了但某处仍在查"的半失效状态。
    */
-  enable_dialog_group_memory: boolean;
+  dialog_group_v11_recall: boolean;
 }
 
 // ── 默认值（yaml 缺失时兜底，保持系统可用）──
@@ -151,8 +155,8 @@ const DEFAULTS: RetrievalFusionConfig = {
     normal: { block_summary: 0.6, high_calcium_group: 0.4 },
     generic_query_high_calcium: 0.15,
   },
-  // ADR-010 P1-C1: 对话块记忆。yaml 缺失时默认开（块检索是本期交付的能力）
-  enable_dialog_group_memory: true,
+  // 对话块召回。yaml 缺失时默认开（块检索是本期交付的能力）
+  dialog_group_v11_recall: true,
 };
 
 let _cache: RetrievalFusionConfig | null = null;
@@ -187,9 +191,9 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
         normal: { ...DEFAULTS.recall_quota.normal, ...(_rqRaw.normal || {}) },
       },
       // 布尔开关不能走 `?? ` 之外的隐式转换：显式判 undefined，避免 yaml 写 false 被当成缺失
-      enable_dialog_group_memory: parsed.enable_dialog_group_memory === undefined
-        ? DEFAULTS.enable_dialog_group_memory
-        : parsed.enable_dialog_group_memory === true,
+      dialog_group_v11_recall: parsed.dialog_group_v11_recall === undefined
+        ? DEFAULTS.dialog_group_v11_recall
+        : parsed.dialog_group_v11_recall === true,
     };
   } catch (e) {
     console.warn('[RetrievalFusionConfig] yaml 加载失败，使用默认值:', (e as Error)?.message);

@@ -240,9 +240,13 @@ export class BlockArchiveService {
       }
 
       if (vectors.length === 0) {
+        // 🔴 2026-11-02 格式修正：`dims` 必须是**数组**，`decodePerceptionV40` 才走 v2 分支。
+        //   原写法 `dims: 40`（数字）会让 hasV2Shape 判 false → 落 v0 命名键分支
+        //   → 静默解出全零向量，违反《40D 量纲统一法令》第四条「不得填 0 冒充」。
+        //   无数据时写**空数组**：parseV2Dims 长度校验失败 ⇒ 解码返回 null（正确的「无向量」语义）。
         writeSnapshot({
-          dims: PERCEPTION_40D_DIM, agg: 'none', dim_version: 'v1', generated_at: now,
-          reason: 'no_40d_data', vector: null,
+          dims: [], agg: 'none', dim_version: 'v1', generated_at: now,
+          reason: 'no_40d_data',
         });
         this.appendLog(sql, dgId, {
           ts: now, type: 'snapshot_created', actor: 'BlockArchiveService',
@@ -257,9 +261,11 @@ export class BlockArchiveService {
         avg[i] = Math.round((avg[i] / vectors.length) * 10000) / 10000;
       }
 
+      // 🔴 2026-11-02：`dims` 直接放 40 维数组（原为数字 40 + 独立的 vector 字段，
+      //   decodePerceptionV40 只认 dims 数组，原格式会被静默解析成全零）。
       writeSnapshot({
-        dims: PERCEPTION_40D_DIM, agg: 'mean', dim_version: 'v1', generated_at: now,
-        rounds: vectors.length, vector: avg,
+        dims: avg, agg: 'mean', dim_version: 'v1', generated_at: now,
+        rounds: vectors.length,
       });
       this.appendLog(sql, dgId, {
         ts: now, type: 'snapshot_created', actor: 'BlockArchiveService',

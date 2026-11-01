@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # 天枢多路检索 & MemoryInjector 融合权重配置
 # 唯一权威来源：所有权重/预算/阈值从此读取，禁止 ts 硬编码魔法数字
 # ============================================================
@@ -13,10 +13,10 @@ inject_priority:
 
 # timeline 钙化记忆权重：min(base + calcium * scale, cap)，且最低不低于 memory_normal
 timeline_weight:
-  base:    0.30
-  scale:   0.20
-  cap:     0.90
-  min_val: 0.60   # 修复倒挂：钙化≥1 的 timeline 不低于普通砂金 0.6
+  base: 0.3
+  scale: 0.2
+  cap: 0.9
+  min_val: 0.6   # 修复倒挂：钙化≥1 的 timeline 不低于普通砂金 0.6
 
 # ── Foundation 多路 RRF 检索域权重（m4/retrieval/fusion.ts）──
 foundation_rrf_domain_weight:
@@ -55,7 +55,7 @@ budget:
   kb_ratio_longtext:  0.15
   longtext_max_ratio: 0.80
   work_max_chars:     4000
-  hard_max_chars:     8000
+  hard_max_chars: 8000
   # Phase 2.2 (B1/T004): 会晤高钙对话组独立配额（**不占** memories 槽位名额）
   # 实测 A/B（2026-10-20，70 组/实体 recall@3）：配额3=51.4%（未达≥60%验收线）→
   #   配额5=**67.1%**（达标）→ 配额8=77.1%。故取 5：达标且注入增量可控（3 条三层摘要 ≈ 300-500 token）。
@@ -73,13 +73,13 @@ recall_quota:
                                    #        + 不做同组去重 ⇒ 片段形态与召回集合逐字回到 2.3 之前
   release_empty_class_quota: true  # 某类零供给时释放其份额（避免 A 无供给却平白锁死 40%）
   generic_query_min_hits: 1        # 泛词判据：经数据校验的关键词命中数低于此值 → A 降档
-  meeting:                         # 会晤：A40% + B40% + 近期记忆20%（业主 2026-10-20 裁决）
-    high_calcium_group: 0.40
-    block_summary:     0.40
+  meeting:                         # 会晤：A30% + B50% + 近期记忆20%（Harness²优化 2026-10-21）
+    high_calcium_group: 0.30
+    block_summary:     0.50
     recent_memory:     0.20
-  normal:                          # 非会晤：B60% + A40%（近期记忆**并入 B 侧同一池**，不另给一份）
-    block_summary:     0.60
-    high_calcium_group: 0.40
+  normal:                          # 非会晤：B70% + A30%（Harness²优化 2026-10-21）
+    block_summary:     0.70
+    high_calcium_group: 0.30
   generic_query_high_calcium: 0.15 # 泛词时 A 的占比（P015 实测泛词 recall@3 仅 33%，钙化地标帮不上忙）
 
 # ── 过滤阈值 ──
@@ -113,8 +113,11 @@ p1_speed:
     bionic_health_shortcircuit: true # Bionic 健康快照短路（7200 不可用不发网络）
     bionic_timeout_ms: 2500        # Bionic 搜索超时（原 5s）
 
-# ── ADR-010 P1-C1: 对话块记忆总开关 ──
-# 关 = 不注册 DialogGroupAdapter ⇒ 检索链路完全回到「单条消息」旧行为（一键回退）。
-# 开 = 块作为一种检索域参与 Foundation 多路融合（不触碰 V13/V11 主链）。
+# ── 对话块记忆总开关（ADR-010 P1-C1，2026-11-02 由 v11 改写）──
+# 🔴 2026-11-02 业主裁决「彻底与过去决裂」：旧开关 enable_dialog_group_memory 已废弃，
+#   由本开关取代。语义变更：
+#     旧 = 开则用 n-gram 通道②，关则不注册（可一键回退到旧实现）
+#     新 = 开则用 v11 结构化召回（recallByStructured + scoreAndRank），
+#          关则该路不注册 —— **不存在回退到 n-gram 的路径**（旧实现在 B2 批次删除）。
 # 生效点：src/m4/retrieval/index.ts 的 createDefaultRegistry。
-enable_dialog_group_memory: true
+dialog_group_v11_recall: true

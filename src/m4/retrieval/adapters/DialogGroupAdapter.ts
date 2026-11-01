@@ -1,95 +1,68 @@
 /**
- * DialogGroupAdapter — 对话块存储域适配器（ADR-010 P1-C1）
- * =========================================================
+ * DialogGroupAdapter — 对话块存储域适配器（2026-11-02 由 v11 结构化召回接管）
+ * =====================================================================
  * 「对话块」= 一段自闭合的连贯场景（`dialog_groups` 表一行 + 其名下 conversations 聚合）。
  * 与 ConversationAdapter 的区别是**聚合粒度**：对话适配器返回单条消息，本适配器返回整块。
  *
- * ──────────────────────────────────────────────────────────────
- * 🔴 为什么不另建索引（ADR-010 P1-C1 细化 4）
+ * ──────────────────────────────────────────────────────────────────────
+ * 🔴 2026-11-02 改造背景（业主裁决：彻底拆除 n-gram / V11 彻底完成 / 绝对不用旧方案兜底）
  *
- *   原方案要求 `SearchIndexBuilder` 加 `source_type='dialog_group'` 并做块内 800 字切块。
- *   勘察后撤销，理由三条：
- *     ① `search_index` 已占全库约 **80% 体积**（V34 专门治理过：319.9MB → 216.5MB，
- *        删掉 3 个冗余索引），不宜再增；
- *     ② `conversations` 已**全量索引**（V34 撤除了 `is_compacted = 0` 过滤）；
- *     ③ 块 = 它那些 conversations 的聚合 ⇒ **同一份索引换个 GROUP BY 即可**。
- *   所以本适配器**复用既有 conversation 索引**，零新增索引体积、零新增写入路径。
- *   检索单元从「单条消息」变为「块」，本质是聚合粒度的变化，不是新建一层索引。
+ *   原实现：自写双通道 SQL ——
+ *     通道① `search_index(source_type='conversation')` 取原文命中
+ *     通道② `search_index(source_type='dialog_group')` 取摘要命中
+ *   实测出的四个问题：
+ *     ① 通道①是**死代码**：conversation 分区已于 2026-10-27 按 v11 §S1 判废停建，现在 0 行；
+ *     ② 通道②维护 769,131 行 / 110.4 MB 索引，而它索引的摘要全文只有 0.48 MB —— **230 倍**；
+ *     ③ 排序键 `COUNT(DISTINCT term)` 让每块都有的摘要模板套话（`标签`/`叙事`/`情感`
+ *        各命中 2,585 块）拿到最高分，**区分度为零**；
+ *     ④ 实测召回耗时 258.4 ms，而 v11 围栏+精排仅 27.4 ms（同一批 40 条真实查询，
+ *        召回率均 40/40，质量相当）。
  *
- * ──────────────────────────────────────────────────────────────
- * 🔴 户籍过滤为什么必须放在子查询里
+ *   现实现：走 `recallByStructured(domain='dialog_group')` + `scoreAndRank`，
+ *   与**记忆召回共用同一套** UUID 闸门、分片 LIKE 围栏与四权重精排
+ *   （hit 0.45 / calcium 0.30 / recency 0.15 / semantic 0.10）。
+ *   单一实现，杜绝「同规则两份实现」的判据漂移（P0-1 教训）。
  *
- *   `buildSqlClause` 产出的是**裸列名**（` AND belong_entity_uuid IN (...)`，见
- *   governance/police/UUIDPoliceFilter.ts）。而本查询天然涉及三张表 ——
- *   `conversations` / `search_index` / `dialog_groups` —— **三张都有 belong_entity_uuid**
- *   ⇒ 直接拼进 JOIN 会触发 ambiguous column 错误。故 police 只拼在**仅 conversations
- *   可见的内层子查询**里，外层再 JOIN 块表。这是「查询层收编 police」的正确姿势，
- *   而不是绕开政务（户籍管理法铁律 0.4 第 4 条：新代码必须走 UUIDPoliceFilter，禁止手写 UUID SQL）。
+ * ──────────────────────────────────────────────────────────────────────
+ * 🔴 户籍过滤
+ *   UUID 闸门由 `StructuredRecall` 内部 `buildSqlClause` 产出，**第一个拼进 SQL**
+ *   （蓝皮书 §3.1 第 4 条：不得先查后过滤 —— 后者会把他人的行读进内存）。
+ *   本适配器只负责把 `ctx.policy.visibleUuids` 传下去，不自行拼任何 UUID 条件。
  *
- * 🔴 deny-by-default：`buildSqlClause` 在无白名单时返回 ` AND 1=0`（拒绝一切）；
- *   `strict` 模式**不走** `OR belong_entity_uuid IS NULL` 逃生口。
- *   本适配器不做任何放宽 —— 无归属的块检索不到，宁缺勿泄。
+ * 🔴 deny-by-default
+ *   白名单为空 ⇒ 直接返回空（与 recallByStructured 红线 14 同一语义）。
+ *   ⚠️ 行为收紧说明：旧实现会尊重 `policy.enforce === false`（离线巡检全库搜），
+ *      新实现一律走 UUID 闸门。离线巡检的主要目标是记忆/知识域，对话块不参与。
+ *
+ * ──────────────────────────────────────────────────────────────────────
+ * 🔴 语义向量
+ *   组级 40D 快照列 `perception_40d_snapshot` 由 `BlockArchiveService` 后台写入；
+ *   无快照的组该列为 NULL ⇒ `cosine` 为 undefined ⇒ scoreAndRank 按语义权重 0 重归一
+ *   （《40D 量纲统一法令》第四条：无向量只能跳过，不得填 0 冒充）。
  */
 
 import type { RetrievalAdapter } from '../adapter.js';
 import type { RetrievalContext, SearchHit } from '../types.js';
-import { buildSqlClause } from '../../../governance/police/UUIDPoliceFilter.js';
-import { buildNgrams } from '../../SearchIndexBuilder.js';
+import { recallByStructured, scoreAndRank } from '../StructuredRecall.js';
+import { ENCLOSURE_DEFAULT_LIMIT } from '../Flags.js';
 
-/** 倒排查询最大词数（与 meeting-recall 同量级，控制单次 SQL 的 IN 规模） */
-const MAX_TERMS = 40;
 /** 单块取多少轮正文拼 hit.text（够判断相关性即可，不追求完整） */
 const TEXT_ROUNDS = 6;
 /** hit.text 截断长度（与 ConversationAdapter 的 150 对齐） */
 const TEXT_MAX = 300;
 /**
- * 摘要通道命中归一化基准（T002 Phase 1）。
- * 摘要命中数的是 n-gram 条数（一个几十字的摘要可命中十几条），与原文通道的「命中轮数」量纲不同。
- * 命中 10 条即视为满分相关 —— 取 10 的依据：摘要约 80~150 字，buildNgrams 去重后通常 60~120 条，
- * 查询词能命中 10 条已属强相关。
- */
-const SUMMARY_HIT_NORM = 10;
-/**
- * 🔴 Phase 2.2 (B1 / T004): 候选池倍数 —— SQL 先多取几倍，最终排序在 JS 做。
+ * 候选池倍数 —— 精排结果多取若干，供 lifecycle 降权后重排裁回 limit。
  *
- * 为什么必须这样：钙分在原 SQL 里是**第 3 个 ORDER BY 键**（前两个是原文命中数、摘要命中数），
- * 也就是说「高钙组排名高于低钙组」在命中数不同时根本不成立（R016/R017 指出的真缺口）。
- * 要让钙分真正参与排序，就必须由**唯一一处**打分逻辑决定最终次序 —— 而打分公式在 JS（0.40/0.30/0.15/0.15）。
+ * 为什么需要：archived 组只降权不排除（只增不减铁律），若直接按精排取满 limit
+ * 再降权，降权后的 archived 仍占名额。多取几倍后统一按最终分重排，语义与旧实现一致。
  */
 const POOL_FACTOR = 5;
 /**
- * 钙分归一基准：**高钙阈值即满分**（5 分 → 1.0）。
- *
- * 原为 `/10`：生产实测 `block_calcium_score` max 7.72、avg 3.85 ⇒ 归一后 0.77/0.39，
- * 高钙(≥5)与 2~5 分段在 0.15 权重下只差 **0.075**，区分度结构性不足（P012 §二.3）。
- * 改 `/5` 后高钙拿满 0.15、2~5 分段最多 0.13，配合候选池扩大即可让同命中数下高钙稳定排前。
- */
-const CALCIUM_NORM_DENOM = 5;
-/**
  * 🔴 Phase 2.3 (E2/T005): archived 组排序降权系数。
- * 归档组**不排除**（仍可关键词命中，只增不减铁律），但排序权重乘此系数使其低于 active/consolidating。
- * 取 0.5：够低以让同命中数的 active 组稳定排前，又不至于把 archived 挤到完全不可见（保留兜底可达性）。
+ * 归档组**不排除**（仍可关键词命中），但排序权重乘此系数使其低于 active/consolidating。
+ * 取 0.5：够低以让同命中数的 active 组稳定排前，又不至于把 archived 挤到完全不可见。
  */
 const ARCHIVED_DECAY = 0.5;
-
-/** 块候选行（内层聚合结果） */
-export interface DialogGroupCandidateRow {
-  dg_id: string;
-  uuid: string | null;
-  matched_rows: number;
-  /** 摘要通道命中的 n-gram 条数（0 = 原文通道命中 / 无摘要） */
-  summary_matched: number | null;
-  last_ts: string | null;
-  calcium: number | null;
-  tag: string | null;
-  hash: string | null;
-  turns: number | null;
-  reason: string | null;
-  /** block_summary（三层摘要），可能为 NULL（未生成/跳过/失败） */
-  summary: string | null;
-  /** 生命周期状态（Phase 2.3 E2 降权消费）：active/consolidating/archived，可能为 NULL */
-  lifecycle_state: string | null;
-}
 
 /** 块正文行 */
 export interface DialogGroupTextRow {
@@ -98,7 +71,18 @@ export interface DialogGroupTextRow {
   content: string;
 }
 
-/** 数据源接口（兼容 SQLiteAdapter.queryAll） */
+/** 块元信息行（精排结果不含 lifecycle 等字段，按 top-K id 回表取） */
+export interface DialogGroupMetaRow {
+  dialog_group_id: string;
+  lifecycle_state: string | null;
+  narrative_tag: string | null;
+  scene_anchor_hash: string | null;
+  turn_count: number | null;
+  block_close_reason: string | null;
+  last_ts: string | null;
+}
+
+/** 数据源接口（兼容 SQLiteAdapter.queryAll，同时也是 StructuredRecallDb 的形状） */
 export interface DialogGroupSqlSource {
   queryAll<T = unknown>(sql: string, params?: unknown[]): T[];
 }
@@ -109,101 +93,47 @@ export class DialogGroupAdapter implements RetrievalAdapter {
 
   constructor(private sqlite: DialogGroupSqlSource) {}
 
-  search(ctx: RetrievalContext): Promise<SearchHit[]> {
+  async search(ctx: RetrievalContext): Promise<SearchHit[]> {
     const query = (ctx.query || '').trim();
-    if (query.length < 2) return Promise.resolve([]);
+    if (query.length < 2) return [];
+
     try {
-      const terms = buildNgrams(query).slice(0, MAX_TERMS);
-      if (terms.length === 0) return Promise.resolve([]);
-
-      const police = buildSqlClause(ctx.policy);
       const limit = Number(ctx.limit) > 0 ? Math.floor(Number(ctx.limit)) : 3;
-      const phs = terms.map(() => '?').join(',');
+      const uuids = Array.from(ctx.policy?.visibleUuids ?? []).filter(Boolean);
+      // deny-by-default：无白名单不检索（与 recallByStructured 红线 14 同语义）
+      if (uuids.length === 0) return [];
 
-      // ── ① 块候选：双通道 = 原文命中 ∪ 摘要命中（T002 Phase 1）──
-      //   通道① conversations 原文命中（police 在此作用，无歧义）。
-      //   通道② search_index 里 source_type='dialog_group' 的摘要命中。
-      //   🔴 这是 B 链路的核心价值：原文没有字面命中、只有摘要能命中时，该组也必须进候选；
-      //      否则「上次聊过想去哪玩」这类问法永远召不回那一组。
-      //   police 在通道②作用于 dialog_groups（别名 g2）—— search_index 本身也有同名列
-      //   belong_entity_uuid，故先把 search_index 投影成只含 (term, source_id) 的子查询，
-      //   避免 ambiguous column 错误（与文件头「户籍过滤放在子查询」同一姿势）。
-      let cands: DialogGroupCandidateRow[];
-      try {
-        cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
-        `SELECT u.dg_id AS dg_id, MAX(u.uuid) AS uuid,
-                SUM(u.matched_rows) AS matched_rows,
-                SUM(u.summary_matched) AS summary_matched,
-                MAX(u.last_ts) AS last_ts,
-                g.block_calcium_score AS calcium, g.narrative_tag AS tag,
-                g.scene_anchor_hash AS hash, g.turn_count AS turns,
-                g.block_close_reason AS reason, g.block_summary AS summary,
-                g.lifecycle_state AS lifecycle_state
-         FROM (
-           SELECT dialog_group_id AS dg_id,
-                  MAX(belong_entity_uuid) AS uuid,
-                  COUNT(*) AS matched_rows,
-                  0 AS summary_matched,
-                  MAX(timestamp) AS last_ts
-           FROM conversations
-           WHERE dialog_group_id IS NOT NULL
-             AND (is_test IS NULL OR is_test = 0)
-             AND id IN (
-               SELECT CAST(source_id AS INTEGER) FROM search_index
-               WHERE source_type = 'conversation' AND term IN (${phs})
-             )${police.clause}
-           GROUP BY dialog_group_id
-           UNION ALL
-           SELECT g2.dialog_group_id AS dg_id,
-                  g2.belong_entity_uuid AS uuid,
-                  0 AS matched_rows,
-                  COUNT(*) AS summary_matched,
-                  g2.last_ts AS last_ts
-           FROM dialog_groups g2
-           JOIN (
-             SELECT term, source_id FROM search_index
-             WHERE source_type = 'dialog_group'
-           ) s ON s.source_id = g2.dialog_group_id
-           WHERE s.term IN (${phs})${police.clause}
-           GROUP BY g2.dialog_group_id
-         ) u
-         LEFT JOIN dialog_groups g ON g.dialog_group_id = u.dg_id
-         GROUP BY u.dg_id
-         -- 🔴 Phase 2.2 (B1): SQL 只负责**取候选池**（limit×POOL_FACTOR），不负责最终排序。
-         --   最终打分 0.40/0.30/0.15/0.15 在 JS 一处计算（下面 search()），避免 SQL 与 JS
-         --   两套判据漂移（P0-1「同规则两份实现」的教训）。钙分在这里仅作**同命中数下的粗排**。
-         ORDER BY SUM(u.matched_rows) DESC, SUM(u.summary_matched) DESC,
-                  COALESCE(g.block_calcium_score, 0) DESC, MAX(u.last_ts) DESC
-         LIMIT ?`,
-        [...terms, ...police.params, ...terms, ...police.params,
-         Math.max(limit, Math.floor(limit * POOL_FACTOR))],
-        );
-      } catch (qe) {
-        // 🔴 D002 兜底4「钙化排序失败降级时间序」——这里才是真正可能失败的点：
-        //   双通道候选 SQL 一旦抛错（索引缺失/列变更/表锁），**降级为单表按 last_ts 取块**，
-        //   而不是整路返回空（返回空 = 该组永远召不回，且对调用方完全静默）。
-        //   降级查询只依赖 dialog_groups 单表，与双通道 SQL 的失败点解耦。
-        console.warn('[DialogGroupAdapter] 双通道候选查询失败，降级为时间序（last_ts DESC）:',
-          (qe as Error)?.message);
-        cands = this.sqlite.queryAll<DialogGroupCandidateRow>(
-          `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid,
-                  0 AS matched_rows, 0 AS summary_matched, last_ts,
-                  block_calcium_score AS calcium, narrative_tag AS tag,
-                  scene_anchor_hash AS hash, turn_count AS turns,
-                  block_close_reason AS reason, block_summary AS summary,
-                  lifecycle_state AS lifecycle_state
-           FROM dialog_groups
-           WHERE 1=1${police.clause}
-           ORDER BY last_ts DESC
-           LIMIT ?`,
-          [...police.params, limit],
-        ) || [];
-      }
-      if (cands.length === 0) return Promise.resolve([]);
+      // ── ① v11 围栏 + 精排（与记忆召回同一套实现）──
+      //   分片切词由 StructuredRecall.buildKeywordShards 统一切（复用 buildNgrams，
+      //   与写索引同源的口径），本适配器不再自行滑窗。
+      const hits = await recallByStructured(
+        this.sqlite,
+        {
+          domain: 'dialog_group',
+          entityUuids: uuids,
+          keywords: [query],
+          limit: ENCLOSURE_DEFAULT_LIMIT,
+        },
+        ctx.perception40d ?? undefined,
+      );
+      if (hits.length === 0) return [];
 
-      // ── ② 块正文：只为已选中的 ≤limit 个块取，查询量有界 ──
-      const ids = cands.map((c) => String(c.dg_id));
+      const ranked = scoreAndRank(hits, Date.now());
+      const pool = ranked.slice(0, Math.max(limit, Math.floor(limit * POOL_FACTOR)));
+      if (pool.length === 0) return [];
+
+      // ── ② 回表：块元信息（lifecycle / tag / hash / turns / reason / last_ts）──
+      const ids = pool.map((h) => h.id);
       const idPhs = ids.map(() => '?').join(',');
+      const metas = this.sqlite.queryAll<DialogGroupMetaRow>(
+        `SELECT dialog_group_id, lifecycle_state, narrative_tag, scene_anchor_hash,
+                turn_count, block_close_reason, last_ts
+         FROM dialog_groups WHERE dialog_group_id IN (${idPhs})`,
+        ids,
+      );
+      const metaMap = new Map(metas.map((m) => [String(m.dialog_group_id), m]));
+
+      // ── ③ 块正文：只为已选中的块取，查询量有界 ──
       const texts = this.sqlite.queryAll<DialogGroupTextRow>(
         `SELECT dialog_group_id, role, content FROM conversations
          WHERE dialog_group_id IN (${idPhs}) AND (is_test IS NULL OR is_test = 0)
@@ -218,75 +148,54 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         textMap.set(k, arr);
       }
 
-      const scored = cands.map((c) => {
-        const dgId = String(c.dg_id);
-        const summary = String(c.summary || '').trim();
+      // ── ④ lifecycle 降权 + 组装 ──
+      //   注入形态与原实现逐字一致：摘要前置到正文，模型先看到「这段对话讲什么」，
+      //   再看原文细节。
+      const scored = pool.map((h) => {
+        const dgId = String(h.id);
+        const meta = metaMap.get(dgId);
+        const summary = String(h.text || '').trim();
         const bodyRaw = (textMap.get(dgId) || []).join(' ').replace(/\s+/g, ' ').trim();
-        // 注入：摘要前置到正文，模型先看到「这段对话讲什么」，再看原文细节
         const body = (summary ? `【摘要】${summary} ${bodyRaw}` : bodyRaw).substring(0, TEXT_MAX);
 
-        const matched = Number(c.matched_rows) || 0;
-        const summaryMatched = Number(c.summary_matched) || 0;
-        const turns = Number(c.turns) || 0;
-
-        // 双通道打分（业主 2026-10-18 确认）：
-        //   原文密度 0.40 / 摘要密度 0.30 / 双通道共振 0.15 / 钙分 0.15 = 1.00（天然归一化）。
-        //   单通道时：纯原文最高 0.55，纯摘要最高 0.45 —— 摘要命中略低于原文命中，
-        //   但足以让「只有摘要能命中」的组进入候选集（这正是 B 链路存在的意义）。
-        //   RRF 只看排名，此分数用于路内排序的可解释性。
-        const convDensity = turns > 0 ? Math.min(1, matched / turns) : 0;
-        const summaryDensity = Math.min(1, summaryMatched / SUMMARY_HIT_NORM);
-        const bothChannels = matched > 0 && summaryMatched > 0 ? 1 : 0;
-        const calcium = Math.min(1, (Number(c.calcium) || 0) / CALCIUM_NORM_DENOM);
-        const rawScoreBase =
-          convDensity * 0.40 + summaryDensity * 0.30 + bothChannels * 0.15 + calcium * 0.15;
-        // 🔴 Phase 2.3 (E2/T005): lifecycle_state 降权 —— archived 组**不排除**（仍可关键词命中，
-        //   只增不减），但排序权重降低（乘 ARCHIVED_DECAY）。active/consolidating 不变（decay=1）。
-        //   规则源：DialogGroupLifecycle.ts（>30天且钙<2 → archived）。高钙路（钙≥5）永不为 archived，
-        //   故只影响块路（DialogGroupAdapter）的排序，不影响高钙召回。
-        const decay = String(c.lifecycle_state || 'active') === 'archived' ? ARCHIVED_DECAY : 1;
-        const rawScore = rawScoreBase * decay;
+        // archived 组不排除（只增不减），仅排序降权
+        const decay = String(meta?.lifecycle_state || 'active') === 'archived' ? ARCHIVED_DECAY : 1;
+        const rawScore = h.score * decay;
         const score = Number.isFinite(rawScore) ? Math.round(rawScore * 1000) / 1000 : 0;
 
-        const hit: SearchHit = {
+        const hitObj: SearchHit = {
           id: dgId,
           domain: 'dialog_group' as const,
           text: body,
           score,
           route: 'dialog_group' as const,
-          entityUuid: c.uuid ?? null,
-          calciumScore: Number(c.calcium) || 0,
-          createdAt: String(c.last_ts || ''),
+          entityUuid: h.belongEntityUuid ?? null,
+          calciumScore: h.calciumScore,
+          createdAt: String(meta?.last_ts || h.createdAt || ''),
           payload: {
-            narrativeTag: c.tag ?? null,
-            sceneAnchorHash: c.hash ?? null,
-            turnCount: turns,
-            blockCloseReason: c.reason ?? null,
-            matchedRows: matched,
-            summaryMatchedRows: summaryMatched,
-            lifecycleState: c.lifecycle_state ?? null,
+            narrativeTag: meta?.narrative_tag ?? null,
+            sceneAnchorHash: meta?.scene_anchor_hash ?? null,
+            turnCount: Number(meta?.turn_count) || 0,
+            blockCloseReason: meta?.block_close_reason ?? null,
+            lifecycleState: meta?.lifecycle_state ?? null,
             summary: summary || null,
+            // v11 精排明细（可解释性；旧实现透传的是 matchedRows/summaryMatchedRows）
+            hitShards: h.hitShards,
+            cosine: typeof h.cosine === 'number' ? h.cosine : null,
+            semanticSource: h.semanticSource,
           },
           backref: { table: 'dialog_groups', id: dgId },
         };
-        return { hit, score, finite: Number.isFinite(rawScore), ts: Date.parse(String(c.last_ts || '')) || 0 };
+        return { hit: hitObj, score, ts: Date.parse(String(meta?.last_ts || '')) || 0 };
       });
 
-      // 🔴 Phase 2.2 (B1)：**唯一排序点** —— 候选池按完整公式排序后裁回 limit。
-      //   兜底（D002 兜底4）：任一分数非有限 ⇒ 本批**降级为时间序**（last_ts DESC），
-      //   既不丢候选也不抛错（异常仍由外层 catch 兜住）。
-      const allFinite = scored.every((s) => s.finite);
-      if (!allFinite) {
-        console.warn('[DialogGroupAdapter] 打分出现非有限值，本批降级为时间序（last_ts DESC）');
-      }
-      scored.sort((a, b) => (allFinite
-        ? (b.score - a.score) || (b.ts - a.ts)
-        : (b.ts - a.ts) || (b.score - a.score)));
-      return Promise.resolve(scored.slice(0, limit).map((s) => s.hit));
+      // 🔴 唯一排序点：按最终分降序，同分按时间降序保证确定性
+      scored.sort((a, b) => (b.score - a.score) || (b.ts - a.ts));
+      return scored.slice(0, limit).map((s) => s.hit);
     } catch (e) {
-      // 单域异常不得阻塞其他检索路（与既有 5 个适配器同策略；runAdapter 另有兜底 catch）
+      // 单域异常不得阻塞其他检索路（与其余适配器同策略；runAdapter 另有兜底 catch）
       console.error('[DialogGroupAdapter]', (e as Error)?.message);
-      return Promise.resolve([]);
+      return [];
     }
   }
 }

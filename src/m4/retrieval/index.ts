@@ -66,8 +66,11 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
     //   主链任何一路都不产出它 —— 不会与既有路重叠。
     //   为什么用「注册级」开关而非查询级：注册表在编排层构造，关掉即整条路不存在，
     //   不会出现「开关关了但某处仍在查」的半失效状态，回退语义干净。
+    // 🔴 2026-11-02：开关改名为 dialog_group_v11_recall。
+    //   语义变更——旧开关的「关」意味着回退到 n-gram 实现；新开关的「关」只表示
+    //   该路不注册，**不存在回退路径**（业主裁决「绝对不用旧方案兜底」）。
     let _dgOn = true;
-    try { _dgOn = getRetrievalFusionConfig().enable_dialog_group_memory !== false; }
+    try { _dgOn = getRetrievalFusionConfig().dialog_group_v11_recall !== false; }
     catch { /* 配置读取失败 → 保持默认开（块检索是本期交付的能力，失败不应静默降级） */ }
     if (_dgOn) reg.register(new DialogGroupAdapter(deps.sqlite));
     // 🔴 Phase 2.3 (E1/T005): 高钙对话组路注册 —— 独立 domain 'high_calcium_group'。
@@ -75,7 +78,7 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
     //   独立 domain + BACKREF_TABLE 映射后，两路同时注册互不覆盖（回归测试锁定）。
     //   跨路去重：高钙路显式 dedupeKey `dialog_group:<id>` 与块路 domain:id 同串，融合层折叠。
     //   配置门：budget.high_calcium_group_limit > 0 才注册（默认 5；设 0 即整路关闭，
-    //   回退语义与块路的 enable_dialog_group_memory 同姿势——注册级开关，关了即整条路不存在）。
+    //   回退语义与块路的 dialog_group_v11_recall 同姿势——注册级开关，关了即整条路不存在）。
     let _hcOn = false;
     try {
       const _b = getRetrievalFusionConfig().budget;

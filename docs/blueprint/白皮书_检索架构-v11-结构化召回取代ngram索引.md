@@ -962,6 +962,19 @@ Sentinel 的回滚基线不包含这些文件、换机器即丢。
 `git revert` 该提交即可回到入库前状态（文件仍留在工作树，功能不受影响）。
 后续 v11 改造（见 `任务书_V11彻底完成-n-gram拆除-v1.md`）以此提交为回退起点。
 
+### D.5 B1 实施记录（2026-11-02）· 对话块接入 v11
+
+| 项 | 变更 |
+|---|---|
+| `DialogGroupAdapter.search()` | 由「自写双通道 SQL 查 `search_index`」改为 `recallByStructured(domain='dialog_group')` + `scoreAndRank`，与记忆召回共用同一套 UUID 闸门 / 分片围栏 / 四权重精排 |
+| `StructuredRecall.DOMAIN_SPECS.dialog_group.vecCol` | `null → 'perception_40d_snapshot'`（v31 迁移已建该列） |
+| `BlockArchiveService.fillSnapshot` | 快照格式 `{dims:40, vector:[...]}` → `{dims:[40个数]}`；无数据写 `dims:[]`。原格式会让 `decodePerceptionV40` 走命名键分支**静默产出全零向量**，违反《40D 量纲统一法令》第四条 |
+| 开关 | `enable_dialog_group_memory`（废弃）→ `dialog_group_v11_recall`；关闭**不回退**到 n-gram |
+| 行为收紧 | 离线巡检（`policy.enforce === false`）不再对对话块放行全库——一律走 UUID 闸门 |
+
+**收益**：召回耗时 258.4 ms → 27.4 ms（同批 40 条真实查询，召回率均 40/40）；
+为 B4 删除 `search_index`（110.4 MB）扫清对话块这一最后消费方。
+
 ---
 
 ## 批准栏

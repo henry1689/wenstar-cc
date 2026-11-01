@@ -156,7 +156,12 @@ const DOMAIN_SPECS: Readonly<Record<EnclosureDomain, DomainSpec>> = Object.freez
     textCol: 'block_summary',
     timeCol: 'created_at',
     calciumCol: 'block_calcium_score',
-    vecCol: null, // 对话组无 40D 列是事实（白皮书 §7.1），不是待补缺陷
+    // 🔴 2026-11-02: 由 null 改为 perception_40d_snapshot。
+    //   v31 迁移（P145 批A1）已建该列，BlockArchiveService（批A2）后台写入
+    //   组级 40D 聚合快照。原注释「对话组无 40D 列是事实」已过时。
+    //   无快照的组该列为 NULL ⇒ `cosine` 为 undefined ⇒ scoreAndRank 按语义权重 0
+    //   重归一（《40D 量纲统一法令》第四条：无向量只能跳过，不得填 0 冒充）。
+    vecCol: 'perception_40d_snapshot',
     locusCol: null,
     extraWhere: " AND block_summary IS NOT NULL AND block_summary <> ''",
   }),
