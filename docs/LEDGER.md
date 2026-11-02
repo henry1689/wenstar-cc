@@ -108,6 +108,7 @@
 - **接续点**：空间路由器**三层拆除 + 性能重构 + 分流可观测性**已完成（`845ec7a` + 本批），下一步清理工作区未提交（P0 问题 #1）→ 修基线红测试（问题 #9，含第三层拆除遗留断言）→ F-29/30/31 → 主库内存课题
 - **卡点**：**先清工作区未提交**（P0，问题 #1），否则后续任何 git 操作都有数据丢失风险
 - **不要重做**：入口文件瘦身（`ea76510`）；空间路由器三级接入（`aa2f0fb`）；三层拆除**全部**（`d94ef16` `3666dee` `845ec7a`）；实测 8 条修复（`cf1bb1d` `c4a1b4e` `9b9c528` `e130c9f`）；文档四件套（`docs/blueprint/`）
+- **未落地的流程记录（勿当代码证据）**：B3b-4 收口期间本会话跑了 4 轮 harness flow（`run_mvyisd4x_cpl4` / `run_mvyj2pal_lorm` 卡 S4.5；`run_mvyjeqhs_u3nl` 卡 S6-B；末轮 `run_mvyjkssz_gjtf` 全 10 阶段通过、签发 3 文件令牌但**一个字节未写**、令牌自然过期）。实际收口由并行会话 `d0413fd`（B3b-4 生产侧清理）完成，方案为「分片 LIKE 直查 conversations」，与本会话拟用的 `recallByStructured` 不同 —— 见审计记录时不要把这几轮 run 当成代码变更证据
 - **不要再加回来**：`WS_GROUP_V2` / `isGroupSessionEnabled` / `GroupSession.isEnabled` / `GroupSessionOptions.enabled` / `EntityMeeting` 的 `_meeting` 字段与 enter/exit/switchTo/addParticipant/restoreLastMeeting —— `switch-master.test.ts` 会逐条断言它们**不存在**
 - **先读**：改空间路由器前先读 `docs/blueprint/白皮书_空间路由器-v1.md` §4 七条不变量 + §2.3「宁可多看，不可全盲」
 - **项目铁律**：动手前读 [`../CLAUDE.md`](../CLAUDE.md) 硬闸门 + `GOVERNANCE.md` 效力层级
