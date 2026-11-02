@@ -17,16 +17,18 @@
  *   原兜底是 `content LIKE '%词%'` + `ORDER BY timestamp DESC LIMIT N` —— 对高频实体，
  *   "最新 N 条"必然落在**已被上下文覆盖**的区间内 ⇒ 兜底层空转（实测：池内 546 条只取 12 条，
  *   落在 43分钟~2.4小时，而上下文已覆盖 3.9 小时）。且字面匹配对"说计划、原文写方案"无能为力。
- *   现改为：① 先用本仓**已有**的 search_index 倒排索引按查询取候选（相关性驱动）；
- *   ② 索引无命中才按时间窗采样兜底；③ 两路都只取**比当前上下文更早**的原文（`beforeTs` 上界），
+ *   现改为：① 先用**关键词分片 LIKE 围栏**按查询取候选（相关性驱动）；
+ *   ② 围栏无命中才按时间窗采样兜底；③ 两路都只取**比当前上下文更早**的原文（`beforeTs` 上界），
  *   从结构上保证"兜的是没看到的，不是刚看过的"。
+ *   🔴 2026-11-02：① 原位 JOIN search_index 倒排表，该表已由 v33 迁移整表下线，
+ *   改为直接对 conversations.content 分片 LIKE —— 与 v11 结构化召回同一口径。
  *
  * retrieval-stage 会晤隔离墙与 MeetingWallAdapter 共用本模块，杜绝同构漂移。
  * 🔴 V34 起本模块**不再零 import** —— 复用同层 `buildNgrams`（m4 内聚，非反向依赖），
  *   以保证切词口径与写入索引时**同源**（切词漂移会让索引查不到）。
  */
 
-// 🔴 V34: 切词与写入 search_index 时**同源**（同层复用，非反向依赖）。口径漂移 = 索引查不到。
+// 🔴 V34: 切词与 v11 围栏**同源**（同层复用，非反向依赖）。口径漂移 = 围栏切出的分片对不上。
 import { buildNgrams } from '../SearchIndexBuilder.js';
 // Phase 2.2 (B1): 高钙阈值 / 沉淀窗从配置单一事实源读取（不硬编码魔法数字）
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
@@ -614,8 +616,10 @@ export interface SandboxRecallOptions {
  * 🔴 V34 #3 砂金库召回**两段式**（原设计「砂金库=回忆兜底层」的落地）：
  *
  * ```
- * ① 倒排索引（查询驱动）—— 用"你问的这句话"去 search_index 找相关的历史原文
- *    命中了 → 取原文（相关性驱动；同一话题即使措辞不同也能命中，因为切的是 n-gram）
+ * ① 关键词分片围栏（查询驱动）—— 用"你问的这句话"切出的 n-gram 去 conversations.content
+ *    做分片 LIKE；命中了 → 取原文（同一话题即使措辞不同也能命中，因为切的是 n-gram）
+ *    🔴 2026-11-02：原位是 JOIN search_index 倒排表，该表已由 v33 迁移整表下线，
+ *       现改为对源表直接 LIKE —— 与 v11 结构化召回同一口径（切词相同，不建索引）。
  * ② 时间窗采样（兜底）—— ① 无命中时才按时间跨度取
  *    措辞与原文完全不同（或用户没提任何实词）时，至少还能看到历史轮廓
  * ```
@@ -625,8 +629,7 @@ export interface SandboxRecallOptions {
  * 区间为空 ⇒ 自然不注入，无需任何关键词或阈值判断，也就不会"一会东一会西"。
  *
  * 🔴 隐私 fail-closed：`entityUuid` 为空 ⇒ **直接返回空**，绝不发起跨角色检索。
- *   过滤依据是 `conversations.belong_entity_uuid`（权威字段）——
- *   `search_index.belong_entity_uuid` 仅 27.5% 非空，**不可**作为过滤依据。
+ *   过滤依据是 `conversations.belong_entity_uuid`（权威字段）。
  */
 export function recallSandboxConversations(
   src: RecallSource,
@@ -653,29 +656,33 @@ export function recallSandboxConversations(
     return hits.length >= _limit;
   };
 
-  // ── ① 倒排索引（查询驱动）──
+  // ── ① 关键词分片围栏（查询驱动）──
+  // 🔴 2026-11-02 拆除 n-gram：原实现 JOIN search_index 倒排表、按 COUNT(DISTINCT term) 排序，
+  //   该表由 v33 迁移整表下线。现改为直接对 conversations.content 做分片 LIKE ——
+  //   与 v11 结构化召回（StructuredRecall.buildKeywordShards）**同一口径**：
+  //   复用同样的 buildNgrams 切分，但**不建索引**（白皮书 §4.2.2）。
+  //   代价：失去倒排的命中数排序 ⇒ 按时间近因排（近期相关性更高）。
+  //   性能：WHERE 首列是 belong_entity_uuid（走 idx_conversations_belong_uuid），
+  //   先按户籍索引收敛候选行，再对残留行做 LIKE，不扫全表。
   const terms = buildNgrams(String(query || '')).slice(0, _maxTerms);
   if (terms.length > 0) {
     try {
-      const phs = terms.map(() => '?').join(',');
       const conds = [
-        "s.source_type = 'conversation'",
-        `s.term IN (${phs})`,
         'c.belong_entity_uuid = ?',                 // 权威隐私过滤
         '(c.is_test IS NULL OR c.is_test = 0)',
         'LENGTH(c.content) > ?',
+        `(${terms.map(() => 'c.content LIKE ?').join(' OR ')})`,
       ];
-      const params: unknown[] = [...terms, entityUuid, _minLen];
+      // 参数顺序必须与条件顺序严格一致
+      const params: unknown[] = [entityUuid, _minLen, ...terms.map((t) => `%${t}%`)];
       if (_beforeTs) { conds.push('c.timestamp < ?'); params.push(_beforeTs); }
       if (_since) { conds.push('c.timestamp >= ?'); params.push(_since); }
       const rows = (
         src.queryAll(
           `SELECT c.role, c.content, c.timestamp
-           FROM search_index s
-           JOIN conversations c ON c.id = CAST(s.source_id AS INTEGER)
+           FROM conversations c
            WHERE ${conds.join(' AND ')}
-           GROUP BY s.source_id
-           ORDER BY COUNT(DISTINCT s.term) DESC, c.timestamp DESC
+           ORDER BY c.timestamp DESC
            LIMIT ?`,
           [...params, _limit],
         ) || []
@@ -684,7 +691,7 @@ export function recallSandboxConversations(
         if (_push(r)) return hits;
       }
     } catch {
-      // 索引路径不可用（表缺失/查询失败）→ 落到 ② 时间窗兜底，不阻断对话
+      // 查询不可用（表缺失/SQL 失败）→ 落到 ② 时间窗兜底，不阻断对话
     }
   }
 

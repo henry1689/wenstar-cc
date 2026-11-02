@@ -26,10 +26,16 @@ const U = 'TXS-000000007';
 const LONG = '这是一条足够长的旧对话原文用于通过长度门槛，内容与当前话题无关。';
 const row = (content: string, ts: string) => ({ role: 'assistant', content, timestamp: ts });
 
-/** 按 SQL 形态分派的假数据源：索引查询 vs 会话表查询 */
-const mkSrc = (indexRows: any[], timeRows: any[]) => ({
+/**
+ * 按 SQL 形态分派的假数据源：① 分片围栏查询 vs ② 时间窗查询。
+ *
+ * 🔴 2026-11-02 拆除 n-gram：① 原为 `JOIN search_index`，该表整表下线后改为
+ *   直接对 conversations 做分片 LIKE。两路都 FROM conversations，靠**表别名 c** 区分：
+ *   ① 用 `FROM conversations c`（需要 c.xxx 列引用），② 用无别名的 `FROM conversations`。
+ */
+const mkSrc = (fenceRows: any[], timeRows: any[]) => ({
   queryAll: (sql: string) =>
-    /FROM search_index/.test(sql) ? indexRows
+    /FROM conversations\s+c\b/.test(sql) ? fenceRows
       : /FROM conversations/.test(sql) ? timeRows
         : [],
 });
