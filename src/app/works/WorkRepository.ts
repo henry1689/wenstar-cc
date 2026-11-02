@@ -30,9 +30,6 @@ export interface WorkRecord {
   updated_at: string;
 }
 
-/** 分块大小（长文按 800 字切块） */
-export const WORK_CHUNK_SIZE = 800;
-
 export class WorkRepository {
   private sqlite: SQLiteAdapter;
 
@@ -129,15 +126,10 @@ export class WorkRepository {
     return policeFilterRows(rows as any, policy) as unknown as WorkRecord[];
   }
 
-  /** 长文切块（供 search_index 分块索引） */
-  chunkLongText(text: string, size: number = WORK_CHUNK_SIZE): string[] {
-    if (!text) return [];
-    const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += size) {
-      chunks.push(text.substring(i, i + size));
-    }
-    return chunks;
-  }
+  // 🔴 2026-11-02 遗留收口：原此处有 `chunkLongText`（长文按 800 字切块）与
+  //   常量 `WORK_CHUNK_SIZE`。其自述用途是给**已下线的 n-gram 倒排表**做分块，
+  //   而全仓 `grep -rn "chunkLongText\|WORK_CHUNK_SIZE" src/` 实测仅定义 2 处、
+  //   零调用方、零测试引用 ⇒ 死函数 + 死常量，已删除（任务书遗留收口 批1）。
 
   /** 更新语义摘要向量（异步） */
   async setSemanticVector(workId: string, vector: number[]): Promise<void> {

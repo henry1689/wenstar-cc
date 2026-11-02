@@ -315,10 +315,12 @@ export class ConversationDB {
     this.scheduleFlush();
 
     if (Number.isFinite(_rid) && _rid > 0) return _rid;
-    // 降级必须可见：否则 search_index.source_id 会静默回到与主键口径不一致的状态
+    // 降级必须可见：seqPos 与自增主键是两套序列，跨写入点混用会让 id 口径分叉。
+    // 🔴 2026-11-02 遗留收口：原文案点名 `search_index.source_id`（该表已随 n-gram 拆除下线），
+    //   风险本身仍在 —— 原 D5 复现路径的后果表述改为不依赖已下线表的说法。
     console.warn(
       `[ConversationDB] last_insert_rowid 不可用(id=${_rid})，降级返回 seqPos=${seqPos} — ` +
-        'search_index.source_id 将与本表主键口径不一致（D5 复现）',
+        'seqPos 与自增主键不同源，跨写入点混用会使 id 口径不一致（原 D5 复现路径）',
     );
     return seqPos;
   }

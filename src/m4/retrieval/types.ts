@@ -35,9 +35,8 @@ export type SearchDomain =
    * 🔴 ADR-010 P1-C1: 对话块（`dialog_groups` 表 + 其名下 conversations 聚合）。
    *
    * 与 'conversation' 的区别：conversation 是**单条消息**这一存储域；
-   * dialog_group 是**一段连贯场景**（多轮聚合）这一存储域。两者共用同一份
-   * `search_index`（块不另建索引，见 ADR-010 P1-C1 细化 4）——
-   * 差异只在聚合粒度，不在索引。
+   * dialog_group 是**一段连贯场景**（多轮聚合）这一存储域。两者**都不建中间索引**
+   * —— 一律直接对源表做分片 LIKE 围栏，差异只在聚合粒度，不在索引。
    */
   | 'dialog_group'
   /**

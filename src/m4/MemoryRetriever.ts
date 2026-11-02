@@ -143,7 +143,7 @@ export class MemoryRetriever {
    *      是满足 S2-B8「生产返回结果集逐字节一致」的最强保证。
    *   2. 整体 try/catch 包住，异常只走 `ShadowLog.error`，**永不抛出**。
    *   3. 影子自身耗时在影子路径内自测并写日志（不占用生产请求时间）。
-   *   4. 不碰任何业务表、不写 `search_index`、不进缓存（ADR-013）。
+   *   4. 不碰任何业务表、不落任何持久化表、不进缓存（ADR-013）。
    *
    * 【为什么 domain 固定传 ['dialog_group','memory']】
    * 路由开关（`RETRIEVAL_V11_DIALOG_GROUP` 等）控制的是**生产走哪条路**；

@@ -188,15 +188,19 @@ export const MEMORY_CONFIG = {
      */
     sandboxRecallMinContentLen: 40,
     /**
-     * 倒排索引查询的最大 n-gram 词数（控制单次 SQL 的 IN 规模）。
+     * 砂金库**关键词分片围栏**的分片数上限。
+     *
+     * 🔴 2026-11-02 拆除 n-gram 后口径变更：原控制倒排表的 `term IN (...)` 规模，
+     *   现为对 `conversations.content` 的 `LIKE OR` 分片数 —— 每片一次子串匹配，
+     *   **线性影响围栏耗时**（实测 3 分片 4.3ms / 10 分片 41ms / 40 分片 80~91ms）。
+     *   调参须走 `任务书_改善落地-检索守卫与观测-v1.md` 的 B3 梯度实验，不得拍脑袋。
      */
     sandboxRecallMaxTerms: 40,
-    /**
-     * 砂金库倒排索引**启动补齐**的单次批量上限（0 = 不限）。
-     * 每进程只跑一次、幂等：只索引 `search_index` 里还没有的对话。
-     * 已知技术债：写入侧尚无增量索引，故靠本补齐在每次重启时收敛缺口。
-     */
-    sandboxIndexBackfillBatch: 1000,
+
+    // 🔴 2026-11-02 遗留收口：原 `sandboxIndexBackfillBatch: 1000` 已删除 ——
+    //   它服务于**已下线的 n-gram 倒排表**的启动期补齐批量，而该补齐机制
+    //   （SANDBOX_INDEX_BACKFILL_BATCH / DONE）已于 B3a-4 从 retrieval-stage 移除，
+    //   实测全仓零消费者 ⇒ 死配置（任务书遗留收口 批1）。
     /**
      * 全库「未归档轮次」的**硬上限**。
      *
