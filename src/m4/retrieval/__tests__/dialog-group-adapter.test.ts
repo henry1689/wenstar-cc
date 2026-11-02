@@ -248,20 +248,58 @@ describe('[Phase 2.2 B1] 钙分真正参与排序 + 候选池 + 降级', () => {
     expect(hits[1].id).toBe('DG2');
   });
 
-  it('🔴 候选查询失败 ⇒ **降级为时间序取块**（不返回空、不阻塞）', async () => {
+  it('🔴 候选查询失败 ⇒ 降级 dialog_groups 单表取块（ADR-010 §13.4，不整路返回空）', async () => {
     const db = await buildDb();
     seedBlock(db, 'DG1', UUID_A, [['user', '杭州的机票订了吗']], { calcium: 6 });
     const base = srcOf(db);
     const degrade = {
       queryAll: <T>(sql: string, params?: unknown[]): T[] => {
-        if (sql.includes('UNION ALL')) throw new Error('index missing');  // 只让双通道候选查询失败
+        // 真实故障注入：让**两条候选查询**都失败 ——
+        //   ① 摘要围栏（`buildKeywordShards('block_summary', …)` 产出 `block_summary LIKE ?`）
+        //   ② 原文聚合（`GROUP BY c.dialog_group_id`）
+        // ⚠️ 原实现的注入条件是 `sql.includes('UNION ALL')`，而该串在非测试源码里**零命中**
+        //    （n-gram 拆除后已无 UNION 聚合）⇒ 包裹器永不抛错、断言实际走的是正常路径
+        //    = 恒真守卫。恒真断言比没有测试更危险，故改为按真实 SQL 形态注入。
+        //    本用例若退化回正常路径会得到 1 条，但那是「摘要路本来就能召回」，
+        //    判别力靠下面这条：兜底路径取的是 dialog_groups 单表，与摘要路是两回事。
+        if (sql.includes('block_summary LIKE') || sql.includes('GROUP BY c.dialog_group_id')) {
+          throw new Error('candidate query unavailable');
+        }
         return base.queryAll<T>(sql, params);
       },
     };
 
     const hits = await new DialogGroupAdapter(degrade as any).search(ctxOf(db));
-    expect(hits.length, '降级后仍须返回块（时间序），而不是整路返回空').toBe(1);
+    expect(hits.length, '🔴 §13.4：候选查询抛错不得整路返回空（返回空 = 该组永远召不回）').toBe(1);
     expect(hits[0].id).toBe('DG1');
+    db.close();
+  });
+
+  it('🔴 §13.4 兜底是**真兜底**：候选查询失败且摘要路也拿不到时仍返回块', async () => {
+    const db = await buildDb();
+    // 这块的摘要**不含**查询词 ⇒ 摘要路本来就不会命中；
+    // 再让原文聚合查询抛错 ⇒ 两路皆空，只有 §13.4 单表兜底能把它取回来。
+    db.run(
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
+      ['user', '杭州的机票订了吗', '2026-10-06T00:00:00.000Z', 1, 'DG_FB', UUID_A],
+    );
+    db.run(
+      "INSERT INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at,last_ts,block_summary) " +
+      "VALUES (?,?,?,?,?,?,?,'active',0,?,?,?)",
+      ['DG_FB', UUID_A, 'neutral', 6, 'h-fb', 1, 'topic_switch',
+       '2026-10-06T00:00:00.000Z', '2026-10-06T00:00:00.000Z', '【标签】无关\n【叙事】不含查询词'],
+    );
+
+    const base = srcOf(db);
+    const degrade = {
+      queryAll: <T>(sql: string, params?: unknown[]): T[] => {
+        if (sql.includes('GROUP BY c.dialog_group_id')) throw new Error('raw candidate down');
+        return base.queryAll<T>(sql, params);
+      },
+    };
+    const hits = await new DialogGroupAdapter(degrade as any).search(ctxOf(db));
+    expect(hits.map((h) => h.id), '🔴 两路皆空时必须走 §13.4 单表兜底').toContain('DG_FB');
+    db.close();
   });
 });
 

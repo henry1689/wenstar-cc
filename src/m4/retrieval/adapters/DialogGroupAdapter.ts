@@ -19,9 +19,16 @@
  *        召回率均 40/40，质量相当）。
  *
  *   现实现：走 `recallByStructured(domain='dialog_group')` + `scoreAndRank`，
- *   与**记忆召回共用同一套** UUID 闸门、分片 LIKE 围栏与四权重精排
- *   （hit 0.45 / calcium 0.30 / recency 0.15 / semantic 0.10）。
- *   单一实现，杜绝「同规则两份实现」的判据漂移（P0-1 教训）。
+ *   与**记忆召回共用同一套** UUID 闸门、分片 LIKE 围栏与精排**引擎**
+ *   （可用性判定 / 权重重归一 / 确定性排序仍只有一处实现，杜绝判据漂移）。
+ *
+ * 🔴 排序分量按 ADR-010 §12.2.3（业主确认 2026-10-18）单独声明：
+ *   `score = convDensity×0.40 + summaryDensity×0.30 + bothChannels×0.15 + calcium×0.15`
+ *   即本域传 `ADR_010_BLOCK_SCHEME`；其余三域不传，仍走 v11 通用四权重。
+ *   **不是第二套排序函数** —— 分量是声明，引擎仍是 `scoreAndRank` 一处（不变量 #7）。
+ *   为什么通用四权重在本域不够用：它只有一个 `hit` 分量，而摘要路给的是「分片数」、
+ *   原文路给的是「行数」，两路量纲不同被直接相加 ⇒ 双通道强度无法分辨，
+ *   法典的密度与共振三个分量全部无从计算。
  *
  * ──────────────────────────────────────────────────────────────────────
  * 🔴 户籍过滤
@@ -43,7 +50,7 @@
 
 import type { RetrievalAdapter } from '../adapter.js';
 import type { RetrievalContext, SearchHit } from '../types.js';
-import { recallByStructured, scoreAndRank } from '../StructuredRecall.js';
+import { ADR_010_BLOCK_SCHEME, recallByStructured, scoreAndRank } from '../StructuredRecall.js';
 import { ENCLOSURE_DEFAULT_LIMIT } from '../Flags.js';
 
 /** 单块取多少轮正文拼 hit.text（够判断相关性即可，不追求完整） */
@@ -107,6 +114,15 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       const { buildKeywordShards } = await import('../StructuredRecall.js');
 
       // ── ①a 摘要通道（v11 围栏 + 精排，与记忆召回同一套实现）──
+      //   🔴 业主 2026-11-02 明示：**原文通道才是主路，摘要通道是临时的、后续会被拆除**。
+      //      本路因此按「可整体摘除」的形状接入，拆除时的爆炸半径锁死在三处：
+      //        ① 下方这一段（①a）；
+      //        ② `channels.summary` 字段与 ADR 方案里的 `summaryDensity` / `bothChannels`
+      //           两个分量 —— 它们都走**可用性判定**，摘要恒为 0 时权重自动置 0 并重归一，
+      //           方案退化为 `convDensity + calcium`，**引擎一行都不用改**；
+      //        ③ 组装时的【摘要】前缀与 `payload.summary`。
+      //      DOMAIN_SPECS.dialog_group 的 `textCol='block_summary'` / `extraWhere` 也属该链。
+      //      除这三处外无任何代码依赖摘要通道 ⇒ 拆除是删代码，不是改判据。
       const summaryHits = await recallByStructured(
         this.sqlite,
         {
@@ -118,18 +134,35 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         ctx.perception40d ?? undefined,
       );
 
-      // ── ①b 原文通道（ADR-010 §12.2 要求的另一半）──
-      //   🔴 为什么必须有：`dialog_group` 域的 textCol 定死为 block_summary 且 extraWhere
-      //      强制非空 ⇒ 只有摘要能召回。后果是 ① 摘要没覆盖到的会话段永远召不回
-      //      （实测段级命中仅 20.8%）；② 无摘要的组整组进不了候选池（实测 479 组 / 15.7%）。
-      //   本路直接对 conversations 按组聚合，**不经过** `extraWhere`，两路候选最后合并。
-      let rawRows: Array<{ gid: string; hit_rows: number }> = [];
+      // ── ①b 原文通道（**主路**，ADR-010 §12.2.2 的候选集另一半）──
+      //   🔴 本路是长期主路（业主 2026-11-02：「原文通道才是主要的」）。它直接对
+      //      conversations 按组聚合，**不经过** `block_summary` 的 `extraWhere` ——
+      //      摘要路把 textCol 定死为 block_summary 且强制非空，只有本路能覆盖：
+      //      ① 摘要没写到的会话段（改造前段级命中仅 20.8%）；
+      //      ② 无摘要的组（改造前 479 组 / 15.7% 整组进不了候选池）。
+      //   两路候选最后合并成一个 Map，排序统一走 ADR 方案，**不存在两套判据**。
+      // 双通道候选查询的失败信号 —— ADR-010 §13.4 兜底的触发条件。
+      // 🔴 只记**原文通道**的异常：摘要围栏的 SQL 出错时 `recallByStructured` 内部
+      //    fail-closed 收成 `[]` 并 console.warn，本层看不到（要根治需让它暴露失败信号）。
+      //    残余场景：摘要围栏内部失败 + 原文通道正常返回空 ⇒ 仍返回空。
+      //    两路同时报错（数据库级故障的典型形态）则必然进兜底。
+      let channelError: unknown = null;
+
+      let rawRows: Array<{
+        gid: string; hit_rows: number; u_hit: number | null; a_hit: number | null;
+      }> = [];
       try {
         const shard = buildKeywordShards('content', [query]);
         if (shard.sql) {
           const uuidPhs = uuids.map(() => '?').join(',');
-          rawRows = this.sqlite.queryAll<{ gid: string; hit_rows: number }>(
-            `SELECT c.dialog_group_id AS gid, COUNT(*) AS hit_rows
+          // 按角色分计命中行数：ADR convDensity 的分子是「轮数」，而轮数只能从角色行推得
+          rawRows = this.sqlite.queryAll<{
+            gid: string; hit_rows: number; u_hit: number | null; a_hit: number | null;
+          }>(
+            `SELECT c.dialog_group_id AS gid,
+                    COUNT(*) AS hit_rows,
+                    SUM(CASE WHEN c.role = 'user' THEN 1 ELSE 0 END) AS u_hit,
+                    SUM(CASE WHEN c.role = 'assistant' THEN 1 ELSE 0 END) AS a_hit
                FROM conversations c
               WHERE c.dialog_group_id IS NOT NULL
                 AND (c.is_test IS NULL OR c.is_test = 0)
@@ -141,62 +174,154 @@ export class DialogGroupAdapter implements RetrievalAdapter {
           ) || [];
         }
       } catch (e) {
-        // 原文通道不可用 ⇒ 退回纯摘要路，不阻塞检索（与 D002 兜底同策略）
+        // 原文通道不可用 ⇒ 先退回纯摘要路，不阻塞检索；两路皆空时下面走 §13.4 单表兜底
+        channelError = e;
         console.warn('[DialogGroupAdapter] 原文通道不可用，仅用摘要通道:', (e as Error)?.message);
       }
 
       // ── ①c 候选合并（摘要命中 ∪ 原文命中，ADR-010 §12.2）──
       const merged = new Map<string, (typeof summaryHits)[number]>();
-      for (const h of summaryHits) merged.set(String(h.id), h);
+      for (const h of summaryHits) {
+        merged.set(String(h.id), {
+          ...h,
+          channels: { summary: h.hitShards, content: 0, turnCount: 0 },
+        });
+      }
 
-      const rawOnlyGids: string[] = [];
       for (const r of rawRows) {
         const gid = String(r.gid || '');
         if (!gid) continue;
         const hitRows = Number(r.hit_rows) || 0;
+        // 命中轮数 = max(命中 user 行, 命中 assistant 行)。
+        // 一轮恰有一条 user 一条 assistant（dialog-group-stage 的 turn_count 就按 u===a 守卫算），
+        // 完全命中时两者同等于 turn_count ⇒ 密度恰好为 1，而不是被「行数 / 轮数」的量纲差顶到封顶。
+        //
+        // 为什么不是 `COUNT(*)`：行数 ≈ 2×轮数，用行数作分子会让密度在命中一半时就饱和到 1，
+        //        区分度归零（这正是改造前的问题）。
+        // 为什么不是 `COUNT(DISTINCT dialog_round)`：该列是 `DEFAULT 0` 且**无回填迁移**，
+        //        只有新闭组才写值 ⇒ 存量全 0，密度会塌成 1/turn_count。
+        // ⚠️ 已知低估边界：user 命中轮与 assistant 命中轮**不相交**时（如 u=3, a=3 却是 6 个不同
+        //    轮），真值 6 而取 3，最多低估 50%。`max` 是真实命中轮数的**保真下界**
+        //    （max ≤ 真值 ≤ u+a，且恒不超 turn_count），不会产生封顶失真。
+        // ⚠️ `turn_count` 走 u≠a 退回 `rounds.length` 分支时（dialog-group-stage.ts），
+        //    分母可能大于库内真实行数 ⇒ 即使全覆盖密度也到不了 1（实测 6/9=0.67）。
+        const hitTurns = Math.max(Number(r.u_hit) || 0, Number(r.a_hit) || 0);
         const exist = merged.get(gid);
         if (exist) {
-          // 双通道共振：两路都命中 ⇒ 累加分片命中数（同一分片口径，累加即共振强度）
+          const ch = exist.channels
+            ?? (exist.channels = { summary: 0, content: 0, turnCount: 0 });
+          ch.content = hitTurns;
+          // 观测口径：两通道命中量之和（沿用改造前的累加行为）。
+          // 🔴 它**不参与** ADR 精排 —— 摘要给的是分片数、原文给的是行数，量纲不同，
+          //    相加只作 payload.hitShards 的可读观测，判据一律走 channels 分量。
           exist.hitShards += hitRows;
         } else {
-          rawOnlyGids.push(gid);
-          // 占位，钙分与时间戳在下面回表补齐（精排要靠这两个分量）
           merged.set(gid, {
             id: gid,
             domain: 'dialog_group',
-            text: '',                  // 无摘要 ⇒ 组装时正文直接用原文，不会出现空【摘要】标签
+            text: '',                  // 有摘要的组在 ①d 回表补齐后才出现【摘要】前缀
             calciumScore: 0,
             createdAt: '',
-            hitShards: hitRows,        // 原文命中行数（与摘要路的分片命中同一量纲）
+            hitShards: hitRows,
             semanticSource: 'none',
+            channels: { summary: 0, content: hitTurns, turnCount: 0 },
           } as (typeof summaryHits)[number]);
         }
       }
 
-      // 原文独有候选：补齐钙分与时间戳，否则精排的 calcium / recency 分量恒为 0
-      if (rawOnlyGids.length > 0) {
+      // ── ①c' 兜底（ADR-010 §13.4）：候选查询抛错 ⇒ 单表取块，不整路返回空 ──
+      //   法典原文：「双通道候选 SQL 抛错 ⇒ 降级为 `dialog_groups` 单表按 `last_ts DESC`
+      //   取块，而不是整路返回空（返回空 = 该组永远召不回且对调用方完全静默）」。
+      //   🔴 只在**报错**时兜底：两路都正常返回 0 条是「确实没命中」，此时返回空才是正确
+      //      行为 —— 无差别塞最近的块会给调用方灌噪声。
+      //   兜底候选同样过 UUID 闸门（deny-by-default 已在入口保证 uuids 非空），
+      //   随后走同一套回表与精排（无通道数据 ⇒ 密度/共振分量失效并重归一，实质按钙分
+      //   排序、`last_ts` 做同分 tiebreak）—— 不另开第二个排序点。
+      if (merged.size === 0 && channelError) {
         try {
-          const phs = rawOnlyGids.map(() => '?').join(',');
-          const rows = this.sqlite.queryAll<{ dialog_group_id: string; block_calcium_score: number | null; last_ts: string | null }>(
-            `SELECT dialog_group_id, block_calcium_score, last_ts
-               FROM dialog_groups WHERE dialog_group_id IN (${phs})`,
-            rawOnlyGids,
+          const uuidPhs = uuids.map(() => '?').join(',');
+          const fb = this.sqlite.queryAll<{ dialog_group_id: string }>(
+            `SELECT dialog_group_id FROM dialog_groups
+              WHERE belong_entity_uuid IN (${uuidPhs})
+              ORDER BY last_ts DESC
+              LIMIT ?`,
+            [...uuids, limit],
           ) || [];
-          for (const r of rows) {
-            const h = merged.get(String(r.dialog_group_id));
-            if (!h) continue;
-            h.calciumScore = Number(r.block_calcium_score) || 0;
-            h.createdAt = String(r.last_ts || '');
+          for (const r of fb) {
+            const gid = String(r.dialog_group_id || '');
+            if (!gid || merged.has(gid)) continue;
+            merged.set(gid, {
+              id: gid,
+              domain: 'dialog_group',
+              text: '',
+              calciumScore: 0,
+              createdAt: '',
+              hitShards: 0,
+              semanticSource: 'none',
+              channels: { summary: 0, content: 0, turnCount: 0 },
+            } as (typeof summaryHits)[number]);
+          }
+          console.warn(
+            `[DialogGroupAdapter] 双通道候选查询失败，已降级 dialog_groups 单表按 last_ts DESC 取 ${fb.length} 块（ADR-010 §13.4）:`,
+            (channelError as Error)?.message,
+          );
+        } catch (e) {
+          // 兜底自身也失败才允许返回空 —— 此时确属数据库不可用
+          console.error('[DialogGroupAdapter] §13.4 单表兜底也失败:', (e as Error)?.message);
+        }
+      }
+
+      // ── ①d 回表：全部候选的钙分 / 时间戳 / turn_count / 摘要 ──
+      //   🔴 覆盖**全部**候选，不是只有原文独有候选：`turn_count` 是 ADR convDensity 的分母，
+      //      摘要路候选同样要靠它才算得出密度；`block_summary` 则让「原文命中、摘要没命中」
+      //      的组也带上【摘要】前置（ADR-010 §12.2.4），改造前这类组正文只有原文。
+      //      钙分与时间戳缺失会让对应分量恒为 0。
+      const preIds = [...merged.keys()];
+      if (preIds.length > 0) {
+        try {
+          // 分批查：两路各取 500 ⇒ 合并后最多 1000 个占位符，分批避开 IN 参数上限
+          const CHUNK = 400;
+          for (let i = 0; i < preIds.length; i += CHUNK) {
+            const part = preIds.slice(i, i + CHUNK);
+            const ph = part.map(() => '?').join(',');
+            const rows = this.sqlite.queryAll<{
+              dialog_group_id: string; block_calcium_score: number | null;
+              last_ts: string | null; created_at: string | null;
+              turn_count: number | null; block_summary: string | null;
+              belong_entity_uuid: string | null;
+            }>(
+              `SELECT dialog_group_id, block_calcium_score, last_ts, created_at,
+                      turn_count, block_summary, belong_entity_uuid
+                 FROM dialog_groups WHERE dialog_group_id IN (${ph})`,
+              part,
+            ) || [];
+            for (const r of rows) {
+              const h = merged.get(String(r.dialog_group_id));
+              if (!h) continue;
+              const ch = h.channels
+                ?? (h.channels = { summary: 0, content: 0, turnCount: 0 });
+              ch.turnCount = Number(r.turn_count) || 0;
+              if (!h.calciumScore) h.calciumScore = Number(r.block_calcium_score) || 0;
+              // last_ts 为空时回退 created_at：否则原文路候选 hitObj.createdAt 恒为 ''，
+              // 时间分量与同分 tiebreak 都会失效
+              if (!h.createdAt) h.createdAt = String(r.last_ts || r.created_at || '');
+              // 原文路独有候选不带归属，不补则 hitObj.entityUuid 恒为 null（上层按实体过滤会漏）
+              if (!h.belongEntityUuid) h.belongEntityUuid = r.belong_entity_uuid || null;
+              if (!h.text) h.text = String(r.block_summary || '');
+            }
           }
         } catch (e) {
-          console.warn('[DialogGroupAdapter] 原文候选补钙分失败（按 0 分精排）:', (e as Error)?.message);
+          // 回表失败 ⇒ 分量按 0 参与（密度/钙分拿不到就重归一），不阻塞检索
+          console.warn('[DialogGroupAdapter] 块元数据回表失败（分量按 0 参与精排）:', (e as Error)?.message);
         }
       }
 
       const hits = [...merged.values()];
       if (hits.length === 0) return [];
 
-      const ranked = scoreAndRank(hits, Date.now());
+      // 精排：ADR-010 §12.2.3 四分量。第 3 参显式传 undefined —— 传了 scheme 后
+      // 权重全由方案声明，此处不套用 v11 通用四权重（避免读代码的人误判生效来源）。
+      const ranked = scoreAndRank(hits, Date.now(), undefined, ADR_010_BLOCK_SCHEME);
       const pool = ranked.slice(0, Math.max(limit, Math.floor(limit * POOL_FACTOR)));
       if (pool.length === 0) return [];
 

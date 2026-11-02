@@ -32,6 +32,9 @@ import {
 import { PERCEPTION_40D_DIM, type PerceptionV40 } from '../../m3/types/perception-40d.js';
 import { aggregateSpinesWithReason, type CompositeDegradation } from './CompositeUrchin.js';
 import {
+  ADR_010_BLOCK_WEIGHTS,
+  ADR_010_CALCIUM_NORM_DENOM,
+  ADR_010_SUMMARY_DENSITY_CAP,
   CALCIUM_SCORE_MAX,
   ENCLOSURE_DEFAULT_LIMIT,
   QUERY_SHARD_MAX,
@@ -73,14 +76,91 @@ export interface EnclosureHit {
   semanticSource: 'atomic' | 'composite' | 'none';
   /** dialog_group 域：组合刺聚合退化原因（蓝皮书 §7.4） */
   compositeDegradation?: CompositeDegradation;
+  /**
+   * dialog_group 域专属：**双通道各自命中量**（ADR-010 §12.2.3 三个分量的输入）。
+   *
+   * 🔴 为什么不能只用 `hitShards`：摘要路给的是「摘要命中的分片数」，原文路给的是
+   *    「conversations 命中的行数」，**量纲不同**；改造前把两者直接相加塞进同一个
+   *    `hit` 分量，两路强度无法分辨，法典的 convDensity / summaryDensity / bothChannels
+   *    三个分量全都无从计算。分量拆开后各走各的公式。
+   *
+   * 只有 `DialogGroupAdapter` 会填它（唯一同时握有双通道计数与块元数据的地方）；
+   * 其余域的命中没有 `channels` ⇒ ADR 方案的可用性判定按「本池无该分量」重归一。
+   */
+  channels?: DialogGroupChannels;
+}
+
+/** dialog_group 双通道计数（ADR-010 §12.2.3 分量输入；`content` 与 `turnCount` 同为「轮」） */
+export interface DialogGroupChannels {
+  /** 摘要通道命中分片数 —— `summaryDensity` 的分子 */
+  summary: number;
+  /**
+   * 原文通道**命中轮数** —— `convDensity` 的分子。
+   * 🔴 单位是「轮」不是「行」：`dialog_groups.turn_count` 自 2026-11-02 起口径为
+   *    已落库问答对数（见 `dialog-group-stage.ts`），分子分母必须同源，
+   *    否则密度被系统性低估、块路排序失真。由 `max(命中 user 行数, 命中 assistant 行数)` 推得。
+   */
+  content: number;
+  /** 该组总轮数 —— `convDensity` 的分母（`dialog_groups.turn_count`） */
+  turnCount: number;
 }
 
 export interface ScoredHit extends EnclosureHit {
   score: number;
-  /** 四分量各自的贡献值，供 §8.3「某分量恒为 0 ⇒ 该通道失效」归因 */
-  breakdown: { hit: number; calcium: number; recency: number; semantic: number };
-  /** 本次实际生效的（已重归一）权重快照 */
-  activeWeights: RetrievalWeights;
+  /**
+   * 各分量的**贡献值**（键 = 所用方案的分量键），供 §8.3「某分量恒为 0 ⇒ 该通道失效」归因。
+   * 默认方案为 `hit / calcium / recency / semantic` 四键；ADR-010 方案为
+   * `convDensity / summaryDensity / bothChannels / calcium` 四键。
+   */
+  breakdown: Readonly<Record<string, number>>;
+  /** 本次实际生效的（已重归一）权重快照，键同 `breakdown`；各键之和恒为 1（除非全部失效） */
+  activeWeights: Readonly<Record<string, number>>;
+}
+
+// ── 排序方案（不变量 #7「同一规则不得多处实现」的落地形态）──
+
+/**
+ * 精排的**分量提取口径**：把某个命中映射成 [0,1] 的分量值。
+ * `hit` 参数是 `EnclosureHit`（结构性满足，无需引入依赖）。
+ */
+export type RankingValueFn = (hit: EnclosureHit, ctx: RankingContext) => number;
+
+/** 精排上下文：本轮池级事实，供分量取值与可用性判定共用（避免各分量重复计算） */
+export interface RankingContext {
+  nowMs: number;
+  /** 归一化分片命中（`hitShards / max`）；池内 max 为 0 时为空表 */
+  normHit: ReadonlyMap<string, number>;
+  /** 本池是否有任一候选带有效余弦，且语义开关打开 */
+  semanticActive: boolean;
+}
+
+/** 排序方案里的一个分量 */
+export interface RankingComponent {
+  /** 分量键 —— 同时是 `breakdown` / `activeWeights` 的字段名，池内必须唯一 */
+  readonly key: string;
+  /** 冻结权重（来自 `Flags` 的常量对象，本处不得写字面量 —— 蓝皮书 §1.2） */
+  readonly weight: number;
+  /** 取值口径，必须归一到 [0,1]；缺数据返回 0 */
+  readonly value: RankingValueFn;
+  /**
+   * 该分量在**本池**是否可用；不可用 ⇒ 权重置 0 并把其余权重重新归一。
+   * 🔴 语义与蓝皮书 §4.4 一致：分量恒为 0 说明该通道整体失效，
+   *    此时按 0 分参与会**拉低全池**（变相降级），必须跳过并重归一。缺省 = 恒可用。
+   */
+  readonly available?: (hits: readonly EnclosureHit[], ctx: RankingContext) => boolean;
+}
+
+/**
+ * 排序方案：**分量的声明式清单**。
+ *
+ * 🔴 方案只声明「算哪些分量、各自多重」，**不重写引擎** —— 可用性判定、权重重归一、
+ *    fail-open、确定性排序这四件事仍只有 `scoreAndRank` 一处实现（不变量 #7）。
+ *    新增一个域要专属权重时，声明一个 scheme 即可，**不得**再写第二个排序函数。
+ */
+export interface RankingScheme {
+  /** 方案名（观测与测试用） */
+  readonly name: string;
+  readonly components: readonly RankingComponent[];
 }
 
 /**
@@ -465,68 +545,162 @@ function normalizeHits(hits: readonly EnclosureHit[]): Map<string, number> {
 }
 
 /**
- * 精排（蓝皮书 §4.1）。**纯函数**，可单测。
+ * 默认方案（v11 通用四权重）—— 由 `RETRIEVAL_V11_WEIGHTS` **派生**，不重复声明权重。
  *
+ * 分量与本函数改造前的实现逐字对应，因此**不传 `scheme` 时行为零变化**：
  * ```
  * score(m) = w_hit      × norm(hitShards_m)
  *          + w_calcium  × norm(calcium_m)
  *          + w_recency  × norm(recency_m)
  *          + w_semantic × cosine40D(query, m)      // 仅当两侧向量均存在
  * ```
+ */
+function defaultScheme(weights: RetrievalWeights): RankingScheme {
+  return {
+    name: 'v11-default',
+    components: [
+      {
+        key: 'hit',
+        weight: weights.hit,
+        value: (h, c) => c.normHit.get(h.id) ?? 0,
+        // `max(hitShards) = 0` ⇒ 该分量整体置 0（不除以零），其余权重重归一
+        available: (_h, c) => c.normHit.size > 0,
+      },
+      {
+        key: 'calcium',
+        weight: weights.calcium,
+        value: (h) => Math.max(0, Math.min(1, h.calciumScore / CALCIUM_SCORE_MAX)),
+      },
+      {
+        key: 'recency',
+        weight: weights.recency,
+        value: (h, c) => {
+          const ageMs = Math.max(0, c.nowMs - Date.parse(h.createdAt));
+          return 1 - Math.min(1, ageMs / RECENCY_HALF_LIFE_MS);
+        },
+      },
+      {
+        key: 'semantic',
+        weight: weights.semantic,
+        value: (h, c) => (c.semanticActive && typeof h.cosine === 'number' ? h.cosine : 0),
+        // 无任何候选带余弦、或语义开关关闭 ⇒ 跳过语义路并把其余权重重归一（§4.4），
+        // 而不是把余弦当 0 分拉低全池（后者属变相降级）。
+        available: (_h, c) => c.semanticActive,
+      },
+    ],
+  };
+}
+
+/**
+ * ADR-010 §12.2.3 对话块双通道排序方案（**法典公式**，业主确认 2026-10-18）。
  *
- * 🔴 权重来自 `RETRIEVAL_V11_WEIGHTS` 单一对象，本函数**不写字面量**。
- * 🔴 无任何候选带余弦时，语义权重置 0 并把其余三权重重新归一（§4.4）——
+ * ```
+ * score = convDensity×0.40 + summaryDensity×0.30 + bothChannels×0.15 + calcium×0.15
+ * ```
+ * 分量口径：
+ * - `convDensity`    = `min(1, 原文命中轮数 / turn_count)`
+ * - `summaryDensity` = `min(1, 摘要命中分片数 / 10)`
+ * - `bothChannels`   = 原文与摘要同时命中 ⇒ 1，否则 0（法典只写「共振加分」，按命中存在性取值）
+ * - `calcium`        = `min(1, block_calcium_score / 5)`　← 基准 **5** 见 ADR-010 §13.1，
+ *                     **不是**通用方案的 `CALCIUM_SCORE_MAX`(10)
+ *
+ * 🔴 本方案**没有 recency 分量** —— 法典只列了四项，不得擅自补时间近因（补了就是第二套判据）。
+ *    时间次序由 `DialogGroupAdapter` 的最终排序按 `last_ts` 做同分 tiebreak 承担。
+ * 🔴 分量失效按 §4.4 重归一：本池全体拿不到 `turn_count` / 没有任何摘要命中 / 没有双通道共振
+ *    时，该分量权重置 0 并把其余重归一 —— 保证「纯摘要池」「纯原文池」各自内部次序仍正确。
+ */
+// 显式给出 `Object.freeze` 的类型实参：否则泛型返回值推断会让下面的箭头参数退化成 any
+export const ADR_010_BLOCK_SCHEME: Readonly<RankingScheme> = Object.freeze<RankingScheme>({
+  name: 'adr-010-block',
+  components: [
+    {
+      key: 'convDensity',
+      weight: ADR_010_BLOCK_WEIGHTS.convDensity,
+      value: (h) => {
+        const ch = h.channels;
+        if (!ch || !(ch.turnCount > 0)) return 0;
+        return Math.max(0, Math.min(1, ch.content / ch.turnCount));
+      },
+      available: (hs) => hs.some((h) => (h.channels?.turnCount ?? 0) > 0),
+    },
+    {
+      key: 'summaryDensity',
+      weight: ADR_010_BLOCK_WEIGHTS.summaryDensity,
+      value: (h) => Math.max(0, Math.min(1, (h.channels?.summary ?? 0) / ADR_010_SUMMARY_DENSITY_CAP)),
+      available: (hs) => hs.some((h) => (h.channels?.summary ?? 0) > 0),
+    },
+    {
+      key: 'bothChannels',
+      weight: ADR_010_BLOCK_WEIGHTS.bothChannels,
+      value: (h) => ((h.channels?.content ?? 0) > 0 && (h.channels?.summary ?? 0) > 0 ? 1 : 0),
+      available: (hs) =>
+        hs.some((h) => (h.channels?.content ?? 0) > 0 && (h.channels?.summary ?? 0) > 0),
+    },
+    {
+      key: 'calcium',
+      weight: ADR_010_BLOCK_WEIGHTS.calcium,
+      // 🔴 基准 5 而非 CALCIUM_SCORE_MAX(10) —— ADR-010 §13.1 明写「/10 → /5，
+      //    高钙阈值即满分」，生产实测 max 7.72 / avg 3.85，除以 10 时高钙与 2~5 分段
+      //    在 0.15 权重下只差 0.075，区分度结构性不足。详见 Flags.ADR_010_CALCIUM_NORM_DENOM。
+      value: (h) => Math.max(0, Math.min(1, h.calciumScore / ADR_010_CALCIUM_NORM_DENOM)),
+    },
+  ],
+});
+
+/**
+ * 精排（蓝皮书 §4.1）。**纯函数**，可单测。
+ *
+ * **框架单源**：可用性判定 → 权重置 0 → 重归一 → 按分量累加 → 确定性排序，
+ * 这五步只有本函数一处实现（不变量 #7）。分量**算什么、多重**由 `scheme` 声明。
+ *
+ * @param weights 仅在未传 `scheme` 时生效（默认方案的四权重来源，来自 `Flags` 单一对象）
+ * @param scheme  排序方案；**传入后 `weights` 不参与**，分量与权重全由方案声明
+ *
+ * 🔴 无任何候选带余弦时，语义权重置 0 并把其余权重重归一（§4.4）——
  *    这是「跳过语义路」，不是把余弦当 0 分拉低全池（后者属变相降级）。
  * 🔴 LLM 精排失败/超时是 **fail-open**：直接用本函数的规则精排结果。
+ * 🔴 本函数不写字面量：权重来自 `Flags` 的常量对象（蓝皮书 §1.2 魔数禁令）。
  */
 export function scoreAndRank(
   hits: readonly EnclosureHit[],
   nowMs: number,
   weights: RetrievalWeights = RETRIEVAL_V11_WEIGHTS,
+  scheme?: RankingScheme,
 ): ScoredHit[] {
   if (hits.length === 0) return [];
 
   const anyCosine = hits.some((h) => typeof h.cosine === 'number' && Number.isFinite(h.cosine));
   // 语义通道开关关闭（`RETRIEVAL_V11_SEMANTIC` 非 true）⇒ 语义权重按 0 参与重归一
   const semanticActive = anyCosine && Flags.semantic();
+  const ctx: RankingContext = { nowMs, normHit: normalizeHits(hits), semanticActive };
 
-  const normHit = normalizeHits(hits);
-  const hitMax = normHit.size > 0;
+  const sc = scheme ?? defaultScheme(weights);
 
-  const active: RetrievalWeights = Object.freeze({
-    hit: hitMax ? weights.hit : 0,
-    calcium: weights.calcium,
-    recency: weights.recency,
-    semantic: semanticActive ? weights.semantic : 0,
-  });
-  const sum = active.hit + active.calcium + active.recency + active.semantic;
-  // 四路全灭（理论上不可能：calcium/recency 恒有值）—— 退化为等权，不返回全 0
+  // ① 可用性判定：该分量在本池算不出来 ⇒ 权重置 0（不参与，而不是按 0 分拉低全池）
+  const raw: Record<string, number> = {};
+  let sum = 0;
+  for (const c of sc.components) {
+    const on = c.available ? c.available(hits, ctx) : true;
+    raw[c.key] = on ? c.weight : 0;
+    if (on) sum += c.weight;
+  }
+  // ② 重归一。全部分量不可用时（理论不可达：两个方案的 calcium 都恒可用）
+  //    wSum 取 1 ⇒ 各分量权重保持 0，分数为 0 而不是 NaN / Infinity。
   const wSum = sum > 0 ? sum : 1;
-  const eff: RetrievalWeights = {
-    hit: active.hit / wSum,
-    calcium: active.calcium / wSum,
-    recency: active.recency / wSum,
-    semantic: active.semantic / wSum,
-  };
+  const eff: Record<string, number> = {};
+  for (const k of Object.keys(raw)) eff[k] = raw[k] / wSum;
+  Object.freeze(eff);
 
+  // ③ 按方案分量累加
   const scored: ScoredHit[] = hits.map((h) => {
-    const nHit = normHit.get(h.id) ?? 0;
-    const nCal = Math.max(0, Math.min(1, h.calciumScore / CALCIUM_SCORE_MAX));
-    const ageMs = Math.max(0, nowMs - Date.parse(h.createdAt));
-    const nRec = 1 - Math.min(1, ageMs / RECENCY_HALF_LIFE_MS);
-    const sem = semanticActive && typeof h.cosine === 'number' ? h.cosine : 0;
-
-    const bHit = eff.hit * nHit;
-    const bCal = eff.calcium * nCal;
-    const bRec = eff.recency * nRec;
-    const bSem = eff.semantic * sem;
-
-    return {
-      ...h,
-      score: bHit + bCal + bRec + bSem,
-      breakdown: { hit: bHit, calcium: bCal, recency: bRec, semantic: bSem },
-      activeWeights: eff,
-    };
+    const breakdown: Record<string, number> = {};
+    let score = 0;
+    for (const c of sc.components) {
+      const part = eff[c.key] * c.value(h, ctx);
+      breakdown[c.key] = part;
+      score += part;
+    }
+    return { ...h, score, breakdown: Object.freeze(breakdown), activeWeights: eff };
   });
 
   // 分数降序；同分按 id 升序保证确定性（同一次查询重复执行结果必须一致）

@@ -42,6 +42,61 @@ export const RETRIEVAL_V11_WEIGHTS: Readonly<RetrievalWeights> = Object.freeze({
   semantic: 0.10,
 });
 
+/**
+ * ADR-010 §12.2.3 对话块双通道排序四权重（**业主确认 2026-10-18**）。
+ *
+ * 🔴 与 `RETRIEVAL_V11_WEIGHTS` 的关系是**分工，不是替代**：
+ *   后者是 v11 通用精排（memory / conversation / work 三域，以及 dialog_group 改造前）；
+ *   本对象是 ADR-010 为 `dialog_group` 域单独确认的法典权重。
+ *   两者都必须落在本文件 —— 权重单一产出点（红线 1），散进业务函数即违反蓝皮书 §1.2 魔数禁令。
+ *
+ * 对应公式（ADR-010 §12.2.3）：
+ * ```
+ * score = convDensity×0.40 + summaryDensity×0.30 + bothChannels×0.15 + calcium×0.15
+ * ```
+ * 因此**纯原文候选最高 0.55**（0.40 + 0.15 钙满）、**纯摘要候选最高 0.45**（0.30 + 0.15 钙满）
+ * —— 摘要命中略低于原文，但足以进入候选集（法典原文）。四分量同时拉满为 1.00。
+ */
+export interface Adr010BlockWeights {
+  /** 原文密度 `min(1, 原文命中轮数 / turn_count)` */
+  convDensity: number;
+  /** 摘要密度 `min(1, 摘要命中分片数 / 10)` */
+  summaryDensity: number;
+  /** 双通道共振：原文与摘要同时命中 */
+  bothChannels: number;
+  /** 钙化度 `min(1, block_calcium_score / 10)` */
+  calcium: number;
+}
+
+export const ADR_010_BLOCK_WEIGHTS: Readonly<Adr010BlockWeights> = Object.freeze({
+  convDensity: 0.40,
+  summaryDensity: 0.30,
+  bothChannels: 0.15,
+  calcium: 0.15,
+});
+
+/**
+ * ADR-010 §12.2.3 `summaryDensity` 的分母（法典写死「摘要命中 n-gram 条数 / 10」）。
+ * 抽成常量而非留在表达式里：它是法典数字，改它 = 修订 ADR-010，不是改代码。
+ */
+export const ADR_010_SUMMARY_DENSITY_CAP = 10;
+
+/**
+ * ADR-010 对话块方案的**钙分归一基准 = 5**（不是通用方案的 `CALCIUM_SCORE_MAX = 10`）。
+ *
+ * 🔴 依据 ADR-010 §13.1 原文：「**钙分归一基准 `/10` → `/5`**（高钙阈值即满分）：
+ *    生产实测 max 7.72 / avg 3.85，除以 10 时高钙与 2~5 分段在 0.15 权重下只差 0.075，
+ *    区分度结构性不足」。该句紧跟在 `0.40 原文密度 + 0.30 摘要密度 + 0.15 双通道共振
+ *    + 0.15 钙分` 之后，指的就是本方案的钙分项。
+ *
+ * ⚠️ 两个基准**并存且各有归属**：`CALCIUM_SCORE_MAX`(10) 属 v11 通用四权重
+ *    （白皮书 §4.2，memory/conversation/work 三域 + dialog_group 改造前），
+ *    本常量只属于 `ADR_010_BLOCK_SCHEME`。历史实现 `c1888dc` 的
+ *    `CALCIUM_NORM_DENOM = 5` 在 `19e1a68`（v11 接管）时连同公式一起丢失，
+ *    2026-11-02 按 ADR 条文恢复。
+ */
+export const ADR_010_CALCIUM_NORM_DENOM = 5;
+
 /** 时间近因半衰期 30 天（蓝皮书 §4.2 表格 🔴 标注：改它等于改召回性格） */
 export const RECENCY_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
 
