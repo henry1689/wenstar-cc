@@ -1,6 +1,6 @@
 # 任务书 · V11 彻底完成与 n-gram 拆除 v1
 
-> **状态**：执行中 · 2026-11-02 立项
+> **状态**：✅ 已完成（B1–B5 全部落地）· 2026-11-02 立项 / 同日完成
 > **上位**：`白皮书_检索架构-v11-结构化召回取代ngram索引.md` §S4 · `拆除计划_检索v11-旧链路下线.md`
 > **性质**：架构收口。目标是让**所有召回**走同一套 `StructuredRecall`，不再存在第二份实现。
 
@@ -128,6 +128,38 @@
 | 40D 快照当前 **0 行有数据**（`BlockArchiveService` 未产出） | B1 允许 `vecCol` 指向该列：无向量时 `cosine=undefined`，`scoreAndRank` 按语义权重 0 重归一（法规第四条：无向量只能跳过，不得填 0 冒充）。同时排查归档服务为何未产出 |
 | 会晤场景无 `dialog_group` 命中时退化为 3 条 | 由 hitShards 主导权重保证召回不塌陷（实测 40/40） |
 | 并行会话共享工作树 | 每批一个 commit，提交前 `git status` 确认仅含本批文件 |
+
+---
+
+## 八、实施记录（2026-11-02 完成）
+
+| 批 | commit | 内容 | 验证 |
+|---|---|---|---|
+| B1 | `7094d42` | DialogGroupAdapter 改走 `recallByStructured` + `scoreAndRank`；`DOMAIN_SPECS.dialog_group.vecCol` 由 `null` → `perception_40d_snapshot`；开关 `enable_dialog_group_memory` → `dialog_group_v11_recall` | 对话块召回正常 |
+| B2 | （并入 B3a-1） | 删 `BlockSummaryService.indexSummary()` 与 `BLOCK_SUMMARY_SOURCE_TYPE` | — |
+| B3a | `ced8b4d` 等 | 旧链路四批下线：写入口断写、`MemoryRetriever.recallByKeywordIndex` 删、`UnifiedSearchEngine.search` 收口为空、`Backfill` 缺口台账下线 | tsc 零错误 |
+| B3b-1 | `c824763` | `SearchIndexBuilder` 267→70 行（只留 `buildNgrams`）；`schema.sql` 删建表；新增 v33 迁移 `DROP TABLE` | 迁移在 webui 重启时执行 |
+| B3b-2 | `2caebc9` | 删 4 个被测对象已消失的专项测试（−324 行） | — |
+| B3b-3 | `bce5b60` | 5 个集成测试从 `search_index` 解绑（+30/−78） | 47 passed / 1 failed（既有） |
+| B3b-4 | `d0413fd` | 生产侧残留：v10 废止为 no-op、v21 同步段、v22/v23 两条 DELETE、`KnowledgeEngine` 清理段（+18/−125） | tsc 零错误 |
+| B3b-5 | `a9b5b5f` | `meeting-recall` ① 段改分片 LIKE（v11 同口径） | 该测试 8/8 绿 |
+| B4+B5 | `def529f` | 降级路径改走 `recallByStructured`；两道防复发守卫（静态扫描 + 全新库无该表）（+94/−11） | B5 两条全绿 |
+
+### 关键实测数据
+
+| 项 | 值 |
+|---|---|
+| 主库体积 | 827.6 MB → **259 MB**（删 354 万行索引） |
+| `conversations` 行数 | 16,257（分片 LIKE 毫无压力） |
+| 新 ① 段耗时（40 分片，6659 条对话） | **80~91 ms**，满额命中 12 条 |
+| 原 n-gram 路径 | 258.4 ms（对比 v11 结构化召回 27.4 ms） |
+| `freelist_count` | 38,667 页 ≈ **158 MB 待回收**（需 VACUUM） |
+
+### 已知遗留
+
+- **VACUUM 未执行**：DROP TABLE 只把页还给 freelist，文件未缩。实测每次持久化落盘写 258.6MB / 2079ms，VACUUM 后应降至约 100MB。需停服 + 备份后执行。
+- `ConversationDB.ts:321` 的一行 warn 文案仍提到 `search_index`（无 SQL，仅过时描述）。
+- `sql-schema-consistency` 的 `dialog_groups.dialog_group_id` 守卫在**基线**即失败，与本任务无关，属既有问题。
 
 ---
 
