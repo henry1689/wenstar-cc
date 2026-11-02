@@ -155,9 +155,23 @@
 | 原 n-gram 路径 | 258.4 ms（对比 v11 结构化召回 27.4 ms） |
 | `freelist_count` | 38,667 页 ≈ **158 MB 待回收**（需 VACUUM） |
 
+### VACUUM 已执行（2026-11-02 10:51）
+
+`DROP TABLE` 只把页还给 freelist、文件不缩，故补做 VACUUM：
+
+| 项 | 前 | 后 |
+|---|---|---|
+| 主库文件 | 258.6 MB | **104.8 MB** |
+| `freelist_count` | 38,667 页（≈158 MB） | **0** |
+| 每次持久化落盘 | 2079 ms | **988 ~ 1923 ms** |
+| `integrity_check` | — | **ok** |
+| 行数（conversations / dialog_groups / memories） | 16258 / 3076 / 15542 | **完全一致** |
+
+流程：停 webui → gzip 备份（45 MB，`gzip -t` 通过）→ VACUUM（5.3 s）→ 逐表核对行数 → 重启验证。
+备份：`data/backups/fusion_memory-pre-vacuum-20261102T105116Z.db.gz`。
+
 ### 已知遗留
 
-- **VACUUM 未执行**：DROP TABLE 只把页还给 freelist，文件未缩。实测每次持久化落盘写 258.6MB / 2079ms，VACUUM 后应降至约 100MB。需停服 + 备份后执行。
 - `ConversationDB.ts:321` 的一行 warn 文案仍提到 `search_index`（无 SQL，仅过时描述）。
 - `sql-schema-consistency` 的 `dialog_groups.dialog_group_id` 守卫在**基线**即失败，与本任务无关，属既有问题。
 
