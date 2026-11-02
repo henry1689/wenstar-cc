@@ -909,4 +909,144 @@ describe('[B5] n-gram 拆除防复发守卫', () => {
       '全新库跑完迁移后仍存在 search_index —— v10 回填逻辑可能被改回来了，或 v33 迁移被移除',
     ).toBe(false);
   });
+
+  /**
+   * 🔴 B1 升级：堵住「注释行」这个口子。
+   *
+   * 原 [B5] 对注释行**显式放行** —— 意图是保留拆除历史留痕，但副作用是
+   * 过时注释可以无限累积。遗留收口批I 实测清出 6 处仍在描述已消失机制的注释
+   * （「砂金库倒排索引启动补齐」「供 search_index 分块索引」…），
+   * 而它们正是「每次改善不沉底」的载体：下次有人照着注释就把机制接回来。
+   *
+   * 两道闸，都不阻塞历史留痕：
+   *   ① **计数封顶**：总数只减不增 —— 留痕允许，增长不允许
+   *   ② **过时表述表**：已证实失效的具体说法，命中即红（比表名更精准）
+   */
+  it('🔴 注释行封顶：非白名单文件中 search_index 出现次数只减不增', () => {
+    // 2026-11-02 遗留收口批I 清偿后的实测基线（11 个文件，全部为拆除历史留痕）
+    const BASELINE = 21;
+    let total = 0;
+    const perFile: string[] = [];
+    for (const file of walkTs(SRC)) {
+      const rel = relative(REPO, file).replace(/\\/g, '/');
+      if (ALLOWED_FILES.has(rel)) continue;
+      const n = (readFileSync(file, 'utf-8').match(/search_index/g) ?? []).length;
+      if (n > 0) perFile.push(`${rel}=${n}`);
+      total += n;
+    }
+    expect(
+      total,
+      `search_index 提及数超过基线（基线 ${BASELINE}，只减不增）。\n` +
+        `  新增的提及必须是**已下线**的说明，且需同步下调本基线并注明批次：\n  ` +
+        perFile.join('\n  '),
+    ).toBeLessThanOrEqual(BASELINE);
+  });
+
+  it('🔴 过时表述不得复活（照着注释接回已拆除机制的直接防线）', () => {
+    /** 已证实失效的表述 —— 每条都对应一个已经不存在的机制 */
+    const STALE_PHRASES: readonly RegExp[] = [
+      /倒排索引启动补齐/,
+      /供 search_index 分块索引/,
+      /与旧链路并行跑/,
+      /倒排索引查询的最大 n-gram 词数/,
+      /不进 `search_index`/,
+      /控制单次 SQL 的 IN 规模/,
+    ];
+    const hits: string[] = [];
+    for (const file of walkTs(SRC)) {
+      const rel = relative(REPO, file).replace(/\\/g, '/');
+      if (ALLOWED_FILES.has(rel)) continue;
+      readFileSync(file, 'utf-8')
+        .split(/\r?\n/)
+        .forEach((line, i) => {
+          for (const re of STALE_PHRASES) {
+            if (re.test(line)) hits.push(`${rel}:${i + 1}  ${line.trim().slice(0, 80)}`);
+          }
+        });
+    }
+    expect(
+      hits,
+      '发现仍在描述**已消失机制**的过时表述 —— 这类注释会让后人把拆除掉的东西接回来。' +
+        '请改写为当前事实（不是删掉，是说清现在是什么）:\n  ' + hits.join('\n  '),
+    ).toEqual([]);
+  });
+});
+
+/**
+ * [B6 / 2026-11-02] 死导出守卫 —— 已收口为空实现的函数不得被接回
+ * ==============================================================
+ * 【被守的真实事故】本次拆除把 `UnifiedSearchEngine.search` 收口为恒返回空，
+ * 但**降级路径仍在调它** ⇒ V13 一抛异常就全链路空检索，而日志还打印
+ * 「降级到 V11」骗人。全量测试 30 项红里**没有一条能发现它**
+ * （没有用例会触发 V13 异常）—— 最终靠人工读代码才发现。
+ *
+ * 这不可复制：故障时刻才暴露、平时证据全在骗人 ⇒ 必须结构化锁死。
+ *
+ * 判据：清单项在生产代码中**零调用点**；且清单项本身**必须真实存在且确为空实现**
+ * （反向断言，防清单腐化成一纸空文）。
+ */
+describe('[B6] 死导出守卫 —— 恒空函数不得被降级路径接回', () => {
+  const CLOSED_EXPORTS: ReadonlyArray<{
+    /** 定义所在文件（自身豁免） */
+    file: string;
+    /** 导出名 */
+    name: string;
+    /** 收口批次 */
+    closedOn: string;
+  }> = [
+    {
+      file: 'src/m4/UnifiedSearchEngine.ts',
+      name: 'search',
+      closedOn: '2026-11-02 n-gram 拆除 B3a-4（原 n-gram 初筛 + 向量精排，索引下线后初筛恒空）',
+    },
+  ];
+
+  it('清单项必须真实存在，且其函数体确为空实现（防清单腐化）', () => {
+    const problems: string[] = [];
+    for (const c of CLOSED_EXPORTS) {
+      const abs = join(REPO, c.file);
+      if (!existsSync(abs)) {
+        problems.push(`${c.file} 已不存在 —— 请同步删除清单项`);
+        continue;
+      }
+      const src = readFileSync(abs, 'utf-8');
+      // 空实现的特征：恒返回空 items（不是「有时返回空」，是无条件空）
+      if (!/items:\s*\[\]/.test(src)) {
+        problems.push(`${c.file} 的 ${c.name} 已不再是恒空实现 —— 若它复活了，请从清单移除并确认调用方`);
+      }
+    }
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('🔴 清单项在生产代码中零调用点（谁接回谁红）', () => {
+    const offenders: string[] = [];
+    for (const c of CLOSED_EXPORTS) {
+      // 三种接回形态：解构 import、别名 import、动态 import 后调用
+      const reImport = new RegExp(
+        String.raw`import\s*\{[^}]*\b${c.name}\b[^}]*\}\s*from\s*['"][^'"]*UnifiedSearchEngine`,
+      );
+      const reAlias = new RegExp(String.raw`\b${c.name}\s*:\s*\w+Search\b`);
+      // 🔴 第三形态必须精确到「动态 import 的**解构列表**里真的有这个名字」——
+      //   早先写成「同文件里出现 `name(`」会误报 `ctx.knowledgeBase.search(...)` 之类
+      //   与本模块无关的调用（实测踩过：B6 首版把 retrieval-stage 判红）。
+      //   `\bsearch\b` 不会匹配 `searchV13`（search 后是词字符，无边界）。
+      const reDyn = new RegExp(
+        String.raw`\{[^}]*\b${c.name}\b[^}]*\}\s*=\s*await\s+import\([^)]*${c.file.split('/').pop()!.replace(/\.ts$/, '')}[^)]*\)`,
+      );
+      for (const file of walkTs(SRC)) {
+        const rel = relative(REPO, file).replace(/\\/g, '/');
+        if (rel === c.file) continue; // 定义文件自身豁免
+        const src = readFileSync(file, 'utf-8');
+        if (!src.includes('UnifiedSearchEngine')) continue;
+        if (reImport.test(src)) { offenders.push(`${rel}: import { ${c.name} } from UnifiedSearchEngine`); continue; }
+        if (reAlias.test(src)) { offenders.push(`${rel}: 别名 import 形态`); continue; }
+        if (reDyn.test(src)) { offenders.push(`${rel}: 动态 import 解构了 ${c.name}`); }
+      }
+    }
+    expect(
+      offenders,
+      '🔴 已收口为恒空的函数被接回 —— 故障时刻会静默返回空检索，而日志看起来一切正常。' +
+        '若确有必要恢复该能力，请先让它真正实现（不是空实现），再从清单移除:\n  ' + offenders.join('\n  '),
+    ).toEqual([]);
+  });
 });
