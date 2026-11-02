@@ -233,6 +233,39 @@
 - **体量构成（2026-10-31 实测，总计 13.40 GB）**：`voxcpm2` **12 GB** > `bionic-cognitive-engine` 900M > `ui` 382M > `data` 326M > `node_modules` 189M > `lib` 143M > `wenstar_os` 99M。
 - **`voxcpm2/models` = 12 GB 本地 ChatTTS 权重**：当前 `TTS_ENGINE=edge`，生产 worker 是 `scripts/tts_worker.py`（edge-tts）；唯一引用它的 `src/webui/tts_server.py` **无任何进程/脚本启动**。⇒ 休眠资产。**业主 2026-10-31 裁决：先不动，仅记台账**，等需要本地语音时再启用或清理。
 
+### §6.7 2026-11-02 commit `ced8b4d` 裹挟并行会话 11 个文件
+
+**现象**：B3a-3 批次的提交 `ced8b4d`（意图只含 Backfill / gap 台账相关文件）实际带入 **11 个并行会话的文件**。
+
+**根因**：并行会话在本人 `git add <自己的文件>` **之前**就已把它们的改动 `git add` 进了暂存区。
+`git commit -m` 提交的是**整个 index**，不是「本次 add 的那些路径」——
+`git add` 只做加法，不会清掉别人先前放入 index 的条目。
+
+**为什么没有当场发现**：`git add <路径>` 的输出只显示本次新增，不显示 index 里已有的其它条目；
+只有 `git diff --cached --name-only` 才能看到**提交的全集**。
+
+**处置**：业主裁决**不改写历史**（`reset` 会干扰并行会话的工作树与 index），改为本台账留痕。
+此后每批提交前必先 `git diff --cached --name-only` 核对全量暂存清单。
+
+**教训（已固化为操作纪律）**：
+1. 提交前**必看** `git diff --cached --name-only` 的全量输出，只看自己 add 了什么是不够的；
+2. 发现并行会话的文件混入 index 时，用 `git restore --staged <他人路径>` 单独摘出，**不要**用 `git reset`；
+3. 绝不 `git add -A` / `git add .` —— 并行会话共享同一个工作树时，那是把别人的未完成工作一并提交。
+
+### §6.8 2026-11-02 B3b-4：`src/m2/` 无令牌写入被 Sentinel 静默回滚
+
+**现象**：`Edit` 返回成功、无任何报错，但 `grep` 立刻显示**文件内容仍是旧的**——
+v10 迁移的整段替换根本没有落盘。
+
+**根因**：`src/m2/MigrationManager.ts` 属高风险管理路径，写入需 S1→S7 签发的令牌。
+当时手上没有针对该批次的有效令牌，Sentinel 在写入后按令牌门控**还原了文件**，
+而工具侧的返回值只反映「写入动作本身成功」。
+
+**判据**：`Edit success ≠ 落盘`。改高风险文件后必须立刻 `grep` 点名该处内容，不能凭工具返回值下结论。
+
+**正确顺序**：跑 `harness_run_flow` 拿令牌 → 改文件 → 立即 `grep` 核验 → commit 消费令牌。
+令牌是**一个文件一次写入**，多文件需分别签发；签发到 commit 之间不得再动该文件。
+
 ---
 
 ## 相关文档
