@@ -1,7 +1,12 @@
 /**
- * ShadowLog — 检索架构 v11 影子日志 + 八项埋点（任务书 §S2 A7 / 蓝皮书 §8.1 / §8.4）
+ * ShadowLog — 检索架构 v11 观测日志 + 埋点（任务书 §S2 A7 / 蓝皮书 §8.1 / §8.4）
  * ============================================================
- * S2 双跑期的**唯一观测出口**。影子链路与旧链路并行跑，结果只写日志、不参与返回。
+ * v11 结构化召回的**观测出口**：每次召回把候选进出量与耗时写日志，结果不参与返回。
+ *
+ * 🔴 2026-11-02 遗留收口：原头注写的是「S2 双跑期的唯一观测出口，影子链路与旧链路
+ *    并行跑」—— 旧链路（n-gram 倒排）已随本次拆除下线，**没有并行对象可比**，
+ *    对比语义失效。但记录 v11 自身候选量与耗时的价值仍在（它是 `fence_ms` 与
+ *    `v11_retrieval_ms` 的唯一数据源），故保留机制、只改口径表述。
  *
  * 【落点】`data/retrieval-v11/shadow/YYYY-MM-DD.jsonl` —— 一行一次查询，按日期分文件。
  * 【红线】
@@ -170,7 +175,17 @@ const FLUSH_EVERY = 50;
 
 const counters = new Map<CounterName, number>();
 for (const n of COUNTER_NAMES) counters.set(n, 0);
+/** 整体检索耗时（进 `v11_retrieval_ms_*`） */
 const latencies: number[] = [];
+/**
+ * 🔴 围栏段（`recallByStructured` 的 SQL 执行）独立耗时，进 `fence_ms_*`。
+ *
+ * 为什么要单独一条（改善落地 B2）：既有 `v11_retrieval_ms` 是**整体**耗时
+ * （实测 p50=97ms），围栏在里面占多少**无法归因**；而围栏是纯 LIKE 分片扫描，
+ * 随 `conversations` 行数**线性劣化**（16,257 行时 40 分片 80~91ms，
+ * 行数涨多少耗时同步放大）。没有这条，劣化只能等用户说「变慢了」才发现。
+ */
+const fenceLatencies: number[] = [];
 let sinceFlush = 0;
 
 /** 计数器 +1（红线：本函数永不抛出） */
@@ -189,21 +204,43 @@ export function observeLatency(ms: number): void {
   if (latencies.length > LATENCY_RING) latencies.splice(0, latencies.length - LATENCY_RING);
 }
 
+/**
+ * 记录一次**围栏段**耗时（毫秒），进入独立环形采样。
+ *
+ * 与 `observeLatency` 完全同构：同样只进内存、同样受 `LATENCY_RING` 封顶、
+ * 同样**永不抛出**（红线 3：观测层不得打断生产链路）。
+ */
+export function observeFenceLatency(ms: number): void {
+  if (!Number.isFinite(ms) || ms < 0) return;
+  fenceLatencies.push(ms);
+  if (fenceLatencies.length > LATENCY_RING) {
+    fenceLatencies.splice(0, fenceLatencies.length - LATENCY_RING);
+  }
+}
+
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[idx];
 }
 
-/** 当前快照（含 `v11_retrieval_ms` 的 P50/P95/P99） */
+/** 当前快照（含 `v11_retrieval_ms` 与 `fence_ms` 的 P50/P95/P99） */
 export function snapshot(): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, v] of counters) out[k] = v;
+
   const sorted = [...latencies].sort((a, b) => a - b);
   out['v11_retrieval_ms_p50'] = percentile(sorted, 50);
   out['v11_retrieval_ms_p95'] = percentile(sorted, 95);
   out['v11_retrieval_ms_p99'] = percentile(sorted, 99);
   out['v11_retrieval_ms_samples'] = sorted.length;
+
+  // 🔴 改善落地 B2：围栏段独立耗时 —— 回答「整体慢下来时，是不是围栏在慢」
+  const fenceSorted = [...fenceLatencies].sort((a, b) => a - b);
+  out['fence_ms_p50'] = percentile(fenceSorted, 50);
+  out['fence_ms_p95'] = percentile(fenceSorted, 95);
+  out['fence_ms_p99'] = percentile(fenceSorted, 99);
+  out['fence_ms_samples'] = fenceSorted.length;
   return out;
 }
 

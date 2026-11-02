@@ -314,6 +314,12 @@ export async function recallByStructured(
   params.push(q.limit > 0 ? q.limit : ENCLOSURE_DEFAULT_LIMIT);
 
   let rows: Array<Record<string, unknown>>;
+  // 🔴 改善落地 B2：围栏段独立耗时（进 metrics 的 `fence_ms_*`）。
+  //   为什么要有：`v11_retrieval_ms` 是整体耗时，围栏占比无法归因；而围栏是纯
+  //   LIKE 分片扫描、随 `conversations` 行数线性劣化，劣化必须可观测。
+  //   实现约束：本函数是 async ⇒ 动态 import 合法，且无需在文件头新增静态 import
+  //   （避免第二个写入点）；埋点自带 try/catch —— 观测层失败绝不影响围栏返回。
+  const _fenceStart = performance.now();
   try {
     // 🔴 参数**整组传数组**，不得展开（见 StructuredRecallDb 注释）
     rows = db.queryAll(sql, params) ?? [];
@@ -322,6 +328,10 @@ export async function recallByStructured(
     console.warn(`[RetrievalV11] 围栏 SQL 失败（fail-closed 返回空）domain=${q.domain}:`, (e as Error)?.message);
     return [];
   }
+  try {
+    const { observeFenceLatency } = await import('./ShadowLog.js');
+    observeFenceLatency(performance.now() - _fenceStart);
+  } catch { /* 观测层异常不阻断围栏返回（红线 3） */ }
 
   const nowMs = Date.now();
   const hits: EnclosureHit[] = [];
