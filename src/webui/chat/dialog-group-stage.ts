@@ -267,6 +267,30 @@ export async function flushDialogGroup(
       });
       const _firstTs = dg.rounds.length > 0 ? new Date(dg.rounds[0].time).toISOString() : now;
       const _lastTs = dg.rounds.length > 0 ? new Date(dg.rounds[dg.rounds.length - 1].time).toISOString() : now;
+
+      // 🔴 turn_count 以**已落库**的完整问答对为准（2026-11-02 与存量修复同口径）。
+      //   为什么不用 `_score.turnCount`（= rounds.length）：rounds 里有的轮并未落进
+      //   conversations（实测 tc=9 而实际只有 6 对），而该列是召回密度的分母
+      //   `convDensity = min(1, 命中轮数 / turn_count)` —— 分母比可召回内容大，
+      //   密度被系统性低估、块路排序失真。**召回只能召回库里真实存在的行**，
+      //   分母必须与它同源，否则排序依据的是一份不存在的内容。
+      //   退化保护：查不到行 / u≠a（半轮、单向发言）⇒ 退回 rounds.length，行为与改前一致。
+      let _turnCount = _score.turnCount;
+      try {
+        const _cnt = sql.queryAll<{ u: number | null; a: number | null }>(
+          'SELECT SUM(CASE WHEN role = \'user\' THEN 1 ELSE 0 END) AS u, ' +
+          'SUM(CASE WHEN role = \'assistant\' THEN 1 ELSE 0 END) AS a ' +
+          'FROM conversations WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0)',
+          [dg.id],
+        )[0];
+        const _u = Number(_cnt?.u) || 0;
+        const _a = Number(_cnt?.a) || 0;
+        if (_u === _a && _u > 0) _turnCount = _u;
+      } catch (e) {
+        // 取不到就沿用 rounds.length（不阻断闭组；闭组失败会导致整块元数据缺失）
+        console.warn('[DG·块] turn_count 实测查询失败，退回 rounds.length:', (e as Error)?.message);
+      }
+
       sql.writeRaw(
         'INSERT OR REPLACE INTO dialog_groups (dialog_group_id, belong_entity_uuid, narrative_tag, ' +
         'primary_emotion, block_calcium_score, scene_anchor_hash, emotion_curve, block_close_reason, ' +
@@ -284,12 +308,12 @@ export async function flushDialogGroup(
           JSON.stringify(_score.emotionCurve),
           String(ctx._dgCloseReason || 'unknown'),
           'active', 0,
-          _score.turnCount, _firstTs, _lastTs, now, now,
+          _turnCount, _firstTs, _lastTs, now, now,
         ],
       );
       console.log(
         `[DG·块] ${dg.id} 钙分=${_score.score} 类别=${_score.decayClass} ` +
-        `轮=${_score.turnCount} 场景占比=${_score.sceneRatio} 指纹=${_score.sceneAnchorHash}` +
+        `轮=${_turnCount}(落库实测,内存${_score.turnCount}) 场景占比=${_score.sceneRatio} 指纹=${_score.sceneAnchorHash}` +
         `${_score.degraded ? ' ⚠️退化块' : ''} 信号=${JSON.stringify(_score.signals)}`,
       );
     } catch (e) {
