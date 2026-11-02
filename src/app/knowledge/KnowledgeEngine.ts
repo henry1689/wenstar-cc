@@ -574,13 +574,10 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     syncToMd(existing, true);
     sqlite.writeRaw(`DELETE FROM knowledge_base WHERE id=?`, id);
     sqlite.writeRaw(`DELETE FROM knowledge_chunks WHERE kn_id=?`, id);
-    // 🔴 S2-C2: 同步清理 search_index n-gram 索引（防孤儿 term 污染检索）
-    try {
-      const _idxDb = (sqlite as any).rawDb;
-      if (_idxDb && typeof _idxDb.run === 'function') {
-        _idxDb.run("DELETE FROM search_index WHERE source_type = 'knowledge_base' AND source_id = ?", [id]);
-      }
-    } catch (_de) { /* 清理索引失败不阻塞 */ }
+    // 🔴 2026-11-02 拆除 n-gram：原 S2-C2 的 search_index 清理段已删除 ——
+    //   该表由 v33 迁移整表下线，知识库召回改由 v11 围栏直接对 knowledge_base.content
+    //   做分片 LIKE，不存在需要跟着删除的索引副本（原先这段每次删除都会抛 no such table
+    //   并被 catch 吞掉，属纯噪声）。
     // 🔴 S4-Y3: 同步移除 FtsSearch 内存索引
     try { _ftsSearch.remove(id); } catch (_rfe) { /* 不阻塞 */ }
     // ADR 2026-09-09:向量清理随功能开关(默认关=跳过)

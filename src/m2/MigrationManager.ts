@@ -267,86 +267,16 @@ const MIGRATIONS: Migration[] = [
       console.log('[Migration] v9 ✅ Foresight 时效字段');
     },
   },
-  // 紧急修复: search_index 倒排表从未创建 (n-gram 粗筛层一直空跑)
+  // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：v10 已废止为 no-op（保留序号，schema_version 记账不跳号）。
+  //   原 v10 会建 search_index 倒排表，并把 memories / conversations / knowledge_base 三表全量文本
+  //   切成 2-3 字 n-gram 灌进去。对**全新库**这是「先建表灌满、紧接着被 v33 DROP」的纯浪费
+  //   （实测对话块域 0.48MB 摘要要维护 110.4MB 索引，230 倍）；对**已存库**该迁移早已执行完毕。
+  //   替代：v11 结构化召回直接对源表做分片 LIKE 围栏（白皮书 §4.2.2），**不建索引**。
   {
     version: 10,
-    description: '紧急修复: search_index 倒排表 + 存量回填 (n-gram粗筛虚设 → 真实可用)',
-    apply: (db: any) => {
-      db.run(`CREATE TABLE IF NOT EXISTS search_index (
-        term TEXT NOT NULL,
-        source_type TEXT NOT NULL,
-        source_id TEXT NOT NULL,
-        belong_entity_uuid TEXT,
-        position INTEGER DEFAULT 0,
-        PRIMARY KEY (term, source_type, source_id)
-      )`);
-      try { db.run("CREATE INDEX IF NOT EXISTS idx_search_term ON search_index(term)"); } catch {}
-      try { db.run("CREATE INDEX IF NOT EXISTS idx_search_source ON search_index(source_type, source_id)"); } catch {}
-
-      // 存量回填: 所有 memories + conversations + black_diamond + knowledge_base
-      console.log('[Migration] v10 开始存量 n-gram 回填...');
-      let rebuilt = 0;
-
-      // memories
-      try {
-        const rows = db.exec("SELECT id, raw_input FROM memories WHERE raw_input IS NOT NULL");
-        if (rows.length && rows[0].values) {
-          for (const [id, text] of rows[0].values) {
-            if (!text) continue;
-            const cleaned = String(text).replace(/[，。！？、；：""''（）《》【】\s\d-]/g, '').trim();
-            if (cleaned.length < 2) continue;
-            const ngrams = new Set<string>();
-            for (let i = 0; i < cleaned.length - 1; i++) ngrams.add(cleaned.substring(i, i + 2));
-            for (let i = 0; i < cleaned.length - 2; i++) ngrams.add(cleaned.substring(i, i + 3));
-            for (const gram of ngrams) {
-              try { db.run("INSERT OR IGNORE INTO search_index(term, source_type, source_id) VALUES(?,?,?)", [gram, 'memory', String(id)]); rebuilt++; } catch {}
-            }
-          }
-        }
-      } catch (e) { console.warn('[Migration] v10 memories 回填失败:', e); }
-      console.log(`[Migration] v10 memories 回填: ${rebuilt} 条 n-gram`);
-
-      // conversations
-      let convRebuilt = 0;
-      try {
-        const rows = db.exec("SELECT id, content FROM conversations WHERE content IS NOT NULL");
-        if (rows.length && rows[0].values) {
-          for (const [id, text] of rows[0].values) {
-            if (!text) continue;
-            const cleaned = String(text).replace(/[，。！？、；：""''（）《》【】\s\d-]/g, '').trim();
-            if (cleaned.length < 2) continue;
-            const ngrams = new Set<string>();
-            for (let i = 0; i < cleaned.length - 1; i++) ngrams.add(cleaned.substring(i, i + 2));
-            for (let i = 0; i < cleaned.length - 2; i++) ngrams.add(cleaned.substring(i, i + 3));
-            for (const gram of ngrams) {
-              try { db.run("INSERT OR IGNORE INTO search_index(term, source_type, source_id) VALUES(?,?,?)", [gram, 'conversation', String(id)]); convRebuilt++; } catch {}
-            }
-          }
-        }
-      } catch (e) { console.warn('[Migration] v10 conversations 回填失败:', e); }
-      rebuilt += convRebuilt;
-
-      // knowledge_base
-      let kbRebuilt = 0;
-      try {
-        const rows = db.exec("SELECT id, content FROM knowledge_base WHERE content IS NOT NULL");
-        if (rows.length && rows[0].values) {
-          for (const [id, text] of rows[0].values) {
-            if (!text) continue;
-            const cleaned = String(text).replace(/[，。！？、；：""''（）《》【】\s\d-]/g, '').trim();
-            if (cleaned.length < 2) continue;
-            const ngrams = new Set<string>();
-            for (let i = 0; i < cleaned.length - 1; i++) ngrams.add(cleaned.substring(i, i + 2));
-            for (let i = 0; i < cleaned.length - 2; i++) ngrams.add(cleaned.substring(i, i + 3));
-            for (const gram of ngrams) {
-              try { db.run("INSERT OR IGNORE INTO search_index(term, source_type, source_id) VALUES(?,?,?)", [gram, 'knowledge_base', String(id)]); kbRebuilt++; } catch {}
-            }
-          }
-        }
-      } catch (e) { console.warn('[Migration] v10 knowledge_base 回填失败:', e); }
-      rebuilt += kbRebuilt;
-
-      console.log(`[Migration] v10 ✅ search_index 建表 + 存量回填共 ${rebuilt} 条 n-gram`);
+    description: '【已废止】search_index 倒排表 + 存量回填（n-gram 已拆除，no-op 保序号）',
+    apply: (_db: any) => {
+      console.log('[Migration] v10 ⬜ search_index 已下线（2026-11-02 拆除 n-gram），跳过');
     },
   },
   // V21: state_spines 放宽 dimension_id CHECK 1-32 → 1-40（40D 统一）
@@ -854,36 +784,9 @@ const MIGRATIONS: Migration[] = [
         console.warn('[Migration] v21 对话组归属重写失败（非致命）:', (e as Error)?.message);
       }
 
-      // 摘要索引归属同步：search_index.belong_entity_uuid 是生成摘要时从 dialog_groups 抄的，
-      // 组归属改正后必须一并同步，否则户籍过滤（UUIDPoliceFilter）会继续用旧归属放行/拦截。
-      try {
-        const _idxBefore = Number(
-          db.exec(
-            `SELECT COUNT(*) FROM search_index s
-             JOIN dialog_groups dg ON dg.dialog_group_id = s.source_id
-             WHERE s.source_type = 'dialog_group'
-               AND dg.belong_entity_uuid IS NOT NULL
-               AND (s.belong_entity_uuid IS NULL OR s.belong_entity_uuid != dg.belong_entity_uuid)`,
-          )?.[0]?.values?.[0]?.[0] ?? 0,
-        );
-        db.run(
-          `UPDATE search_index SET belong_entity_uuid = (
-             SELECT dg.belong_entity_uuid FROM dialog_groups dg
-             WHERE dg.dialog_group_id = search_index.source_id
-           )
-           WHERE source_type = 'dialog_group'
-             AND EXISTS (
-               SELECT 1 FROM dialog_groups dg
-               WHERE dg.dialog_group_id = search_index.source_id
-                 AND dg.belong_entity_uuid IS NOT NULL
-                 AND (search_index.belong_entity_uuid IS NULL
-                      OR search_index.belong_entity_uuid != dg.belong_entity_uuid)
-             )`,
-        );
-        console.log(`[Migration] v21 ✅ 摘要索引归属同步: ${_idxBefore} 行`);
-      } catch (e) {
-        console.warn('[Migration] v21 摘要索引归属同步失败（非致命）:', (e as Error)?.message);
-      }
+      // 🔴 2026-11-02 拆除 n-gram：原此处「摘要索引归属同步」整段已删除 ——
+      //   search_index 整表下线后，块归属的权威源就是 dialog_groups.belong_entity_uuid 本身，
+      //   不再有需要跟随修正的副本（v11 围栏直接按源表列过滤）。
     },
   },
 
@@ -898,7 +801,8 @@ const MIGRATIONS: Migration[] = [
       // 本迁移把存量兜底行清空，让后台按新逻辑重生成。
       //
       // 幂等：重生成后 block_summary 必含【叙事】，条件不再命中；重复执行影响 0 行。
-      // 同时清理这些组的旧摘要索引行，避免旧 n-gram 残留（重生成会重新写入）。
+      // 🔴 2026-11-02 拆除 n-gram：原「清理旧摘要索引行」的 DELETE 已删除 ——
+      //   摘要即召回源，重生成直接覆盖 block_summary，不存在需要同步的索引副本。
       try {
         const _before = Number(
           db.exec("SELECT COUNT(*) FROM dialog_groups WHERE block_summary IS NOT NULL AND block_summary NOT LIKE '%【叙事】%'")?.[0]?.values?.[0]?.[0] ?? 0,
@@ -906,10 +810,6 @@ const MIGRATIONS: Migration[] = [
         db.run(
           "UPDATE dialog_groups SET block_summary = NULL, summary_state = NULL " +
           "WHERE block_summary IS NOT NULL AND block_summary NOT LIKE '%【叙事】%'",
-        );
-        db.run(
-          "DELETE FROM search_index WHERE source_type = 'dialog_group' AND source_id IN (" +
-          'SELECT dialog_group_id FROM dialog_groups WHERE block_summary IS NULL AND summary_state IS NULL)',
         );
         console.log(`[Migration] v22 ✅ 兜底格式摘要重置: ${_before} 组（后台将自动重生成）`);
       } catch (e) {
@@ -969,11 +869,7 @@ const MIGRATIONS: Migration[] = [
           "OR block_summary NOT LIKE '%【情感】%')",
           [new Date().toISOString()],
         );
-        // 清理这些组的旧索引行（重生成会重新写入）
-        db.run(
-          "DELETE FROM search_index WHERE source_type='dialog_group' AND source_id IN (" +
-          'SELECT dialog_group_id FROM dialog_groups WHERE block_summary IS NULL)',
-        );
+        // 🔴 2026-11-02 拆除 n-gram：原「清理旧索引行」的 DELETE 已删除（摘要即召回源，无索引副本）。
         console.log(`[Migration] v23 ✅ 三层不齐摘要重置: ${r} 组`);
       } catch (e) {
         console.warn('[Migration] v23 重置缺层摘要失败（非致命）:', (e as Error)?.message);
