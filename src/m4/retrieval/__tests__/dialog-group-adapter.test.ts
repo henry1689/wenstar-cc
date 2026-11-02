@@ -264,3 +264,52 @@ describe('[Phase 2.2 B1] 钙分真正参与排序 + 候选池 + 降级', () => {
     expect(hits[0].id).toBe('DG1');
   });
 });
+
+describe('[ADR-010 §12.2] 双通道：候选 = 原文命中 ∪ 摘要命中', () => {
+  it('🔴 无 block_summary 的组可经原文通道召回（摘要路的 extraWhere 挡不住它）', async () => {
+    const db = await buildDb();
+    // 只有原文、没有摘要 —— 摘要路 `extraWhere` 要求非空，会把它整组挡在候选池外
+    db.run(
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
+      ['user', '杭州的机票订了吗', '2026-10-06T00:00:00.000Z', 1, 'DG_NOSUM', UUID_A],
+    );
+    db.run(
+      "INSERT INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at,block_summary) " +
+      "VALUES (?,?,?,?,?,?,?,'active',0,?,NULL)",
+      ['DG_NOSUM', UUID_A, 'neutral', 6, 'h-nosum', 1, 'topic_switch', '2026-10-06T00:00:00.000Z'],
+    );
+
+    const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db));
+    expect(hits.map((h) => h.id), '🔴 无摘要的组必须能靠原文召回').toContain('DG_NOSUM');
+    expect(hits.find((h) => h.id === 'DG_NOSUM')!.text,
+      '无摘要时正文应直接是原文，不得出现空的【摘要】标签').not.toContain('【摘要】');
+  });
+
+  it('🔴 摘要没覆盖到的段可经原文通道召回（本域召回只认摘要时该段永远召不回）', async () => {
+    const db = await buildDb();
+    seedBlock(db, 'DG_SEG', UUID_A, [['user', '无关内容打个招呼']]);
+    // 摘要改写成不含查询词的版本 —— 模拟「摘要只写了其中一段」
+    db.run(
+      "UPDATE dialog_groups SET block_summary = ? WHERE dialog_group_id = 'DG_SEG'",
+      ['【标签】无关\n【叙事】只写了这一段\n【情感】平静'],
+    );
+    // 原文补一段带查询词的（模拟另一段会话）
+    db.run(
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
+      ['assistant', '杭州机票我看过了，周三出票', '2026-10-06T00:01:00.000Z', 99, 'DG_SEG', UUID_A],
+    );
+
+    const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db));
+    expect(hits.map((h) => h.id), '🔴 摘要没写的段必须能靠原文召回').toContain('DG_SEG');
+  });
+
+  it('双通道同时命中 ⇒ 只产出一个 hit（不重复），且分片命中被累加', async () => {
+    const db = await buildDb();
+    seedBlock(db, 'DG_BOTH', UUID_A, [['user', '杭州机票订了吗']]);
+
+    const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db));
+    const dup = hits.filter((h) => h.id === 'DG_BOTH');
+    expect(dup.length, '同一组不得因两通道命中而产出两条 hit').toBe(1);
+    expect(Number(dup[0].payload?.hitShards ?? 0), '两通道都命中应累加分片命中（共振）').toBeGreaterThan(0);
+  });
+});

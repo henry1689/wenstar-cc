@@ -103,10 +103,11 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       // deny-by-default：无白名单不检索（与 recallByStructured 红线 14 同语义）
       if (uuids.length === 0) return [];
 
-      // ── ① v11 围栏 + 精排（与记忆召回同一套实现）──
-      //   分片切词由 StructuredRecall.buildKeywordShards 统一切（复用 buildNgrams，
-      //   与写索引同源的口径），本适配器不再自行滑窗。
-      const hits = await recallByStructured(
+      // 切词口径复用 v11 唯一实现（buildNgrams 同源），本适配器不自行滑窗
+      const { buildKeywordShards } = await import('../StructuredRecall.js');
+
+      // ── ①a 摘要通道（v11 围栏 + 精排，与记忆召回同一套实现）──
+      const summaryHits = await recallByStructured(
         this.sqlite,
         {
           domain: 'dialog_group',
@@ -116,6 +117,83 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         },
         ctx.perception40d ?? undefined,
       );
+
+      // ── ①b 原文通道（ADR-010 §12.2 要求的另一半）──
+      //   🔴 为什么必须有：`dialog_group` 域的 textCol 定死为 block_summary 且 extraWhere
+      //      强制非空 ⇒ 只有摘要能召回。后果是 ① 摘要没覆盖到的会话段永远召不回
+      //      （实测段级命中仅 20.8%）；② 无摘要的组整组进不了候选池（实测 479 组 / 15.7%）。
+      //   本路直接对 conversations 按组聚合，**不经过** `extraWhere`，两路候选最后合并。
+      let rawRows: Array<{ gid: string; hit_rows: number }> = [];
+      try {
+        const shard = buildKeywordShards('content', [query]);
+        if (shard.sql) {
+          const uuidPhs = uuids.map(() => '?').join(',');
+          rawRows = this.sqlite.queryAll<{ gid: string; hit_rows: number }>(
+            `SELECT c.dialog_group_id AS gid, COUNT(*) AS hit_rows
+               FROM conversations c
+              WHERE c.dialog_group_id IS NOT NULL
+                AND (c.is_test IS NULL OR c.is_test = 0)
+                AND c.belong_entity_uuid IN (${uuidPhs})${shard.sql}
+              GROUP BY c.dialog_group_id
+              ORDER BY hit_rows DESC
+              LIMIT ?`,
+            [...uuids, ...shard.params, ENCLOSURE_DEFAULT_LIMIT],
+          ) || [];
+        }
+      } catch (e) {
+        // 原文通道不可用 ⇒ 退回纯摘要路，不阻塞检索（与 D002 兜底同策略）
+        console.warn('[DialogGroupAdapter] 原文通道不可用，仅用摘要通道:', (e as Error)?.message);
+      }
+
+      // ── ①c 候选合并（摘要命中 ∪ 原文命中，ADR-010 §12.2）──
+      const merged = new Map<string, (typeof summaryHits)[number]>();
+      for (const h of summaryHits) merged.set(String(h.id), h);
+
+      const rawOnlyGids: string[] = [];
+      for (const r of rawRows) {
+        const gid = String(r.gid || '');
+        if (!gid) continue;
+        const hitRows = Number(r.hit_rows) || 0;
+        const exist = merged.get(gid);
+        if (exist) {
+          // 双通道共振：两路都命中 ⇒ 累加分片命中数（同一分片口径，累加即共振强度）
+          exist.hitShards += hitRows;
+        } else {
+          rawOnlyGids.push(gid);
+          // 占位，钙分与时间戳在下面回表补齐（精排要靠这两个分量）
+          merged.set(gid, {
+            id: gid,
+            domain: 'dialog_group',
+            text: '',                  // 无摘要 ⇒ 组装时正文直接用原文，不会出现空【摘要】标签
+            calciumScore: 0,
+            createdAt: '',
+            hitShards: hitRows,        // 原文命中行数（与摘要路的分片命中同一量纲）
+            semanticSource: 'none',
+          } as (typeof summaryHits)[number]);
+        }
+      }
+
+      // 原文独有候选：补齐钙分与时间戳，否则精排的 calcium / recency 分量恒为 0
+      if (rawOnlyGids.length > 0) {
+        try {
+          const phs = rawOnlyGids.map(() => '?').join(',');
+          const rows = this.sqlite.queryAll<{ dialog_group_id: string; block_calcium_score: number | null; last_ts: string | null }>(
+            `SELECT dialog_group_id, block_calcium_score, last_ts
+               FROM dialog_groups WHERE dialog_group_id IN (${phs})`,
+            rawOnlyGids,
+          ) || [];
+          for (const r of rows) {
+            const h = merged.get(String(r.dialog_group_id));
+            if (!h) continue;
+            h.calciumScore = Number(r.block_calcium_score) || 0;
+            h.createdAt = String(r.last_ts || '');
+          }
+        } catch (e) {
+          console.warn('[DialogGroupAdapter] 原文候选补钙分失败（按 0 分精排）:', (e as Error)?.message);
+        }
+      }
+
+      const hits = [...merged.values()];
       if (hits.length === 0) return [];
 
       const ranked = scoreAndRank(hits, Date.now());
