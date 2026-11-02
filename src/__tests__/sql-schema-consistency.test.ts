@@ -853,3 +853,60 @@ describe('[D8v2-判据] 豁免登记表必须有真实依据（防登记腐化 �
     ).toBe(0);
   });
 });
+
+/**
+ * [B5 / 2026-11-02] n-gram 拆除防复发守卫
+ * =========================================
+ * 业主裁决「彻底拆除 n-gram」后的两道锁：
+ *   ① **静态**：生产代码不得再出现 search_index 的读写（迁移历史与表结构定义除外）
+ *   ② **动态**：全新库跑完全部迁移后 sqlite_master 不得存在该表
+ *      —— 直接锁住「v10 已 no-op + v33 已 DROP」这条链，防有人把 v10 回填改回去
+ *
+ * 为什么需要它：这次拆除前后折腾了 B1~B3b 七个批次，历史教训是
+ *   「每次改善不沉底」—— 没有守卫的能力拆除，总会在后续重构中被悄悄接回来。
+ */
+describe('[B5] n-gram 拆除防复发守卫', () => {
+  /** 迁移历史 + 表结构定义：允许提及 search_index（含 v33 的 DROP 与下线说明） */
+  const ALLOWED_FILES = new Set(['src/m2/MigrationManager.ts', 'src/m2/schema.sql']);
+
+  it('生产代码不得出现 search_index 的读写（迁移历史除外）', () => {
+    const offenders: string[] = [];
+    // walkTs 内建跳过 __tests__ 与 node_modules ⇒ 只扫生产代码
+    for (const file of walkTs(SRC)) {
+      const rel = relative(REPO, file).replace(/\\/g, '/');
+      if (ALLOWED_FILES.has(rel)) continue;
+      const lines = readFileSync(file, 'utf-8').split(/\r?\n/);
+      lines.forEach((line, i) => {
+        const t = line.trim();
+        // 纯注释行放行：拆除历史需要被记录，但代码路径不能再引用
+        if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
+        // 只认「SQL 语句行」——日志文案里提到表名（如「将与本表主键口径不一致」）
+        // 不构成运行时依赖，不应被判违规。判据：同一行同时出现表名与 SQL 动词。
+        if (!/\bsearch_index\b/.test(line)) return;
+        if (!/\b(FROM|INTO|UPDATE|DELETE|JOIN|TABLE|INDEX)\b/i.test(line)) return;
+        offenders.push(`${rel}:${i + 1}  ${t.slice(0, 90)}`);
+      });
+    }
+    expect(
+      offenders,
+      '发现指向已下线表的代码（该表已由 v33 迁移 DROP，运行时会抛 no such table）。' +
+        '若确属迁移历史，请加入 ALLOWED_FILES 并写明理由:\n  ' + offenders.join('\n  '),
+    ).toEqual([]);
+  });
+
+  it('全新库跑完全部迁移后不存在 search_index 表', async () => {
+    const initSqlJs = (await import('sql.js')).default;
+    const { migrateSchema } = await import('../m2/MigrationManager.js');
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    db.run(readFileSync(join(SRC, 'm2', 'schema.sql'), 'utf-8'));
+    migrateSchema(db);
+    const rows = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='search_index'");
+    const found = rows.length > 0 && rows[0].values.length > 0;
+    db.close();
+    expect(
+      found,
+      '全新库跑完迁移后仍存在 search_index —— v10 回填逻辑可能被改回来了，或 v33 迁移被移除',
+    ).toBe(false);
+  });
+});

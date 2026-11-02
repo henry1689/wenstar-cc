@@ -1387,17 +1387,43 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           }
         }
 
-        // ── V11 旧管线（默认 / V13 失败降级） ──
-        // 🔴 P1-D1 修复: V13 失败（_v13Failed）时也执行 V11，真正降级兜底
+        // ── 降级兜底（V13 不可用 / V13 失败时） ──
+        // 🔴 P1-D1: V13 失败（_v13Failed）时必须真的执行兜底，不能只打日志。
+        // 🔴 B4(2026-11-02) 拆除 n-gram：原本此处调 `UnifiedSearchEngine.search`，
+        //   而该函数已随倒排索引拆除收口为**恒返回空** ⇒ 降级路径形同虚设，
+        //   V13 一失败就是全链路空检索（日志还显示「降级到 V11」，骗人）。
+        //   现改走 v11 结构化召回（recallByStructured + scoreAndRank），不依赖任何索引表：
+        //   对源表做分片 LIKE 围栏 → 四权重精排（hit/calcium/recency/semantic）。
         if (!WS_SEARCH_V13 || !ctx.m4?.retrieveMultiRankForSearch || _v13Failed) {
-          const { search: unifiedSearch } = await import('../../m4/UnifiedSearchEngine.js');
-          _dbResult = unifiedSearch(_sqlite.rawDb || _sqlite, message, p, {
-            mode: isTopicShift ? 'full' : 'balanced',
-            p40: input.p40,  // 🔴 P072 批2: M3 原生 40D 透传（V11 兑底路径同样禁 24D 投影）
-            entityUuids: _activeEntityUuids.length > 0 ? _activeEntityUuids : undefined,
-            limit: isTopicShift ? 6 : 3,
-            includeKnowledgeBase: true,
-          });
+          const _fallbackLimit = isTopicShift ? 6 : 3;
+          try {
+            const { recallByStructured, scoreAndRank } = await import('../../m4/retrieval/StructuredRecall.js');
+            const _hits = await recallByStructured(
+              _sqlite as unknown as { queryAll?: (sql: string, params?: unknown[]) => Array<Record<string, unknown>> },
+              {
+                domain: 'memory',
+                // 沿用原有语义：无活跃实体（户主）⇒ 不加 UUID 过滤
+                entityUuids: _activeEntityUuids.length > 0 ? _activeEntityUuids : undefined,
+                keywords: [message],
+                limit: 200,  // 围栏上限；精排后只注入 _fallbackLimit 条
+              },
+              input.p40,  // 🔴 P072 批2: M3 原生 40D 查询向量（禁 24D 二次投影）
+            );
+            const _ranked = scoreAndRank(_hits, Date.now()).slice(0, _fallbackLimit);
+            _dbResult = {
+              items: _ranked.map((h) => h.text),
+              raw: _ranked.map((h) => ({ item: { source: h.domain, id: h.id }, score: h.score })),
+              hitsBySource: _ranked.length > 0 ? { memory: _ranked.length } : {},
+              totalCandidates: _hits.length,
+            };
+          } catch (_b4Err) {
+            // 兜底失败必须可见 —— 不得静默退化成空检索
+            console.error(
+              '[B4-fallback] v11 结构化召回失败，本轮记忆检索为空:',
+              (_b4Err as Error)?.message,
+            );
+            _dbResult = { items: [], raw: [], hitsBySource: {}, totalCandidates: 0 };
+          }
 
           for (const _item of _dbResult.items) {
             if (!memoryFragments.some(f => f.includes(_item.substring(0, 40)))) {
@@ -1405,7 +1431,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
           }
           if (_dbResult.items.length > 0) {
-            console.log(`[UnifiedSearch] n-gram→${_dbResult.totalCandidates}候选→向量精排${_dbResult.raw.length}条→注入${_dbResult.items.length}条 | ${JSON.stringify(_dbResult.hitsBySource)}`);
+            console.log(`[B4-fallback] v11结构化召回→${_dbResult.totalCandidates}候选→精排${_dbResult.raw.length}条→注入${_dbResult.items.length}条 | ${JSON.stringify(_dbResult.hitsBySource)}`);
           }
         }
 
