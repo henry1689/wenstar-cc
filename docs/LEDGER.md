@@ -66,6 +66,29 @@
 | 15 | **`DialogGroupAdapter` 的原文召回通道不存在（代码不符合法典）**：ADR-010 §12.2 明确要求「**双通道召回**：候选集 = `conversations` 原文命中 ∪ 摘要命中」，但 v11 改造把 `dialog_group` 域的 `textCol` 定死为 `block_summary`（且 `extraWhere` 要求非空）⇒ **原文通道整个不存在**，块路召回只能依赖摘要。后果：① 摘要没覆盖到的词永远召不回；② 无摘要的组被 `extraWhere` 整组挡死；③ 实测「多段混入」组段级命中仅 **15/72 = 20.8%**，清空重生成摘要后**零提升**（15/72）。按《记忆系统运维审计规范》第十条属「代码不符合法典 = 缺陷」，**不是数据问题** —— 影响全部块路召回，不限于已清除的 29 组。**处置待定**：恢复原文通道要改 `StructuredRecall` / `DialogGroupAdapter`（检索核心路径，与并行检索车道有撞车风险，须走 Harness 流水线） | ~~P1~~ | 2026-11-02 | ~~2026-11-07~~ | **✅ 已解决（`9842df6`）** | ADR-010 §12.2；实测段级 **20.8%→63.3%**、无摘要组 **0%→73.3%** |
 | 10 | **删除内核命令层（parseCommand）**：生产零调用（全仓非测试仅 1 处类型定义），但 `router.test.ts` 有 **38 处** `kind:'command'` 用它构造 T02~T08 七个核心测试块的进出场。且 `keep_only`（"诗雨留下"）/ `clear_all`（"所有人离场"）在 `internal_seat_op` 里**无等价能力**。需先定这两个语义去留，再批量改写测试 | ~~P2~~ | 2026-11-01 | — | **✅ 已完成**（`282bed8`；`clear_all` 仅存于单测、随单测删除，生产从未使用） | 本批实测 |
 
+### 全量测试基线归因台账（2026-11-02 实测 · 服务问题 #9）
+
+n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，逐个看失败原因）：
+**3732 passed / 30 failed / 17 文件，0 项可归因于 n-gram 拆除。**
+
+| 失败簇 | 项数 | 实际失败原因 | 归属 |
+|---|---|---|---|
+| `write-channel-single-source` | 5 | `this._isDuplicateNewWrite is not a function`（SQLiteAdapter 缺方法） | 写入通道车道 |
+| `ask-all-intent` + `meeting-multi-wake` | 6 | `expected 'addressOnly' to be 'switch'`（意图判序） | household 车道 |
+| `preroute-order-guard` | 2 | 扫 **`chat.ts`** 找不到锚点 `enrichedHistory = _ad.turnsFor` | 空间路由器车道 |
+| `uuid-police-visibility` | 1 | 手写点在 **`meetingIsolation.ts`** | 户籍车道 |
+| `recall-structure-guard` S8 | 1 | 新 push 点 `【默契元素 · MemSym…` | MemSym 车道 |
+| `evt-ownership` + `persistence-write-guard` | 3 | `_meetingEntered` / 盖章时序方法已删 | 第三层拆除遗留（既有） |
+| `sql-schema-consistency` | 1 | `dialog_groups.dialog_group_id` 守卫 | 既有；**已做对照实验**：回退 n-gram 拆除的改动跑，同样失败 |
+| API key / smoke / e2e | 7 | 无 key 环境 + flaky | 既有 |
+
+**判据**：`preroute-order-guard` 扫的是 `chat.ts`（本批未碰）、`uuid-police-visibility`
+指向 `meetingIsolation.ts`（本批未碰）、`recall-structure-guard` 的新 push 属 MemSym 车道 ——
+三条均**可反证**不属本次。
+
+**附带结论**：n-gram 拆除期间新增的守卫（`[B5]` ×4、`[B6]` ×2）**全部通过**，
+且 `[B6]` 判据判别力实测 7/7（3 种接回形态全命中、4 种合法形态零误报）。
+
 ### 风险说明 #1（务必读）
 
 124 项改动分布在 `src/m*`、`src/app`、`src/webui`、`src/engine`、`docs/agent-collab`、`data/knowledge`、`scripts/` 等。
