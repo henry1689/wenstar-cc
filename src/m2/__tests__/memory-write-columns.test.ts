@@ -28,6 +28,8 @@ import {
   MEMORY_IDENTITY_CRITICAL_COLUMNS,
   missingMemoryCriticalColumns,
   extractInsertColumns,
+  ANCHOR_REBUILD_DERIVED_COLUMNS,
+  computeAnchorRestoreColumns,
 } from '../SQLiteAdapter.js';
 
 const ADAPTER_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'SQLiteAdapter.ts');
@@ -91,6 +93,41 @@ describe('[2026-11-02 隔离列] memories 写入必须显式携带 namespace', (
         '锚点 INSERT 缺 namespace ⇒ 快照降级分支下整批锚点隔离标记丢失',
       ).toBe(true);
     }
+  });
+
+  /**
+   * 🔴 2026-11-03（S4 独立评审 P0 必修 #1 的配套断言 —— **值存活**，不是列存在）
+   * ============================================================
+   * 上面几例只断言「列**在 INSERT 清单里**」，**测不出覆盖**：
+   *   事故形态是 INSERT 写入了正确的值，随后 `_restoreSnap`（在 INSERT **之后**执行）
+   *   把快照里旧行的 `namespace='default'` UPDATE 回去 ⇒ 新值当场作废。
+   *   评审员用内存库复刻执行序实测：快照正常时 INSERT 后=test → **最终=default**；
+   *   生产库 3253 条锚点 100% 为 default，LEDGER #13 据此标记的「已解决」不成立。
+   *
+   * 判据：`namespace` 必须与 `source_type` 同类 —— 归入「重建时主动重算、不接受快照回填」
+   * 的派生列集合。两条同时锁：① 在派生集合内；② **不出现**在回填列清单里。
+   * 反向断言（回填清单仍含其它非派生列）证明 computeAnchorRestoreColumns 没被改成恒空。
+   */
+  it('🔴 namespace 必须归入派生列（不接受快照回填）—— 否则 _restoreSnap 会把新写入值盖回 default', () => {
+    expect(
+      ANCHOR_REBUILD_DERIVED_COLUMNS.has('namespace'),
+      'namespace 不在派生列集合 ⇒ 会进入回填清单，_restoreSnap 用快照旧值覆盖写入时算出的新值',
+    ).toBe(true);
+
+    // 输入必须**同时含**派生列与非派生列，否则反向断言无从谈起
+    //（首版漏放 session_id/source_conversation_ids 却断言它们在输出里 ⇒ 必红）。
+    const cols = [
+      'id', 'namespace', 'raw_input', 'source_type', 'belong_entity_uuid', // 派生列（应被排除）
+      'recall_count', 'session_id', 'source_conversation_ids',              // 非派生列（应回填）
+    ];
+    const restoreCols = computeAnchorRestoreColumns(cols);
+    expect(restoreCols, 'namespace 必须被排除在回填清单外').not.toContain('namespace');
+    // 反向：非派生列仍应正常回填（防空实现让本断言恒真）。
+    // 🔴 选列注意：raw_input / source_type / belong_entity_uuid **本身就在派生集合内**
+    //    （首版拿 raw_input 做反向断言即因此误红），必须用真正不在集合里的列。
+    expect(restoreCols, '回填清单被清空 ⇒ computeAnchorRestoreColumns 已失效').toContain('recall_count');
+    expect(restoreCols).toContain('session_id');
+    expect(restoreCols).toContain('source_conversation_ids');
   });
 });
 

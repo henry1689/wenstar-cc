@@ -190,21 +190,31 @@ describe('S3/S4 — 隐私权威与自信回忆铁律（能力断言）', () => 
     // 【默契元素 · MemSym】🔴 2026-11-03 补收（批6）：其注入文案自身已明令「无需回忆前缀；
     //   不得复述为往事事件，**不得新增细节/时间/地点**」—— 是「非往事叙事、可溯源」的**当下氛围素材**，
     //   不是记忆类。给它套 memFragWithTime 加时间坐标会**直接违反其自身定义**，
-    //   且与 S8 的立法意图（**记忆类**才需时间坐标）相悳；与已收的【回忆表达三档】同类。
+    //   且与 S8 的立法意图（**记忆类**才需时间坐标）相悖；与已收的【回忆表达三档】同类。
     // 其余记忆类注入必须全部经 memFragWithTime。
     const legacyLabelPushes = retrievalSrc.match(/memoryFragments\.push\('【[^']*' \+/g) ?? [];
     //   【用户状态】chat.ts:1039 —— `somaticContext` 是**当下**躯体感知（该处注释原文
     //   「反映用户当前的身体/情绪状态」），非记忆、无时间坐标可言 ⇒ 收。
-    //   【深度回忆素材包 · MemSym】retrieval-stage:842 —— P093 整编器从记忆仓扫出的
-    //   **多碎片聚合包**（`SweptFragment` 只有 source+content，`organizeForQuestion` 输出
-    //   〔source〕content 亦不带时间），非单条记忆；且其尾随的 CRYSTAL_DIRECTIVE（结晶
-    //   宪法信条0）已给**替代防线**：「顺序记不真切了——但那会儿的感觉是记得的…
-    //   （这些是印象，你别当准的）」，即显式标记为印象、刻意不锚定时间点，防的是
-    //   「编造精确时间」这一 S8 真正要防的风险 ⇒ 收。
+    //   🔴 2026-11-03（S4 独立评审 P1-B 类）：【深度回忆素材包 · MemSym】retrieval-stage:842
+    //   **已从本允许清单移除** —— 原豁免理由（「SweptFragment 无时间字段」「CRYSTAL_DIRECTIVE
+    //   已给替代防线」）经评审员读上游代码证伪：① sweepAllStores 三条 SQL 只 SELECT 文本，
+    //   而数据层 created_at 100% 在库（SQL 自己就 ORDER BY created_at DESC），是**通道选择不取**；
+    //   ② CRYSTAL_DIRECTIVE 只对顺序/精确度打印象标记，**不补时间坐标**，防不住「把素材放进
+    //   错误的年月」；③ 该通道是**体量最大的记忆聚合**（跨砂金/金库黑钻/知识库三仓、无时间窗、
+    //   maxFrags=12）。故改为根治：sweepAllStores 补取 created_at → organizeForQuestion 透传
+    //   → retrieval-stage 经 memFragWithTime 输出（时间格式化保持单源）。
     // 允许的遗留（非记忆/带内生时间）：时间检索、对话原文、作品、回忆表达三档、
-    //                      默契元素、用户状态、深度回忆素材包
-    // 🔴 只是**补收三项**：正则形态、收集方式、逐条 match 全部不变 ⇒
-    //   新出现的其它（无替代防线的）记忆类注入仍会红，防线不削弱。
+    //                      默契元素、用户状态、深度回忆素材包（**仅指指令性标题行**）
+    // 🔴 2026-11-03 复核（S4 B类已根治后的口径澄清）：本正则抓的是
+    //   `memoryFragments.push('【标签…` 的**标签字面量**，不是包内内容。
+    //   深度回忆素材包的**内容**已逐条经 memFragWithTime 带时间坐标
+    //   （retrieval-stage 改为 `_swept.map(s => memFragWithTime(s.source, s.content, s.createdAt))`，
+    //   输出 `【砂金·10-15】content`，与金库通道同形态）；留在清单里的只是
+    //   「【深度回忆素材包 · MemSym】以下是全部记忆仓…」这句**告诉 LLM 这是什么的指令前缀**，
+    //   它本身不是记忆、无时间可言 —— 与已收的【回忆表达三档】【默契元素】同类。
+    //   ⇒ S8 立法意图（记忆类必须带时间）**未被削弱**：内容层已强制，豁免的仅是指令行。
+    // 🔴 收紧而非放松：正则形态、收集方式、逐条 match 全部不变 ⇒
+    //   新出现的任何记忆类注入（无时间、且非指令行）仍会红。
     for (const m of legacyLabelPushes) {
       expect(m).toMatch(/时间检索|对话原文|作品|回忆表达三档|默契元素|用户状态|深度回忆素材包/);
     }

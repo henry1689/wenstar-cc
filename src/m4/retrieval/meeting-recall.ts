@@ -989,7 +989,18 @@ export const SWEEP_POLICY = { memoriesPerKw: 2, vaultPerKw: 2, kbPerKw: 1, maxFr
 /** 问句功能词噪声（切词残留治理——"还记/是就"类不得进入主题扫） */
 const SWEEP_NOISE_RE = /^(?:还记|记得|是不是|是就|吗|呢|吧|的|了|得|地|那|这|什么|怎么|如何|啥|咋|什么时候|怎么样|讲讲|说说|跟我说|告诉我)+$/;
 
-export interface SweptFragment { source: '砂金' | '金库黑钻' | '知识库'; content: string; }
+/**
+ * 🔴 2026-11-03（S4 独立评审 P1-B 类）：SweptFragment 增 `createdAt`。
+ * 原只有 source+content，导致**体量最大的记忆聚合通道**（跨砂金/金库黑钻/知识库三仓、
+ * 无时间窗、maxFrags=12）注入时不带时间坐标，而数据层 created_at 100% 在库
+ * —— 是通道**选择不取**，不是数据没有（S8 立法意图为「记忆类注入必须携带时间坐标」）。
+ */
+export interface SweptFragment {
+  source: '砂金' | '金库黑钻' | '知识库';
+  content: string;
+  /** 该碎片的落库时间（ISO）；无时间时为 undefined，由调用方 memFragWithTime 回退旧标签 */
+  createdAt?: string;
+}
 
 /** 关键词治理：去噪 + 截断（整编层入口） */
 export function cleanSweepKeywords(keywords: string[]): string[] {
@@ -1002,6 +1013,8 @@ export function cleanSweepKeywords(keywords: string[]): string[] {
 /**
  * 统一多仓收集：砂金(memories 无窗关键词) + 金库/黑钻(vault_log 主题扫) + 知识库(kb 主题扫)。
  * 收集最大化：无时间窗、跨层全收；去重按内容前缀；来源标注（整编可溯源）。
+ * 🔴 2026-11-03：三条 SQL 均**增取 created_at**（此前只 SELECT 文本 —— 该列本就在
+ *   ORDER BY 里用着，取它零成本），使碎片可携带时间坐标。
  */
 export function sweepAllStores(
   src: { queryAll: (sql: string, p: unknown[]) => Array<Record<string, unknown>> },
@@ -1010,41 +1023,61 @@ export function sweepAllStores(
   const kws = cleanSweepKeywords(keywords);
   const out: SweptFragment[] = [];
   const seen = new Set<string>();
-  const push = (source: SweptFragment['source'], text: string) => {
+  const push = (source: SweptFragment['source'], text: string, createdAt?: unknown) => {
     const t = String(text || '').replace(/\s+/g, ' ').trim();
     const key = t.substring(0, 18);
     if (t.length < 8 || !key || seen.has(key)) return;
     seen.add(key);
-    out.push({ source, content: t.substring(0, 110) });
+    // 时间解析失败时留 undefined（fail-open：由 memFragWithTime 回退无时间标签，不阻塞注入）
+    const iso = typeof createdAt === 'string' && createdAt ? createdAt : undefined;
+    out.push({ source, content: t.substring(0, 110), ...(iso ? { createdAt: iso } : {}) });
   };
   for (const kw of kws) {
     if (out.length >= SWEEP_POLICY.maxFrags) break;
     const mem = src.queryAll(
-      `SELECT raw_input FROM memories WHERE belong_entity_uuid = ? AND raw_input LIKE ?
+      `SELECT raw_input, created_at FROM memories WHERE belong_entity_uuid = ? AND raw_input LIKE ?
        ORDER BY calcium_score DESC, created_at DESC LIMIT ${SWEEP_POLICY.memoriesPerKw}`,
       [entityUuid, `%${kw}%`]) || [];
-    for (const r of mem) push('砂金', String(r.raw_input || ''));
+    for (const r of mem) push('砂金', String(r.raw_input || ''), r.created_at);
     const vlt = src.queryAll(
-      `SELECT content_md FROM vault_log WHERE belong_entity_uuid = ? AND content_md LIKE ? AND length(trim(content_md)) >= 12
+      `SELECT content_md, created_at FROM vault_log WHERE belong_entity_uuid = ? AND content_md LIKE ? AND length(trim(content_md)) >= 12
        ORDER BY created_at DESC LIMIT ${SWEEP_POLICY.vaultPerKw}`,
       [entityUuid, `%${kw}%`]) || [];
-    for (const r of vlt) push('金库黑钻', String(r.content_md || ''));
+    for (const r of vlt) push('金库黑钻', String(r.content_md || ''), r.created_at);
     const kb = src.queryAll(
-      `SELECT content FROM knowledge_base WHERE belong_entity_uuid = ? AND content LIKE ? LIMIT ${SWEEP_POLICY.kbPerKw}`,
+      `SELECT content, created_at FROM knowledge_base WHERE belong_entity_uuid = ? AND content LIKE ? LIMIT ${SWEEP_POLICY.kbPerKw}`,
       [entityUuid, `%${kw}%`]) || [];
-    for (const r of kb) push('知识库', String(r.content || ''));
+    for (const r of kb) push('知识库', String(r.content || ''), r.created_at);
   }
   return out;
 }
 
+/**
+ * 整编输出的结构化形态（🔴 2026-11-03 由 string[] 改为对象数组）。
+ * `line` 保留 `〔source〕content` 可溯源前缀（sweep-organize 测试与日志仍用它）；
+ * `source`/`content`/`createdAt` 供调用方经 **memFragWithTime** 格式化 ——
+ * 时间格式化必须留在 webui 层单源，m4 不造第二份实现。
+ */
+export interface OrganizedFragment {
+  line: string;
+  source: SweptFragment['source'];
+  content: string;
+  createdAt?: string;
+}
+
 /** 问题中心整编：按关键词命中密度排序（命中多=更相关），输出带来源标注的行 */
-export function organizeForQuestion(frags: SweptFragment[], keywords: string[]): string[] {
+export function organizeForQuestion(frags: SweptFragment[], keywords: string[]): OrganizedFragment[] {
   const kws = cleanSweepKeywords(keywords);
   const scored = frags.map((f) => ({
     f, hits: kws.reduce((s, k) => s + (f.content.includes(k) ? 1 : 0), 0),
   }));
   scored.sort((a, b) => b.hits - a.hits);
-  return scored.slice(0, SWEEP_POLICY.maxFrags).map((s) => `〔${s.f.source}〕${s.f.content}`);
+  return scored.slice(0, SWEEP_POLICY.maxFrags).map((s) => ({
+    line: `〔${s.f.source}〕${s.f.content}`,
+    source: s.f.source,
+    content: s.f.content,
+    ...(s.f.createdAt ? { createdAt: s.f.createdAt } : {}),
+  }));
 }
 
 /**

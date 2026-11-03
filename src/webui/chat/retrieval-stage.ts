@@ -839,8 +839,13 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             if (_sweepKw.length > 0) {
               const _swept = organizeForQuestion(sweepAllStores(_sqlite as never, _entityUuid, _sweepKw), _sweepKw);
               if (_swept.length > 0) {
+                // 🔴 2026-11-03（S4 独立评审 P1-B 类）：每条碎片经 memFragWithTime 带时间坐标。
+                //   该通道是体量最大的记忆聚合（跨三仓、无时间窗、maxFrags=12），此前只注入文本，
+                //   而数据层 created_at 100% 在库 ⇒ 是通道选择不取。时间格式化保持**单源**
+                //   （复用本文件既有 memFragWithTime，与 :867 金库通道同形态），m4 层不造第二份。
+                //   无 createdAt 时 memFragWithTime 自动回退无时间标签（fail-open，不阻塞注入）。
                 memoryFragments.push('【深度回忆素材包 · MemSym】以下是全部记忆仓（砂金/金库黑钻/知识库）与该话题相关的碎片——整编组织，努力还原情景：\n' +
-                  _swept.join('\n') + CRYSTAL_DIRECTIVE);
+                  _swept.map((s) => memFragWithTime(s.source, s.content, s.createdAt)).join('\n') + CRYSTAL_DIRECTIVE);
                 console.log(`[MemSym·深度素材] P093编排器 ${_sweepKw.join('/')} → ${_swept.length} 条整编入包`);
               }
             }

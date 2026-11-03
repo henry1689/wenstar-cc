@@ -37,8 +37,39 @@ describe('P093 统一多仓收集编排器', () => {
       { source: '知识库', content: '与话题无关的别的内容而已' },
       { source: '砂金', content: '亲热那天很紧张，亲热的细节记得不多' },
     ], ['亲热']);
-    expect(lines[0]).toContain('〔砂金〕');
-    expect(lines[0].includes('亲热')).toBe(true);
+    // 🔴 2026-11-03（S4 B类）：返回类型由 string[] 改为结构化对象（line/source/content/createdAt），
+    //   `line` 保留〔source〕content 可溯源前缀 —— 断言强度不变（仍校验前缀与内容命中）。
+    expect(lines[0].line).toContain('〔砂金〕');
+    expect(lines[0].line.includes('亲热')).toBe(true);
+    expect(lines[0].source).toBe('砂金');
+  });
+
+  /**
+   * 🔴 2026-11-03（S4 独立评审 P1-B 类的回归防线）
+   * ============================================================
+   * 事故形态：sweepAllStores 三条 SQL 只 SELECT 文本 ⇒ 最大的记忆聚合通道
+   * （跨砂金/金库黑钻/知识库三仓、无时间窗、maxFrags=12）注入时不带时间坐标，
+   * 而数据层 created_at 100% 在库（SQL 自己就 ORDER BY created_at DESC）——
+   * 是**通道选择不取**，不是数据没有。S8 立法意图为「记忆类注入必须携带时间坐标」。
+   */
+  it('🔴 碎片必须透传 createdAt（sweepAllStores 取出 → organizeForQuestion 透传）', () => {
+    const ISO = '2026-10-15T03:21:00.000Z';
+    const withTime = sweepAllStores(mockSrc({
+      memories: [{ raw_input: '第一次亲热那天很紧张手都不知道往哪放', created_at: ISO }],
+    }) as never, 'TXS-1', ['亲热']);
+    expect(withTime.length, 'mock 应命中至少 1 条').toBeGreaterThan(0);
+    expect(withTime[0].createdAt, 'sweepAllStores 必须把 created_at 从 SQL 带出来').toBe(ISO);
+
+    const organized = organizeForQuestion(withTime, ['亲热']);
+    expect(organized[0].createdAt, 'organizeForQuestion 必须透传 createdAt（供 memFragWithTime 格式化）').toBe(ISO);
+    expect(organized[0].source).toBe('砂金');
+
+    // fail-open：无时间戳的行不阻塞注入（createdAt 缺省 ⇒ memFragWithTime 回退无时间标签）
+    const noTime = sweepAllStores(mockSrc({
+      memories: [{ raw_input: '没有时间戳的一段回忆内容仍然要能注入' }],
+    }) as never, 'TXS-1', ['回忆']);
+    expect(noTime.length).toBeGreaterThan(0);
+    expect(noTime[0].createdAt).toBeUndefined();
   });
 
   it('结晶注入单源含三重奏+憧憬自由+表达优先（宪法信条0 执行文本）', () => {
