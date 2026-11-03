@@ -1,0 +1,79 @@
+{
+  "$comment": "P079 任务3 · 真 LLM 轨用例（用户限额：总计 ≤30 轮，本文件正好 30 轮）。执行前置：Claude P078 修复完成 + 独占窗口（豆包协调）。执行器：scripts/stress-llm-track-runner.cjs。全部 test_mode=1（is_test=1，事后 /api/chat/purge-test 清理）。断言基于：回复文本 + 日志窗口归属（[Identity]/[GroupSession]/[MeetExit]/纪要）+ R1 快照（只读）。",
+  "version": 1,
+  "created": "2026-10-23",
+  "totalRounds": 30,
+  "groups": [
+    {
+      "id": "G1-单人进出与现场恢复",
+      "rounds": [
+        { "seq": 1, "message": "找徐诗雨聊聊", "expect": { "log": ["GroupSession] 单人会晤启动: 徐诗雨"], "logAny": ["[Identity]"], "r1_participants": ["徐诗雨"], "notes": "WAKE 生效；身份应 meeting=true speaker=徐诗雨（P078 后断言：日志行含 meeting=true）" } },
+        { "seq": 2, "message": "最近工作忙不忙呀", "expect": { "logAny": ["[Identity] .* meeting=true speaker=徐诗雨"], "r1_participants": ["徐诗雨"], "notes": "会晤中第二轮：身份保持实体（P076 缺陷场景复测）。⚠️勿用「诗雨，…」称呼前缀——单人态称呼点名→switch→门卫拒绝（既有行为，P083 §四.1 实测）" } },
+        { "seq": 3, "message": "你先忙吧，我回头找你", "expect": { "logAny": ["normal 轮即可，无状态变化"], "r1_participants": ["徐诗雨"], "notes": "闲聊不误触发退出" } },
+        { "seq": 4, "message": "再见", "expect": { "log": ["[GroupSession] 会晤结束", "玉瑶现场已恢复"], "r1_participants": [], "notes": "LEAVE + 现场弹栈恢复（role 非硬置 secretary）" } },
+        { "seq": 5, "message": "今天天气怎么样", "expect": { "logAny": ["[Identity] .* meeting=false"], "r1_participants": [], "notes": "玉瑶态正常回复" } }
+      ]
+    },
+    {
+      "id": "G2-多人加人换发言与纪要（P078 纪要修复专项）",
+      "rounds": [
+        { "seq": 6, "message": "叫徐诗雨和阿珍过来开会", "expect": { "log": ["[GroupSession] 多人会晤启动"], "r1_participants": ["徐诗雨", "罗珍思"], "notes": "WAKE×2；阿珍主名=罗珍思" } },
+        { "seq": 7, "message": "阿珍，你先汇报一下", "expect": { "log": ["[GroupSession] 群聊换主发言: → 罗珍思"], "r1_speaker_name": "罗珍思", "notes": "点名 → SPEAK" } },
+        { "seq": 8, "message": "叫熊梓铭也来", "expect": { "log": ["[GroupSession] 群聊加人: +熊梓铭"], "r1_participants": ["徐诗雨", "罗珍思", "熊梓铭"], "notes": "JOIN → 3 人（纪要条件 ≥3 人已满足）" } },
+        { "seq": 9, "message": "徐诗雨最近状态不错吧", "expect": { "logAny": ["[GroupSession] 发言人推断: → 徐诗雨", "群聊换主发言: → 徐诗雨"], "r1_speaker_name": "徐诗雨", "notes": "提及唯一非当前 → 推断切换" } },
+        { "seq": 10, "message": "嗯嗯好的", "expect": { "r1_speaker_name": "徐诗雨", "notes": "零提及 → 粘性保持（不换发言）" } },
+        { "seq": 11, "message": "散会", "expect": { "log": ["[GroupSession] 会晤结束"], "logAny": ["会议结束 → 纪要已生成"], "r1_participants": [], "notes": "🔴 P078 专项：3人+多轮散会必须生成纪要（切主后曾恒不生成）" } }
+      ]
+    },
+    {
+      "id": "G3-亲密话题召回 P052（徐诗韵）",
+      "rounds": [
+        { "seq": 12, "message": "韵韵，找你聊聊", "expect": { "log": ["[GroupSession] 单人会晤启动: 徐诗韵"], "r1_participants": ["徐诗韵"], "notes": "别名归一（韵韵→徐诗韵）" } },
+        { "seq": 13, "message": "我们第一次亲热是在哪，你还记得吗", "expect": { "logAny": ["RecallQuota|RetrievalAdapter|MemoryInjector"], "notes": "P052 扩词召回生效——回复应能回忆（非'脑子里空的'）；判分=人工/LLM 评审" } },
+        { "seq": 14, "message": "那次在房间里我们聊过什么", "expect": { "logAny": ["RecallQuota"], "notes": "亲密词集（房间/床）触发召回；不应说不记得" } },
+        { "seq": 15, "message": "好了先这样，再见", "expect": { "log": ["[GroupSession] 会晤结束"], "r1_participants": [], "notes": "退出" } }
+      ]
+    },
+    {
+      "id": "G4-人格信条 P067（徐诗雨）+ 身份泄漏",
+      "rounds": [
+        { "seq": 16, "message": "诗雨，找你说说话", "expect": { "log": ["[GroupSession] 单人会晤启动: 徐诗雨"], "r1_participants": ["徐诗雨"], "notes": "进入会晤" } },
+        { "seq": 17, "message": "你觉得感情里最重要的是什么", "expect": { "logAny": ["[Identity] .* meeting=true speaker=徐诗雨"], "notes": "🔴 P076 场景：身份必须是徐诗雨非玉瑶；回答应体现信条（忠贞/温柔体贴/不伤害），注入验证看回复语义" } },
+        { "seq": 18, "message": "你妹妹诗韵的感情事你会干涉吗", "expect": { "logAny": ["[Identity] .* meeting=true speaker=徐诗雨"], "notes": "信条'尊重自由不干涉'面；🔴 身份泄漏探测：不得自称玉瑶" } },
+        { "seq": 19, "message": "散会", "expect": { "log": ["[GroupSession] 会晤结束"], "r1_participants": [], "notes": "退出" } }
+      ]
+    },
+    {
+      "id": "G5-人格隔离与串档探测（红线）",
+      "rounds": [
+        { "seq": 20, "message": "叫王全芬和阿珍过来", "expect": { "log": ["[GroupSession] 多人会晤启动"], "r1_participants": ["王全芬", "罗珍思"], "notes": "进入两人会晤" } },
+        { "seq": 21, "message": "全芬，你记得阿珍上次跟我说了什么吗", "expect": { "notes": "🔴 I007 串档红线：王全芬不得复述阿珍的私密记忆（回复应称不插手/不知道，而非编造阿珍视角内容）；同时测 KB UUID 门（P077 §三.3）" } },
+        { "seq": 22, "message": "阿珍，你觉得呢", "expect": { "log": ["[GroupSession] 群聊换主发言: → 罗珍思"], "notes": "点名切换" } },
+        { "seq": 23, "message": "阿珍，你上次跟我聊的私事还记得吗", "expect": { "notes": "阿珍应回忆**自己**的记忆（belong=罗珍思），不得引用王全芬的" } },
+        { "seq": 24, "message": "散会", "expect": { "log": ["[GroupSession] 会晤结束"], "r1_participants": [], "notes": "退出；此后玉瑶态" } },
+        { "seq": 25, "message": "你们刚才聊得怎么样", "expect": { "logAny": ["[Identity] .* meeting=false"], "notes": "玉瑶态不得延续实体会话视角（转场隔离）" } }
+      ]
+    },
+    {
+      "id": "G6-门卫与恢复杂项（≤6 轮）",
+      "rounds": [
+        { "seq": 26, "message": "找熊梓铭聊聊", "expect": { "log": ["[GroupSession] 单人会晤启动: 熊梓铭"], "r1_participants": ["熊梓铭"], "notes": "再入会晤" } },
+        { "seq": 27, "message": "叫阿珍也来", "expect": { "logAny": ["门卫拒绝"], "r1_participants": ["熊梓铭"], "notes": "🔴 单人态加人=门卫拒绝（现状行为，P075-7 '减人/单人加' 待裁决项记录）" } },
+        { "seq": 28, "message": "换徐诗雨", "expect": { "logAny": ["门卫拒绝"], "r1_participants": ["熊梓铭"], "notes": "单人态换人=门卫拒绝（现状）" } },
+        { "seq": 29, "message": "嗯嗯", "expect": { "notes": "普通轮" } },
+        { "seq": 30, "message": "散会", "expect": { "log": ["[GroupSession] 会晤结束"], "r1_participants": [], "notes": "终态清场：30 轮后必须回玉瑶态（R1 快照 participants=0）" } }
+      ]
+    }
+  ],
+  "globalAssertions": [
+    "I1-零抛错：30 轮 HTTP 全 200、服务无 500/[ChatRoute] 异常",
+    "I2-明确指令100%：seq1/6/7/8/11/12/15/16/19/20/24/26/30 的状态日志全部命中",
+    "I3-模糊零误操作：seq3/5/10/25/29 无状态变更日志（无 WAKE/JOIN/LEAVE/SPEAK）",
+    "I4-发言人推断：seq9 命中、seq10 粘性保持",
+    "I5-身份正确（P078）：会晤轮 [Identity] meeting=true speaker=实体名；玉瑶轮 meeting=false",
+    "I6-纪要（P078）：seq11 出现 '纪要已生成'",
+    "I7-终态：seq30 后 R1 快照 participants=0",
+    "红线-人格隔离：会晤轮回复不自称玉瑶；玉瑶轮不延续实体会话（seq17/18/21/23/25 人工+日志双评审）"
+  ],
+  "cleanup": "压测后 POST /api/chat/purge-test（仅当业主/豆包确认全库 is_test=1 可清）；R1 快照留终态玉瑶。"
+}
