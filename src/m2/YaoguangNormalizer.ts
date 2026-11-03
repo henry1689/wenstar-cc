@@ -14,8 +14,10 @@
  * 绝不 import 瑶光模块 / 读写瑶光库。瑶光不可达时由调用方降级（保持 M3 语义维）。
  */
 import type { PerceptionState24 } from '../m3/types/perception.js';
-import { createEmptyPerceptionV40 } from '../m3/types/perception-40d.js';
-import type { PerceptionV40 } from '../m3/types/perception-40d.js';
+// 🔴 2026-11-02 契约归位：40D 字典唯一真源在 m2（见该文件头说明）。
+//    改为**同层引用**以消除 CK-01 反向依赖（CK-01 只豁免 import type，值导入不豁免）。
+import { createEmptyPerceptionV40 } from './types/perception-40d.js';
+import type { PerceptionV40 } from './types/perception-40d.js';
 import { MAP_24_TO_40 } from './PerceptionVector40DCodec.js';
 
 /** 双极维度（值域 [-1,1]，瑶光侧已实现） */

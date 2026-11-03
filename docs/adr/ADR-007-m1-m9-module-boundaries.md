@@ -33,6 +33,7 @@ M1 → M2 → M3 → M4 → M5 → M6/M7/M8/M9
 | M5 → M9 反向依赖 | P0 | DeepSeekLLMProvider 动态 import M9 WorkingMemory | 移除 |
 | M3 → M1 反向依赖 | P1 | PerceptionAnalyzer import M1 LexiconLoader.loadSet | 将词表移至共享目录 |
 | M9 → M3 反向依赖 | P1 | WorkingMemory 调用 PerceptionAnalyzer.recalculateCalcium | 统一钙化后移除 |
+| **M2 → M3 反向依赖（40D 数据字典值引用）** | **P0** | `src/m2/*` 值导入 m3 的 `PERCEPTION_40D_KEYS` / `createEmptyPerceptionV40`（SQLiteAdapter、YaoguangNormalizer、PerceptionVector40DCodec）。**直接违反本 ADR「M2 不得调用 M3」**，且 CK-01 只豁免 `import type`、值导入不豁免 ⇒ DS-01 恒 60 分；叠加 SQLiteAdapter 属高风险核心存储文件、必然要改 ⇒ S7-B R4 死锁：**要改代码才能消 CK-01，要消 CK-01 才能拿到改代码的令牌** | **2026-11-02 已修**（业主批准「案B 三件套」）：40D 字典唯一定义处归位 M2，`src/m3/types/perception-40d.ts` 改为转发桩；m2 侧 3 处改同层引用。与本 ADR「M3 依赖 M2 的检索常量」方向一致，属**归位**而非新增架构。见 [V51 变更说明](../V51-40D字典层级归位与锚点隔离列-变更说明.md) |
 
 ## 理由
 

@@ -23,7 +23,8 @@ import {
   PERCEPTION_40D_DIM,
   PERCEPTION_40D_SECTOR_WEIGHTS,
   createEmptyPerceptionV40,
-} from '../m3/types/perception-40d.js';
+// 🔴 2026-11-02 契约归位：40D 字典唯一真源在 m2，此处改同层引用消除 CK-01 反向值依赖。
+} from './types/perception-40d.js';
 
 // V12.4 阶段B 根除24D: 默认 40D v2 JSON（全零语义向量）— 金库/记事/锚点等无感知输入时的统一落库默认值。
 // 与旧 perception_json 全零向量语义等价（历史：该列已删）：知识类条目不参与情感相似召回（余弦 0）。

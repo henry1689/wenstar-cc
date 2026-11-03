@@ -48,6 +48,53 @@ function isDocumentedAnchor(site: { columns: string[]; window: string }): boolea
 }
 
 /**
+ * 🔴 2026-11-02 测试隔离列守卫（#13 收口 / 业主「案B 三件套」第③件）
+ * ============================================================
+ * `memories.namespace` 缺列的后果与 D8 那批**同机理**：
+ *   `INSERT ... ON CONFLICT DO UPDATE` 未列出的列保持原值 ⇒ 旧行隔离标记**不更新**；
+ *   `INSERT OR REPLACE` 未列出的列被整行重建 ⇒ 直接落回 DEFAULT 'default'。
+ * 两种形态都会让测试流量（namespace='test'）静默混进生产检索，
+ * 而检索侧 `namespace <> 'test'` 硬门会因此失效——**静默且方向危险**。
+ *
+ * 事故形态（2026-11-02 实测定位）：`_rebuildMemoryAnchors` 的锚点重建 INSERT 缺该列，
+ * 靠 `_restoreSnap` 快照回填兜底，而快照存在 `catch → 降级为无回填` 分支 ⇒ 降级即丢。
+ * 修复：写入时显式继承（见 SQLiteAdapter 内注释），本守卫负责**防复发**。
+ *
+ * 判据口径与 D8 一致：全形态扫描（INSERT / INSERT OR REPLACE / INSERT OR IGNORE），
+ * 命中 marker 却解析不出列清单者直接判 offender（fail-closed，不静默跳过）。
+ * 锚点路径同样纳入——它正是本次事故点，不再豁免（D8 的 anchor 豁免只针对 entity_genes）。
+ */
+describe('[2026-11-02 隔离列] memories 写入必须显式携带 namespace', () => {
+  const src = readFileSync(ADAPTER_SRC, 'utf-8');
+
+  it('🔴 至少扫描到 memories 写入点（哨兵：正则或路径失效会静默跳过全项）', () => {
+    const sites = collectMemoryInsertColumnLists(src);
+    expect(sites.length, '写入点数为 0 ⇒ 本守卫形同虚设').toBeGreaterThan(2);
+  });
+
+  it('🔴 全仓每处 memories 写入都必须列出 namespace 列', () => {
+    const offenders = collectMemoryInsertColumnLists(src)
+      .filter((s) => s.columns.length === 0 || !s.columns.includes('namespace'))
+      .map((s) => `${s.snippet.slice(0, 90).replace(/\s+/g, ' ')}…`);
+    expect(
+      offenders,
+      `以下写入点缺 namespace 列（缺列 = 隔离标记静默重置为 default）:\n  ${offenders.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('锚点重建（_rebuildMemoryAnchors）必须显式写 namespace，不得只靠快照回填', () => {
+    const sites = collectMemoryInsertColumnLists(src).filter((s) => isDocumentedAnchor(s));
+    expect(sites.length, '锚点写入点应被识别（指纹：source_type + user.misc.default）').toBeGreaterThan(0);
+    for (const s of sites) {
+      expect(
+        s.columns.includes('namespace'),
+        '锚点 INSERT 缺 namespace ⇒ 快照降级分支下整批锚点隔离标记丢失',
+      ).toBe(true);
+    }
+  });
+});
+
+/**
  * 扫描源码中 memories 的写入点列清单。
  * 🔴 2026-09-19 批 5：原匹配式只认 `INSERT OR REPLACE INTO memories`，而
  *   `writeMemory` 为了修 P0（OR REPLACE 撞 UNIQUE(seq_pos) 会静默删行）已改成

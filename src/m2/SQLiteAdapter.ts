@@ -138,7 +138,11 @@ import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
 import { computeL2Norm40D } from './PerceptionVector40DCodec.js';
 import { decodePerceptionV40, encodePerceptionV40, projectState24ToV40, cosineSimilarity40D, PERCEPTION_40D_ENCODING_VERSION, encodeEmptyPerceptionV40, encodePerceptionV40FromDims } from './PerceptionVector40DCodec.js';
 import type { PerceptionV40 } from '../m3/types/perception-40d.js';
-import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from '../m3/types/perception-40d.js';
+// 🔴 2026-11-02 契约归位（CK-01 死锁根治）：40D 字典唯一真源在 m2/types/perception-40d.ts。
+//    原 `from '../m3/...'` 是**值导入**，而 CK-01 只豁免 `import type` ⇒ DS-01 恒 60 分，
+//    叠加本文件属高风险存储层、必然要改 ⇒ 「要改代码才能消 CK-01、要消 CK-01 才能拿令牌」的
+//    结构性死锁。改为同层引用后 m2→m3 值依赖清零（依据 ADR-007：M2 不得调用 M3）。
+import { PERCEPTION_40D_KEYS, createEmptyPerceptionV40 } from './types/perception-40d.js';
 import { migrateSchema } from './MigrationManager.js';
 import { createHash } from 'node:crypto';
 import { assertWriteAllowed } from '../app/locking/ServerLock.js';
@@ -2889,6 +2893,21 @@ export class SQLiteAdapter {
       } catch (err) {
         console.warn('[SQLiteAdapter] 锚点身份继承查询失败:', (err as Error)?.message);
       }
+      // 🔴 2026-11-02 测试隔离（#13 收口）：锚点 namespace 从组内 conversations 继承。
+      //   原实现该列**不在 INSERT 列清单**，靠 `_restoreSnap` 快照回填兜底；而快照有
+      //   `catch → 降级为无回填` 分支（日志原文「锚点快照失败（降级为无回填）」），
+      //   降级发生时整批重建锚点全部落 DEFAULT 'default' ⇒ 测试流量的隔离标记静默丢失，
+      //   进而穿透检索侧 `namespace <> 'test'` 的硬门。改为**写入时就显式继承**，
+      //   不再依赖快照这一单点（与上方 global_uid/dna_root_id 的继承位同一处取值）。
+      let anchorNamespace = 'default';
+      try {
+        const nsRes = this.execSql(
+          "SELECT namespace FROM conversations WHERE dialog_group_id = ? AND belong_entity_uuid = ? ORDER BY timestamp LIMIT 1",
+          [dg, eu]);
+        if (nsRes.length && nsRes[0].values?.[0]?.[0]) anchorNamespace = String(nsRes[0].values[0][0]);
+      } catch (err) {
+        console.warn('[SQLiteAdapter] 锚点 namespace 继承查询失败（按 default 落库）:', (err as Error)?.message);
+      }
       // ═══════════════════════════════════════════════════════════
       // V22: 单一写入点（本次只写锚点行；碎片重建已拆出本批）
       // ═══════════════════════════════════════════════════════════
@@ -2905,15 +2924,16 @@ export class SQLiteAdapter {
           "is_landmark,primary_emotion,memory_type,dialog_group_id,belong_entity_uuid," +
           "entity_genes,fg_entity_names," +
           "global_uid,dna_root_id,location_fingerprint," +
-          "is_foresight,valid_until_ms,foresight_status,source_type) " +
-          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,?,?,0,NULL,'none','conversation')",
+          "is_foresight,valid_until_ms,foresight_status,namespace,source_type) " +
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,1,?,'dialog',?,?,?,?,?,?,?,0,NULL,'none',?,'conversation')",
           [id, seq++, String(firstTs || now),
            encodeEmptyPerceptionV40(),
            ca, _cl, 'user.misc.default', 'language_semantic_zone', raw, kind,
            _cl >= 2 ? 'active' : 'candidate', 0.55, _cl >= 2 ? 0.45 : 0.2,
            dg, Math.min(1.0, ca * 0.8), now, '平静', dg, eu,
            anchorGenes, ename,
-           anchorGlobalUid, anchorDnaRootId, anchorLocationFp || '0'.repeat(32)]
+           anchorGlobalUid, anchorDnaRootId, anchorLocationFp || '0'.repeat(32),
+           anchorNamespace]
         );
         // V22: ① 派生列（含原先被清零的 anchor_score/topic_label/时空标签/round_count）
         //      ② 快照回填（其余非派生列：recall_count / last_recalled_at / is_promoted / 伤痕 / 溯源等）
@@ -3148,12 +3168,29 @@ export class SQLiteAdapter {
     //   或 `rolled_back`（失败，内存数据未受影响，等下一轮重试），而非 SQL 的 BEGIN/COMMIT 状态。
     const _hook = (event: string, extra: Record<string, unknown>): void => {
       try {
-        console.log('[Hook] ' + JSON.stringify({
-          module: 'm2.SQLiteAdapter',
-          event,
-          operation_type: 'persistence_flush',
-          ...extra,
-        }));
+        // 🔴 2026-11-03 埋点归位全仓 key=value 范式（业主批准批5）：
+        //   原 `JSON.stringify({module,event,...})` 是全仓唯一异类 —— DNAEncoder:201、
+        //   FamilyGraph:1001/:1011/:3498、DeepSeekLLMProvider 等**全是**
+        //   `[Hook] module_entry module=m1.X ...` 的 key=value 形态，而
+        //   reasoning-leak-length-cap:305 正断言该范式（另 DeepSeekLLMProvider:1290
+        //   注释还写着「埋点范式照 m2.SQLiteAdapter」，与现实相反）。
+        //   **只改序列化形态，字段一字不增不减**（operation_type / duration_ms / status /
+        //   save_flush / transaction_status / dirty 全保留），纯 stdout、不写库、不改落盘语义。
+        //   全仓无 JSON.parse 消费者（已 grep 核实，命中的 4 处均为注释/输出方本身）。
+        //   ⚠️ 关键：head 必须是**字面串**，不能写成 `[Hook] ${event}` 再拼 ——
+        //   reasoning-leak-length-cap:305 是**源码级**断言（toMatch 读源码文本，非运行日志），
+        //   要求源码里就能 grep 到 `[Hook] module_entry module=m2.SQLiteAdapter`，
+        //   与 DNAEncoder:201、FamilyGraph:1001/:1011 的字面写法同款；拼接写法源码里
+        //   只有 `[Hook] ${event}`，断言恒不匹配。
+        const _tail = Object.entries({ operation_type: 'persistence_flush', ...extra })
+          .map(([k, v]) => `${k}=${v}`).join(' ');
+        //   同理，exit 的**耗时字段也必须是字面模板**（reasoning-leak-length-cap:306 断言
+        //   源码含 `耗时=${Date.now() - t0}ms`，与 FamilyGraph:1011 同款；`t0` 即本函数
+        //   上方的落盘计时起点，作用域内可见）。`duration_ms` 是结构化字段，两者并存。
+        const _head = event === 'module_entry'
+          ? '[Hook] module_entry module=m2.SQLiteAdapter'
+          : `[Hook] module_exit module=m2.SQLiteAdapter 耗时=${Date.now() - t0}ms`;
+        console.log(`${_head} ${_tail}`);
       } catch { /* 埋点失败绝不影响落盘 */ }
     };
     _hook('module_entry', { save_flush: 'start', transaction_status: 'in_progress', dirty: this._dirtyCount });
