@@ -1,0 +1,53 @@
+{
+  "module": "M1-Storage",
+  "version": "v2.0.0",
+  "baseline_md5": "C3DCBFC83B96EBE88D06D230F26CF503",
+  "harness_checkpoints": [
+    {
+      "id": "H-CK-01",
+      "name": "schema_consistency",
+      "schedule": "10:30,17:00,23:00",
+      "script": "storage/harness/schema_consistency_check.ts",
+      "on_fail": "alert_and_freeze_writes",
+      "description": "校验14张表结构与设计文档一致、索引完整、外键有效"
+    },
+    {
+      "id": "H-CK-02",
+      "name": "namespace_isolation",
+      "schedule": "every_hour",
+      "script": "storage/harness/check_namespace_leak.ts",
+      "on_fail": "alert",
+      "description": "扫描v_conv_real/v_mem_real中是否出现test/roleplay命名空间数据（防污染）"
+    },
+    {
+      "id": "H-CK-03",
+      "name": "audit_ledger_integrity",
+      "schedule": "every_hour",
+      "script": "storage/harness/verify_hashchain.ts",
+      "on_fail": "alert_and_freeze_writes",
+      "description": "校验audit_ledger哈希链连续，prev_hash无断裂"
+    },
+    {
+      "id": "H-CK-04",
+      "name": "migration_progress",
+      "schedule": "on_change",
+      "script": "storage/harness/report_migration_status.ts",
+      "on_fail": "warn",
+      "description": "上报M1-M5迁移进度到Harness面板"
+    }
+  ],
+  "metrics_to_report": [
+    "table_count",
+    "row_count_per_table",
+    "fts_index_status",
+    "vec_index_dimensions",
+    "migration_pending",
+    "queue_depth",
+    "wal_file_size"
+  ],
+  "freeze_on": [
+    "audit_ledger_hash_break",
+    "table_missing",
+    "namespace_leak_in_prod_view"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@wenstar/memarch-v2-storage",
+  "type": "module",
+  "version": "2.0.0",
+  "description": "MemArch-v2.0.0 M1-Storage module: 14 tables, FTS5, vec0, namespace isolation, migrations",
+  "main": "storage/write_queue/WriteQueue.ts",
+  "scripts": {
+    "test": "vitest run memarch-v2/storage/tests/",
+    "lint:namespace": "powershell -File memarch-v2/storage/ci/lint-namespace.ps1 -RepoRoot .",
+    "harness:check": "tsx memarch-v2/storage/harness/schema_consistency_check.ts"
+  },
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  }
+}

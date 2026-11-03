@@ -1,0 +1,20 @@
+{
+  "name": "@wenstar/memarch-v2-sleep",
+  "type": "module",
+  "version": "2.0.0",
+  "description": "MemArch-v2.0.0 M3-SleepConsolidation: 10-step sleep pipeline, checkpoint resume, lifecycle state machine, LLM budget control",
+  "main": "index.ts",
+  "scripts": {
+    "test": "vitest run sleep_consolidation/tests/",
+    "test:unit": "vitest run sleep_consolidation/tests/test_lifecycle.test.js sleep_consolidation/tests/test_checkpoint.test.js sleep_consolidation/tests/test_budget_quota.test.js",
+    "test:integration": "vitest run sleep_consolidation/tests/test_pipeline_integration.test.js"
+  },
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  }
+}
