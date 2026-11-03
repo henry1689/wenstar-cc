@@ -191,6 +191,7 @@ const SQL_META =
 const SQL_CONVERSATIONS =
   'SELECT id, role, content, timestamp, seq_pos, belong_entity_uuid ' +
   'FROM conversations WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0) ' +
+  'AND COALESCE(is_summary, 0) = 0 ' +
   'ORDER BY seq_pos ASC, timestamp ASC';
 
 const SQL_CONSUME_READ =

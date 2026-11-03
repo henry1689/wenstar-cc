@@ -164,6 +164,7 @@ export class BlockArchiveService {
       const convs = sql.queryAll<{ role: string; content: string | null; seq_pos: number | null }>(
         'SELECT role, content, seq_pos FROM conversations ' +
         'WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0) ' +
+        'AND COALESCE(is_summary, 0) = 0 ' +
         'ORDER BY seq_pos ASC, timestamp ASC',
         [dgId],
       ) || [];

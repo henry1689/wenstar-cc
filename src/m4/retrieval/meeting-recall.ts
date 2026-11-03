@@ -554,7 +554,8 @@ export function recallOriginalConversations(
     const rows = (
       src.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND content LIKE ? AND LENGTH(content) > 150
+         WHERE belong_entity_uuid = ? AND COALESCE(is_summary, 0) = 0
+           AND content LIKE ? AND LENGTH(content) > 150
          ORDER BY timestamp DESC LIMIT 3`,
         [entityUuid, `%${kw}%`],
       ) || []
@@ -577,7 +578,8 @@ export function recallOriginalConversations(
     const rows = (
       src.queryAll(
         `SELECT role, content, timestamp FROM conversations
-         WHERE belong_entity_uuid = ? AND timestamp >= ?${_upper} AND LENGTH(content) > 40
+         WHERE belong_entity_uuid = ? AND COALESCE(is_summary, 0) = 0
+           AND timestamp >= ?${_upper} AND LENGTH(content) > 40
          ORDER BY timestamp DESC LIMIT ?`,
         _params,
       ) || []
@@ -681,7 +683,7 @@ export function recallSandboxConversations(
         src.queryAll(
           `SELECT c.role, c.content, c.timestamp
            FROM conversations c
-           WHERE ${conds.join(' AND ')}
+           WHERE ${conds.join(' AND ')} AND COALESCE(c.is_summary, 0) = 0
            ORDER BY c.timestamp DESC
            LIMIT ?`,
           [...params, _limit],

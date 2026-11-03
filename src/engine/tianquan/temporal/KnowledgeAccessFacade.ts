@@ -92,7 +92,7 @@ export class KnowledgeAccessFacade {
   queryConversationFallback(keyword: string, limit: number = 3): Array<{ content: string; timestamp: string }> {
     try {
       const rows = this.sqlite.queryAll(
-        "SELECT content, timestamp FROM conversations WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?",
+        "SELECT content, timestamp FROM conversations WHERE COALESCE(is_summary, 0) = 0 AND content LIKE ? ORDER BY timestamp DESC LIMIT ?",
         [`%${keyword}%`, limit]
       );
       return (rows as any[]).map(r => ({

@@ -40,7 +40,7 @@ export class ConversationAdapter implements RetrievalAdapter {
       const rows = this.sqlite.queryAll<ConversationRow>(
         `SELECT id, role, content, timestamp, belong_entity_uuid
          FROM conversations
-         WHERE content LIKE ? AND is_compacted = 0${police.clause}
+         WHERE content LIKE ? AND is_compacted = 0 AND COALESCE(is_summary, 0) = 0${police.clause}
          ORDER BY timestamp DESC LIMIT ?`,
         [`%${query}%`, ...police.params, limit],
       );
