@@ -129,7 +129,7 @@ const TTS_NO_PROXY_ENV = { NO_PROXY: '*', no_proxy: '*', HTTP_PROXY: '', HTTPS_P
 
 class TTSWorker {
   private proc: ChildProcess | null = null;
-  private pending = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+  private pending = new Map<string, { resolve: (file: string) => void; reject: (e: Error) => void }>();
   private stdoutBuf = '';
 
   constructor(private scriptPath: string) {}
@@ -150,12 +150,20 @@ class TTSWorker {
     p.on('error', (e) => { this._failAll(e); this.proc = null; });
   }
 
-  /** 合成单段 → 写 outPath。resolve=成功；reject=失败（由 genOne 外层重试，空文件检测不变）。 */
-  synthesize(text: string, outPath: string): Promise<void> {
+  /**
+   * 合成单段 → 写 outPath。
+   * 🔴 V26 协议（2026-11-02 修复，方案A）：resolve 的是 **worker 实际写入的文件名**
+   *    —— 扩展名由引擎决定（edge→.mp3 / sapi→.wav），调用方**不得**自行拼接，
+   *    否则会把 base 里的 .mp3 再叠一层写成 xxx.mp3.mp3，而调用方查 xxx.mp3 判定
+   *    「空文件」重试后返回 null，表现为有文件无声音（实测 11-02 全天 442 例）。
+   * reject=失败（由 genOne 外层重试，空文件检测不变）。
+   */
+  synthesize(text: string, outPath: string): Promise<string> {
     this.ensureStarted();
     const id = randomUUID();
+    const _fallbackName = path.basename(outPath); // 协议异常回退：至少指向入参同名文件
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve: (file: string) => resolve(file || _fallbackName), reject });
       try {
         this.proc!.stdin!.write(JSON.stringify({ id, text, path: outPath }) + '\n');
       } catch (e) {
@@ -176,7 +184,8 @@ class TTSWorker {
       try {
         const resp = JSON.parse(line);
         const p = this.pending.get(resp.id);
-        if (p) { this.pending.delete(resp.id); resp.ok ? p.resolve() : p.reject(new Error(resp.error || 'tts synth failed')); }
+        // 🔴 V26：把 worker 返回的真实文件名透传给调用方（原实现丢弃 resp.file，是本次无声根因之一）
+        if (p) { this.pending.delete(resp.id); resp.ok ? p.resolve(String(resp.file || '')) : p.reject(new Error(resp.error || 'tts synth failed')); }
       } catch (_) { /* 解析失败忽略，等待后续行 */ }
     }
   }
@@ -205,23 +214,32 @@ export async function generateTTSAudio(segments: string[], dataDir: string, onSe
   const worker = _getWorker(dataDir);
   const genOne = async (txt: string, idx: number): Promise<string | null> => {
     if (!txt.trim()) return null; // 空段不生成（S4 P2-4）
-    const _fn = 'tts_' + Date.now().toString(36) + '_' + randomUUID().slice(0, 8) + '.mp3';
+    // 🔴 V26（2026-11-02）：base **不带扩展名** —— 扩展名由 worker 协议 `path = base + ENGINE.ext`
+    //    唯一决定（edge→.mp3 / sapi→.wav）。此前硬编码 `.mp3` 导致产物 `xxx.mp3.mp3`。
+    //    实际文件名一律取 synthesize 返回值，本处只提供 base，不参与拼 URL。
+    const _fn = 'tts_' + Date.now().toString(36) + '_' + randomUUID().slice(0, 8);
     const _fp = path.join(dataDir, 'audio', _fn);
     // V14: edge-tts 服务端临时故障重试（NoAudioReceived 生成 0 字节文件）——重试 2 次，间隔 1.5s/3s
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (attempt > 1) await new Promise(r => setTimeout(r, 1500 * attempt)); // 1.5s/3s 退避
-        await worker.synthesize(txt, _fp); // V25: 走常驻 worker（复用 import，省 ~1.4s/段）
-        if (fs.existsSync(_fp) && fs.statSync(_fp).size > 0) {
-          const url = '/audio/' + _fn;
+        // V25: 走常驻 worker（复用 import，省 ~1.4s/段）
+        // 🔴 V26（2026-11-02 修复）：synthesize 返回 worker 实际写入的**真实文件名**，
+        //    后续存在性检查/删重试/URL 拼接一律用它，**不再用本地拼的 _fp/_fn**。
+        //    根因：worker 按协议 `path = base + ENGINE.ext` 补扩展名，而 _fn 已带 .mp3
+        //    → 实际产物是 xxx.mp3.mp3，查 xxx.mp3 恒不存在 → 误判空文件 → 返回 null 无声音。
+        const realName = await worker.synthesize(txt, _fp);
+        const realFp = path.join(dataDir, 'audio', realName);
+        if (realName && fs.existsSync(realFp) && fs.statSync(realFp).size > 0) {
+          const url = '/audio/' + realName;
           // 🔴 S2-F2: 每段生成完立即回调（边生成边播，不等全量）— 消除长文"文字写完干等几秒"。
           // idx 保持分段顺序，前端按序播放（缺段等待）。
           try { onSegment?.(url, idx); } catch (_oc) { /* 回调失败不阻塞 */ }
           return url;
         }
         // 0 字节文件（NoAudioReceived）→ 删除重试
-        try { fs.unlinkSync(_fp); } catch (_de) { /* 忽略 */ }
+        try { if (realName) fs.unlinkSync(realFp); } catch (_de) { /* 忽略 */ }
         if (attempt < maxAttempts) { console.warn('[TTS] 第 ' + attempt + ' 次生成空文件，重试...'); continue; }
       } catch (_e) {
         if (attempt < maxAttempts) { console.warn('[TTS] 第 ' + attempt + ' 次失败，重试:', (_e as Error)?.message || _e); continue; }

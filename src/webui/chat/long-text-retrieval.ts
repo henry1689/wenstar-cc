@@ -121,7 +121,7 @@ export function buildLongTextFragment(content: string, level: DetailLevel): stri
   const text = (content || '').trim();
   if (text.length <= LONG_TEXT_THRESHOLD) {
     return '【对话原文·权威记录】' + text +
-      '\n（以上为当时对话原文——【记得】档权威记录。可自然口语化复述，但原文没有的人物/情节/时间不得新增提及。）';
+      '\n（以上为当时对话原文——【记得】档权威记录。可自然口语化复述：补过渡、理顺序、串语境都是你的表达自由；只有添了原文没有的人物/情节/时间才需要停一下。）';
   }
 
   let body: string;

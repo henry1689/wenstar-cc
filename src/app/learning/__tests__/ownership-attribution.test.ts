@@ -121,18 +121,43 @@ describe('[归属传递] 派生写入必须继承源记忆的归属与溯源锚�
     );
   });
 
-  it('系统巩固写 kb：必须绑真实归属，不得 bind 字面 NULL', () => {
-    // 旧实现：列清单列了 belong_entity_uuid 却在 VALUES 里写死 NULL —— 列在、值恒空
-    expect(SC, "systems_consolidation 写入点仍在 bind 字面 NULL（形态②回归）").toMatch(
-      /'systems_consolidation', \?, \?, \?, 1, '系统巩固', 0, 'other', \?\)/,
+  it('系统巩固【不得再写 knowledge_base】—— 知识库只存文档 + 微信临时', () => {
+    // 🔴 P0-8a(2026-10-07) 守卫方向反转（强度升级，不是放宽）：
+    //   原断言是「写 kb 时必须绑真实归属，不得 bind 字面 NULL」—— 只防"写错归属"。
+    //   业主定义了知识库边界：「知识库里不应该有什么碎片信息…这里只存文档和微信临时信息」，
+    //   于是 SleepTimeConsolidator 的 systems_consolidation 写入点被**整个删除**
+    //   （22~120 字的「巩固记忆」条目，实测会让实体在会晤里把碎片当档案、真文档被挤掉）。
+    //   ⇒ 现在连"写进去"都防：这两个文件不得再出现写 knowledge_base 的语句。
+    //   若日后确需把它写到别处（如 vault_log），请在本测试里显式更新豁免**并说明理由**。
+    expect(SC, 'SC 不得再写 systems_consolidation 到知识库（P0-8a）').not.toMatch(
+      /'systems_consolidation', \?, \?, \?, 1, '系统巩固'/,
     );
-    expect(SC).toMatch(/deriveBelongUuid\(mem\) \?\? null/);
+    // 精确核对：SC 对 knowledge_base 的写入**只应剩 2 处**，且都是 dream_behavior（梦境）。
+    //   业主对梦境的处置是「不删、只隔离出检索」⇒ 梦境仍由本文件写入，**不在本断言的禁止范围内**。
+    //   若这个数字变了（多或少），说明有人动了知识库的写入面，必须在此显式说明理由。
+    const kbInserts = SC.match(/INSERT\s+(OR\s+REPLACE\s+)?INTO\s+knowledge_base/gi) || [];
+    expect(
+      kbInserts.length,
+      `SC 对 knowledge_base 的写入点应为 2 处（均为 dream_behavior），实际 ${kbInserts.length} 处`,
+    ).toBe(2);
+    expect(SC, 'SC 对知识库的写入只应剩 dream_behavior').not.toMatch(/'systems_consolidation', \?/);
+    expect(SC, 'SC 须保留 P0-8a 的移除说明（后人别把它当"可复用的写入"捡回来）').toMatch(/P0-8a\(2026-10-07\) 已\*\*移除此处对 knowledge_base 的写入\*\*/);
   });
 });
 
 describe('[归属传递] 确实无唯一户口的聚合件必须显式登记 unowned（第七条）', () => {
+  // 🔴 P0-8a(2026-10-07): DailyMaintenanceScheduler 的 monthly_topic 写入点已被**整个删除**
+  //   （知识库只存文档 + 微信临时；月报是系统分析产物）。故它从下面的清单移出，
+  //   改为**反向断言**：该文件不得再往 knowledge_base 写。
+  //   ProspectiveSimulator 仍在写，守卫**原样保留、不放宽**。
+  it('DailyMaintenanceScheduler【不得再写 knowledge_base】（月报，P0-8a）', () => {
+    const DM = readFileSync(join(REPO, 'src/app/learning/DailyMaintenanceScheduler.ts'), 'utf-8');
+    expect(DM, 'DailyMaintenanceScheduler 不得再往 knowledge_base 写（P0-8a）').not.toMatch(
+      /INSERT\s+(OR\s+REPLACE\s+)?INTO\s+knowledge_base/i,
+    );
+  });
+
   const AGGREGATES: Array<[string, RegExp]> = [
-    ['src/app/learning/DailyMaintenanceScheduler.ts', /INSERT OR REPLACE INTO knowledge_base \(([^)]*)\)/],
     ['src/engine/tianquan/temporal/ProspectiveSimulator.ts', /INSERT OR REPLACE INTO knowledge_base \(([^)]*)\)/],
   ];
 
@@ -147,12 +172,11 @@ describe('[归属传递] 确实无唯一户口的聚合件必须显式登记 uno
   }
 
   it('跨实体聚合的 unowned 判定必须写明法律依据（可审计，而非裸 NULL）', () => {
-    const SC = readFileSync(join(REPO, 'src/engine/tianquan/temporal/SleepTimeConsolidator.ts'), 'utf-8');
-    const DM = readFileSync(join(REPO, 'src/app/learning/DailyMaintenanceScheduler.ts'), 'utf-8');
+    // 🔴 P0-8a(2026-10-07): 断言范围从「SC / DM / PS 三处」收窄到**仍在写聚合件的 PS** ——
+    //   SC 与 DM 的写入点已删除，其第七条依据注释随写入点一并移除，断言失去对象。
+    //   这不是放宽：那两个文件现在被上面两条反向断言管着（连写都不许写）。
     const PS = readFileSync(join(REPO, 'src/engine/tianquan/temporal/ProspectiveSimulator.ts'), 'utf-8');
-    for (const [name, src] of [['SleepTimeConsolidator', SC], ['DailyMaintenanceScheduler', DM], ['ProspectiveSimulator', PS]] as const) {
-      expect(src, `${name} 的 unowned 判定缺少《UUID 户籍管理法》第七条依据`).toMatch(/第七条/);
-      expect(src, `${name} 未警示 OWNER_UUID 是玉瑶本体（易被误用为「用户本人」）`).toMatch(/TXS-000000001/);
-    }
+    expect(PS, 'ProspectiveSimulator 的 unowned 判定缺少《UUID 户籍管理法》第七条依据').toMatch(/第七条/);
+    expect(PS, 'ProspectiveSimulator 未警示 OWNER_UUID 是玉瑶本体（易被误用为「用户本人」）').toMatch(/TXS-000000001/);
   });
 });

@@ -1,5 +1,8 @@
-"""
-简易 Edge-TTS 语音服务 (端口 8765)
+﻿"""
+简易 Edge-TTS 语音服务 (端口 9000)
+# 🔴 2026-11-03（收口任务书 J4/J5）：端口 8765→9000 —— 8765 实测被
+#    harness-mcp 派生的 tsx server.ts 进程占用，必须避让；本行注释
+#    此前仍写 8765（与代码不一致），一并订正。
 """
 import asyncio
 import json
@@ -111,4 +114,4 @@ async def audio(filename: str):
 if __name__ == "__main__":
     print(f"[TTS] Edge-TTS 服务启动, 默认声音: {_current_voice}")
     print(f"[TTS] 可用 {len(CHINESE_VOICES)} 种中文声音")
-    uvicorn.run(app, host="0.0.0.0", port=8765)
+    uvicorn.run(app, host="0.0.0.0", port=9000)
