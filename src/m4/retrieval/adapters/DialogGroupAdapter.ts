@@ -155,14 +155,26 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         const shard = buildKeywordShards('content', [query]);
         if (shard.sql) {
           const uuidPhs = uuids.map(() => '?').join(',');
-          // 按角色分计命中行数：ADR convDensity 的分子是「轮数」，而轮数只能从角色行推得
+          // 按角色分计命中行数：ADR convDensity 的分子是「轮数」，而轮数只能从角色行推得。
+          //
+          // 🔴 `is_summary=1` 的行（对话块摘要归并进 conversations 后的形态）**只参与召回、
+          //    不参与计数** —— 摘要行本身不是一轮对话，若计入 a_hit，每组会凭空多出 1 个
+          //    「命中轮」，convDensity = max(u_hit,a_hit)/turn_count 直接失真。
+          //    召回与计数在**同一条 SQL** 里用 CASE 分开，仍是一条通道（业主：
+          //    「最终只保留原文通道一个」），不拆第二路、不 UNION。
+          // ⚠️ 批1 时生产库 213 行 is_summary=1 的 dialog_group_id 全为 NULL，
+          //    本条件恒真、排除无对象 ⇒ 迁移前零行为变化；批2 写入后才真正生效。
+          //    摘要行的**命中识别**（供 channels.summary 用）留到批4 接线时一并加，
+          //    本批不放用不上的列。
           rawRows = this.sqlite.queryAll<{
             gid: string; hit_rows: number; u_hit: number | null; a_hit: number | null;
           }>(
             `SELECT c.dialog_group_id AS gid,
-                    COUNT(*) AS hit_rows,
-                    SUM(CASE WHEN c.role = 'user' THEN 1 ELSE 0 END) AS u_hit,
-                    SUM(CASE WHEN c.role = 'assistant' THEN 1 ELSE 0 END) AS a_hit
+                    COUNT(CASE WHEN COALESCE(c.is_summary, 0) = 0 THEN 1 END) AS hit_rows,
+                    SUM(CASE WHEN COALESCE(c.is_summary, 0) = 0 AND c.role = 'user'
+                             THEN 1 ELSE 0 END) AS u_hit,
+                    SUM(CASE WHEN COALESCE(c.is_summary, 0) = 0 AND c.role = 'assistant'
+                             THEN 1 ELSE 0 END) AS a_hit
                FROM conversations c
               WHERE c.dialog_group_id IS NOT NULL
                 AND (c.is_test IS NULL OR c.is_test = 0)

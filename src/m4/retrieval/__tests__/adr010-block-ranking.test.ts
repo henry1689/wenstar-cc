@@ -347,6 +347,31 @@ describe('[ADR-010 §12.2.3] 适配器把双通道接进了方案', () => {
     db.close();
   });
 
+  it('🔴 摘要行（is_summary=1）只参与召回、不参与密度计数', async () => {
+    const db = await buildDb();
+    seedBlock(db, 'DG_NO_SUMROW', [['user', '杭州机票订了吗'], ['assistant', '杭州机票我看过了']],
+      { calcium: 5, turns: 4 });
+    const before = await new DialogGroupAdapter(srcOf(db)).search(ctxOf({ limit: 5 }));
+    const beforeScore = before.find((h) => h.id === 'DG_NO_SUMROW')!.score;
+
+    // 插一行 is_summary=1、内容同样命中查询的摘要行 —— 若计数不排除它，
+    // a_hit 会 1→2 ⇒ max(u_hit,a_hit) 1→2 ⇒ convDensity 0.25→0.5 ⇒ 分数必然变。
+    db.run(
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,is_summary,belong_entity_uuid) " +
+      "VALUES (?,?,?,?,?,0,1,?)",
+      ['assistant', '杭州机票的三层摘要：标签/叙事/情感', '2026-10-06T00:02:00.000Z', 999999,
+       'DG_NO_SUMROW', UUID_A],
+    );
+    const after = await new DialogGroupAdapter(srcOf(db)).search(ctxOf({ limit: 5 }));
+    const afterHit = after.find((h) => h.id === 'DG_NO_SUMROW');
+    expect(afterHit, '摘要行必须仍能让该组被召回').toBeTruthy();
+    expect(
+      afterHit!.score,
+      '🔴 摘要行若被计入密度，这里会变大 —— 说明 is_summary 排除没生效',
+    ).toBeCloseTo(beforeScore, 9);
+    db.close();
+  });
+
   it('🔴 convDensity 分子是「轮数」不是「行数」—— max(u_hit, a_hit) 口径守卫', async () => {
     const db = await buildDb();
     // 两块摘要、钙分、turn_count 全同，唯一差别是**命中行数**：
