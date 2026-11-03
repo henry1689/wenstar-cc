@@ -190,7 +190,13 @@ describe('[NO-API] Agent-CNC config loading is local-only', () => {
       {
         cwd: REPO,
         encoding: 'utf8',
-        timeout: 5000,
+        // 🔴 2026-11-03 调参（非放宽断言）：原 5000ms。本用例改用 tsx 加载 src 真源后
+        //   （见文件头注释：`require('./dist/...')` 因 dist 不存在而 exit 1），
+        //   子进程须先拉起 tsx 运行时（单跑实测约 1~2s），全量并发 CPU 抢占下 5s 不够
+        //   ⇒ spawnSync 返回 `status: null`（超时被杀）⇒ `expect(r.status).toBe(0)` 报
+        //   `expected null to be +0`。实测：单跑 67/67 绿、全量偶发红 ⇒ 是**超时**不是逻辑错。
+        //   断言本体（status===0 + stdout 匹配 LLM STATUS 枚举）一字未动。
+        timeout: 20000,
         env: {
           ...process.env,
           NODE_ENV: 'test',
