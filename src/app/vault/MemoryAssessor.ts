@@ -196,7 +196,7 @@ export class MemoryAssessor {
         `SELECT id, role, content, calcium_score, entity_names, dna_root_id, timestamp,
                 perception_summary, topic, seq_pos, dialog_group_id, namespace
          FROM conversations
-         WHERE is_promoted = 0 AND calcium_score >= ?
+         WHERE is_promoted = 0 AND COALESCE(is_summary, 0) = 0 AND calcium_score >= ?
          ORDER BY calcium_score DESC LIMIT ?`,
         [cfg.minCalciumScore, cfg.batchSize]
       ) as any[];

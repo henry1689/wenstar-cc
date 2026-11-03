@@ -180,7 +180,10 @@ export class BlockSummaryService {
 
     const convs = sql.queryAll<{ role: string; content: string; belong_entity_uuid: string | null }>(
       'SELECT role, content, belong_entity_uuid FROM conversations ' +
+      // 🔴 摘要归并批3a：**必须**排除 is_summary=1 的行 —— 否则批2 迁移后，
+      //   本服务会把已生成的摘要行当「原文」再喂给 LLM 重新生成，形成自指循环。
       'WHERE dialog_group_id = ? AND (is_test IS NULL OR is_test = 0) ' +
+      'AND COALESCE(is_summary, 0) = 0 ' +
       'ORDER BY timestamp ASC, seq_pos ASC',
       [dgId],
     );

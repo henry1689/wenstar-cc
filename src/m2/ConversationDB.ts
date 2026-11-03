@@ -371,9 +371,12 @@ export class ConversationDB {
     // 🏗️ P0-4: 非角色扮演时自动过滤角色扮演对话（避免记忆污染）
     // 🔴 V34(2026-09-25): 撤除 `is_compacted = 0` —— 关键词搜历史时若排除归档原文，
     //   等于只在"内存窗口内剩下的几小时"里搜，用户问几天前的具体事必然落空。
+    // 🔴 摘要归并批3a：关键词搜历史须排除 is_summary=1 的摘要行 ——
+    //   摘要不是用户说过的话，回灌会把「块概述」当成对话内容答给用户。
+    //   迁移前该条件恒真（现有摘要行 dialog_group_id 全为 NULL），零行为变化。
     const sql = excludeRoleplay
-      ? `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT ?`
-      : `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?`;
+      ? `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND COALESCE(is_summary, 0) = 0 AND (roleplay_char IS NULL OR roleplay_char = '') ORDER BY timestamp DESC LIMIT ?`
+      : `SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp DESC LIMIT ?`;
     const stmt = this.db.prepare(sql);
     stmt.bind([`%${keyword}%`, limit]);
     const rows: ConversationRow[] = [];
@@ -386,7 +389,9 @@ export class ConversationDB {
     this.ensureReady();
     // 🔴 P0-A4 修复: 时间导航（"昨天/上周说了什么"）原无 UUID 过滤，跨实体拉对话。
     //   新增 entityUuids 白名单过滤（deny-by-default，无归属记录在会晤场景不放行）。
-    let sql = `SELECT id, role, content, timestamp, belong_entity_uuid FROM conversations WHERE timestamp >= ? AND timestamp <= ? AND (roleplay_char IS NULL OR roleplay_char = '')`;
+    // 🔴 摘要归并批3a：时间导航（\"昨天/上周说了什么\"）同须排除摘要行 ——
+    //   摘要行的 timestamp 是块的 last_ts，会伪装成「某个时间点说过的话」。
+    let sql = `SELECT id, role, content, timestamp, belong_entity_uuid FROM conversations WHERE timestamp >= ? AND timestamp <= ? AND COALESCE(is_summary, 0) = 0 AND (roleplay_char IS NULL OR roleplay_char = '')`;
     const params: any[] = [start, end];
     if (entityUuids && entityUuids.length > 0) {
       const marks = entityUuids.map(() => '?').join(',');

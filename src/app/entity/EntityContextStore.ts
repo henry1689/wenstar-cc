@@ -62,7 +62,11 @@ export class EntityContextStore {
       // 🔴 2026-09-12 隔离区过滤: is_test=1 的对话永不得进入实体上下文。
       //   用途: 已将洩漏污染型回复标记为 is_test=1（不删数据），此处保证它们不再被当作“聊过的事”回灌给实体。
       //   ⚠️ 这是**唯一**保留的过滤条件 —— is_compacted 已于 V34 撤出可见性判断。
-      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0)';
+      // 🔴 摘要归并批3a（任务书 e110afc §2.3）：is_summary=1 的行是对话块摘要
+      //   （批2 迁移后挂进 conversations），**只参与召回、不参与计数、更不得回灌给模型**。
+      //   不堵则摘要会被当作「聊过的事」注入实体上下文。
+      //   迁移前该条件恒真（现有 213 行摘要行的 dialog_group_id 全为 NULL），零行为变化。
+      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0) AND COALESCE(is_summary, 0) = 0';
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp, belong_entity_uuid
          FROM conversations
@@ -102,7 +106,11 @@ export class EntityContextStore {
       // 🔴 V34(2026-09-25): is_compacted 已撤出可见性判断（见 queryEntityContext 注释）。
       //   本方法的分段采样语义**因此才成立** —— 采样的是"全部历史的时间轴"，
       //   此前 unavailable 的那段（已归档）根本不在 total 里，早期/中期槽实际采不到任何东西。
-      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0)';
+      // 🔴 摘要归并批3a（任务书 e110afc §2.3）：is_summary=1 的行是对话块摘要
+      //   （批2 迁移后挂进 conversations），**只参与召回、不参与计数、更不得回灌给模型**。
+      //   不堵则摘要会被当作「聊过的事」注入实体上下文。
+      //   迁移前该条件恒真（现有 213 行摘要行的 dialog_group_id 全为 NULL），零行为变化。
+      const visibilityFilter = ' AND (is_test IS NULL OR is_test = 0) AND COALESCE(is_summary, 0) = 0';
       const totalRow = this._sqlite.queryAll(
         `SELECT COUNT(*) AS c FROM conversations WHERE belong_entity_uuid = ? ${visibilityFilter}`,
         [uuid],
@@ -166,7 +174,8 @@ export class EntityContextStore {
     try {
       const rows = this._sqlite.queryAll(
         `SELECT role, content, timestamp, belong_entity_uuid FROM conversations
-         WHERE belong_entity_uuid = ? AND (is_test IS NULL OR is_test = 0) AND content LIKE ?
+         WHERE belong_entity_uuid = ? AND (is_test IS NULL OR is_test = 0)
+           AND COALESCE(is_summary, 0) = 0 AND content LIKE ?
          ORDER BY timestamp DESC LIMIT ?`,
         [uuid, `%${keyword}%`, limit],
       );

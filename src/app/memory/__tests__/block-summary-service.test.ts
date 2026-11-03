@@ -84,8 +84,13 @@ beforeEach(async () => {
     timestamp TEXT,
     seq_pos INTEGER,
     is_test INTEGER,
-    belong_entity_uuid TEXT
+    belong_entity_uuid TEXT,
+    is_summary INTEGER DEFAULT 0
   )`);
+  // 🔴 摘要归并批3a：`is_summary` 必须与生产 DDL 对齐（SQLiteAdapter.ts / ConversationDB.ts
+  //   均为 `is_summary INTEGER DEFAULT 0`）。本服务读组内原文生成摘要时按
+  //   `COALESCE(is_summary,0)=0` 排除摘要行（否则批2 迁移后会把摘要当原文再摘要），
+  //   测试表缺该列会让 SQL 直接报 no such column ⇒ 6 个用例全红。
   // 🔴 2026-11-02 拆除 n-gram：不再建 search_index —— 块摘要直接落在 dialog_groups.block_summary，
   //   由 v11 结构化召回的分片 LIKE 围栏消费（白皮书 §4.2.2），无中间索引表。
 

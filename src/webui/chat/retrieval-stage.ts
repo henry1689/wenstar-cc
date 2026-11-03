@@ -963,7 +963,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         if (memoryFragments.length < 5) {
           try {
             const _convRows = _sqlite.queryAll(
-              "SELECT dialog_group_id, content, role, timestamp FROM conversations WHERE belong_entity_uuid = ? ORDER BY timestamp DESC LIMIT 80",
+              // 🔴 摘要归并批3a：降级检索的结果直接拼进上下文，须排除 is_summary=1 的摘要行
+              "SELECT dialog_group_id, content, role, timestamp FROM conversations WHERE belong_entity_uuid = ? AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp DESC LIMIT 80",
               [_entityUuid]
             ) || [];
             const _seenGroups: Record<string, boolean> = {};
