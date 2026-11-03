@@ -58,13 +58,15 @@
 | 6 | **交互规约两项待业主裁决**：全员问询的 focus 轮转顺序；耳语对其余在场席位的降级粒度（`publicMeta` 还是完全不可见） | P2 | 2026-10-30 | 待业主定 | 待裁决 | `docs/blueprint/空间路由器-v1-交互规约.md` §6 |
 | 7 | **主库 522MB 内存耗尽型重启循环**：sql.js 整库载入 WASM，堆外固化约 597MB；pm2 已重启 1355 次；碎片仅 0.06% 故 VACUUM 无效 | **P0** | 2026-10-30 | 2026-11-07 | 待立项 | 蓝皮书附录 C · D1 |
 | 8 | **harness-mcp 无限重启**：`D:\AI文件\harness\src\FlowEngine.ts` 使用 `this._lastMachineSignal`（:351 / :655）但**未声明该字段** ⇒ tsc 失败 ⇒ 启动器「TypeScript 编译失败，MCP 拒绝启动」⇒ 循环重启 100+ 次。2026-10-27 20:57 的改动引入 | ~~P0~~ | 2026-10-31 | — | **✅ 已关闭（业主修复）** | 实测 `tsc --noEmit` exit 0 · `harness_list_flows` 返回 3 条 · 进程 online 稳定 |
-| 9 | **全仓测试基线带红**：稳态 29~31 项失败（18 文件），其中至少 2 项是**第三层拆除遗留**——`persistence-write-guard.test.ts` 仍断言 `_meetingEntered` 由 `enter/enterMulti` 置位、`evt-ownership-guard.test.ts` 仍断言盖章在 `exit` 分支之后，而这些方法已随 `845ec7a` 删除。另有 `e2e.test.ts` 属 flaky（两次运行失败用例不同） | P1 | 2026-10-31 | 2026-11-07 | 待排期 | 本批实测 |
-| 11 | **基线编译红：`EntityMeeting.isMeetableEntity` 被删但调用点未跟** —— 工作区未提交的删除让 `chat.ts:523` 与 `src/__tests__/entity-meeting.test.ts` 6 处引用悬空，`tsc` 全仓红。后果不止编译：harness **S3 编译检查**只看本次文件，于是 flow 在 `S3 → S4.5 兜底 → S3` 之间**无限回流**（实测 16:29~16:33 每 60s 一轮，MCP 调用 300s 超时），令牌一次也没签发。本次已 `git checkout HEAD --` 恢复该方法解除红；**并行的删除若再次落地而调用点未同步，本问题会复现** | P1 | 2026-11-01 | **2026-11-03** | 待确认删除者的意图：若确要删，须同时改 `chat.ts:523`（改用 `p.category !== 'S'`，语义等价）与测试 6 处；否则保持方法 | `a516a0b` 期间实测 |
-| 12 | **`block-summary-service.test.ts` 的「写入索引」断言已失效**：并行车道 2026-11-02 裁决「彻底拆除 n-gram」，移除 `indexSummary` 并（v33）整表 DROP `search_index`，但该用例仍断言摘要写入了 `search_index` ⇒ 恒红 1 项。**非本批引入**（P145 批B 只往该测试建表补了 `summary_hash`/`append_log` 两列）。需按新架构改写为「只校验 block_summary 文本 + summary_hash」 | P2 | 2026-11-02 | 2026-11-05 | 待排期 | `ced8b4d` 实测 |
-| 13 | **`test_mode` 未贯通到记忆抽取层**：P145 批B 实测时用 `test_mode:true` 跑探针，对话正确写入 `is_test=1`/`namespace='test'`，但会晤入口那条用户消息的记忆被抽成 `memory_kind='episodic'`、`namespace='default'`（实测 rowid 3367360），即**记忆层不认测试隔离标记**。后果：任何 test_mode 会话都会向生产记忆池写入真实行 | P2 | 2026-11-02 | 2026-11-06 | 待排期 | 本批实测 |
+| 9 | **全仓测试基线带红**：稳态 29~31 项失败（18 文件），其中至少 2 项是**第三层拆除遗留**——`persistence-write-guard.test.ts` 仍断言 `_meetingEntered` 由 `enter/enterMulti` 置位、`evt-ownership-guard.test.ts` 仍断言盖章在 `exit` 分支之后，而这些方法已随 `845ec7a` 删除。另有 `e2e.test.ts` 属 flaky（两次运行失败用例不同） | P1 | 2026-10-31 | ~~2026-11-07~~ | **✅ 已解决（2026-11-03 全绿）** —— 实测 `Test Files 322/322 passed · Tests 3841 passed / **0 failed**`（另 15 skipped + 2 todo）、`tsc --noEmit` exit 0。**不是靠豁免或放宽断言达成**：逐条定位真因后改，多数是「测量窗口 / 加载路径 / 契约同步」类缺陷，只有 1 项动了生产迁移 SQL。明细见 §4 首行与《2026-11-03 全量收口》 | 本批实测 |
+| 11 | **基线编译红：`EntityMeeting.isMeetableEntity` 被删但调用点未跟** —— 工作区未提交的删除让 `chat.ts:523` 与 `src/__tests__/entity-meeting.test.ts` 6 处引用悬空，`tsc` 全仓红。后果不止编译：harness **S3 编译检查**只看本次文件，于是 flow 在 `S3 → S4.5 兜底 → S3` 之间**无限回流**（实测 16:29~16:33 每 60s 一轮，MCP 调用 300s 超时），令牌一次也没签发。本次已 `git checkout HEAD --` 恢复该方法解除红；**并行的删除若再次落地而调用点未同步，本问题会复现** | P1 | 2026-11-01 | **2026-11-03**（已核实） | ⚠️ **2026-11-03 实测：当前无害** —— `EntityMeeting.ts:758` 方法在、`chat.ts:529` 调用点与测试 6 处引用齐全、`tsc --noEmit` exit 0、全量 **322/322 · 0 失败**。**但「删除者的意图」仍未确认、复发风险未消**：若确要删，须同时改 `chat.ts:529`（改用 `p.category !== 'S'`，语义等价）与测试 6 处；否则保持方法。**不得因当前绿就关闭本条** | `a516a0b` 期间实测；2026-11-03 复核 |
+| 12 | **`block-summary-service.test.ts` 的「写入索引」断言已失效**：并行车道 2026-11-02 裁决「彻底拆除 n-gram」，移除 `indexSummary` 并（v33）整表 DROP `search_index`，但该用例仍断言摘要写入了 `search_index` ⇒ 恒红 1 项。**非本批引入**（P145 批B 只往该测试建表补了 `summary_hash`/`append_log` 两列）。需按新架构改写为「只校验 block_summary 文本 + summary_hash」 | ~~P2~~ | 2026-11-02 | ~~2026-11-05~~ | **✅ 已解决（并行车道 `bce5b60` B3b-3 解绑 search_index）** | 实测 7 例全绿，`search_index` 仅剩注释提及 |
+| 13 | **`test_mode` 隔离标记会在锚点重建时静默重置** —— ⚠️ **原结论（「记忆层不认测试隔离标记」）已被本批穷举复核部分证伪**：写入侧 `persistence-stage.ts` 4 处均写 `namespace`、主通道 `write()`/`writeMemory()` 的 `ON CONFLICT ... SET namespace = excluded.namespace` 均在，全仓 `UPDATE memories`（约 30 处）与 14 个 `scripts/` backfill 脚本**零处**触及该列。**真根因唯一**：`SQLiteAdapter._rebuildMemoryAnchors` 的 `INSERT OR REPLACE` 列清单**缺 `namespace`**，靠 `_restoreSnap` 快照回填兜底，而快照有 `catch → 降级为无回填` 分支 ⇒ **降级发生时整批锚点落 `DEFAULT 'default'`**，穿透检索侧 `namespace <> 'test'` 硬门。故「不是重启必丢，是对快照的单点依赖、降级即丢」 | P2 | 2026-11-02 | ~~2026-11-06~~ | **✅ 已解决（案B 三件套第②件）** —— 写入时显式继承（`:2898` `anchorNamespace`，与 `global_uid` 同一继承位）+ `:2923` 列清单补列 + `:2924` 占位 + `:2932` 参数；第③件新增 `memory-write-columns.test.ts` 隔离列守卫 3 例（缺 `namespace` 即红，锚点路径不再豁免）防复发 | 穷举审计 + 三件套流水线（S1→S7-B 十阶段通过）；`tsc --noEmit` exit 0 · 守卫 13/13 |
 | 14 | **29 组「多段会话撞进同一组」待处置**：`dialog_group_id = dna_root_id + '_DG_' + seqPos`（**全局轮序号**），同一 seqPos 再次闭组即撞名 —— 元数据被 `INSERT OR REPLACE` 覆盖，而 `conversations` 行全部保留 ⇒ 组内混入多段不相干会话（实测 29 组 `seq_pos` 有重复，时间跨度最长 **149 小时**）。**根因已止**（重复 seq_pos 最后一次出现于 2026-10-15，seqCounter 修复生效），**存量未处置**。影响：组内 `block_summary` 只可能总结其中一段、`content_hash` 却覆盖全部、`BArchiveReader` 回放会把多段混在一起。**处置方向待定** —— 拆分组会改变历史归属并牵动 `memories.dialog_group_id` 关联，属高风险数据改造，不适合顺手做，需单独立项 + 业主确认 | P1 | 2026-11-02 | ~~2026-11-10~~ | **✅ 已处置（2026-11-02 清除）** | 本批实测，处置经过见「已完成」首行 |
 | 15 | **`DialogGroupAdapter` 的原文召回通道不存在（代码不符合法典）**：ADR-010 §12.2 明确要求「**双通道召回**：候选集 = `conversations` 原文命中 ∪ 摘要命中」，但 v11 改造把 `dialog_group` 域的 `textCol` 定死为 `block_summary`（且 `extraWhere` 要求非空）⇒ **原文通道整个不存在**，块路召回只能依赖摘要。后果：① 摘要没覆盖到的词永远召不回；② 无摘要的组被 `extraWhere` 整组挡死；③ 实测「多段混入」组段级命中仅 **15/72 = 20.8%**，清空重生成摘要后**零提升**（15/72）。按《记忆系统运维审计规范》第十条属「代码不符合法典 = 缺陷」，**不是数据问题** —— 影响全部块路召回，不限于已清除的 29 组。**处置待定**：恢复原文通道要改 `StructuredRecall` / `DialogGroupAdapter`（检索核心路径，与并行检索车道有撞车风险，须走 Harness 流水线） | ~~P1~~ | 2026-11-02 | ~~2026-11-07~~ | **✅ 已解决（`9842df6`）** | ADR-010 §12.2；实测段级 **20.8%→63.3%**、无摘要组 **0%→73.3%** |
 | 10 | **删除内核命令层（parseCommand）**：生产零调用（全仓非测试仅 1 处类型定义），但 `router.test.ts` 有 **38 处** `kind:'command'` 用它构造 T02~T08 七个核心测试块的进出场。且 `keep_only`（"诗雨留下"）/ `clear_all`（"所有人离场"）在 `internal_seat_op` 里**无等价能力**。需先定这两个语义去留，再批量改写测试 | ~~P2~~ | 2026-11-01 | — | **✅ 已完成**（`282bed8`；`clear_all` 仅存于单测、随单测删除，生产从未使用） | 本批实测 |
+| 16 | **`migration.ts:14` 业务编排反向依赖（V51 遗留，另立项）**：`import { M3LogicOrchestrator } from '../m3/M3LogicOrchestrator.js'` 是**值导入**，而该文件位于 m2 ⇒ 违反 CK-01（ADR-007「M2 不得调用 M3」）。V51 三件套已把 40D **数据字典**归位 m2（该批后 m2 对 m3 的值导入**仅剩此一处**），但本条性质完全不同：它是 `const m3 = new M3LogicOrchestrator()` 的**业务编排调用**，不是数据契约归属 —— 强行移动会改迁移执行时序，风险高且不属于 V51 范围。**处置方向待定**：① 把迁移编排上提到 m3/m4 驱动（m2 只留存储原语）；② 或给 m2 抽一个最小迁移接口、编排层注入。任一都需连带 review `MigrationManager` 调用链 | P2 | 2026-11-02 | 待排期 | 待立项 | V51 `approved_plan` 断言范围已明确排除（见 `docs/V51-...变更说明.md` §七.1） |
+| 17 | **type-only 反向引用未清（V51 遗留，另一批次）**：`SQLiteAdapter:121/140`、`Perception40DStore:15`、`math.ts:7/247`、`types/index.ts:6/71/146` 仍 `import type` 引 m3。按 CK-01 口径（`main_harness_checker.ts:240` 只豁免 `import type`）编译期擦除、**不计入依赖边**，故不影响 DS-01 打分。彻底清理需把 `PerceptionState24` / `PerceptionV40` 类型一并下沉到契约层，会动更多消费方 ⇒ 与 #16 同批评估 | P3 | 2026-11-02 | 待排期 | 待立项 | V51 §七.2 |
 
 ### 全量测试基线归因台账（2026-11-02 实测 · 服务问题 #9）
 
@@ -89,6 +91,30 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 **附带结论**：n-gram 拆除期间新增的守卫（`[B5]` ×4、`[B6]` ×2）**全部通过**，
 且 `[B6]` 判据判别力实测 7/7（3 种接回形态全命中、4 种合法形态零误报）。
 
+### 2026-11-03 全量收口（#9 关闭）
+
+**结果：`Test Files 322/322 · Tests 3841 passed / **0 failed**`（另 15 skipped + 2 todo）· `tsc --noEmit` exit 0。**
+
+上表各簇的最终去向（**归因口径修正**：原表把 7 项笼统记为「无 key 环境 + flaky」，
+逐条实测后发现其中**只有少数是环境问题，多数是真缺陷**）：
+
+| 簇 | 项数 | 实测真因 | 修法性质 |
+|---|---|---|---|
+| `sql-schema-consistency` | 1 | **守卫预言机盲区**：相关子查询被孤立 prepare（外层 `dialog_groups` 不在片段 FROM 里） | 修预言机（`correlatedContextPrepares` 外层包裹），非白名单豁免 |
+| `provider-selection-smoke` | 4 | **require `dist/`**，而 `dist` 不存在、生产走 tsx（V27批3 漏改遗留） | 改读 src 真源 |
+| `no-api-smoke` | 1 | 同上，`node -e` + `require('./dist/...')` 子进程 exit 1 | 改用 tsx 加载 src，子进程语义保留 |
+| `deepseek-no-key` | 1 | Test 5 的 `[\s\S]{0,300}` 窗口被两段注释撑爆（V45 把返回改写成三元） | 改为界定函数体再断言，**核心判据一字不改** |
+| `smoke` 知识库 ×2 | 2 | **测试过时**：`text` 已进 `FILE_SOURCE_TYPES`；409 已被 2026-09-20 契约改为 200 | 探针换真非法值（让探针重新生效）+ 同步契约 |
+| `e2e` Case4/8 | 2 | **`afterEach` ENOTEMPTY 清理失败**，非断言错 | `fs.rm` 内建 `maxRetries` |
+| `candidate-zone` P0-1 | 1 | 全量并发下 30s 不够（单跑实测 16.8s） | `{timeout:120000}`，断言未动 |
+| `memarch-v2` collect | 3 文件 | `.test.js` 实为 TS 语法 ⇒ Rollup 炸、**看不到断言** | 改名 `.ts` + README 同步 |
+| `memarch-v2` M5 | 1 | **生产迁移真缺陷**：注释承诺「无旧表跳过」但未实现，新库必抛 | 补 `CREATE TABLE IF NOT EXISTS` 兜底（已恢复 `attrib +R`） |
+| `runtime-api-smoke` | 2 | 服务在跑 ⇒ **自动转绿**（原记为「需服务」） | 无需改 |
+
+**方法论修正**：原表「API key / smoke / e2e = 7 项环境+flaky」是**按数量吻合的推断**，
+逐条看失败消息后推翻 —— 环境类实际只有 `runtime-api-smoke`(服务在跑即绿) 一项，
+其余全是可修的真缺陷。**这再次印证「逐条归因、不按数量吻合推断」的既有判据。**
+
 ### 风险说明 #1（务必读）
 
 124 项改动分布在 `src/m*`、`src/app`、`src/webui`、`src/engine`、`docs/agent-collab`、`data/knowledge`、`scripts/` 等。
@@ -102,6 +128,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-03 | **全仓测试基线收口至 0 失败（LEDGER #9 关闭）** —— 29 → 13 → **0**。**逐条定位真因后改，没有一条靠放宽断言或加豁免**：① `sql-schema-consistency` 是**守卫预言机盲区**：`MigrationManager` 的相关子查询 `dialog_groups.dialog_group_id` 被**孤立 prepare**（UPDATE 整体含 `${}` 被规则3跳过，只剩纯字符串片段）⇒ 新增 `correlatedContextPrepares()` 用**真实外层上下文**包裹后重试；判据三条齐全（限定引用 + 表真实存在且不在本片段 FROM + 包裹后成功），**列名真错时包裹后依然失败 ⇒ 不掩盖缺陷**，优于逐条白名单登记。② `provider-selection-smoke`(4) + `no-api-smoke`(1) **require `dist/` 编译产物**而 `dist` 根本不存在、生产走 tsx —— 属 **V27批3「移除 dist 测试别名」的漏改遗留**（`vitest.config.ts` 头注释即该裁决），改读 **src 真源**；`no-api` 保持子进程语义，改用 `node ./node_modules/tsx/dist/cli.mjs -e`。③ `smoke` 两条**都是测试过时、生产无缺陷**：探针 `source_type:'text'` **已进 `FILE_SOURCE_TYPES`**（`SourceTypePolicy:18`）⇒ 测了个合法值，改用 `__illegal_probe__` 让探针重新生效；`[201,409]` 同步 **2026-09-20 契约**（`server-knowledge-routes.ts:97-99`：重复提交 409→**200 更新既有条目**）。④ `e2e` Case4/8 是 **`afterEach` 的 ENOTEMPTY 清理失败、不是断言错**（`TEST_DIR` 模块级共用，一次 rm 失败残留流进下个 case）⇒ 用 `fs.rm` 内建 `maxRetries/retryDelay`（专为 EBUSY/ENOTEMPTY/EPERM 而设）。⑤ `candidate-zone` P0-1 实测 **16.8s**（`integrateFromEntity→addEdge` 全组档案重建），全量并发 30s 必超时 ⇒ `{timeout:120000}`，断言未动。⑥ **`memarch-v2`**（今日新建子项目）：3 个 `.test.js` 实为 **TS 语法**（`let db: Database.Database`）⇒ Rollup 在 collect 阶段就炸、**根本看不到断言**，改名 `.ts` + README 同步；**M05 迁移真缺陷** —— 注释写「旧表若不存在则跳过」但**从未实现**，新库执行必抛 `no such table`（验收报告 `+R ✅` 是在**有旧表的旧库**上跑的）⇒ 补 `CREATE TABLE IF NOT EXISTS black_diamond` 兜底：旧库真表存在不建（行为零变化）、新库建 0 行空表使 `INSERT SELECT` 命中 0 行即幂等跳过；纯 SQL **无法**条件访问不存在的表（`WHERE EXISTS(sqlite_master)` 救不了 —— `FROM` 仍在 prepare 期被解析）。改后 **`attrib +R` 已恢复**（验收加固清单 7.1，20 个核心文件） | `tsc --noEmit` exit 0；`Test Files 322/322 · Tests 3841 passed / **0 failed**`（另 15 skipped + 2 todo）；分批实测 28/72/18/14 例分批全绿 |
 | 2026-11-02 | **恢复块路原文召回通道（LEDGER #15 已解决）** —— ADR-010 §12.2 要求「候选 = `conversations` 原文命中 ∪ 摘要命中」，v11 改造后 `dialog_group` 域的 `textCol` 定死为 `block_summary` 且 `extraWhere` 强制非空 ⇒ **原文通道整个不存在**。在 `DialogGroupAdapter` 内新增对 `conversations` 按组聚合的分片 LIKE 查询，与摘要候选合并后统一走 `scoreAndRank` 精排与回表 —— **不新增第二个排序点**（不变量 #7），切词复用 `buildKeywordShards` 同源口径，`StructuredRecall` **一行未改**（避开并行检索车道）。**实测：段级命中 15/72=20.8% → 76/120=63.3%；无 `block_summary` 的组 0% → 22/30=73.3%** | `9842df6`；`dialog-group-adapter` 16→19 例（新增双通道 3 例）全绿；tsc=0；重启后 HTTP 200 |
 | 2026-11-02 | **清除 29 个「多段会话混入」对话组（乙方案实测失败后裁决）** —— 排查：`dialog_group_id = dna_root_id + '_DG_' + seqPos` 用**全局轮序号**，同一 seqPos 再次闭组即撞名，元数据被 `INSERT OR REPLACE` 覆盖而 `conversations` 行全留 ⇒ 29 组混入 2~7 段不相干会话（时间跨度最长 **149 小时**）。**先试乙方案（清空重生成摘要）并实测失败**：`dialog_group` 域召回的 `textCol = block_summary`，段级命中 **15/72 = 20.8% → 20.8%（零提升）**、组级全段命中 1/25 → 3/25 = 12.0%，按业主判据「产物不能被召回即视为失败」**不达标**。根因是载体容量（约 150 字摘要装不下 7 段关键词），且 ADR-010 §12.2 要求的**原文命中通道**在 v11 改造后已不存在。**业主裁决：不改现有任何规则去迁就数据，不行就彻底清除** ⇒ 删除 `dialog_groups` 29 行；`conversations` 16314 行与 `memories` 15597 条**一行不删**（ADR-010 D2「原文只增不删」，且本次明确不改规则） | 停服窗口执行；`dialog_groups` 3073→3044；残留目标组 0、`integrity_check=ok`、conversations/memories 计数不变；重启后 HTTP 200、混段组查询归零；29 组全字段（含 `append_log`）留档 `D:/tmp/dg-purge-backup-2026-11-02T04-35-55-894Z.json` |
 | 2026-11-02 | **删除 12 个空壳对话组（内容 ≤20 字）** —— 筛判口径：**不完整**（`u≠a` 或 `u=0`）**且** 内容 ≤20 字、且无指向（高钙记忆 0、无摘要）。关键实测：291 组 `u≠a`/`u=0` 中**0 组满足「无法有明确指向」**（全部都被 memories 引用过 1~11 条），故业主原三条件**一个都不该删**；经业主裁决放宽到「内容体量」判据后删除 12 组（钙分全为 0、均为单行、无摘要、无高钙记忆）。全量按字数筛本会命中 18 组，其中 6 组是 `u=a` 的**完整**一问一答（不满足前提，含 `block_calcium_score=2` 与 work 域组），已排除未删。**删除范围仅 `dialog_groups` 行**：`conversations` 16280 行、`memories` 15552 条**一行未动**（ADR-010 D2 原文只增不删）；13 条关联记忆的 `dialog_group_id` 悬空 —— 全仓无 `JOIN dialog_groups`，仅表示这些组不再进块路候选，记忆自身读取不受影响 | 停服窗口执行；`dialog_groups` 3077→3065；`integrity_check=ok`、目标组残留 0、conversations 与 memories 计数均不变；重启后端口 3000 监听、HTTP 200 |
@@ -134,7 +161,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 ## 5. 下次从这继续
 
-- **接续点**：空间路由器**三层拆除 + 性能重构 + 分流可观测性**已完成（`845ec7a` + 本批），下一步清理工作区未提交（P0 问题 #1）→ 修基线红测试（问题 #9，含第三层拆除遗留断言）→ F-29/30/31 → 主库内存课题
+- **接续点**：~~修基线红测试（问题 #9）~~ **✅ 2026-11-03 已完成 —— 322/322 文件、0 失败、tsc=0**（明细见 §4 首行与《2026-11-03 全量收口》）。下一步：**清理工作区未提交（P0 问题 #1，禁止 `git add -A`）** → F-29/30/31（#2）→ 主库内存课题（#7）→ #16/#17 两项 V51 遗留 → #11 意图确认
 - **卡点**：**先清工作区未提交**（P0，问题 #1），否则后续任何 git 操作都有数据丢失风险
 - **不要重做**：入口文件瘦身（`ea76510`）；空间路由器三级接入（`aa2f0fb`）；三层拆除**全部**（`d94ef16` `3666dee` `845ec7a`）；实测 8 条修复（`cf1bb1d` `c4a1b4e` `9b9c528` `e130c9f`）；文档四件套（`docs/blueprint/`）
 - **未落地的流程记录（勿当代码证据）**：B3b-4 收口期间本会话跑了 4 轮 harness flow（`run_mvyisd4x_cpl4` / `run_mvyj2pal_lorm` 卡 S4.5；`run_mvyjeqhs_u3nl` 卡 S6-B；末轮 `run_mvyjkssz_gjtf` 全 10 阶段通过、签发 3 文件令牌但**一个字节未写**、令牌自然过期）。实际收口由并行会话 `d0413fd`（B3b-4 生产侧清理）完成，方案为「分片 LIKE 直查 conversations」，与本会话拟用的 `recallByStructured` 不同 —— 见审计记录时不要把这几轮 run 当成代码变更证据

@@ -136,15 +136,26 @@ describe('C1: chat.ts 盖章时序（能力断言）', () => {
 
   it('C1: 会晤路由指令必须同时跳过 evt_* 路（push 门控）—— 否则 skip 只关半扇门（S4 评审 P1）', () => {
     // workingMemory.push 必须在 _skipEvtRoute 的 else 分支内（非无条件执行）
-    expect(src).toMatch(/if \(_skipEvtRoute\) \{[\s\S]{0,400}?\} else \{\s*\n\s*ctx\.workingMemory\.push\(dna/);
+    // 🔴 2026-11-02：原判据 `} else \{\s*\n\s*ctx\.workingMemory\.push` 被 2026-10-30 加的
+    //   三行注释（evt 行独立号 / seq_pos 撞车背景 / reserveNextSeq 配套）插断 ⇒ 恒不匹配。
+    //   放宽为「空白或整行注释」—— push **仍是 else 块的第一条语句**，判据不削弱：
+    //   中间只允许注释，任何真实语句插进来仍会红。
+    expect(src).toMatch(/if \(_skipEvtRoute\) \{[\s\S]{0,400}?\} else \{(?:\s|\/\/[^\n]*)*\s*ctx\.workingMemory\.push\(dna/);
     // 预判判据必须与状态机同源：同一 detectIntent 静态方法
     expect(src).toMatch(/EntityMeeting\.detectIntent\(message, _namesR, ctx\._entityMeeting\.isActive\(\), _aliasR\)/);
   });
 
-  it('盖章②必须在会晤状态机（exit 分支）之后 —— 否则缓冲路径拿到的是进/出前的旧戳', () => {
-    const exitBranch = src.indexOf('const exitResult = await _em.exit()');
+  // 🔴 2026-11-02 旧状态机根除（业主：「连根拔出，哪怕一个代码都不留」）：
+  //   原锚（第三层拆除前的会晤退出调用）随 845ec7a 第三层拆除删除 ⇒ indexOf 恒 -1。
+  //   🔴 不复述该方法名：根除要求连名字都不留，复述即重新成为可被照抄的调用入口。
+  //   新架构的会晤状态退出 = GroupSession dispatch LEAVE —— 状态唯一真源（ADR-013 硬约束②），
+  //   EntityMeeting 已降级为纯副作用执行器，退出状态由 dispatch 落定、再由
+  //   endMeetingSideEffects() 跑纪要/门卫/清轮次。断言语义**不变**：盖章②仍必须在退出状态落定之后。
+  it('盖章②必须在会晤退出状态落定（LEAVE dispatch）之后 —— 否则缓冲路径拿到的是进/出前的旧戳', () => {
+    const exitBranch = src.indexOf("_gs!.dispatch({ type: 'LEAVE'");
     const stampB = src.indexOf('const _stampB =');
-    expect(exitBranch).toBeGreaterThan(-1);
+    expect(exitBranch, '会晤退出 dispatch 锚点必须存在（旧状态机退出调用已删）').toBeGreaterThan(-1);
+    expect(stampB, '盖章② 必须存在').toBeGreaterThan(-1);
     expect(stampB).toBeGreaterThan(exitBranch);
   });
 

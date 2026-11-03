@@ -144,7 +144,11 @@ describe('批12 · FamilyGraph 观察区集成', () => {
     expect(statusOf('观察区甲'), 'L3 应进观察区').toBe('candidate');
   });
 
-  it('🔴 P0-1 端到端回归：首次提及即带介绍句 → 应晋升 active', async () => {
+  // 🔴 2026-11-03 修超时（非放松断言）：本用例走 `integrateFromEntity` 真实链路 → addEdge →
+  //   **全组档案重建**，单跑实测约 12s（LEDGER 已记该路径占 FG 耗时 92%）。默认 30s 在
+  //   **全量并发**（322 文件同跑、CPU 抢占）下不够 ⇒ 报 `Test timed out in 30000ms`，
+  //   而非断言失败；单跑恒绿正是这个形态。断言（晋升 active）一字不改，只给并发留余量。
+  it('🔴 P0-1 端到端回归：首次提及即带介绍句 → 应晋升 active', { timeout: 120000 }, async () => {
     if (!fg) return;
     // 走真实链路（不经私有方法），复现评审 P0-1：
     // 修复前 _accumulateCandidateEvidence 在 persons 循环【前】调用，

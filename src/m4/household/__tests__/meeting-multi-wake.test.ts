@@ -52,12 +52,17 @@ describe('T012 P0-5 · 反例不误判', () => {
 
 describe('T012 P1-3 · 会晤中点名切换（WeChat 风格）', () => {
   const di = (m: string) => EntityMeeting.detectIntent(m, NAMES, true, ALIAS);
-  it('称呼点名某参会者 → 切主发言到该人', () => {
-    expect(di('阿珍，你在干嘛')).toEqual({ kind: 'switch', targets: ['阿珍'] });
-    expect(di('阿芬，你到家了吗')).toEqual({ kind: 'switch', targets: ['王全芬'] }); // 别名
+  // 🔴 2026-11-02 对齐 D2 转场体验（a516a0b，业主 2026-11-01 批准）：
+  //   会晤中点名由 `switch`（永久换主）改为 `addressOnly`（本轮顶替，下一轮请求开头
+  //   dispatch SPEAK 恢复原主；连续点名保留最初原主）。原断言仍期望 switch ⇒ 恒红，
+  //   属 LEDGER #9「household 意图判序簇」遗留。断言**语义不变**（点名仍须先于 askAll、
+  //   不被 wake 抢先），只是把「永久换主」这一过时前提换成现行语义。
+  it('称呼点名某参会者 → 本轮顶替发言（D2：不永久换主）', () => {
+    expect(di('阿珍，你在干嘛')).toEqual({ kind: 'addressOnly', targets: ['阿珍'] });
+    expect(di('阿芬，你到家了吗')).toEqual({ kind: 'addressOnly', targets: ['王全芬'] }); // 别名
   });
-  it('@某人 → 切主发言（不被 wake 抢先）', () => {
-    expect(di('@阿珍 在吗')).toEqual({ kind: 'switch', targets: ['阿珍'] });
+  it('@某人 → 本轮顶替发言（不被 wake 抢先）', () => {
+    expect(di('@阿珍 在吗')).toEqual({ kind: 'addressOnly', targets: ['阿珍'] });
   });
   it('纯提及（无紧跟分隔符）不误切', () => {
     expect(di('阿珍和徐诗雨都是好人').kind).toBe('normal');
@@ -72,11 +77,12 @@ describe('T012 发言人推断 inferSpeaker（多人·自然聊天）', () => {
   const stubFG: any = {
     getUUIDByName: (n: string) => ({ 徐诗雨: 'TXS-1', 阿珍: 'TXS-2', 王全芬: 'TXS-3' } as any)[n] || null,
     getEntityByUUID: () => ({ category: 'G' }),
-    saveLastMeeting: () => {},
+    // 🔴 2026-11-02 旧状态机根除：会晤状态保存类方法随 845ec7a 删除，此处不再向 mock 提供。
+    //   留着它会让「旧调用复活」被静默吞掉；删掉后一旦复活会直接抛 not a function ⇒ 成探测器。
     _saveMeetingSnapshot: () => {},
   };
   /**
-   * 🔴 2026-10-31 第三层固化：`EntityMeeting.enterMulti()` 已随旧状态机删除。
+   * 🔴 2026-10-31 第三层固化：旧的「多人进入」状态机路径已删除（生产代码零残留）。
    *   会晤状态的真源是 GroupSession —— 本测试用**只读视图**注入等价状态，
    *   与生产接线方式（chat.ts 里的 `setSessionView`）完全同形。
    */

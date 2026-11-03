@@ -127,9 +127,15 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
     //   ⇒ KnowledgeEngine 来源守卫 throw，而路由裸 await 无 catch ⇒ **请求挂起**（必然超时）。
     //   ① 先断言“非法类型 → 400”（可见失败，锁定本次修复，防回归）
     //   ② 再用合法类型 'md' 走完整 CRUD
+    // 🔴 2026-11-03 修探针值（**不是放松断言，是让探针重新生效**）：
+    //   原探针用 `source_type:'text'` —— 它**已进 FILE_SOURCE_TYPES**
+    //   （src/app/knowledge/SourceTypePolicy.ts:18 `'md','txt','text','pdf',...`），
+    //   故 `isAllowedForAdd('text')` 恒 true ⇒ 返回 200 是**正确**行为，
+    //   而本断言要 400 ⇒ 探针测了一个合法值、早已失效（非生产缺陷）。
+    //   改用确定不在 FILE ∪ ANALYSIS 的值，断言与意图（非法→400）一字不改。
     const { status: sBad } = await json('/api/knowledge', {
       method: 'POST',
-      body: JSON.stringify({ title: '非法来源探针', content: 'x', source_type: 'text' }),
+      body: JSON.stringify({ title: '非法来源探针', content: 'x', source_type: '__illegal_probe__' }),
     });
     expect(sBad, '非法 source_type 必须返回 400（而非挂起不返回）').toBe(400);
 
@@ -141,11 +147,13 @@ describe('P3.2 - 核心链路 E2E 测试', () => {
       method: 'POST',
       body: JSON.stringify({ title: uniq, content: `${uniq} 内容`, source_type: 'md' }),
     });
-    expect([201, 409], 's1 必须是 201（新建）或 409（语义去重命中）').toContain(s1);
-    // 🔴 2026-09-19：知识库 `add()` 带 **DedupService 语义去重**（按嵌入相似度，非文本精确匹配）
-    //   ⇒ 固定/近似内容会被判重申而返回 409（这正是本用例此前“必然失败”的另一个原因，
-    //   且与“每次都新建”的测试意图结构性冲突）。去重命中时跳过后续 CRUD（条目未新建）。
-    if (s1 === 409) return;
+    // 🔴 2026-11-03 同步 2026-09-20 契约变更（真源 src/webui/server-knowledge-routes.ts:97-99）：
+    //   「重复提交不再拒给（409）而是**更新既有条目** ⇒ 新建 201 / 命中重复并更新 200
+    //    （响应体带 updated:true 与 dedup_hit）」。故原期望里的 409 分支已废弃。
+    //   知识库 `add()` 带 **DedupService 语义去重**（按嵌入相似度，非文本精确匹配），
+    //   时间戳后缀仍可能被判近似 ⇒ 命中即更新既有条目返回 200。
+    expect([201, 200], 's1 必须是 201（新建）或 200（语义去重命中并更新）').toContain(s1);
+    if (s1 !== 201) return; // 未真正新建 ⇒ 跳过后续 CRUD（与原 409 分支同义）
     expect(d1.id).toBeTruthy();
     expect(d1.id).toBeTruthy();
     const id = d1.id;
@@ -238,8 +246,11 @@ describe('P3.3 - 数据完整性测试', () => {
       method: 'POST',
       body: JSON.stringify({ title: '完整性测试', content, source_type: 'md' }),
     });
-    expect([201, 409], 's1 必须 201（新建）或 409（语义去重命中）').toContain(s1);
-    if (s1 === 409) return;
+    // 🔴 2026-11-03 同步 2026-09-20 契约（真源 src/webui/server-knowledge-routes.ts:97-99）：
+    //   「重复提交不再拒给（409）而是**更新既有条目** ⇒ 新建 201 / 命中重复并更新 200」。
+    //   故原「接受语义去重命中（409）」的 409 分支已废弃，改收 200。
+    expect([201, 200], 's1 必须 201（新建）或 200（语义去重命中并更新）').toContain(s1);
+    if (s1 !== 201) return; // 未真正新建 ⇒ 跳过后续（与原 409 分支同义）
     expect(d1.content).toBe(content);
 
     // 通过搜索验证

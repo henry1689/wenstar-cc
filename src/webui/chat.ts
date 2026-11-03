@@ -722,8 +722,9 @@ export async function processChat(
     //   与 persistence-stage 同源表达式「会晤实体 > 退出实体 > 玉瑶」。
     //   此刻会晤进/出尚未在本轮处理 ⇒ 进入/退出指令由下方预判拦截（不写 evt）；
     //   缓冲路径由下方盖章②（会晤状态落定后）重盖修正。
-    //   ⚠ 已知归属漂移（S4 评审 P2-A）：普通消息若触发 restoreLastMeeting 或群聊 switchTo，
+    //   ⚠ 已知归属漂移（S4 评审 P2-A）：普通消息若触发会晤自动恢复（R1 快照）或群聊切主，
     //   即时毕业条目持旧戳、缓冲条目持新戳 —— 两者均为有效归属（非 NULL），影响面小，如实声明。
+    //   （旧状态机方法名已于 2026-10-31 随第三层拆除删除，此处不再点名，只描述行为。）
     {
       const _fgOwnA = ctx.m4?.getFamilyGraph?.();
       const _stampA = ctx._entityMeeting?.getEntityUUID?.()
@@ -782,7 +783,7 @@ export async function processChat(
     //   随 `WS_SPACE_GATE_OPEN` 一起删除，换人恒定放行，不再需要「整轮短路」的拒绝通道。
     let _meetingExited = false;
     // 🔴 P0-2.1(2026-10-17): 会晤「进入」路由指令信号 —— 与 _meetingExited 对称。
-    //   仅显式 enter/enterMulti 置位；restoreLastMeeting（重启自动恢复）**不置位**
+    //   仅显式进入类路由指令置位；重启自动恢复（R1 快照 + loadSession）**不置位**
     //   （那是普通对话恰好触发恢复，不是路由指令，不能跳写记忆）。供 persistence-stage 判据使用。
     let _meetingEntered = false;
     // 🔴 新顺序：先解析意图并迁移状态，再装配上下文与检索。
@@ -1273,7 +1274,7 @@ export async function processChat(
           } catch { /* 非致命 */ }
         }
         // 纪要日志不再在此接收返回值：切主后由 `_em.endMeetingSideEffects()` 内部打出
-        // 「会议结束 → 纪要已生成」，旧路径由 `_em.exit()` 内部同样打出 —— 两条路径均有日志。
+        // 「会议结束 → 纪要已生成」（第三层拆除前的旧状态机路径同样有此日志）。
         // 🔴 转场彻底隔离(2026-08-23): 记录退出实体 UUID —— 退出消息归属原实体（不污染玉瑶历史），
         // 玉瑶转场后=全新会话（玉瑶专属历史过滤，看不到转场消息）；下一轮 processChat 开头清除。
         (ctx as any)._exitEntityUuid = _exitUuid;
@@ -2282,6 +2283,11 @@ try {
 // V4.0 实体会晤：注入实体上下文（优先于 knowledgeBaseText）
 // 🔴 P0-2 修复: 知识库去重——移除 base 层重复的 knowledgeBaseText，
 // 知识库由 memoryText（injectMemories 截断过滤后）唯一承载，避免 LLM 看两遍浪费 token。
+// 🔴 HOOK_CHAT_TS 装配计时起点（观测点，非业务逻辑，不违反薄调度层约束）：
+//   finalKnowledgeText 从此处开始被逐段追加（PFC/记忆/铁律/档案/高德…），到 PromptAssembler
+//   完成处的 [KB·装配] 日志为止。此前只有 [KB·分段] 的**各段字节数**、缺**装配耗时**
+//   —— 而装配中途含多处 await（PFC 构建、记忆检索、外部数据），无耗时无法定位卡点。
+const _kbAssembleT0 = Date.now();
 let finalKnowledgeText = _entityContextText || '';
 
 // 🔬 批20(诊断): kb 分段占比 —— 用【...】标记切分，定位 L2 大头的真实构成。
@@ -2822,6 +2828,8 @@ try {
       }).join(" ");
       console.log("[铁律·去重校验] len=" + finalKnowledgeText.length + " | " + _cnt);
       console.log("[Assembler·块] " + _assembled.blocks.map((b: any) => b.id + ":" + (b.content || "").length).join(" "));
+      // 🔴 HOOK_CHAT_TS：装配耗时 + 最终字节数（各段字节数由 [KB·分段] 覆盖；此前缺耗时字段）
+      console.log("[KB·装配] duration_ms=" + (Date.now() - _kbAssembleT0) + " total=" + finalKnowledgeText.length + " segments=" + _assembled.blocks.length);
     } catch { /* 诊断非阻塞 */ }
   }
 } catch (_asmErr) {

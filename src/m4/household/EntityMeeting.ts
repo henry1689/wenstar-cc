@@ -9,9 +9,10 @@
  *   - 发言人推断（inferSpeaker）
  *
  * 🔴 会晤/群聊状态的**唯一真源是 `GroupSession`**（ADR-013 硬约束②「状态只有一处写」）。
- *   本类不再持有任何会晤状态：`_meeting` 字段与它的状态机（enter / enterMulti / exit /
- *   switchTo / addParticipant / restoreLastMeeting / saveLastMeeting）已于 2026-10-31
- *   随 `WS_GROUP_V2` 回滚开关**一并删除**。
+ *   本类不再持有任何会晤状态：原 `_meeting` 字段与它承载的那套状态机（进入 / 退出 /
+ *   切主 / 加人 / 恢复 / 保存 一类方法）已于 2026-10-31 随 `WS_GROUP_V2` 回滚开关
+ *   **一并删除**，生产代码零残留（全仓扫描：旧方法定义 0 处、`_em.<旧方法>` 调用 0 处）。
+ *   🔴 刻意不在此复述方法名 —— 复述等于持续向读者演示已删 API，正是本次根除要消除的入口。
  *
  *   状态读方法（isActive / isMultiParty / getParticipants / getEntityName / getEntityUUID）
  *   全部经 `_sessionView` 只读视图向 GroupSession 取值，**不做任何本地回退** ——
@@ -134,8 +135,8 @@ export class EntityMeeting {
    *
    * 缺口成因：切主后重启恢复走 `loadSession` → `_gs.active` 分支，**既不经过 `enter()`，
    * 也不经过 `beginMeetingSideEffects()`** —— 而这两样东西正是下面两项数据的唯一来源：
-   *   1. `_isFirstTurn`：原本只在 `enter()` 置位 ⇒ 重启后首轮开场协议/首轮 KB 不注入；
-   *   2. `_multiParticipants` / `_multiMeetingName`：原本只在 `enterMulti()`/`addParticipant()`
+   *   1. `_isFirstTurn`：原本只在旧「进入」路径置位 ⇒ 重启后首轮开场协议/首轮 KB 不注入；
+   *   2. `_multiParticipants` / `_multiMeetingName`：原本只在旧「多人进入 / 加人」路径
    *      写入 ⇒ 进程重启后本类单例随进程消亡、数组为空 ⇒ 纪要门槛 `participants>=3`
    *      只能靠后续 JOIN 零星补入（实测只补到 1 个）⇒ **纪要静默丢失**。
    *
@@ -154,7 +155,7 @@ export class EntityMeeting {
     if (ps.length === 0) return;
     this._multiParticipants = ps.map(p => ({ uuid: p.uuid, name: p.name, category: p.category || '' }));
     this._multiMeetingName = ps.map(p => p.name).join('、');
-    // `_multiTurns` 不处理：进程重启后本就为空，与 `enterMulti()` 每次清零的语义一致。
+    // `_multiTurns` 不处理：进程重启后本就为空，与旧多人进入路径每次清零的语义一致。
   }
 
   private static GENERIC_NAMES = new Set(['妹妹', '老婆', '妈妈', '爸爸', '姐姐', '哥哥', '弟弟']);
@@ -214,7 +215,7 @@ export class EntityMeeting {
    *
    * 🔴 P078 任务2（多人会议纪要静默丢失，PI P077 §四独立发现）：
    *   `endMeetingSideEffects` 的纪要条件为 `turns>=2 && participants>=3`，而 `_multiParticipants`
-   *   原先**只在旧 `enter()/enterMulti()/addParticipant()` 里写入** —— 切主后那些方法不再被调用
+   *   原先**只在旧 `旧的进入/多人进入/加人路径` 里写入** —— 切主后那些方法不再被调用
    *   ⇒ 恒空数组 ⇒ 条件后半段永不满足 ⇒ **纪要永不生成**（实测 3 人会晤散会后无「纪要已生成」）。
    *
    *   现在此处同步采集**纪要素材**（名单 + 会议名）：与 `recordTurn` 采集 `_multiTurns` 同构，
@@ -297,7 +298,7 @@ export class EntityMeeting {
 
   // ═══════════════════════════════════════════════════════════════
   // 状态查询 —— 🔴 一律读 GroupSession 只读视图，不做本地回退
-  //   （2026-10-31：`this._meeting` 回退分支已随旧状态机一并删除）
+  //   （2026-10-31：本地状态回退分支已随旧状态机一并删除，不再有任何本地兜底）
   // ═══════════════════════════════════════════════════════════════
 
   isActive(): boolean {
@@ -373,7 +374,7 @@ export class EntityMeeting {
 
   /**
    * 🔴 P078：`_isFirstTurn` 的重置无条件执行。
-   *   切主后本类不再持有会晤状态，原 `if (this._meeting)` 守卫已删除；
+   *   切主后本类不再持有会晤状态，原「本地状态为真才执行」的守卫已删除；
    *   行为等价性：旧路径下本方法只在会晤态被调用，新路径下无状态也必须复位。
    */
   incrementTurn(): void {

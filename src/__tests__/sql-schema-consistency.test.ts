@@ -195,6 +195,59 @@ function findGuard(lines: string[], stmtLine1Based: number, column: string, tbl:
   return null;
 }
 
+/**
+ * 相关子查询的外层上下文补救（2026-11-03）
+ * ===========================================
+ * 被守卫误报的活体标本：`MigrationManager.ts:902` 的 `transcriptLen`。
+ * 它是被插进 `UPDATE dialog_groups SET summary_error = (CASE ... WHEN (${transcriptLen}) < 120 ...)`
+ * 的**相关子查询** —— 片段里的 `dialog_groups.dialog_group_id` 引用的是**外层被更新的表**，
+ * 运行时完全合法；但 UPDATE 整体含 `${}` 被规则 3 跳过，只剩这个纯字符串片段被**孤立 prepare**
+ * ⇒ 外层上下文丢失 ⇒ 必报 `no such column: dialog_groups.dialog_group_id`。
+ *
+ * 判据（三条同时成立才补救，缺一即视为真缺陷继续上报）：
+ *   ① 报错形如 `no such column: <表>.<列>`（限定引用，非本片段内列名笔误）
+ *   ② 该表在本库真实存在，且**不在本片段自己的 FROM/JOIN/INTO/UPDATE 来源里**
+ *      （在 ⇒ 说明是片段自身表，列名真错，不补救）
+ *   ③ 用真实外层上下文包裹后能 prepare 成功
+ *      —— 列名若真写错，包裹后 `UPDATE <外层表> SET ... (<坏子查询>)` 依然失败 ⇒ 不掩盖缺陷。
+ *
+ * 为什么不用「加白名单豁免」：豁免是逐条人工登记，遇到下一个相关子查询又要再登记一次；
+ * 本函数修的是**预言机的结构性盲区**（孤立 prepare 不支持外层引用），一次修好覆盖全仓。
+ */
+function correlatedContextPrepares(db: InstanceType<typeof Database>, sql: string, firstErr: string): boolean {
+  let cur = sql;
+  let err = firstErr;
+  // 最多嵌 5 层：一条子查询可能同时引用多个外层表
+  for (let depth = 0; depth < 5; depth++) {
+    const m = /no such column:\s*["'`]?([A-Za-z_][\w]*)\.([\w]+)/i.exec(err);
+    if (!m) return false; // 非限定引用 ⇒ 不是外层表问题，交回原判
+    const outer = m[1];
+    // ② 该表必须真实存在（表名笔误 ⇒ 查不到 ⇒ 不补救）
+    const exists = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?")
+      .get(outer);
+    if (!exists) return false;
+    // ② 该表不得是本片段自己的表来源（在 ⇒ 片段内列名真错）
+    if (new RegExp(`\\b(FROM|JOIN|INTO|UPDATE)\\s+["'\`]?${outer}\\b`, 'i').test(cur)) return false;
+    // ③ 包裹：给外层表套一层 UPDATE，把片段作为其列值的子查询
+    let cols: Array<{ name: string }>;
+    try {
+      cols = db.prepare(`PRAGMA table_info(${outer})`).all() as Array<{ name: string }>;
+    } catch {
+      return false;
+    }
+    if (!cols?.length) return false;
+    cur = `UPDATE ${outer} SET ${cols[0].name} = (${cur}) WHERE 0`;
+    try {
+      db.prepare(cur);
+      return true;
+    } catch (e2) {
+      err = (e2 as Error).message; // 仍失败 ⇒ 可能是另一个外层表，继续下一轮
+    }
+  }
+  return false;
+}
+
 describe('[SQL-schema 守卫] 全仓 SQL 必须能对至少一个真实库 prepare 成功', () => {
   const available = DB_PATHS.filter(([, p]) => existsSync(p));
 
@@ -247,7 +300,15 @@ describe('[SQL-schema 守卫] 全仓 SQL 必须能对至少一个真实库 prepa
           // 注意：better-sqlite3 的 prepare() 返回 Statement，**没有 finalize()**（那是 sql.js 的 API）；
           // 写 .finalize() 会抛 TypeError → 造成「所有库都拒绝」的假阳性（已踩过）。
           try { db.prepare(sql); return { name, ok: true, err: '' }; }
-          catch (e) { return { name, ok: false, err: (e as Error).message }; }
+          catch (e) {
+            const err = (e as Error).message;
+            // 相关子查询补救：`外层表.列` 在孤立 prepare 下必然报「列不存在」——
+            // 该引用本就依赖外层语句（如 UPDATE dialog_groups ... WHERE x = (SELECT ...
+            // WHERE c.y = dialog_groups.y)），片段单独编译时外层上下文已丢失。
+            // 用**真实外层上下文**包裹后重试：列名若真写错，包裹后依然失败 ⇒ 不掩盖缺陷。
+            if (correlatedContextPrepares(db, sql, err)) return { name, ok: true, err: '' };
+            return { name, ok: false, err };
+          }
         });
         // 规则 1：任一库接受 → 通过
         if (results.some((r) => r.ok)) continue;

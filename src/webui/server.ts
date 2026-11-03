@@ -873,7 +873,7 @@ async function initPipeline(): Promise<void> {
     if (gatekeeper) entityMeeting.setGatekeeper(gatekeeper);
     const minutesStore = new MeetingMinutesStore(familyGraph);
     entityMeeting.setMinutesStore(minutesStore);
-    // 🔴 2026-10-31 第三层固化：原 S2-G1「注入存储 + 启动期 restoreLastMeeting()」已删除。
+    // 🔴 2026-10-31 第三层固化：原 S2-G1「注入存储 + 启动期恢复调用」已删除（旧状态机随第三层一并拔除）。
     //   会话状态的跨重启恢复由 GroupSession 的 R1 快照承担（engine_store 单键
     //   `group_session_state`，见 SessionStore.loadSession），在 chat.ts 每请求入口执行。
     //   两条恢复链并存本身就是隐患：旧链恢复出 EntityMeeting._meeting，而群聊状态真源在
@@ -1692,6 +1692,9 @@ const MAX_SSE_CLIENTS = 100;
  *   V26: 引擎产出格式随引擎而定（edge→.mp3 / sapi→.wav），故按扩展名集合过滤，
  *        否则非 .mp3 的产物会永久堆积、并把成功记录挤出「最近 500 个」窗口。 */
 const TTS_AUDIO_EXTS = ['.mp3', '.wav'];
+/** 🔴 2026-11-02 业主裁决：音频保留窗口 500 → 30（减少存储占用）。
+ *  从三处内联魔数提为单一常量，避免只改一处造成「slice/日志/早退」三处口径漂移。 */
+const TTS_AUDIO_KEEP = 30;
 
 /**
  * 🧹 2026-10-30 残留临时库清扫（启动时一次）
@@ -1762,12 +1765,12 @@ function cleanupOldAudioFiles(): void {
       .filter((f: string) => f.startsWith('tts_') && TTS_AUDIO_EXTS.some((e) => f.endsWith(e)))
       .sort()
       .reverse(); // 最新在前
-    if (files.length <= 500) return;
-    const toDelete = files.slice(500);
+    if (files.length <= TTS_AUDIO_KEEP) return;
+    const toDelete = files.slice(TTS_AUDIO_KEEP);
     for (const f of toDelete) {
       try { unlinkSync(path.join(audioDir, f)); } catch (_) { /* ignore */ }
     }
-    if (toDelete.length > 0) console.log('[AudioClean] 清理 ' + toDelete.length + ' 个旧音频文件, 保留 ' + Math.min(files.length, 500) + ' 个');
+    if (toDelete.length > 0) console.log('[AudioClean] 清理 ' + toDelete.length + ' 个旧音频文件, 保留 ' + Math.min(files.length, TTS_AUDIO_KEEP) + ' 个');
   } catch (_) { /* 清理失败不影响主流程 */ }
 }
 

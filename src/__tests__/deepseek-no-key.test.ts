@@ -104,8 +104,22 @@ describe('[NO-KEY] DeepSeekLLMProvider — pre-fetch key guard', () => {
   it('rawCall has no guard — remains explicit API caller', () => {
     const srcPath = path.join(REPO, 'src/m5/DeepSeekLLMProvider.ts');
     const content = readFileSync(srcPath, 'utf8');
-    const rawCallMatch = content.match(/async rawCall\([\s\S]{0,300}return result\.text/);
-    expect(rawCallMatch).toBeTruthy();
-    expect(rawCallMatch![0]).not.toMatch(/!resolveApiKey/);
+    // 🔴 2026-11-03 修测量（非放松判据）：原正则 `async rawCall\([\s\S]{0,300}return result\.text`
+    //   是**写死 300 字符窗口**去够函数体，而 rawCall 的入参区与函数体之间已堆了两段注释
+    //   （丙1 2026-10-09 的 opts 说明 + V45 2026-10-09 的原始 content 兜底说明），
+    //   实测 `async rawCall(` → `return` 远超 300 ⇒ 恒 null ⇒ 断言必红。
+    //   另 V45 把返回改写成 `return _raw ? result.rawContent! : result.text`（三元），
+    //   字面 `return result.text` 也已不存在。
+    //   现改为**界定函数体**再断言，判据本体（rawCall 内无 resolveApiKey 降级守卫）一字不改：
+    const fnStart = content.indexOf('async rawCall(');
+    expect(fnStart, 'src 中找不到 async rawCall —— 方法被改名/删除？请同步修订本守卫').toBeGreaterThanOrEqual(0);
+    // 函数结束 = 行首 `  }`（函数体内部最浅缩进为 4 空格，不会提前命中）
+    const fnEnd = content.indexOf('\n  }', fnStart);
+    expect(fnEnd, '无法界定 rawCall 函数体边界').toBeGreaterThan(fnStart);
+    const fnBody = content.slice(fnStart, fnEnd);
+    // 原判据的「真的返回结果」一层（三元形态亦算）
+    expect(fnBody, 'rawCall 必须返回结果').toMatch(/\breturn\s+[^;]+;/);
+    // 核心判据：rawCall 内不得有 resolveApiKey 降级守卫（它是显式 API 调用方）
+    expect(fnBody, 'rawCall 不得带 resolveApiKey 守卫').not.toMatch(/!resolveApiKey/);
   });
 });

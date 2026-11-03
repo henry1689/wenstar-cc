@@ -61,7 +61,14 @@ describe('E2E: 完整流水线 M1→M2→M3→M4→M5', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(TEST_DIR, { recursive: true, force: true });
+    // 🔴 2026-11-03 修（全量并发下 Case 4 / Case 8 判红的真根因）：
+    //   报错是 `ENOTEMPTY: directory not empty, rmdir '...\.e2e-tmp-...\knowledge'` ——
+    //   **不是断言失败，是 afterEach 清理失败**：sql.js / FamilyGraph 写盘句柄尚未释放时，
+    //   Windows 上立刻 rm -r 必撞 ENOTEMPTY。本文件 TEST_DIR 是模块级常量（8 个 case 共用），
+    //   一次 rm 失败 ⇒ 残留数据流进下个 case 的 beforeEach（existsSync 已真 ⇒ 不再 mkdir）。
+    //   Node 的 fs.rm 内建 `maxRetries` 正是针对 EBUSY / ENOTEMPTY / EPERM 而设 ⇒ 直接用它，
+    //   不自己写重试循环（断言、用例、超时全部不动）。
+    await fs.rm(TEST_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it('Case 1: 家庭情感话题 → comfort 回应', async () => {

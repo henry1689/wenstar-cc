@@ -74,7 +74,8 @@ export interface PersistInput {
  *
  * 为什么用结构信号而非扫正文：会晤状态机（chat.ts 的 EntityMeeting.detectIntent）
  * 本就知道本条是否触发了进入/退出；正则猜正文 = V3 任务书明令禁止的旧方案（会漏会误）。
- * restoreLastMeeting（重启自动恢复）**不置 entry** —— 那是普通对话恰好触发恢复，不是指令。
+ * 重启自动恢复（R1 快照 + loadSession）**不置 entry** —— 那是普通对话恰好触发恢复，不是指令。
+ * （旧状态机的恢复方法已随第三层拆除删除，此处只描述行为、不复述已删 API 名。）
  */
 export function shouldSkipMemoryWrite(p: { isMeetingEntry?: boolean; isMeetingExit?: boolean }): boolean {
   return !!(p.isMeetingEntry || p.isMeetingExit);
@@ -227,7 +228,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
   const _fg = input.ctx.m4?.getFamilyGraph?.();
   const _yuyaoUUID = _fg?.getUUIDByName?.('玉瑶') ?? null;
   // 归属 = 聊天对象 UUID（会晤激活/群聊当前发言者）或 玉瑶 UUID（默认私聊）
-  // 🔴 转场彻底隔离(2026-08-23): 退出轮 _meeting=null（_em.exit 已清空），belong 兜底原实体 UUID
+  // 🔴 转场彻底隔离(2026-08-23): 退出轮会晤状态已被 LEAVE dispatch 清空（无本地状态），belong 兜底原实体 UUID
   //   ——退出消息归原实体，绝不污染玉瑶历史（玉瑶转场后=全新会话，看不到转场消息）
   let belongUUID: string | null = _meetingUUID ?? (input.ctx as any)?._exitEntityUuid ?? _yuyaoUUID;
   let asstUUID: string | null = _meetingUUID ?? _yuyaoUUID;

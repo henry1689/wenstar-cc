@@ -38,6 +38,17 @@ function stubAdapter() {
     },
     queryAll: () => [{ id: 7 }],
     save: () => {},
+    // 🔴 2026-11-02（业主指令「遗留问题逐一改善」）：writeMemory 实际依赖、但此前桩未提供的两个成员。
+    //   缺它们 ⇒ writeMemory 内部 `this._isDuplicateNewWrite(...)` / `this.db!.exec(...)` 抛 TypeError，
+    //   五例根本走不到自己的断言（三例 "reading 'sql'"、一例 not.toThrow、一例 writeMemory 失败日志）。
+    //   ① 去重闸门（SQLiteAdapter:1207，2026-10-15 业主批准 A+C 方案引入）——
+    //      返回 false = 不拦截，写入照常发生，测试才能拿到 runCalls[0]；去重语义由
+    //      dedupe-zone-scope.test.ts 独立覆盖，两用例正交，不在此重复断言。
+    //   ② seq_pos 冲突改号（SQLiteAdapter:1222）—— 桩的 queryAll 恒返回 [{id:7}] 故必然进该分支，
+    //      返回结构按 `Number(_mx?.[0]?.values?.[0]?.[0])` 匹配（取 values[0][0]）。
+    //   本文件 insertConversation 的 3 例共用同一桩，多两个成员对它们无影响（4 例已绿）。
+    _isDuplicateNewWrite: () => false,
+    db: { exec: () => [{ values: [[9999]] }] },
   };
   return { self, runCalls };
 }

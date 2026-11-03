@@ -19,6 +19,8 @@
  * 【原典零改动】瑶灵侧接收/流水线/推送已建成。
  */
 import { GlobalBusClient } from '../../tianquan-rpc/GlobalBusClient.js';
+// 🔴 2026-11-03：40D 向量唯一编码器（归位说明见下方 encodeP40 内注释）
+import { encodePerceptionV40FromDims } from '../../m2/PerceptionVector40DCodec.js';
 
 interface SQLiteLike {
   queryAll(sql: string, ...params: unknown[]): Array<Record<string, unknown>>;
@@ -263,7 +265,14 @@ function decodeP40(raw: unknown): number[] | null {
 }
 
 function encodeP40(dims: number[]): string {
-  return JSON.stringify({ __v: '40d', dims: dims.map((x) => Math.round(x * 10000) / 10000) });
+  // 🔴 2026-11-03 归位唯一编码器（业主批准批4）：原手写 `JSON.stringify({__v:'40d', dims:round4})`
+  //   绕过「编码器唯一入口」（管控总纲§五），且版本字段与标准不一致（手写 '40d' 字符串 vs
+  //   标准 PERCEPTION_40D_ENCODING_VERSION=2 数字）、多一层 round4 精度截断、无入参校验。
+  //   改调与 MigrationManager:410、Perception40DStore:29 同源的唯一实现。
+  //   兼容性：decodePerceptionV40 对「未知 __v + 合法 dims」走 hasV2Shape 数据保全分支 ⇒
+  //   旧手写数据照读，不迁移不覆盖；安全性：调用点 :285 在 try/catch 内，新实现的
+  //   入参校验 throw 会被既有 catch 吞为 return 0，不会炸穿 arbitrateAndWrite。
+  return encodePerceptionV40FromDims(dims);
 }
 
 export function arbitrateAndWrite(sqlite: SQLiteLike, dnaRootId: string, payload: unknown): number {

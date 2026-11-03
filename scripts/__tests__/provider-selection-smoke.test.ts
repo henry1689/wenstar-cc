@@ -17,23 +17,28 @@ function restoreKeys() { KEYS.forEach(k => SAVED[k] === undefined ? delete proce
 
 const savedFetch = globalThis.fetch;
 
-// Load patched dist provider (explicit require, not vitest alias)
-function loadDistProvider() {
-  return require(require('node:path').resolve(__dirname, '..', '..', 'dist/m5/DeepSeekLLMProvider.js'));
+// 🔴 2026-11-03 修（与 deepseek-no-key.test.ts Test 4 同源裁决，此处为漏改遗留）：
+//   原实现 `require(dist/m5/*.js)` 并自称 "patched dist provider" —— 该说法是**假的**：
+//   生产跑 `tsx src/webui/server.ts`（start.cjs），dist 是无消费者的构建产物且本地常不存在
+//   ⇒ 本套件 4 个用例全挂 `Cannot find module ... dist\m5\...`。
+//   V27批3 已裁决 dist 非 authoritative runtime source，故改读 **src 真源**。
+//   动态 import 走 vitest 转译（.js → .ts），与 deepseek-no-key 同一手法。
+async function loadProvider(): Promise<typeof import('../../src/m5/DeepSeekLLMProvider.js')> {
+  return await import('../../src/m5/DeepSeekLLMProvider.js');
 }
 
 describe('[PROVIDER-SELECTION] No-key → Mock fallback verification', () => {
   // Test 1: DeepSeek isAvailable() returns false when all keys unset
-  it('DeepSeek isAvailable() is false when env keys unset', () => {
+  it('DeepSeek isAvailable() is false when env keys unset', async () => {
     saveKeys(); unsetKeys();
-    const mod = loadDistProvider();
+    const mod = await loadProvider();
     expect(mod.isAvailable()).toBe(false);
     restoreKeys();
   });
 
   // Test 2: MockLLMProvider has zero fetch/network calls
   it('MockLLMProvider has zero network calls', async () => {
-    const mod = require(require('node:path').resolve(__dirname, '..', '..', 'dist/m5/MockLLMProvider.js'));
+    const mod = await import('../../src/m5/MockLLMProvider.js');
     expect(mod.MockLLMProvider).toBeDefined();
     // MockLLMProvider.generate() is pure template — no fetch, no network
     // We verify by checking the function exists and is callable
@@ -42,8 +47,8 @@ describe('[PROVIDER-SELECTION] No-key → Mock fallback verification', () => {
   });
 
   // Test 3: MockLLMProvider is importable and implements LLMProvider interface
-  it('MockLLMProvider is importable and has generate() method', () => {
-    const mod = require(require('node:path').resolve(__dirname, '..', '..', 'dist/m5/MockLLMProvider.js'));
+  it('MockLLMProvider is importable and has generate() method', async () => {
+    const mod = await import('../../src/m5/MockLLMProvider.js');
     expect(mod.MockLLMProvider).toBeDefined();
     const p = new mod.MockLLMProvider();
     expect(typeof p.generate).toBe('function');
@@ -56,7 +61,7 @@ describe('[PROVIDER-SELECTION] No-key → Mock fallback verification', () => {
   it('DeepSeek generate() returns safe fallback when no key', async () => {
     saveKeys(); unsetKeys();
     (globalThis as any).fetch = async () => { throw new Error('FETCH_TRAP'); };
-    const mod = loadDistProvider();
+    const mod = await loadProvider();
     const p = new mod.DeepSeekLLMProvider();
     const r = await p.generate({
       strategy: { promptLevel: 0 } as any,

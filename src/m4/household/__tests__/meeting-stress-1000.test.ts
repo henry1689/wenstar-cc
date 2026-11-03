@@ -26,10 +26,10 @@ function mkMeeting(): EntityMeeting {
       return i >= 0 ? `TXS-${String(i).padStart(3, '0')}` : null;
     },
     getEntityByUUID: () => ({ category: 'G' }),
-    saveLastMeeting: () => {},
+    // 🔴 2026-11-02 旧状态机根除：会晤状态保存类方法随 845ec7a 删除，不再向 mock 提供（不复述名称）。
   };
   const em = new EntityMeeting(fg);
-  // 🔴 2026-10-31 第三层固化：`EntityMeeting.enterMulti()` 已随旧状态机删除。
+  // 🔴 2026-10-31 第三层固化：旧的「多人进入」状态机路径已删除（生产代码零残留）。
   //   会晤状态真源是 GroupSession —— 这里用**只读视图**注入等价状态（主发言=徐诗雨，另3位参会者），
   //   与生产接线方式（chat.ts 的 setSessionView）同形。
   em.setSessionView({

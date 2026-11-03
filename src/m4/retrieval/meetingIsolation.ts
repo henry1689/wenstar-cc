@@ -10,6 +10,8 @@
  *  - 只有会晤 UUID 在白名单内（strict）
  *  - verifyMeetingHits 供调用后断言（防回归：任何 hit 泄漏非会晤实体即告警）
  */
+// 🔴 2026-11-03：策略改由 policyFor 单一决定点产出（见下方 applyMeetingUuidFilter 内注释）
+import { policyFor } from '../../governance/police/UUIDPoliceFilter.js';
 import type { PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 
 /**
@@ -22,12 +24,16 @@ export function applyMeetingUuidFilter(uuid: string | null | undefined): PoliceP
     // deny-by-default：无 uuid 不召回任何归属记忆（宁缺勿泄）
     return { visibleUuids: new Set<string>(), searchScope: 'strict', enforce: true };
   }
-  return {
-    visibleUuids: new Set([clean]),
-    searchScope: 'strict',
-    allowUnowned: false,
-    enforce: true,
-  };
+  // 🔴 2026-11-03 归位 policyFor 单一决定点（业主批准批5）：
+  //   原手写 4 字段与本调用**逐字段等价** —— visibleUuids=Set([clean]) 同；
+  //   allowUnowned: shared='private' ⇒ false 同；searchScope: shared=false ⇒ 'strict' 同；
+  //   enforce: opts.enforce=true 同；restrictedSharing: false 与缺省 undefined 同为 falsy。
+  //   故**行为零变化**。依据 UUIDPoliceFilter:65（policyFor 是 allowUnowned 与 searchScope
+  //   的唯一产出处）——手写即第二份判据；且本文件不在 uuid-police 的 KNOWN_HANDWRITTEN
+  //   钉死清单内，出现即判「只减不增」违约（LEDGER #9 归因一致）。
+  //   🔴 铁律不变（ADR-013 第三层 / I007 串档根因所在）：deny-by-default、只会晤 UUID 在白、
+  //   绝不 enforce:false；下方无 uuid 的空白名单分支**原样保留**。
+  return policyFor('private', [clean], { enforce: true });
 }
 
 /** 会晤命中实体 UUID（供调用方传给 applyMeetingUuidFilter）——从会议状态取当前发言者 uuid */

@@ -9,7 +9,7 @@
  *   B1. shouldSkipMemoryWrite 是纯判据：entry/exit 任一为真 ⇒ 跳过 memories（conversations 照记）；
  *   B2. 判据必须消费**结构信号**（chat.ts 会晤状态机输出），不得扫正文；
  *   C2. chat.ts 的 _meetingEntered 只在显式 enter/enterMulti 置位 ——
- *       restoreLastMeeting（重启自动恢复）不得置位（那是普通对话，不能跳写记忆）。
+ *       重启自动恢复（R1 快照）不得置位（那是普通对话，不能跳写记忆）。
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -71,14 +71,17 @@ describe('B2/C2 — 结构信号链路（能力断言）', () => {
     expect(persistSrc).toMatch(/if \(!_skipMemWrite\) try \{\s*\n\s*const v40Semantic =/);
   });
 
-  it('C2: _meetingEntered 只在显式 enter/enterMulti 置位（restoreLastMeeting 不置位）', () => {
+  // 🔴 2026-11-02 旧状态机根除：原锚（第三层拆除前的重启恢复调用）随 845ec7a 删除 ⇒ 恒 -1。
+  //   🔴 不复述该方法名 —— 根除要求连名字都不留。
+  //   重启恢复的新承担者是 **R1 快照 + loadSession**（chat.ts:1201 注释明确写明），其
+  //   实际执行点是代码行 `console.log('[GroupSession] 重启自动恢复会晤（R1 快照）...')`。
+  //   锚**代码行而非注释**（S4 评审 F 曾指出锚注释近乎空转）；断言语义不变：恢复路径不得置 entry。
+  it('C2: 重启恢复路径不得置 _meetingEntered（只有显式路由指令才置）', () => {
     const setPoints = chatSrc.match(/_meetingEntered = true/g) ?? [];
-    // 恰好两处置位：enterMulti 分支 + 单人 enter 分支；不得多（多 = 有路径误跳写记忆）
+    // 恰好两处置位：多人路由分支 + 单人路由分支；不得多（多 = 有路径误跳写记忆）
     expect(setPoints.length).toBe(2);
-    // restoreLastMeeting 的**实际调用块**内不得置位（锚定调用表达式，而非首次出现的文档注释 ——
-    //   S4 评审 F 指出原断言锚在注释上近乎空转，现改正）
-    const restoreCall = chatSrc.indexOf('_em.restoreLastMeeting?.()');
-    expect(restoreCall).toBeGreaterThan(-1);
+    const restoreCall = chatSrc.indexOf('重启自动恢复会晤（R1 快照）');
+    expect(restoreCall, '重启恢复锚点必须存在（旧状态机恢复调用已删）').toBeGreaterThan(-1);
     const nearby = chatSrc.slice(restoreCall, restoreCall + 400);
     expect(nearby).not.toMatch(/_meetingEntered = true/);
   });

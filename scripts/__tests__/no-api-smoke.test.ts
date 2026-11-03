@@ -174,10 +174,14 @@ describe('[NO-API] Agent-CNC source is API-free', () => {
 
 describe('[NO-API] Agent-CNC config loading is local-only', () => {
   it('checkLlmConfigured() runs without API keys and does not crash', () => {
+    // 🔴 2026-11-03 修（与 provider-selection-smoke 同源）：原 `node -e` + require('./dist/...') ——
+    //   dist 是**无消费者的构建产物**且本地常不存在 ⇒ 子进程抛 Cannot find module ⇒ status 1。
+    //   生产跑 tsx（`agent-cnc: tsx src/agent-cnc/cli.ts`），故改用 tsx 加载 **src 真源**；
+    //   实测 `node ./node_modules/tsx/dist/cli.mjs -e "require('./src/agent-cnc/config.ts')"` exit 0。
     const r = spawnSync(
       'node',
-      ['-e', `
-        var m = require('./dist/agent-cnc/config.js');
+      [path.join('node_modules', 'tsx', 'dist', 'cli.mjs'), '-e', `
+        var m = require('./src/agent-cnc/config.ts');
         var result = m.checkLlmConfigured();
         var valid = ['configured','disabled','unavailable'];
         if (!valid.includes(result)) throw new Error('Unexpected: ' + result);
