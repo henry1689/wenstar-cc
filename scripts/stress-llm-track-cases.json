@@ -1,5 +1,5 @@
 {
-  "$comment": "P079 任务3 · 真 LLM 轨用例（用户限额：总计 ≤30 轮，本文件正好 30 轮）。执行前置：Claude P078 修复完成 + 独占窗口（豆包协调）。执行器：scripts/stress-llm-track-runner.cjs。全部 test_mode=1（is_test=1，事后 /api/chat/purge-test 清理）。断言基于：回复文本 + 日志窗口归属（[Identity]/[GroupSession]/[MeetExit]/纪要）+ R1 快照（只读）。",
+  "$comment": "P079 任务3 · 真 LLM 轨用例（用户限额：总计 ≤30 轮，本文件正好 30 轮）。执行前置：Claude P078 修复完成 + 独占窗口（豆包协调）。执行器：scripts/stress-llm-track-runner.cjs。全部 test_mode=1（is_test=1，🔴 清理不得走 /api/chat/purge-test —— 该接口按隔离标记删数据，详见文件尾 cleanup 字段）。断言基于：回复文本 + 日志窗口归属（[Identity]/[GroupSession]/[MeetExit]/纪要）+ R1 快照（只读）。",
   "version": 1,
   "created": "2026-10-23",
   "totalRounds": 30,
@@ -75,5 +75,5 @@
     "I7-终态：seq30 后 R1 快照 participants=0",
     "红线-人格隔离：会晤轮回复不自称玉瑶；玉瑶轮不延续实体会话（seq17/18/21/23/25 人工+日志双评审）"
   ],
-  "cleanup": "压测后 POST /api/chat/purge-test（仅当业主/豆包确认全库 is_test=1 可清）；R1 快照留终态玉瑶。"
+  "cleanup": "🔴 不得调用 /api/chat/purge-test：该接口按 is_test=1 删除，而 is_test 是「隔离标记」不是「测试数据」标记，实测曾误删 427 条有意保留的污染回复。本轨 test_mode=1 数据的清理须由业主指定专门通道执行，不得用本接口代劳；R1 快照留终态玉瑶。"
 }
