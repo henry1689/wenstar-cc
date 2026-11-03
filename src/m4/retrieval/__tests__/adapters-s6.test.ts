@@ -37,7 +37,11 @@ describe('ConversationAdapter', () => {
   it('对话域 + backref=conversations + 会晤过滤', async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
-    db.exec(`CREATE TABLE conversations (id INTEGER PRIMARY KEY, content TEXT, timestamp TEXT, role TEXT, is_compacted INTEGER, belong_entity_uuid TEXT);`);
+    // 🔴 摘要归并收口：`is_summary` 必须与生产 DDL 对齐（SQLiteAdapter.ts / ConversationDB.ts
+    //   均为 `is_summary INTEGER DEFAULT 0`）。ConversationAdapter 的关键词查询按
+    //   `COALESCE(is_summary,0)=0` 排除摘要行，测试表缺该列会让 SQL 报 no such column
+    //   ⇒ 返回空数组（实测 `expected [] to have a length of 1 but got +0`）。
+    db.exec(`CREATE TABLE conversations (id INTEGER PRIMARY KEY, content TEXT, timestamp TEXT, role TEXT, is_compacted INTEGER, belong_entity_uuid TEXT, is_summary INTEGER DEFAULT 0);`);
     db.exec(`INSERT INTO conversations (id, content, timestamp, role, is_compacted, belong_entity_uuid) VALUES (1, '星落之城后续剧情', '2026-08-01', 'assistant', 0, 'uuid-zm');`);
     const queryAll = (sql: string, params: unknown[] = []): any[] => {
       const stmt = db.prepare(sql); stmt.bind(params); const rows: any[] = [];
