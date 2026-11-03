@@ -311,6 +311,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
     // P090 · P096 §2.3：askAll 后续轮**不写用户行**（用户消息已在首轮落库）。
     // 🛑 检索架构 v11 §S1(2026-10-27)：原此处记录 rowid 是给增量 n-gram 索引做 source_id 的，
     //   索引已停写 ⇒ rowid 记录链（_convUserRowId/_convAsstRowId）一并撤销，对话行写入行为不变。
+    if (process.env.WS_NS_DEBUG === '1') console.log(`[NS-DEBUG] L317 conversations.user testMode=${input.ctx.testMode} seq=${input.seqPos} head=${JSON.stringify(String(input.message).slice(0, 20))} caller=${String(new Error().stack || '').split('\n')[2] || ''}`);
     if (!input.skipUserPersist) input.ctx.conversationDB?.insertConversation('user', input.message, {
       seqPos: input.seqPos, topic,
       // 🔴 2026-09-22 测试隔离（#D）：测试流量写入 namespace='test' ⇒ 可辨识、可清理、且被检索侧排除
@@ -325,6 +326,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
       belongEntityUuid: belongUUID || undefined,
       mentionedEntityUuids: mentionedEntityUuids,
     });
+    if (process.env.WS_NS_DEBUG === '1') console.log(`[NS-DEBUG] L330 conversations.assistant testMode=${input.ctx.testMode} seq=${input.seqPos} head=${JSON.stringify(String(input.reply).slice(0, 20))} caller=${String(new Error().stack || '').split('\n')[2] || ''}`);
     input.ctx.conversationDB?.insertConversation('assistant', input.reply, {
       seqPos: input.seqPos + 1, topic,
       namespace: input.ctx.testMode ? 'test' : 'default',
@@ -389,6 +391,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
 
     // 写用户消息 — 改造②：使用 SQLiteAdapter.writeMemory() 公共 API
     const idUser = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    if (process.env.WS_NS_DEBUG === '1') console.log(`[NS-DEBUG] L399 memories.user testMode=${input.ctx.testMode} seq=${input.seqPos} skip=${_skipMemWrite} head=${JSON.stringify(String(input.message).slice(0, 20))} caller=${String(new Error().stack || '').split('\n')[2] || ''}`);
     if (_skipMemWrite) {
       console.log(`[Persist] ✂️ P0-2.1 会晤路由指令跳过 memories 写入 (seq=${input.seqPos} entry=${!!input.isMeetingEntry} exit=${!!input.isMeetingExit}): "${input.message.substring(0, 20)}"`);
     } else if (!sqlite.writeMemory({
@@ -461,6 +464,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
 
     //     存储时剥离括号场景描写，只保留语义内容（"我记得那次你说…我姐…"）。
     const idAssist = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    if (process.env.WS_NS_DEBUG === '1') console.log(`[NS-DEBUG] L469 memories.assistant testMode=${input.ctx.testMode} seq=${input.seqPos + 1} skip=${_skipMemWrite} head=${JSON.stringify(String(cleanReply).slice(0, 20))} caller=${String(new Error().stack || '').split('\n')[2] || ''}`);
     if (!_skipMemWrite && !sqlite.writeMemory({
       id: idAssist, seqPos: input.seqPos + 1, createdAt: now,
       perceptionV40: input.decision.enhanced.perceptionV40 ? encodePerceptionV40(input.decision.enhanced.perceptionV40) : undefined,
