@@ -64,3 +64,22 @@ scripts/patch-minor-check.mjs
 scripts/patch-safety.mjs
 *.sentinel-lock
 scripts/reindex-knowledge.py
+
+# ── 🔴 2026-11-03 收口任务书 T0/F组 · 隐私隔离 ──────────────────────────
+# src/data/ 装的是会晤记录 .md，文件名与正文含真实姓名与私密对话，
+# 而本仓库是 PUBLIC。此前 git check-ignore 实测**未被忽略** —— 一旦有人
+# 误跑 git add -A（项目明令禁止但仍是常发误操作）即直接外泄。
+# 依据：实体隐私权红线 + FG 最高安全资产红线。
+# 🔴 只做隔离，**不删除任何数据**；处置权唯一归业主。
+src/data/
+
+# 测试运行产物：vitest 实时创建的临时库。原 `.tmp/` 规则只盖目录，
+# 盖不住 `.test-*.db.tmp-11388` 这种带 PID 后缀的**文件**（实测 2026-11-03）。
+.test-*.db.tmp-*
+
+# 本地工具目录：16M / 8459 文件，含 __pycache__/*.pyc、*.bak、*.b64 编译与备份产物，
+# 不宜全量入库。若日后需入库，由业主指定精简清单。
+harness-opt/
+
+# 交付物 zip（业主 2026-11-03 决定：留本地、不再推）
+memarch-v2.0.0-*.zip
