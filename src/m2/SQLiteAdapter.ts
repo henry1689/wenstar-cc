@@ -66,6 +66,18 @@ export const ANCHOR_REBUILD_DERIVED_COLUMNS: ReadonlySet<string> = new Set([
   'dialog_group_id', 'belong_entity_uuid', 'entity_genes', 'fg_entity_names',
   'global_uid', 'dna_root_id', 'location_fingerprint', 'is_foresight',
   'valid_until_ms', 'foresight_status', 'source_type',
+  // 🔴 2026-11-03（S4 独立评审 P0 必修 #1 / run_mw0dgoe5_0i47）：namespace 归入派生列。
+  //   它是**写入时主动算出的值**（锚点从组内 conversations 继承，见 _rebuildMemoryAnchors
+  //   的 anchorNamespace），与 source_type 同类 —— 但此前不在本集合 ⇒ 进入 _restoreCols
+  //   （表列 − 派生列）⇒ _restoreSnap 在 INSERT **之后**执行，把快照里旧行的
+  //   namespace='default' UPDATE 回去，**刚写入的 anchorNamespace 被覆盖**。
+  //   评审员用内存库复刻执行序实测：快照正常时 INSERT 后=test → 最终=default；
+  //   仅「快照降级为无回填」那条分支新值才存活。生产佐证：3253 条锚点 100% 为 default，
+  //   故 LEDGER #13 据此标记的「已解决」此前并不成立。
+  //   本集合语义即「重建时主动重算的列（不接受快照回填，否则旧值会覆盖新算值）」——
+  //   namespace 正属此类，故**归位而非改 _restoreSnap**（后者会影响全部回填列）。
+  //   回归防线：memory-write-columns.test.ts「值存活」断言（锁派生集合成员 + 回填清单排除）。
+  'namespace',
   // V22 新增派生列（原先完全不写 → 被清零的元凶）
   'anchor_score', 'topic_label', 'time_period', 'season', 'lunar_term',
   'last_verified_at', 'round_count',
