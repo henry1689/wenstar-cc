@@ -914,7 +914,7 @@ export class SQLiteAdapter {
   searchConversations(keyword: string, limit = 10): Array<{ id: number; role: string; content: string; timestamp: string; topic?: string }> {
     this.ensureReady();
     return this.queryAll(
-      'SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND is_compacted = 0 ORDER BY timestamp DESC LIMIT ?',
+      'SELECT id, role, content, timestamp, topic FROM conversations WHERE content LIKE ? AND is_compacted = 0 AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp DESC LIMIT ?',
       ['%' + keyword + '%', limit]
     );
   }
@@ -923,7 +923,7 @@ export class SQLiteAdapter {
   searchConversationsByEntity(entityName: string, limit = 10): Array<{ id: number; role: string; content: string; timestamp: string }> {
     this.ensureReady();
     return this.queryAll(
-      'SELECT id, role, content, timestamp FROM conversations WHERE entity_names LIKE ? AND is_compacted = 0 ORDER BY timestamp DESC LIMIT ?',
+      'SELECT id, role, content, timestamp FROM conversations WHERE entity_names LIKE ? AND is_compacted = 0 AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp DESC LIMIT ?',
       ['%' + entityName + '%', limit]
     );
   }
@@ -932,7 +932,7 @@ export class SQLiteAdapter {
   findByTimeRange(start: string, end: string, limit = 20): Array<{ id: number; role: string; content: string; timestamp: string }> {
     this.ensureReady();
     return this.queryAll(
-      'SELECT id, role, content, timestamp FROM conversations WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC LIMIT ?',
+      'SELECT id, role, content, timestamp FROM conversations WHERE timestamp >= ? AND timestamp <= ? AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp ASC LIMIT ?',
       [start, end, limit]
     );
   }
@@ -954,7 +954,9 @@ export class SQLiteAdapter {
         // 🔴 2026-09-22 上下文连贯性：历史加载必须排掉测试行（namespace='test' 或 is_test=1）
         //   实测：近 200 轮里 58 条 is_test=1 + 2 条 ns=test，共 30.5% 为测试/极短行，
         //   它们会插入她的对话流 ⇒ “接不上话”（）
-        'SELECT role, content, timestamp FROM conversations WHERE is_compacted = 0 AND COALESCE(namespace,\'default\') <> \'test\' AND COALESCE(is_test, 0) = 0 ORDER BY timestamp DESC LIMIT ?',
+        // 🔴 摘要归并批3b-2：本方法注释明写「供 LLM 上下文拼接」——
+        //   is_summary=1 的摘要行必须排除，否则批2 迁移后摘要会被直接拼进模型上下文。
+        'SELECT role, content, timestamp FROM conversations WHERE is_compacted = 0 AND COALESCE(namespace,\'default\') <> \'test\' AND COALESCE(is_test, 0) = 0 AND COALESCE(is_summary, 0) = 0 ORDER BY timestamp DESC LIMIT ?',
         [limit]
       );
       return rows.reverse();
