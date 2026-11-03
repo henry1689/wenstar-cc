@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import initSqlJs from 'sql.js';
@@ -189,6 +189,45 @@ describe('[ADR-010 P1-C1] 退化输入与异常隔离', () => {
   it('库中无块 ⇒ 空数组', async () => {
     const db = await buildDb();
     expect(await new DialogGroupAdapter(srcOf(db)).search(ctxOf(db))).toEqual([]);
+  });
+});
+
+describe('[摘要归并批4a] 拆除守卫 —— 拆掉的通道不得被接回来', () => {
+  it('🔴 recallByStructured(domain:"dialog_group") 在 src/ 零调用（摘要围栏路已整体拆除）', () => {
+    const srcRoot = join(HERE, '..', '..', '..'); // → src/
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, ent.name);
+        if (ent.isDirectory()) {
+          if (ent.name === '__tests__' || ent.name === 'node_modules') continue;
+          walk(p);
+          continue;
+        }
+        if (!ent.name.endsWith('.ts')) continue;
+        // 先剥注释再判：`retrieval-fusion-config` 的说明、以及本文件头注释里都同时出现
+        // 「recallByStructured」与「domain:'dialog_group'」，不剥会把文档当成接回通道。
+        const text = readFileSync(p, 'utf-8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+        if (/recallByStructured\s*\(/.test(text) && /domain:\s*'dialog_group'/.test(text)) {
+          offenders.push(p.slice(srcRoot.length + 1).replace(/\\/g, '/'));
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(
+      offenders,
+      '🔴 摘要围栏路已于批4a 拆除（业主：「摘要通道也拆干净」）。' +
+        '若要恢复它，须先修订任务书 §2.4 与 ADR-010，并重新走 S1→S7 —— 不得直接把调用接回来。',
+    ).toEqual([]);
+  });
+
+  it('DOMAIN_SPECS.dialog_group spec 仍在（类型占位），但已标注下线', () => {
+    const text = readFileSync(join(HERE, '..', 'StructuredRecall.ts'), 'utf-8');
+    expect(text, 'spec 保留：从 EnclosureDomain 移除会影响 MemoryRetriever.domains 类型')
+      .toContain('dialog_group: Object.freeze({');
+    expect(text, '必须标注已下线，否则读代码的人会以为它还在生效').toContain('已下线');
   });
 });
 

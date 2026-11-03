@@ -50,7 +50,7 @@
 
 import type { RetrievalAdapter } from '../adapter.js';
 import type { RetrievalContext, SearchHit } from '../types.js';
-import { ADR_010_BLOCK_SCHEME, recallByStructured, scoreAndRank } from '../StructuredRecall.js';
+import { ADR_010_BLOCK_SCHEME, scoreAndRank, type EnclosureHit } from '../StructuredRecall.js';
 import { ENCLOSURE_DEFAULT_LIMIT } from '../Flags.js';
 
 /** 单块取多少轮正文拼 hit.text（够判断相关性即可，不追求完整） */
@@ -113,40 +113,20 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       // 切词口径复用 v11 唯一实现（buildNgrams 同源），本适配器不自行滑窗
       const { buildKeywordShards } = await import('../StructuredRecall.js');
 
-      // ── ①a 摘要通道（v11 围栏 + 精排，与记忆召回同一套实现）──
-      //   🔴 业主 2026-11-02 明示：**原文通道才是主路，摘要通道是临时的、后续会被拆除**。
-      //      本路因此按「可整体摘除」的形状接入，拆除时的爆炸半径锁死在三处：
-      //        ① 下方这一段（①a）；
-      //        ② `channels.summary` 字段与 ADR 方案里的 `summaryDensity` / `bothChannels`
-      //           两个分量 —— 它们都走**可用性判定**，摘要恒为 0 时权重自动置 0 并重归一，
-      //           方案退化为 `convDensity + calcium`，**引擎一行都不用改**；
-      //        ③ 组装时的【摘要】前缀与 `payload.summary`。
-      //      DOMAIN_SPECS.dialog_group 的 `textCol='block_summary'` / `extraWhere` 也属该链。
-      //      除这三处外无任何代码依赖摘要通道 ⇒ 拆除是删代码，不是改判据。
-      const summaryHits = await recallByStructured(
-        this.sqlite,
-        {
-          domain: 'dialog_group',
-          entityUuids: uuids,
-          keywords: [query],
-          limit: ENCLOSURE_DEFAULT_LIMIT,
-        },
-        ctx.perception40d ?? undefined,
-      );
-
-      // ── ①b 原文通道（**主路**，ADR-010 §12.2.2 的候选集另一半）──
-      //   🔴 本路是长期主路（业主 2026-11-02：「原文通道才是主要的」）。它直接对
-      //      conversations 按组聚合，**不经过** `block_summary` 的 `extraWhere` ——
-      //      摘要路把 textCol 定死为 block_summary 且强制非空，只有本路能覆盖：
-      //      ① 摘要没写到的会话段（改造前段级命中仅 20.8%）；
-      //      ② 无摘要的组（改造前 479 组 / 15.7% 整组进不了候选池）。
-      //   两路候选最后合并成一个 Map，排序统一走 ADR 方案，**不存在两套判据**。
-      // 双通道候选查询的失败信号 —— ADR-010 §13.4 兜底的触发条件。
-      // 🔴 只记**原文通道**的异常：摘要围栏的 SQL 出错时 `recallByStructured` 内部
-      //    fail-closed 收成 `[]` 并 console.warn，本层看不到（要根治需让它暴露失败信号）。
-      //    残余场景：摘要围栏内部失败 + 原文通道正常返回空 ⇒ 仍返回空。
-      //    两路同时报错（数据库级故障的典型形态）则必然进兜底。
+      // ── ① 原文通道（**唯一通道**，ADR-010 §12.2.2）──
+      //   🔴 摘要围栏路（原 ①a `recallByStructured(domain:'dialog_group')`）已于批4a **整体拆除**。
+      //      拆除依据：业主 2026-11-02「原文通道才是主要的，摘要通道是临时的，我会把她拆掉的」、
+      //      2026-11-04「摘要通道也拆干净」「最终只保留原文通道一个」。
+      //      摘要内容已由批2 迁入 `conversations`（`is_summary=1` 行），因此：
+      //        · 摘要**命中** ⇒ 本条 SQL 的 `summary_shards` 列（对摘要行按分片 LIKE 计数）
+      //        · 摘要**内容** ⇒ ①d 回表从 `conversations` 的 `is_summary=1` 行取
+      //      两处都不再碰 `dialog_groups.block_summary` ⇒ 该列具备批6 DROP 的前提。
+      //   🔴 仍是一条通道：召回与计数在**同一条 SQL** 内用 CASE 分开，不拆第二路、不 UNION。
+      //      `channels.summary` 的量纲（分片数）与原摘要围栏完全同源（都用 buildKeywordShards
+      //      的分片）⇒ ADR-010 §12.2.3 的 `ADR_010_SUMMARY_DENSITY_CAP=10` 不用改。
       let channelError: unknown = null;
+      /** 本次查询的分片词（已去掉 LIKE 的 % 包裹），供 ①d 在 JS 侧算摘要分片命中数 */
+      let shardTerms: string[] = [];
 
       let rawRows: Array<{
         gid: string; hit_rows: number; u_hit: number | null; a_hit: number | null;
@@ -162,10 +142,14 @@ export class DialogGroupAdapter implements RetrievalAdapter {
           //    「命中轮」，convDensity = max(u_hit,a_hit)/turn_count 直接失真。
           //    召回与计数在**同一条 SQL** 里用 CASE 分开，仍是一条通道（业主：
           //    「最终只保留原文通道一个」），不拆第二路、不 UNION。
-          // ⚠️ 批1 时生产库 213 行 is_summary=1 的 dialog_group_id 全为 NULL，
-          //    本条件恒真、排除无对象 ⇒ 迁移前零行为变化；批2 写入后才真正生效。
-          //    摘要行的**命中识别**（供 channels.summary 用）留到批4 接线时一并加，
-          //    本批不放用不上的列。
+          //    分片词表提到外层作用域：①d 回表取回摘要 content 后，**在 JS 侧**算分片命中数
+          //    填 `channels.summary`（口径与 buildKeywordShards 同源）。
+          //    ⚠️ 不在 SQL 里用 `SUM(CASE WHEN … THEN (嵌套 CASE 带参数))` 算它 ——
+          //      实测 sql.js 对这种写法**静默返回 0 行且不报错**（诊断：同 WHERE 简化版 2 行、
+          //      加该列后 0 行、err=none），会把整条召回路打成空。
+          shardTerms = shard.params
+            .map((p) => String(p).replace(/^%+/, '').replace(/%+$/, ''))
+            .filter((t) => t.length > 0);
           rawRows = this.sqlite.queryAll<{
             gid: string; hit_rows: number; u_hit: number | null; a_hit: number | null;
           }>(
@@ -191,14 +175,10 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         console.warn('[DialogGroupAdapter] 原文通道不可用，仅用摘要通道:', (e as Error)?.message);
       }
 
-      // ── ①c 候选合并（摘要命中 ∪ 原文命中，ADR-010 §12.2）──
-      const merged = new Map<string, (typeof summaryHits)[number]>();
-      for (const h of summaryHits) {
-        merged.set(String(h.id), {
-          ...h,
-          channels: { summary: h.hitShards, content: 0, turnCount: 0 },
-        });
-      }
+      // ── ①c 候选构建（ADR-010 §12.2.2：候选集 = conversations 命中 ∪ 摘要行命中）──
+      //   拆除摘要围栏路后只有一个来源：本条原文通道 SQL。摘要行与原文行在同一条
+      //   SQL 里各走各的 CASE ⇒ 一个组只产出一个候选，无需再做两路合并。
+      const merged = new Map<string, EnclosureHit>();
 
       for (const r of rawRows) {
         const gid = String(r.gid || '');
@@ -218,27 +198,18 @@ export class DialogGroupAdapter implements RetrievalAdapter {
         // ⚠️ `turn_count` 走 u≠a 退回 `rounds.length` 分支时（dialog-group-stage.ts），
         //    分母可能大于库内真实行数 ⇒ 即使全覆盖密度也到不了 1（实测 6/9=0.67）。
         const hitTurns = Math.max(Number(r.u_hit) || 0, Number(r.a_hit) || 0);
-        const exist = merged.get(gid);
-        if (exist) {
-          const ch = exist.channels
-            ?? (exist.channels = { summary: 0, content: 0, turnCount: 0 });
-          ch.content = hitTurns;
-          // 观测口径：两通道命中量之和（沿用改造前的累加行为）。
-          // 🔴 它**不参与** ADR 精排 —— 摘要给的是分片数、原文给的是行数，量纲不同，
-          //    相加只作 payload.hitShards 的可读观测，判据一律走 channels 分量。
-          exist.hitShards += hitRows;
-        } else {
-          merged.set(gid, {
-            id: gid,
-            domain: 'dialog_group',
-            text: '',                  // 有摘要的组在 ①d 回表补齐后才出现【摘要】前缀
-            calciumScore: 0,
-            createdAt: '',
-            hitShards: hitRows,
-            semanticSource: 'none',
-            channels: { summary: 0, content: hitTurns, turnCount: 0 },
-          } as (typeof summaryHits)[number]);
-        }
+        // `channels.summary` 此处先置 0，由 ①d 回表取到摘要 content 后在 JS 侧算分片数回填。
+        // `hitShards` 先记原文命中行数，回表后再累加摘要侧（观测口径，不参与 ADR 精排）。
+        merged.set(gid, {
+          id: gid,
+          domain: 'dialog_group',
+          text: '',                    // 有摘要的组在 ①d 回表补齐后才出现【摘要】前缀
+          calciumScore: 0,
+          createdAt: '',
+          hitShards: hitRows,
+          semanticSource: 'none',
+          channels: { summary: 0, content: hitTurns, turnCount: 0 },
+        });
       }
 
       // ── ①c' 兜底（ADR-010 §13.4）：候选查询抛错 ⇒ 单表取块，不整路返回空 ──
@@ -271,7 +242,7 @@ export class DialogGroupAdapter implements RetrievalAdapter {
               hitShards: 0,
               semanticSource: 'none',
               channels: { summary: 0, content: 0, turnCount: 0 },
-            } as (typeof summaryHits)[number]);
+            } as EnclosureHit);
           }
           console.warn(
             `[DialogGroupAdapter] 双通道候选查询失败，已降级 dialog_groups 单表按 last_ts DESC 取 ${fb.length} 块（ADR-010 §13.4）:`,
@@ -284,14 +255,16 @@ export class DialogGroupAdapter implements RetrievalAdapter {
       }
 
       // ── ①d 回表：全部候选的钙分 / 时间戳 / turn_count / 摘要 ──
-      //   🔴 覆盖**全部**候选，不是只有原文独有候选：`turn_count` 是 ADR convDensity 的分母，
-      //      摘要路候选同样要靠它才算得出密度；`block_summary` 则让「原文命中、摘要没命中」
-      //      的组也带上【摘要】前置（ADR-010 §12.2.4），改造前这类组正文只有原文。
+      //   🔴 `turn_count` 是 ADR convDensity 的分母，**全部**候选都要（缺则密度算不出）。
+      //   🔴 摘要内容**不再读 `dialog_groups.block_summary`**（批4a 已拆该通道）——
+      //      改从 `conversations` 的 `is_summary=1` 行取（批2 迁移的落点）。
+      //      这样【摘要】前缀（ADR-010 §12.2.4）与 `payload.summary` 的来源换到主通道，
+      //      `dialog_groups.block_summary` 列具备批6 DROP 的前提。
       //      钙分与时间戳缺失会让对应分量恒为 0。
       const preIds = [...merged.keys()];
       if (preIds.length > 0) {
         try {
-          // 分批查：两路各取 500 ⇒ 合并后最多 1000 个占位符，分批避开 IN 参数上限
+          // 分批查：候选最多 1000 个占位符，分批避开 IN 参数上限
           const CHUNK = 400;
           for (let i = 0; i < preIds.length; i += CHUNK) {
             const part = preIds.slice(i, i + CHUNK);
@@ -299,11 +272,11 @@ export class DialogGroupAdapter implements RetrievalAdapter {
             const rows = this.sqlite.queryAll<{
               dialog_group_id: string; block_calcium_score: number | null;
               last_ts: string | null; created_at: string | null;
-              turn_count: number | null; block_summary: string | null;
+              turn_count: number | null;
               belong_entity_uuid: string | null;
             }>(
               `SELECT dialog_group_id, block_calcium_score, last_ts, created_at,
-                      turn_count, block_summary, belong_entity_uuid
+                      turn_count, belong_entity_uuid
                  FROM dialog_groups WHERE dialog_group_id IN (${ph})`,
               part,
             ) || [];
@@ -314,12 +287,35 @@ export class DialogGroupAdapter implements RetrievalAdapter {
                 ?? (h.channels = { summary: 0, content: 0, turnCount: 0 });
               ch.turnCount = Number(r.turn_count) || 0;
               if (!h.calciumScore) h.calciumScore = Number(r.block_calcium_score) || 0;
-              // last_ts 为空时回退 created_at：否则原文路候选 hitObj.createdAt 恒为 ''，
+              // last_ts 为空时回退 created_at：否则候选 hitObj.createdAt 恒为 ''，
               // 时间分量与同分 tiebreak 都会失效
               if (!h.createdAt) h.createdAt = String(r.last_ts || r.created_at || '');
-              // 原文路独有候选不带归属，不补则 hitObj.entityUuid 恒为 null（上层按实体过滤会漏）
+              // 不带归属的候选不补则 hitObj.entityUuid 恒为 null（上层按实体过滤会漏）
               if (!h.belongEntityUuid) h.belongEntityUuid = r.belong_entity_uuid || null;
-              if (!h.text) h.text = String(r.block_summary || '');
+            }
+
+            // 摘要内容 + 分片命中数：从 conversations 的 is_summary=1 行取（批2 迁移的落点），
+            // 不再读 dialog_groups.block_summary。分片计数在 JS 侧做（口径 = shardTerms，
+            // 与 buildKeywordShards 同源），避开 sql.js 对嵌套 CASE 带参数的静默空结果缺陷。
+            const sumRows = this.sqlite.queryAll<{ dialog_group_id: string; content: string }>(
+              `SELECT dialog_group_id, content FROM conversations
+                WHERE dialog_group_id IN (${ph})
+                  AND COALESCE(is_summary, 0) = 1
+                  AND (is_test IS NULL OR is_test = 0)`,
+              part,
+            ) || [];
+            for (const s of sumRows) {
+              const h = merged.get(String(s.dialog_group_id));
+              if (!h) continue;
+              const content = String(s.content || '');
+              const ch = h.channels
+                ?? (h.channels = { summary: 0, content: 0, turnCount: 0 });
+              if (ch.summary <= 0 && shardTerms.length > 0) {
+                ch.summary = shardTerms.filter((t) => content.includes(t)).length;
+                // 观测口径：累加摘要侧命中量（与原文行数相加，仅供 payload.hitShards 可读）
+                h.hitShards += ch.summary;
+              }
+              if (!h.text) h.text = content;
             }
           }
         } catch (e) {

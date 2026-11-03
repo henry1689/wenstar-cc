@@ -229,6 +229,14 @@ const DOMAIN_SPECS: Readonly<Record<EnclosureDomain, DomainSpec>> = Object.freez
     // 🔴 同上：必须以 `AND` 开头，否则整条围栏语法错误 fail-closed。
     extraWhere: " AND COALESCE(namespace,'default') <> 'test' AND (is_test IS NULL OR is_test = 0)",
   }),
+  // ── 🔴 已下线（摘要归并批4a，2026-11-04）──
+  // 本 spec 的唯一消费者 `DialogGroupAdapter` ①a 摘要围栏路已整体拆除
+  //（业主：「摘要通道也拆干净」「最终只保留原文通道一个」）。
+  // **spec 保留但不得再被调用**：从 `EnclosureDomain` 移除会影响
+  // `MemoryRetriever.domains?: EnclosureDomain[]` 类型，故保留为类型占位；
+  // 由守卫断言 `recallByStructured(domain:'dialog_group')` 在 src/ 中**零调用**
+  // 防止有人把拆掉的通道接回来（与 B6 死导出守卫同思路）。
+  // 摘要内容已迁 `conversations`（`is_summary=1` 行），对话块召回改走原文通道。
   dialog_group: Object.freeze({
     table: 'dialog_groups',
     // 🔴 主键是 dialog_group_id 不是 id（写死 id 会 no such column: id ⇒ 恒 fail-closed）

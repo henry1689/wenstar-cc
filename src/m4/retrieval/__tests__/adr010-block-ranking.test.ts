@@ -354,12 +354,15 @@ describe('[ADR-010 §12.2.3] 适配器把双通道接进了方案', () => {
     const before = await new DialogGroupAdapter(srcOf(db)).search(ctxOf({ limit: 5 }));
     const beforeScore = before.find((h) => h.id === 'DG_NO_SUMROW')!.score;
 
-    // 插一行 is_summary=1、内容同样命中查询的摘要行 —— 若计数不排除它，
-    // a_hit 会 1→2 ⇒ max(u_hit,a_hit) 1→2 ⇒ convDensity 0.25→0.5 ⇒ 分数必然变。
+    // 插一行 is_summary=1、**内容不含查询词**的摘要行：
+    //  · 若密度计数不排除它 ⇒ a_hit 1→2 ⇒ convDensity 0.25→0.5 ⇒ 分数变
+    //  · 内容不含查询词 ⇒ channels.summary 仍为 0 ⇒ 摘要分量不变
+    // 两条都不变才能证明「只参与召回、不参与计数」。
+    // （若摘要内容含查询词，它会合法地抬高 summaryDensity 分量 —— 那是双通道的本意，不是泄漏。）
     db.run(
       "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,is_summary,belong_entity_uuid) " +
       "VALUES (?,?,?,?,?,0,1,?)",
-      ['assistant', '杭州机票的三层摘要：标签/叙事/情感', '2026-10-06T00:02:00.000Z', 999999,
+      ['assistant', '【标签】无关\n【叙事】不含任何查询词的三层摘要\n【情感】平静', '2026-10-06T00:02:00.000Z', 999999,
        'DG_NO_SUMROW', UUID_A],
     );
     const after = await new DialogGroupAdapter(srcOf(db)).search(ctxOf({ limit: 5 }));
@@ -395,21 +398,25 @@ describe('[ADR-010 §12.2.3] 适配器把双通道接进了方案', () => {
     db.close();
   });
 
-  it('原文命中但摘要没写的组，正文也带【摘要】前置（ADR-010 §12.2.4）', async () => {
+  it('原文命中、摘要另写的组 —— 【摘要】前置来自 conversations 的摘要行（ADR-010 §12.2.4）', async () => {
     const db = await buildDb();
-    seedBlock(db, 'DG_SEG', [['user', '无关内容打个招呼']], {
-      summary: '【标签】无关\n【叙事】只写了这一段\n【情感】平静',
-    });
+    // 批4a 后摘要内容不再读 dialog_groups.block_summary，而是读 conversations 的
+    // is_summary=1 行（批2 迁移的落点）。本用例按**迁移后的真实形态**造数据。
+    seedBlock(db, 'DG_SEG', [['user', '无关内容打个招呼']], { summary: '' });
     db.run(
-      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,belong_entity_uuid) VALUES (?,?,?,?,?,0,?)",
-      ['assistant', '杭州机票我看过了，周三出票', '2026-10-06T00:01:00.000Z', 99, 'DG_SEG', UUID_A],
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,is_summary,belong_entity_uuid) VALUES (?,?,?,?,?,0,?,?)",
+      ['assistant', '杭州机票我看过了，周三出票', '2026-10-06T00:01:00.000Z', 98, 'DG_SEG', 0, UUID_A],
+    );
+    db.run(
+      "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,is_summary,belong_entity_uuid) VALUES (?,?,?,?,?,0,?,?)",
+      ['assistant', '【标签】旅行\n【叙事】只写了这一段的三层摘要\n【情感】平静', '2026-10-06T00:02:00.000Z', 99, 'DG_SEG', 1, UUID_A],
     );
 
     const hits = await new DialogGroupAdapter(srcOf(db)).search(ctxOf());
     const seg = hits.find((h) => h.id === 'DG_SEG');
     expect(seg, '原文通道必须把它召回').toBeTruthy();
-    expect(seg!.text, '有摘要的组应带【摘要】前缀').toContain('【摘要】');
-    expect(seg!.payload?.summary, 'payload.summary 同时暴露结构化字段').toBeTruthy();
+    expect(seg!.text, '有摘要的组应带【摘要】前缀（来源 = conversations 摘要行）').toContain('【摘要】');
+    expect(seg!.payload?.summary, 'payload.summary 同时暴露结构化字段').toContain('三层摘要');
     db.close();
   });
 
