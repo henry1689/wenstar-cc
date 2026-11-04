@@ -1,12 +1,19 @@
--- =====================================================================
+﻿-- =====================================================================
 -- MemArch-v2.0.0 / M1-Storage / 03_fts5.sql
--- FTS5 全文索引（外部内容表，绑定 conversations.content + episodes.gist）
--- 中文分词：trigram（SQLite 3.34+ 内置，零依赖；查询词 >= 3 字）
--- 推荐生产环境切换 simple 扩展（jieba），见 §03b_tokenizer_simple.sql.example
+-- FTS5 全文索引（trigram 中文分词，零依赖，SQLite 3.34+ 内置）
+--
+-- 设计说明：
+--   - fts_conversations：外部内容表（conversations.id 是 INTEGER PRIMARY KEY，
+--     天然匹配 FTS5 content_rowid 的 INTEGER 要求，节省倒排索引外的存储）
+--   - fts_episodes / fts_memories：独立 FTS 表（episodes.id / memories.id 都是
+--     TEXT 业务主键，无法做 FTS5 的 content_rowid（必须 INTEGER），因此改用
+--     UNINDEXED 关联列 + 触发器同步的独立表模式）
+--   - 生产环境可切换 simple 分词（jieba 扩展），见 §03b_tokenizer_simple.sql.example
 -- =====================================================================
 
--- I1: 全文检索（BM25）
--- 外部内容表：content 存在原表，FTS 只存倒排索引，节省空间
+-- =====================================================================
+-- I1-1: conversations 全文索引（外部内容表）
+-- =====================================================================
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversations USING fts5(
   content,
   content='conversations',
@@ -14,15 +21,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_conversations USING fts5(
   tokenize='trigram'
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS fts_episodes USING fts5(
-  gist,
-  content='episodes',
-  content_rowid='id',          -- 注意：episodes.id 是 TEXT，外部内容表需用 rowid
-  tokenize='trigram'
-);
-
--- 触发器：保持 FTS 与原表同步（INSERT/UPDATE/DELETE）
--- conversations
 CREATE TRIGGER IF NOT EXISTS fts_conv_ai AFTER INSERT ON conversations BEGIN
   INSERT INTO fts_conversations(rowid, content) VALUES (new.id, new.content);
 END;
@@ -36,21 +34,65 @@ CREATE TRIGGER IF NOT EXISTS fts_conv_au AFTER UPDATE ON conversations BEGIN
   INSERT INTO fts_conversations(rowid, content) VALUES (new.id, new.content);
 END;
 
--- episodes（gist 在睡眠期更新，用 rowid 关联）
+-- =====================================================================
+-- I1-2: episodes 全文索引（独立表模式，episode.id 是 TEXT 主键）
+-- =====================================================================
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_episodes USING fts5(
+  episode_id UNINDEXED,
+  gist,
+  tokenize='trigram'
+);
+
 CREATE TRIGGER IF NOT EXISTS fts_ep_ai AFTER INSERT ON episodes BEGIN
-  INSERT INTO fts_episodes(rowid, gist) VALUES (new.rowid, new.gist);
+  INSERT INTO fts_episodes(episode_id, gist)
+  VALUES (new.id, COALESCE(new.gist, ''));
 END;
 CREATE TRIGGER IF NOT EXISTS fts_ep_ad AFTER DELETE ON episodes BEGIN
-  INSERT INTO fts_episodes(fts_episodes, rowid, gist)
-  VALUES ('delete', old.rowid, old.gist);
+  DELETE FROM fts_episodes WHERE episode_id = old.id;
 END;
 CREATE TRIGGER IF NOT EXISTS fts_ep_au AFTER UPDATE ON episodes BEGIN
-  INSERT INTO fts_episodes(fts_episodes, rowid, gist)
-  VALUES ('delete', old.rowid, old.gist);
-  INSERT INTO fts_episodes(rowid, gist) VALUES (new.rowid, new.gist);
+  DELETE FROM fts_episodes WHERE episode_id = old.id;
+  INSERT INTO fts_episodes(episode_id, gist)
+  VALUES (new.id, COALESCE(new.gist, ''));
 END;
 
+-- =====================================================================
+-- I1-3: memories 全文索引（独立表模式，memories.id 是 TEXT 主键）
+--       M4 Bm25Recall 依赖 JOIN v_mem_real m ON m.id = fts_memories.trace_id
+-- =====================================================================
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
+  trace_id UNINDEXED,
+  summary,
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS fts_mem_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO fts_memories(trace_id, summary)
+  VALUES (new.id, COALESCE(new.summary, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS fts_mem_ad AFTER DELETE ON memories BEGIN
+  DELETE FROM fts_memories WHERE trace_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS fts_mem_au AFTER UPDATE ON memories BEGIN
+  DELETE FROM fts_memories WHERE trace_id = old.id;
+  INSERT INTO fts_memories(trace_id, summary)
+  VALUES (new.id, COALESCE(new.summary, ''));
+END;
+
+-- =====================================================================
 -- 常用查询模板（业务层参考，不强制）：
---   SELECT c.*, bm25(fts_conversations) AS score
---   FROM fts_conversations JOIN conversations c ON c.id = fts_conversations.rowid
---   WHERE fts_conversations MATCH ? ORDER BY score LIMIT 20;
+--   conversations:
+--     SELECT c.*, bm25(fts_conversations) AS score
+--     FROM fts_conversations JOIN conversations c ON c.id = fts_conversations.rowid
+--     WHERE fts_conversations MATCH ? ORDER BY score LIMIT 20;
+--
+--   episodes:
+--     SELECT e.*, bm25(fts_episodes) AS score
+--     FROM fts_episodes JOIN episodes e ON e.id = fts_episodes.episode_id
+--     WHERE fts_episodes MATCH ? ORDER BY score LIMIT 20;
+--
+--   memories:
+--     SELECT m.*, bm25(fts_memories) AS score
+--     FROM fts_memories JOIN memories m ON m.id = fts_memories.trace_id
+--     WHERE fts_memories MATCH ? ORDER BY score LIMIT 20;
+-- =====================================================================

@@ -87,20 +87,25 @@ export class WorkingMemory {
 
   /**
    * 标记条目处理完成（由 MemoryWriter 在门控判定后调用）
+   * 通过 WriteQueue 入队执行，遵守统一写入口红线
    */
-  markDone(bufferId: number, gate: Gate): void {
-    this.db.prepare(
-      `UPDATE wm_buffer SET status = 'done', gate = ? WHERE id = ?`
-    ).run(gate, bufferId);
+  async markDone(bufferId: number, gate: Gate): Promise<void> {
+    await this.writer.enqueue((db) => {
+      db.prepare(
+        `UPDATE wm_buffer SET status = 'done', gate = ? WHERE id = ?`
+      ).run(gate, bufferId);
+    }, 'high', `wm_markDone:${bufferId}`);
   }
 
   /**
    * 标记条目处理失败（崩溃恢复出错时调用）
    */
-  markFailed(bufferId: number): void {
-    this.db.prepare(
-      `UPDATE wm_buffer SET status = 'failed' WHERE id = ?`
-    ).run(bufferId);
+  async markFailed(bufferId: number): Promise<void> {
+    await this.writer.enqueue((db) => {
+      db.prepare(
+        `UPDATE wm_buffer SET status = 'failed' WHERE id = ?`
+      ).run(bufferId);
+    }, 'high', `wm_markFailed:${bufferId}`);
   }
 
   /**

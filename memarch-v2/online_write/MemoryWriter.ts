@@ -76,8 +76,17 @@ export class MemoryWriter {
           ).run(entry.message_id);
         }, 'high');
       }
-      this.workingMem.markDone(bufferId, gate);
+      // 🔴 必须 await：markDone 已改走 WriteQueue 成为异步，漏 await 会让
+      //   恢复处理器在状态落库前返回（崩溃恢复时 wm_buffer 可能卡在 pending）。
+      await this.workingMem.markDone(bufferId, gate);
     });
+  }
+
+  /**
+   * 获取内部 WriteQueue（供 M3 / M6 等模块注入使用）
+   */
+  getWriteQueue(): WriteQueue {
+    return this.writer;
   }
 
   /**
@@ -156,7 +165,7 @@ export class MemoryWriter {
 
     if (segResult.is_boundary) {
       // 切分：创建新 episode
-      this.currentEpisodeId = this.createNewEpisode(namespace, tsUtc);
+      this.currentEpisodeId = await this.createNewEpisode(namespace, tsUtc);
       this.episodeHistory = [];
     }
 
@@ -184,7 +193,7 @@ export class MemoryWriter {
     }
 
     // 更新 wm_buffer 状态
-    this.workingMem.markDone(bufferId, gate);
+    await this.workingMem.markDone(bufferId, gate);
 
     // ===== 步骤 ⑦：前瞻记忆抽取 =====
     const prospectiveItems = this.prospectiveExtractor.extract(
@@ -213,8 +222,10 @@ export class MemoryWriter {
     this.processedMessages.set(input.message_id, result);
     // 防止内存无限增长：超过 1000 条时清理最早的
     if (this.processedMessages.size > 1000) {
+      // keys().next().value 的类型是 `string | undefined`（迭代器耗尽时为空）；
+      // size>1000 时必有值，但显式判空才能通过 strict 并且真正防御。
       const firstKey = this.processedMessages.keys().next().value;
-      this.processedMessages.delete(firstKey);
+      if (firstKey !== undefined) this.processedMessages.delete(firstKey);
     }
 
     // 触发钩子
@@ -272,13 +283,16 @@ export class MemoryWriter {
 
   /**
    * 创建新 episode（写入 episodes 表）
+   * 通过 WriteQueue 入队执行，遵守统一写入口红线
    */
-  private createNewEpisode(namespace: string, tsUtc: number): string {
+  private async createNewEpisode(namespace: string, tsUtc: number): Promise<string> {
     const episodeId = `ep_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-    this.db.prepare(`
-      INSERT INTO episodes (id, namespace, started_at, status, consolidation, lifecycle_state)
-      VALUES (?, ?, ?, 'open', 0, 'fresh')
-    `).run(episodeId, namespace, tsUtc);
+    await this.writer.enqueue((db) => {
+      db.prepare(`
+        INSERT INTO episodes (id, namespace, started_at, status, consolidation, lifecycle_state)
+        VALUES (?, ?, ?, 'open', 0, 'fresh')
+      `).run(episodeId, namespace, tsUtc);
+    }, 'high', `createEpisode:${episodeId}`);
     return episodeId;
   }
 

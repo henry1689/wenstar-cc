@@ -27,6 +27,7 @@ import type { SleepConfig } from '../config/index.js';
 import { BudgetTracker } from '../config/budget.js';
 import { CheckpointStore, type CheckpointData } from '../checkpoint/CheckpointStore.js';
 import { BaseStep, type StepDeps } from './StepBase.js';
+import type { WriteQueue } from '../../storage/write_queue/WriteQueue.js';
 
 import { ScanPendingStep } from './Step1_ScanPending.js';
 import { SealEpisodesStep } from './Step2_SealEpisodes.js';
@@ -44,11 +45,13 @@ export class SleepOrchestrator {
   private readonly checkpoint: CheckpointStore;
   private readonly db: Database.Database;
   private readonly config: SleepConfig;
+  private readonly writeQueue: WriteQueue | null;
   private llm: LLMClient | null = null;
 
-  constructor(db: Database.Database, config: SleepConfig) {
+  constructor(db: Database.Database, config: SleepConfig, writeQueue?: WriteQueue) {
     this.db = db;
     this.config = config;
+    this.writeQueue = writeQueue ?? null;
     this.checkpoint = new CheckpointStore(db, config.namespace);
 
     // 构建依赖
@@ -88,8 +91,22 @@ export class SleepOrchestrator {
    * 执行完整睡眠流水线
    * @param mode 主睡眠 / 小睡
    * @param resume 是否尝试断点续跑
+   *
+   * 设计：若注入了 WriteQueue，则整个流水线以 low 优先级入队执行，
+   * 遵守"M1 是唯一写入口"的设计红线，不阻塞在线写入（high 优先级）。
    */
   async execute(mode: SleepMode = 'main', resume = true): Promise<HarnessMetrics> {
+    if (this.writeQueue) {
+      return this.writeQueue.runLowPriority(
+        () => this.executeInternal(mode, resume),
+        `sleep_${mode}`,
+      );
+    }
+    return this.executeInternal(mode, resume);
+  }
+
+  /** 流水线内部实现（由 execute 调度，可直接调用用于测试或无队列场景） */
+  private async executeInternal(mode: SleepMode, resume: boolean): Promise<HarnessMetrics> {
     const runStart = Date.now();
     let checkpoint: CheckpointData;
     let isResumed = false;
