@@ -1944,6 +1944,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  // ── MemArch bridge 运维端点（2026-11-05 接入）──
+  //   懒加载：动态 import ⇒ 不访问该组端点就完全不加载 better-sqlite3、不打开 v2 库。
+  //   仅 loopback 可访问，响应不含记忆原文（安全闸在新文件内自担）。
+  //   灰度默认 0：只提供运维通道，不改变任何现有记忆读写路径。
+  //   注意 dataDir 用 PROJECT_ROOT/data —— memarch-v2.db 在 data/ 下，不是 DATA_DIR(data/webui)。
+  if (url.pathname.startsWith('/api/memarch-bridge')) {
+    const { handleMemarchBridgeRoutes } = await import('./server-memarch-bridge-routes.js');
+    if (await handleMemarchBridgeRoutes({
+      req, res, url,
+      dataDir: path.join(PROJECT_ROOT, 'data'),
+      readBody,
+    })) return;
+  }
+
   // 可观测性路由（已拆分至 server-observability-routes.ts）
   if (await handleObservabilityRoutes({
     req, res, url,
