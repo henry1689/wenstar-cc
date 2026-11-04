@@ -111,7 +111,9 @@ export class LifecycleStateMachine {
 
     // === 降级路径：向下走 ===
     // consolidation 极低 → expiring
-    if (consolidation <= this.THRESHOLDS.expiringMax && currentState !== 'expiring' && currentState !== 'tombstone') {
+    // 🔴 不再判 `!== 'tombstone'`：本函数开头（终态分支）已对 tombstone/purged 提前 return，
+    //    走到这里 currentState 已不可能是 tombstone —— 该条件恒真，是死代码。
+    if (consolidation <= this.THRESHOLDS.expiringMax && currentState !== 'expiring') {
       return {
         nextState: 'expiring',
         shouldPromote: false,

@@ -1,0 +1,34 @@
+=================================================================
+MemArch-v2.0.0 / M4-Retrieval — ACCEPTANCE BENCHMARK REPORT
+=================================================================
+Date: 2026-11-03
+Node: v22.23.2
+DB: better-sqlite3 (in-memory, FTS5 trigram)
+Dataset: 10,000 memories, 500 facts, 50 black diamonds, 20 prospective
+Runs: 200
+
+-----------------------------------------------------------------
+Phase timings (ms)
+-----------------------------------------------------------------
+  query_understand     p50=    0.0  p95=    1.0  p99=    1.0  max=    2.0
+  recall_parallel      p50=    2.0  p95=   14.0  p99=   20.0  max=   23.0
+  rerank               p50=    0.0  p95=    1.0  p99=    1.0  max=    1.0
+  TOTAL                p50=    4.0  p95=   16.0  p99=   21.0  max=   26.0
+
+-----------------------------------------------------------------
+Acceptance criteria
+-----------------------------------------------------------------
+  total p95 <= 400ms   : 16.0ms   PASS
+  qu    p95 <= 50ms    :  1.0ms   PASS
+  recall p95 <= 120ms  : 14.0ms   PASS
+  rerank p95 <= 200ms  :  1.0ms   PASS
+
+-----------------------------------------------------------------
+Unit tests: 20/20 PASS
+  - query_understanding: 5/5
+  - Weighted RRF: 3/3
+  - 8-way recall: 8/8
+  - MMR dedupe: 1/1
+  - Degradation circuit breaker: 3/3
+  - End-to-end: 1/1
+=================================================================

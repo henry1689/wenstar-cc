@@ -28,9 +28,11 @@
     "agent-cnc:scan": "tsx src/agent-cnc/cli.ts scan",
     "agent-cnc:validate": "tsx src/agent-cnc/cli.ts validate",
     "agent-cnc:guard": "tsx src/agent-cnc/cli.ts guard",
-    "agent-cnc:report": "tsx src/agent-cnc/cli.ts report"
+    "agent-cnc:report": "tsx src/agent-cnc/cli.ts report",
+    "lint:memarch": "tsc -p tsconfig.memarch.json"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/busboy": "^1.5.4",
     "@types/node": "^22.0.0",
     "@types/sql.js": "^1.4.11",

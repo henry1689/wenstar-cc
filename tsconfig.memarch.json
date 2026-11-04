@@ -1,0 +1,27 @@
+{
+  "//": "MemArch v2 / bridge / governance 子项目的类型检查入口。",
+  "//为什么单独一份": "根 tsconfig.json 的 include 只有 src/**，这三块从未进过任何 tsc 校验（2200+ 行零检查）。适配层要成为终点架构，必须先能被编译器看见。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": [
+    "memarch-v2/**/*.ts",
+    "memarch-bridge/**/*.ts",
+    "governance/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/dist/**",
+    "**/tests/**",
+    "**/__tests__/**",
+    "**/*.test.ts"
+  ]
+}

@@ -1,0 +1,109 @@
+﻿======================================================================
+MemArch-v2 端到端联调测试
+======================================================================
+node.exe : [DDL] 04_vector_index.sql 执行警告: no such module: vec0
+所在位置 行:1 字符: 1
++ & "C:\Users\henry\AppData\Local\pi-node\current/node.exe" "C:\Users\h ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([DDL] 04_vector...ch module: vec0:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+[1] 内存数据库初始化完成
+[2] M2 MemoryWriter 实例化完成
+[3] M6 AuditLog 已统一接入 WriteQueue 审计钩子
+
+[4] 写入测试记忆（50 次采样）...
+  conversations 表: 50 条
+  memories 表: 40 条
+  写入延迟 p50/p95/p99: 0.757 / 1.841 / 6.317 ms
+  最后一条 gate=RAW_ONLY, salience=0.359, trace_id=无
+
+[5] M3 睡眠巩固...
+  睡眠状态: completed
+  总耗时: 13.2 ms
+  步骤数: 10
+    - scan_pending: success (0.0ms, 40 items)
+    - seal_episodes: success (1.0ms, 0 items)
+    - reeval_raw_only: success (1.0ms, 10 items)
+    - score_salience_llm: success (0.0ms, 0 items)
+    - build_replay_set: success (0.0ms, 30 items)
+    - merge_dedupe: success (4.0ms, 5 items)
+    - extract_semantic: success (0.0ms, 0 items)
+    - resolve_temporal: success (0.0ms, 0 items)
+    - promote_lifecycle: success (1.0ms, 5 items)
+    - purge_tombstones: success (2.0ms, 0 items)
+
+[6] M4 检索...
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+  检索到证据: 20 条
+  检索延迟 p50/p95/p99: 2.155 / 2.963 / 9.445 ms
+  首条证据: {"memory_id":"pi_2e8b37d2fc7900dc","text":"生日","source_namespace":"prospective_items","score":0.08184153005464481,"recall_sources":["foresight"],"recency":0.000002488425925925926,"strength":0.6,"activ
+
+[7] M5 呈现...
+  utterance: "这部分我暂时没有相关记忆，你可以多告诉我一点。"
+  label: refused, routed_path: B_only, p_A: 0.072
+  guard_passed: false, used_uuids: 20
+  呈现延迟 p50/p95/p99: 0.12 / 0.557 / 2.481 ms
+
+[8] M6 审计日志检查...
+  审计条目数: 273
+  哈希链完整性: ✓ 通过 (273 条)
+  WriteQueue 统一审计: 273 条
+
+[9] 全链路端到端延迟采样（20 次）...
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+  全链路 p50/p95/p99: 4.051 / 4.666 / 4.666 ms
+
+======================================================================
+联调问题汇总
+======================================================================
+✓ 未发现问题
+
+性能数据汇总:
+  M2 写入:      p50=0.757ms, p95=1.841ms, p99=6.317ms
+  M4 检索:      p50=2.155ms, p95=2.963ms, p99=9.445ms
+  M5 呈现:      p50=0.12ms, p95=0.557ms, p99=2.481ms
+  全链路:       p50=4.051ms, p95=4.666ms, p99=4.666ms
+
+✓ 测试完成

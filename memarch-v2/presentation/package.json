@@ -1,0 +1,24 @@
+{
+  "name": "@wenstar/memarch-presentation",
+  "version": "2.0.0",
+  "description": "MemArch-v2.0.0 Module 5 (MemSym Presentation) - probability router + evidence labeling + output guard + reinforcement attribution + reconsolidation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.5.0",
+    "better-sqlite3": "^11.3.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

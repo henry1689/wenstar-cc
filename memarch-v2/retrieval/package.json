@@ -1,0 +1,28 @@
+{
+  "name": "@wenstar/memarch-retrieval",
+  "version": "2.0.0",
+  "description": "MemArch-v2.0.0 Module 4 - User-facing retrieval pipeline (8-way recall + weighted RRF + cross-encoder rerank + MMR)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest --runInBand",
+    "bench": "node --loader ts-node/esm bench/bench.ts",
+    "bench:js": "node bench/bench.compiled.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^22.5.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,148 @@
+﻿======================================================================
+MemArch-v2 端到端联调测试
+======================================================================
+node.exe : [DDL] 04_vector_index.sql 执行警告: no such module: vec0
+所在位置 行:1 字符: 1
++ & "C:\Users\henry\AppData\Local\pi-node\current/node.exe" "C:\Users\h ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([DDL] 04_vector...ch module: vec0:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+[1] 内存数据库初始化完成
+[2] M2 MemoryWriter 实例化完成
+  写入 #0 失败详情: SQLITE_ERROR SQL logic error
+[3] M6 AuditLog 已接入 M2 写入钩子
+  写入 #1 失败详情: SQLITE_ERROR SQL logic error
+  写入 #2 失败详情: SQLITE_ERROR SQL logic error
+  写入 #3 失败详情: SQLITE_ERROR SQL logic error
+
+[4] 写入测试记忆（50 次采样）...
+  conversations 表: 50 条
+  memories 表: 40 条
+  写入延迟 p50/p95/p99: 0.853 / 2.421 / 2.421 ms
+  最后一条 gate=RAW_ONLY, salience=0.359, trace_id=无
+
+[5] M3 睡眠巩固...
+  睡眠状态: completed
+  总耗时: 5.9 ms
+  步骤数: 5
+    - scan_pending: success (0.0ms, 40 items)
+    - seal_episodes: success (0.0ms, 0 items)
+    - reeval_raw_only: success (1.0ms, 10 items)
+    - score_salience_llm: success (0.0ms, 0 items)
+    - build_replay_set: success (0.0ms, 0 items)
+
+[6] M4 检索...
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+  检索到证据: 20 条
+  检索延迟 p50/p95/p99: 1.534 / 3.018 / 6.389 ms
+  首条证据: {"memory_id":"tr_97af42f0f0814497831cd0ce15fa3598","text":"我决定下个月辞职创业，和朋友合伙开一家电机公司","source_namespace":"v_mem_real","score":0.049678436317780586,"recall_sources":["bm25","semantic","emotion"],"recency
+
+[7] M5 呈现...
+  utterance: "这部分我暂时没有相关记忆，你可以多告诉我一点。"
+  label: refused, routed_path: B_only, p_A: 0.049
+  guard_passed: false, used_uuids: 20
+  呈现延迟 p50/p95/p99: 0.244 / 0.941 / 1.554 ms
+
+[8] M6 审计日志检查...
+  审计条目数: 11
+  哈希链完整性: ✓ 通过 (11 条)
+  M2 写入审计: 10 条
+  M3 巩固审计: 1 条
+
+[9] 全链路端到端延迟采样（20 次）...
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+[memarch-recall] semantic KNN failed, fallback to FTS5: no such table: vec_mem_semantic
+[memarch-recall] emotion KNN failed, fallback to FTS5: no such table: vec_mem_perception
+  全链路 p50/p95/p99: 4.858 / 9.447 / 9.447 ms
+
+======================================================================
+联调问题汇总
+======================================================================
+[P0] M2: 写入 #0 异常: SQL logic error (失败)
+[P0] M2: 写入 #1 异常: SQL logic error (失败)
+[P0] M2: 写入 #2 异常: SQL logic error (失败)
+[P0] M2: 写入 #3 异常: SQL logic error (失败)
+[P0] M2: 写入 #5 异常: SQL logic error (失败)
+[P0] M2: 写入 #6 异常: SQL logic error (失败)
+[P0] M2: 写入 #7 异常: SQL logic error (失败)
+[P0] M2: 写入 #8 异常: SQL logic error (失败)
+[P0] M2: 写入 #10 异常: SQL logic error (失败)
+[P0] M2: 写入 #11 异常: SQL logic error (失败)
+[P0] M2: 写入 #12 异常: SQL logic error (失败)
+[P0] M2: 写入 #13 异常: SQL logic error (失败)
+[P0] M2: 写入 #15 异常: SQL logic error (失败)
+[P0] M2: 写入 #16 异常: SQL logic error (失败)
+[P0] M2: 写入 #17 异常: SQL logic error (失败)
+[P0] M2: 写入 #18 异常: SQL logic error (失败)
+[P0] M2: 写入 #20 异常: SQL logic error (失败)
+[P0] M2: 写入 #21 异常: SQL logic error (失败)
+[P0] M2: 写入 #22 异常: SQL logic error (失败)
+[P0] M2: 写入 #23 异常: SQL logic error (失败)
+[P0] M2: 写入 #25 异常: SQL logic error (失败)
+[P0] M2: 写入 #26 异常: SQL logic error (失败)
+[P0] M2: 写入 #27 异常: SQL logic error (失败)
+[P0] M2: 写入 #28 异常: SQL logic error (失败)
+[P0] M2: 写入 #30 异常: SQL logic error (失败)
+[P0] M2: 写入 #31 异常: SQL logic error (失败)
+[P0] M2: 写入 #32 异常: SQL logic error (失败)
+[P0] M2: 写入 #33 异常: SQL logic error (失败)
+[P0] M2: 写入 #35 异常: SQL logic error (失败)
+[P0] M2: 写入 #36 异常: SQL logic error (失败)
+[P0] M2: 写入 #37 异常: SQL logic error (失败)
+[P0] M2: 写入 #38 异常: SQL logic error (失败)
+[P0] M2: 写入 #40 异常: SQL logic error (失败)
+[P0] M2: 写入 #41 异常: SQL logic error (失败)
+[P0] M2: 写入 #42 异常: SQL logic error (失败)
+[P0] M2: 写入 #43 异常: SQL logic error (失败)
+[P0] M2: 写入 #45 异常: SQL logic error (失败)
+[P0] M2: 写入 #46 异常: SQL logic error (失败)
+[P0] M2: 写入 #47 异常: SQL logic error (失败)
+[P0] M2: 写入 #48 异常: SQL logic error (失败)
+
+性能数据汇总:
+  M2 写入:      p50=0.853ms, p95=2.421ms, p99=2.421ms
+  M4 检索:      p50=1.534ms, p95=3.018ms, p99=6.389ms
+  M5 呈现:      p50=0.244ms, p95=0.941ms, p99=1.554ms
+  全链路:       p50=4.858ms, p95=9.447ms, p99=9.447ms
+
+✓ 测试完成

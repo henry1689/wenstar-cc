@@ -1,0 +1,19 @@
+{
+  "name": "@wenstar/memarch-bridge",
+  "version": "1.0.0",
+  "description": "MemArch v2 接入适配层 —— 旧记忆系统 → 新 M1-M6 桥接",
+  "main": "src/core/BridgeRegistry.ts",
+  "types": "src/core/BridgeRegistry.ts",
+  "scripts": {
+    "migrate": "powershell -File scripts/run-migration.ps1",
+    "rollback": "powershell -File scripts/rollback.ps1",
+    "verify": "ts-node src/verification/E2EVerifier.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "peerDependencies": {
+    "@wenstar/memarch-v2": "workspace:^",
+    "@wenstar/governance": "workspace:^"
+  }
+}

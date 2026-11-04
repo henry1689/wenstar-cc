@@ -1,0 +1,11 @@
+const Database = require('better-sqlite3');
+const { buildTestDb } = require('../dist/__tests__/helpers/db_factory.js');
+const db = buildTestDb({ n_memories: 100 });
+const rows = db.prepare("SELECT trace_id, raw_input FROM fts_memories LIMIT 2").all();
+console.log('sample rows:', rows);
+const m1 = db.prepare("SELECT trace_id, bm25(fts_memories) AS score FROM fts_memories WHERE fts_memories MATCH 'motor' LIMIT 5").all();
+console.log("match 'motor':", m1);
+const m2 = db.prepare("SELECT trace_id, bm25(fts_memories) AS score FROM fts_memories WHERE fts_memories MATCH 'motor stator' LIMIT 5").all();
+console.log("match 'motor stator':", m2);
+const m3 = db.prepare("SELECT trace_id, bm25(fts_memories) AS score FROM fts_memories WHERE fts_memories MATCH 'winding' LIMIT 5").all();
+console.log("match 'winding':", m3);
