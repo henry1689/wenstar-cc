@@ -77,8 +77,11 @@ interface FeatureFlagHandle {
 interface BridgeModule {
   initBridge(deps: { v2Db: unknown; legacyConfig: unknown }): unknown;
   getBridge(): BridgeHandle;
-  NamespaceManager: { list?: () => unknown };
+  /** 从 BridgeRegistry 导出的是 class 本身（`list` 在原型上），不是实例 */
+  NamespaceManager: new (db: unknown) => { list(): unknown };
   globalFeatureFlag: FeatureFlagHandle;
+  /** ensureBridge 注入的实例 —— 模块导出是类，端点必须拿实例才能读注册表 */
+  _nsManagerInstance?: { list(): unknown };
 }
 
 /** undefined = 尚未尝试；null = 尝试过且失败（避免每次请求都重试并刷日志） */
@@ -135,6 +138,9 @@ async function ensureBridge(dataDir: string): Promise<BridgeModule | null> {
     const BRIDGE_SPEC = '../../memarch-bridge/src/core/BridgeRegistry.js';
     const mod = (await import(/* @vite-ignore */ BRIDGE_SPEC)) as unknown as BridgeModule;
     mod.initBridge({ v2Db, legacyConfig });
+    // 模块导出的是 class，`list()` 在原型上 —— 端点要读注册表必须拿实例。
+    // 复用同一个 v2Db 句柄，不新开连接。
+    mod._nsManagerInstance = new mod.NamespaceManager(v2Db);
 
     console.log('[MemArchBridge] 已初始化（懒加载，灰度 0%，不接管流量）');
     _bridgeMod = mod;
@@ -183,8 +189,9 @@ export async function handleMemarchBridgeRoutes(deps: MemarchBridgeRouteDeps): P
   // ── GET /namespaces ──
   if (req.method === 'GET' && url.pathname === `${P}/namespaces`) {
     if (!mod) return notReady();
-    const mgr = mod.NamespaceManager as unknown as { list?: () => unknown };
-    json(res, 200, { ok: true, namespaces: typeof mgr?.list === 'function' ? mgr.list() : null });
+    const mgr = mod._nsManagerInstance;
+    // 实例未注入时返回空数组而不是 null：调用方不会把「未初始化」误读成「注册表为空」
+    json(res, 200, { ok: true, namespaces: typeof mgr?.list === 'function' ? mgr.list() : [] });
     return true;
   }
 
@@ -259,7 +266,12 @@ export async function handleMemarchBridgeRoutes(deps: MemarchBridgeRouteDeps): P
           const ev = (r as unknown as { evidence?: Array<{ uuid?: string }> })?.evidence ?? [];
           json(res, 200, { ok: true, namespace: ns, count: ev.length, ids: ev.slice(0, 20).map((e) => e.uuid) });
         } catch (e) {
-          json(res, 500, { ok: false, error: (e as Error)?.message || String(e) });
+          const msg = (e as Error)?.message || String(e);
+          // 不掩盖问题：状态码与原始 error 原样保留，只补一条可操作提示。
+          const hint = msg.includes('legacyRetriever 未注入')
+            ? '该 namespace 灰度比例为 0%，请求被路由到旧链路，但运维端点未注入旧实例。可先 POST /promote 或 /ratio 调整后再重试自检。'
+            : undefined;
+          json(res, 500, hint ? { ok: false, error: msg, hint } : { ok: false, error: msg });
         }
         return true;
       }
