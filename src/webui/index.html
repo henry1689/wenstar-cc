@@ -833,7 +833,29 @@ async function sendStream(t){
         //   （server-chat-routes L625），关了就丢掉带音频的第二帧与之后所有 chat-tts 段推送，
         //   音频只能靠轮询兜底，兜底一断即无声。关闭时机移到 _audioFinish。
         if(gen!==_audioGen){es.close();if(_streamES===es)_streamES=null;return;}
-        try{const dd=JSON.parse(ev.data);if(dd.job_id===jobId)finalizeStream(dd);}catch(e){}
+        try{
+          const dd=JSON.parse(ev.data);
+          if(dd.job_id===jobId){
+            // 🔴 2026-11-05 标签单一真源（流式路径补接线）：
+            //   服务端现在在 chat-done / result 上回传 **生成该回复时** 的 chat_state。
+            //   优先用它，而不是等 applyChatStateAsync 去 /api/conversation 取「请求结束时」
+            //   的状态 —— 后者在换人（inferSpeaker/点名）后必然与正文自称错位，
+            //   实测表现为「【徐诗雨】罗珍思：…」、点名换人后标签不跟、散会后停在最后发言人。
+            //   fail-open：任何异常都不影响正文渲染。
+            try{
+              if(dd.chat_state){
+                applyChatState(dd.chat_state);
+                const _sp=dd.chat_state.speakerName;
+                if(dd.chat_state.mode==='meeting'&&_sp&&b){
+                  if(b.textContent.indexOf('【'+_sp+'】')!==0)b.textContent='【'+_sp+'】'+b.textContent;
+                  const _ml=b.closest('.msg')?.querySelector('.ml');
+                  if(_ml)_ml.textContent=_sp;
+                }
+              }
+            }catch(_ce){console.warn('[Stream] chat_state 应用失败:',_ce);}
+            finalizeStream(dd);
+          }
+        }catch(e){}
       });
       // 🔴 S2-F2: 增量 TTS 段推送 — 每段生成完立即追加到增量队列并播放（不等全量）
       es.addEventListener('chat-tts',(ev)=>{

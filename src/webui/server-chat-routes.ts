@@ -663,12 +663,38 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
             result.reply = _replyAll;   // 保持 job.result 与 job.reply 一致
           }
           job.reply = _replyAll;
+          // 🔴 2026-11-05 流式出口归一（与同步路径同源）。
+          //   此前 attributeReply **只接了同步路径**，而前端 index.html 无条件传 stream:true
+          //   ⇒ 生产 100% 走流式，该修复从未执行。后果：正文里 LLM 自写的「罗珍思：」
+          //   段首标记无人解析，前端又无条件拼粘性发言人 ⇒
+          //   「【徐诗雨】罗珍思：…」身份错乱、点名换人后标签不跟、散会后标签停在最后发言人。
+          //   判据（项目既有红线）：标签 = **生成该回复时的身份**，不是请求结束时的状态。
+          //   fail-open：归一是增强不是闸门，失败绝不挡回复。
+          let _streamChatState: Record<string, unknown> | null = null;
+          try {
+            const _cs = buildChatState(deps.entityMeeting);
+            if (_cs && _cs.mode === 'meeting' && job.reply) {
+              const _gen = (job.result as Record<string, unknown> | null)?.speakerName;
+              const _speaker = (typeof _gen === 'string' && _gen) ? _gen : _cs.speakerName;
+              const _attr = attributeReply(job.reply, _cs.participants, _speaker);
+              job.reply = _attr.body;
+              _streamChatState = { ..._cs, speakerName: _attr.speakerName };
+              if (_attr.warn) console.warn('[OutputGuard] ' + _attr.warn);
+              // 挂到 result 上：/api/chat/job/status 本就返回 result，前端据此拿「生成时」的
+              // chat_state，不必再走 /api/conversation 取「请求结束时」的旧值。
+              if (job.result && typeof job.result === 'object') {
+                (job.result as Record<string, unknown>).chat_state = _streamChatState;
+              }
+            }
+          } catch (_e) {
+            console.warn('[OutputGuard] 流式出口归一失败，回退原回复:', (_e as Error)?.message);
+          }
           // P1-C-1: 内部概念出口审计（**只告警不削字** —— askAll 与普通路径都汇于此）
           auditReplyExit(job.reply, 'stream');
           // 🔴 发送卡死修复: TTS 不阻塞 done——reply 就绪立即完成（文本可展示），TTS 后台异步生成后更新 audio。
           job.status = 'done';
           job.terminalAt = Date.now();
-          deps.pushToSSEClients?.('chat-done', { job_id: jobId, reply: job.reply, audio_url: null, audio_urls: [], tts_job: null });
+          deps.pushToSSEClients?.('chat-done', { job_id: jobId, reply: job.reply, chat_state: _streamChatState, audio_url: null, audio_urls: [], tts_job: null });
           console.log('[ChatStream] done: ' + jobId + ' tokens=' + job.tokens.length + ' len=' + job.reply.length);
           // V15: 增量 TTS 尾补（不阻塞 done；增量段已在流式期间推送）
           if (incrTTS) {
