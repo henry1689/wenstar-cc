@@ -44,10 +44,16 @@ export function quantizeInt8(x: number): number {
  *   dequantize(q) = q / 127
  *
  * 反量化误差上界为半个量化步长，即 1/254（S-004 校验标准）。
+ *
+ * 整改 7：输入先钳到合法 int8 值域 [-127,127]——`dequantizeInt8(-200)` 若不钳
+ * 会得到 -1.57，一个不可能由量化产生的值域外结果。钳位后恒落在 [-1,1]。
+ * （注：oracle v3 的 `dequant_int8` 不钳位，此处按整改任务书第 77 行取钳位，
+ *  属已知分歧，已记入差异报告。）
  */
 export function dequantizeInt8(q: number): number {
   if (!Number.isFinite(q)) return 0;
-  return q / INT8_MAX;
+  const clamped = Math.min(Math.max(q, -INT8_MAX), INT8_MAX);
+  return clamped / INT8_MAX;
 }
 
 /**
@@ -109,6 +115,10 @@ export function decodePi(k: number): number {
  * - 结果发散（ICC → 1、τ → 0）→ 按 σ 下限封顶到 400，不吐 Infinity
  * - ICC > 1 时 (1−ICC) 为负会算出**负 π**，而 π = 1/σ² 的定义域是 [0,400]，
  *   故下限同样截到 0（π=0 即未知），与 ICC≤0 同口径
+ *
+ * 整改 4（定义域统一）：ICC>1 **归 0** 而非抛异常——oracle v3 没有此函数
+ * （只有基线 S-006 的公式），无可对齐对象；归 0 与 ICC≤0 同口径，
+ * 语义是「无有效一致性即无精度」，且全输入域输出恒落在 [0,400]。
  */
 export function iccPrecisionCap(icc: number, tau: number): number {
   if (!Number.isFinite(icc) || !Number.isFinite(tau) || icc <= 0) return 0;

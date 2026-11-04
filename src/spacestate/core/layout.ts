@@ -5,7 +5,7 @@
  * 不得在别处硬编码下标，以防维度错位导致证据计算整体失真。
  */
 
-import { LAYOUT_SIZE, PI_MAX } from './config.js';
+import { LAYOUT_SIZE } from './config.js';
 import { clampPi } from './coding.js';
 
 /** 印记块 */
@@ -121,6 +121,10 @@ if (LAYOUT.length !== LAYOUT_SIZE) {
   throw new Error(`LAYOUT 维数 ${LAYOUT.length} !== 规约 ${LAYOUT_SIZE}（S-001）`);
 }
 
+// 整改 6：深冻结。Object.freeze(LAYOUT) 只锁数组本身，
+// 内层对象仍可被 `(LAYOUT[0] as any).block = 'x'` 篡改——而 LAYOUT 是下标唯一真相源。
+for (const entry of LAYOUT) Object.freeze(entry);
+
 /** LAYOUT 单项的类型（由字面量数组推导，避免第二处定义漂移） */
 export type LayoutEntry = (typeof LAYOUT)[number];
 
@@ -164,6 +168,15 @@ export const D27_STORAGE_INDICES: readonly number[] = LAYOUT.reduce<number[]>(
       : acc,
   [],
 );
+
+// 整改 3：加载断言。D27 必须恰好命中主体块两处（self + user_est），
+// 否则推导已随布局漂移——精确下标 [35, 66] 由单测 `toEqual([35, 66])` 钉死
+// （字面量 35/66 不进 core，受工程约束 4 白名单限制）。
+if (D27_STORAGE_INDICES.length !== 2) {
+  throw new Error(
+    `D27_STORAGE_INDICES 命中 ${D27_STORAGE_INDICES.length} 处，应为主体块 2 处（S-008/E-10）`,
+  );
+}
 
 /**
  * S-008：写入印记时把主体块 D27 的存储精度强制置 0。

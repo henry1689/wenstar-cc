@@ -45,3 +45,15 @@ export const MINUTES_PER_DAY = 1440;
  * 放配置源是为了让 layout.ts 的模块加载断言不出现数值字面量（工程约束 4）。
  */
 export const LAYOUT_SIZE = 79;
+
+/**
+ * 每维证据 ℓ 的截断上界（S-013）：ℓ ∈ [-3, 3]，截断后再乘权重。
+ * 防止单维一票否决——原始失配值可到 -31.57（G-010 #4）。
+ */
+export const CLIP = 3;
+
+/** 背景离散度 τ 下限（S-015）：τ_i ≥ 0.1，否则背景退化为点质量 */
+export const TAU_MIN = 0.1;
+
+/** 双极维值域下界（S-002）；单极维下界为 0（白名单可直接书写） */
+export const BIPOLAR_MIN = -1;

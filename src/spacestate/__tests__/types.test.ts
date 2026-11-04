@@ -49,17 +49,21 @@ describe('S-003 · DimReading 结构', () => {
     expect(Object.isFrozen(UNKNOWN_READING)).toBe(true);
   });
 
-  it('isKnown 判 π>0 且非 NaN；+∞ 语义是无限精确而非未知（整改 C / E-25）', () => {
+  it('isKnown 要求 v 有限 且 π>0 且非 NaN（整改 1 / 整改 C / E-25）', () => {
     // E-25：π=+∞ 是 σ→0 无限精确，未规范化时不得被误判为未知（整改 C 去掉 isFinite）
     expect(isKnown({ v: 0.5, pi: Infinity, src: 'x' })).toBe(true);
-    expect(isKnown({ v: NaN, pi: Infinity, src: 'x' })).toBe(true); // 只看 pi，v 由 normalizeReading 把关
-    // NaN 仍是未知
+    // 整改 1：v 非有限时即使 π 正常也算未知——否则 NaN 会被当有效值读出去
+    expect(isKnown({ v: NaN, pi: 100, src: 'x' })).toBe(false);
+    expect(isKnown({ v: Infinity, pi: 100, src: 'x' })).toBe(false);
+    expect(isKnown({ v: NaN, pi: Infinity, src: 'x' })).toBe(false);
+    // NaN 精度仍是未知
     expect(isKnown({ v: 0.5, pi: NaN, src: 'x' })).toBe(false);
     // 负精度 / 零精度是未知
     expect(isKnown({ v: 0.5, pi: -Infinity, src: 'x' })).toBe(false);
     expect(isKnown({ v: 0.5, pi: -1, src: 'x' })).toBe(false);
     expect(isKnown({ v: 0.5, pi: 0, src: 'x' })).toBe(false);
     expect(isKnown({ v: 0.5, pi: 1e-9, src: 'x' })).toBe(true);
+    expect(isKnown({ v: 0, pi: 25, src: 'x' })).toBe(true);
   });
 
   it('类型定义里不出现 sigma / variance 字段（静态审查）', () => {

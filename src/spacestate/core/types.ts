@@ -5,7 +5,7 @@
  * 调用方在读取 v 之前必须先过 isKnown 判断，否则会把「未知」误当成 0。
  */
 
-import { PI_MAX } from './config.js';
+import { BIPOLAR_MIN, PI_MAX } from './config.js';
 import { isBipolar, type DimId } from './layout.js';
 
 /** 值域截断结果（内部原语的返回形） */
@@ -29,7 +29,7 @@ interface RangeResult {
  */
 function clampToRange(value: number, bipolar: boolean): RangeResult {
   if (!Number.isFinite(value)) return { v: value, truncated: false };
-  const lo = bipolar ? -1 : 0;
+  const lo = bipolar ? BIPOLAR_MIN : 0; // 整改 5：字面量 -1 收进 config
   const hi = 1;
   if (value < lo) return { v: lo, truncated: true };
   if (value > hi) return { v: hi, truncated: true };
@@ -63,12 +63,13 @@ export const UNKNOWN_READING: DimReading = Object.freeze({
  * 读取 v 前的必经判断（S-003 + E-25）。
  * 所有要使用 v 的代码路径都必须先调用本函数，pi = 0 时 v 视为不存在。
  *
- * ⚠️ 只判 `> 0` 与「非 NaN」，**刻意不判有限性**：
- * π=+∞ 按 E-25 是「σ→0 无限精确」而非未知，未规范化的 +∞ 不该被误判成未知。
- * 需要拿到规范化的 π（必在 [0,400]）时，请先过 `normalizeReading`。
+ * 两个条件缺一不可：
+ * - **v 必须有限**：`{v: NaN, pi: 100}` 若只看 pi 会误判为已知，把 NaN 当成有效值读出去
+ * - **π > 0 且非 NaN**：π=+∞ 按 E-25 是「σ→0 无限精确」而非未知，故不判有限性；
+ *   需要规范化后的 π（必在 [0,400]）时请先过 `normalizeReading`
  */
 export function isKnown(r: DimReading): boolean {
-  return r.pi > 0 && !Number.isNaN(r.pi);
+  return Number.isFinite(r.v) && r.pi > 0 && !Number.isNaN(r.pi);
 }
 
 /**
@@ -92,6 +93,52 @@ export type ReadingFlag =
   | 'bad_value'
   | 'range_clamped'
   | null;
+
+/** 原始值清洗结果（不含 src，供 dimEvidence 等按极性直接调用） */
+export interface SanitizeResult {
+  readonly v: number;
+  readonly pi: number;
+  readonly flag: ReadingFlag;
+  readonly truncated: boolean;
+}
+
+/**
+ * 按极性清洗一对 (v, π) —— **单一真相源**。
+ *
+ * `normalizeReading`（按 dim 查极性）与 `dimEvidence`（直接收 bipolar 参数）
+ * 都走这里，避免两处清洗口径漂移。逻辑与 oracle `sanitize_reading` 逐条对齐。
+ *
+ * @param bipolar 双极维用 [-1,1]，单极维用 [0,1]
+ */
+export function sanitizeValue(v: number, pi: number, bipolar: boolean): SanitizeResult {
+  // E-25：v 非有限 → 未知。🔴 不得把 +∞ 截成边界值凭空造强证据
+  if (!Number.isFinite(v)) return { v: 0, pi: 0, flag: 'bad_value', truncated: false };
+
+  // E-25：π = NaN → 未知
+  if (Number.isNaN(pi)) return { v: 0, pi: 0, flag: 'nan', truncated: false };
+
+  // E-25：π = +∞ → 饱和 400（σ→0 无限精确），属异常计数
+  if (pi === Infinity) {
+    const range = clampToRange(v, bipolar);
+    return { v: range.v, pi: PI_MAX, flag: 'pos_inf', truncated: true };
+  }
+
+  // E-25：π = −∞ 或 <0 → 未知并计数
+  if (pi === -Infinity || pi < 0) return { v: 0, pi: 0, flag: 'negative', truncated: true };
+
+  // π 钳到 [0,400]；为 0（含 -0）即未知，不走值域钳位（与 oracle p<=0 分支一致）
+  const p = Math.min(pi, PI_MAX);
+  if (p === 0) return { v: 0, pi: 0, flag: null, truncated: false };
+
+  const range = clampToRange(v, bipolar);
+  return {
+    v: range.v,
+    pi: p,
+    flag: range.truncated ? 'range_clamped' : null,
+    // π 有限但 >400 属常规截断：truncated=true 供计数，flag=null 不计异常
+    truncated: range.truncated || p !== pi,
+  };
+}
 
 /** 规范化结果 */
 export interface NormalizeResult {
@@ -118,45 +165,11 @@ export interface NormalizeResult {
  * @param dim 维度编号（如 'D01' / 'Y2'），用于查值域表；类型收紧为 DimId 以在编译期挡住拼写错误
  */
 export function normalizeReading(r: DimReading, dim: DimId): NormalizeResult {
-  // E-25：v/q/x = NaN 或 ±∞ → 该读数未知。
-  // 🔴 绝不能把 +∞ 截成边界值（如 1）——那会凭空造出一条强证据。
-  if (!Number.isFinite(r.v)) {
-    return { reading: UNKNOWN_READING, flag: 'bad_value', truncated: false };
-  }
-
-  // E-25：π = NaN → 未知
-  if (Number.isNaN(r.pi)) {
-    return { reading: UNKNOWN_READING, flag: 'nan', truncated: false };
-  }
-
-  // E-25：π = +∞ → 饱和 400（σ→0 无限精确），属异常计数
-  if (r.pi === Infinity) {
-    const range = clampToRange(r.v, isBipolar(dim));
-    return {
-      reading: { v: range.v, pi: PI_MAX, src: r.src },
-      flag: 'pos_inf',
-      truncated: true,
-    };
-  }
-
-  // E-25：π = −∞ 或 π < 0 → 未知**并计数**（负精度无物理意义）
-  if (r.pi === -Infinity || r.pi < 0) {
-    return { reading: UNKNOWN_READING, flag: 'negative', truncated: true };
-  }
-
-  // 整改 B：π 钳位后为 0（含 -0）→ 规范化为未知。
-  // oracle 在 p<=0 时直接返回 (0,0,flag)，不走值域钳位，此处保持一致。
-  const pi = Math.min(r.pi, PI_MAX);
-  if (pi === 0) {
-    return { reading: UNKNOWN_READING, flag: null, truncated: false };
-  }
-
-  const range = clampToRange(r.v, isBipolar(dim));
+  // 极性由 dim 查表得出，清洗本身全部交给 sanitizeValue（单一真相源）
+  const s = sanitizeValue(r.v, r.pi, isBipolar(dim));
   return {
-    reading: { v: range.v, pi, src: r.src },
-    // range_clamped 只在无更高优先级异常时出现（上面几条已提前返回）
-    flag: range.truncated ? 'range_clamped' : null,
-    // π 有限但 >400 属常规截断：truncated=true 供 S-002 计数，flag=null 不计异常
-    truncated: range.truncated || pi !== r.pi,
+    reading: s.pi > 0 ? { v: s.v, pi: s.pi, src: r.src } : UNKNOWN_READING,
+    flag: s.flag,
+    truncated: s.truncated,
   };
 }
