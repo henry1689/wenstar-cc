@@ -15,6 +15,24 @@
 
 import { CLIP, TAU_MIN } from './config.js';
 import { sanitizeValue } from './types.js';
+import { clampPi } from './coding.js';
+
+/**
+ * 后验方差 v̂ = 1 / (πx + 1/τ²)（S-014 收缩、S-018 覆盖率共用）。
+ *
+ * 导出为独立函数是为了让 `dimEvidence` 与 `coverage` **共用同一份公式**，
+ * 否则两处各写一遍必然漂移（这正是切片#1 整改「不要自己写清洗逻辑」的教训）。
+ *
+ * - τ 按 S-015 钳到 ≥ TAU_MIN
+ * - πx 按 E-25 清洗：NaN/负/−∞ → 0（未知），+∞ → 400（饱和）
+ *
+ * G-018 校验：τ=0.3、πx=100 → v̂=0.009；πx=0 → v̂=0.09（此时 cov 恰为 0）
+ */
+export function posteriorVariance(piX: number, tau: number): number {
+  const tauEff = Math.max(tau, TAU_MIN);
+  const p0 = 1 / (tauEff * tauEff);
+  return 1 / (clampPi(piX) + p0);
+}
 
 /**
  * 单维对数似然比证据（S-010）
@@ -66,7 +84,7 @@ export function dimEvidence(
 
   // 精度加权收缩（S-014：|x̂−μ| ≤ |x−μ|，收缩不会放大噪声）
   const xh = (xr.pi * xr.v + p0 * mu) / (xr.pi + p0);
-  const vHat = 1 / (xr.pi + p0);
+  const vHat = posteriorVariance(xr.pi, tauEff); // 与 S-018 覆盖率共用同一公式
 
   const s2 = sigmaQ2 + vHat;
   const b2 = sigmaQ2 + tauEff * tauEff;

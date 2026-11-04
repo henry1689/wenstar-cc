@@ -1,0 +1,173 @@
+/**
+ * 多层聚合与权重（S-016 / S-017 / S-018）
+ *
+ * 把 79 维的单维证据 ℓ_i 聚合为总证据 E。三层结构：
+ *
+ *   ℓ_i（切片#2 dimEvidence）
+ *     → w_i 加权求和得 E_L（S-016 层内）
+ *     → 覆盖率 + 掩码 + 阈值三条件准入（S-018）
+ *     → Σ m_L·E_L 得总证据 E（S-016 层间）
+ *
+ * 🔴 **层→维度映射不在此文件**：`LAYER_DIMS` 尚缺（任务书指引的基线 E-05
+ * 只有层名，active/ 全部 17 个文件均无映射表）。因此本文件的三个函数
+ * 一律**把层分组作为参数接收**，不硬编码；映射到位后只需在 config.ts
+ * 补一处常量，本文件零改动。
+ */
+
+import {
+  COVERAGE_MIN,
+  DELTA_MAX,
+  ICC_B_LOWER,
+  ICC_B_SPAN,
+  LOCKED_WEIGHT_DIMS,
+  TAU_MIN,
+} from './config.js';
+import { posteriorVariance } from './evidence.js';
+
+// ============ S-017 · 维度权重 ============
+
+/** ICC 分级：A 级完全采信、B 级线性过渡、C 级不采信 */
+export type IccGrade = 'A' | 'B' | 'C';
+
+/**
+ * S-017 ICC 分级系数 r_ICC：
+ * - A 级 r = 1
+ * - B 级 r = (ICC − 0.5) / 0.25，钳到 [0,1]
+ * - C 级 r = 0
+ */
+export function iccCoefficient(icc: number, grade: IccGrade): number {
+  if (grade === 'A') return 1;
+  if (grade === 'C') return 0;
+  // B 级：ICC 低于下界得负值、高于上界得超 1，都钳回 [0,1]
+  const r = (icc - ICC_B_LOWER) / ICC_B_SPAN;
+  return Math.min(Math.max(r, 0), 1);
+}
+
+/**
+ * S-017 维度权重 w_i = base_i × r_ICC × (1 + δ_i)
+ *
+ * - `baseI` 基础权重由调用方从配置读入，core 不硬编码
+ * - `delta` 本切片固定 0（动态调整留后续），但仍强制 |δ| ≤ 0.3
+ * - **D20/D29/D30 恒为 0**（E-14：依赖指标不进入排序，否则会主导打分）
+ */
+export function dimWeight(
+  dim: string,
+  baseI: number,
+  icc: number,
+  grade: IccGrade,
+  delta = 0,
+): number {
+  // E-14：依赖指标锁死为 0，先于一切计算
+  if (LOCKED_WEIGHT_DIMS.includes(dim)) return 0;
+
+  // S-017：|δ| ≤ 0.3，越界钳回
+  const d = Math.min(Math.max(delta, -DELTA_MAX), DELTA_MAX);
+  return baseI * iccCoefficient(icc, grade) * (1 + d);
+}
+
+// ============ S-016 · 层内聚合 ============
+
+/** 层内求和项：index 是维度下标，用于固定求和顺序（E-06） */
+export interface WeightedTerm {
+  /** 维度下标（LAYOUT 下标），决定求和顺序 */
+  readonly index: number;
+  /** 该维权重 w_i */
+  readonly w: number;
+  /** 该维证据 ℓ_i（已由 dimEvidence 截断到 [-3,3]） */
+  readonly ell: number;
+}
+
+/**
+ * S-016 层内聚合 E_L = Σ_s w_s × Σ_i (w_i × ℓ_i)
+ *
+ * 本切片单源（w_s = 1），故退化为 Σ_i w_i·ℓ_i。
+ *
+ * 🔴 **求和顺序固定为维度下标升序**（E-06）：浮点加法不满足结合律，
+ * 打乱顺序会得到不同末位，跨平台结果就会漂移。因此先按 `index` 升序
+ * 排序再累加——调用方传入顺序无关紧要，结果恒定。
+ * 校验：打乱输入顺序后结果差 ≤ 1e-12（属性测试）。
+ */
+export function layerEvidence(items: readonly WeightedTerm[]): number {
+  const ordered = [...items].sort((a, b) => a.index - b.index);
+  return ordered.reduce((acc, t) => acc + t.w * t.ell, 0);
+}
+
+// ============ S-018 · 覆盖率与层准入 ============
+
+/**
+ * 单维覆盖率 cov = 1 − v̂/τ²（G-018）
+ *
+ * v̂ 复用 `posteriorVariance`，与 dimEvidence 同一公式。
+ *
+ * G-018 校验（τ=0.3）：πx=100 → v̂=0.009 → cov=0.9；πx=0 → v̂=0.09 → cov=0
+ */
+export function coverage(piX: number, tau: number): number {
+  const tauEff = Math.max(tau, TAU_MIN);
+  const vHat = posteriorVariance(piX, tau);
+  return 1 - vHat / (tauEff * tauEff);
+}
+
+/**
+ * 层覆盖率 cov_L = mean(1 − v̂_i/τ_i²)（S-018）
+ *
+ * 空层返回 0——没有维度就没有覆盖，不能默认为满覆盖。
+ */
+export function layerCoverage(piXs: readonly number[], tau: number): number {
+  if (piXs.length === 0) return 0;
+  const sum = piXs.reduce((acc, p) => acc + coverage(p, tau), 0);
+  return sum / piXs.length;
+}
+
+/** 层准入所需的全部输入（三个准入条件 + 阈值） */
+export interface AdmissionInput {
+  /** 用途掩码值，> 0 才算被激活 */
+  readonly mask: number;
+  /** self 侧覆盖率 */
+  readonly coverageSelf: number;
+  /** user_est 侧覆盖率 */
+  readonly coverageUserEst: number;
+  /** 该层证据 E_L */
+  readonly evidence: number;
+  /** 该层阈值 θ_L */
+  readonly threshold: number;
+}
+
+/**
+ * S-018 层准入：三个条件**全部**满足才计入 minLayers。
+ *
+ * 1. 掩码激活（mask > 0）
+ * 2. **两侧**覆盖率都 ≥ 0.3（self 与 user_est 缺一不可——只有一侧有值
+ *    说明是单边臆测，不足以支撑共振）
+ * 3. E_L ≥ θ_L
+ */
+export function layerAdmitted(input: AdmissionInput): boolean {
+  return (
+    input.mask > 0 &&
+    input.coverageSelf >= COVERAGE_MIN &&
+    input.coverageUserEst >= COVERAGE_MIN &&
+    input.evidence >= input.threshold
+  );
+}
+
+/**
+ * S-018 minLayers 校验：通过准入的层数不足即返回空结果。
+ *
+ * 🔴 **绝不自动降低阈值或 minLayers 条件**——那会让单一线索就引发误召回，
+ * 正是本条规约要防的违规后果。
+ */
+export function meetsMinLayers(admittedCount: number, minLayers: number): boolean {
+  return admittedCount >= minLayers;
+}
+
+// ============ S-016 · 层间聚合 ============
+
+/**
+ * 总证据 E = Σ_L m_L × E_L（S-016）
+ *
+ * - `m_L` 层权重本切片固定为 1，故退化为直接求和
+ * - **只传已通过准入的层**（S-018 的筛选在此前完成）
+ * - 层的求和顺序同样固定：调用方须按 `LAYER_NAMES` 升序传入（E-06）
+ */
+export function totalEvidence(admittedLayerEs: readonly number[]): number {
+  return admittedLayerEs.reduce((acc, e) => acc + e, 0);
+}

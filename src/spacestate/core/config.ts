@@ -57,3 +57,62 @@ export const TAU_MIN = 0.1;
 
 /** 双极维值域下界（S-002）；单极维下界为 0（白名单可直接书写） */
 export const BIPOLAR_MIN = -1;
+
+// ============ 切片#3 · 多层聚合与权重（S-016~S-018） ============
+
+/** S-017 动态调整上限：|δ| ≤ 0.3（本切片 δ 固定 0，动态调整留后续） */
+export const DELTA_MAX = 0.3;
+
+/** S-017 B 级 ICC 分级下界：ICC ≥ 0.5 才进 B 级 */
+export const ICC_B_LOWER = 0.5;
+
+/** S-017 B 级 ICC 分级跨度：r = (ICC − 0.5) / 0.25 */
+export const ICC_B_SPAN = 0.25;
+
+/** S-018 单侧覆盖率下限：两侧都 ≥ 0.3 才算有效层 */
+export const COVERAGE_MIN = 0.3;
+
+/**
+ * S-017 / E-14：权重恒为 0 的依赖指标维度。
+ * 这三个维度不参与排序，否则依赖指标会主导打分。
+ */
+export const LOCKED_WEIGHT_DIMS: readonly string[] = Object.freeze([
+  'D20',
+  'D29',
+  'D30',
+]);
+
+/**
+ * E-05：层组共 7 个，顺序即掩码数组的下标顺序。
+ *
+ * 🔴 **层→维度映射表（LAYER_DIMS）尚缺**：任务书称映射在基线 E-05，
+ * 但 E-05 只有层名、S-018 只有掩码值、S-046 只有 λ 顺序，active/ 全部
+ * 17 个文件均无映射表。层（body/core/…）与块（scene/self/user_est/dyad）
+ * 是**正交划分**，不可自行推导。待映射表到位后在本文件补 LAYER_DIMS，
+ * aggregation.ts 的三个函数均以参数接收层分组，无需改动。
+ */
+export const LAYER_NAMES = Object.freeze([
+  'body',
+  'core',
+  'appraisal',
+  'motive',
+  'relation',
+  'scene',
+  'dyad',
+] as const);
+
+/** 层名类型（由 LAYER_NAMES 推导） */
+export type LayerName = (typeof LAYER_NAMES)[number];
+
+/**
+ * S-018 默认用途掩码（下标对应 LAYER_NAMES）。
+ * 三套通路各自的层激活权重，> 0 即视为被掩码激活。
+ */
+export const DEFAULT_MASKS = Object.freeze({
+  /** 通路 C：0.3 / 1 / 0.3 / 0.5 / 0.8 / 0.6 / 1 */
+  pathwayC: Object.freeze([0.3, 1, 0.3, 0.5, 0.8, 0.6, 1]),
+  /** 通路 B：0 / 1 / 0 / 0.3 / 0.5 / 0 / 1 */
+  pathwayB: Object.freeze([0, 1, 0, 0.3, 0.5, 0, 1]),
+  /** 共同经历隐喻：0 / 1 / 0 / 0 / 0.8 / 0.8 / 0.8 */
+  sharedEpiphany: Object.freeze([0, 1, 0, 0, 0.8, 0.8, 0.8]),
+});

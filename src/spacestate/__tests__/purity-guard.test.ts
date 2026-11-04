@@ -105,9 +105,26 @@ describe('约束 4 · 参数集中配置源', () => {
 
   it('配置源为纯常量导出（无可变状态）', async () => {
     const config = await import('../core/config.js');
-    for (const value of Object.values(config)) {
-      expect(typeof value).toBe('number');
-      expect(Number.isFinite(value)).toBe(true);
+    for (const [key, value] of Object.entries(config)) {
+      if (typeof value === 'number') {
+        expect(Number.isFinite(value), key).toBe(true);
+        continue;
+      }
+      // 切片#3 起 config 含数组/对象常量（掩码表、锁定维度、层名）：
+      // 必须 frozen，否则仍是可被就地改写的可变状态
+      expect(Object.isFrozen(value), `${key} 应被 Object.freeze`).toBe(true);
     }
+  });
+
+  it('config 中的数组常量内层也已冻结', async () => {
+    const config = await import('../core/config.js');
+    const masks = (config as { DEFAULT_MASKS?: Record<string, readonly number[]> }).DEFAULT_MASKS;
+    expect(masks).toBeDefined();
+    for (const [name, arr] of Object.entries(masks!)) {
+      expect(Object.isFrozen(arr), `DEFAULT_MASKS.${name} 内层应冻结`).toBe(true);
+    }
+    const locked = (config as { LOCKED_WEIGHT_DIMS?: readonly string[] }).LOCKED_WEIGHT_DIMS;
+    expect(Object.isFrozen(locked)).toBe(true);
+    expect(Object.isFrozen(config.LAYER_NAMES)).toBe(true);
   });
 });
