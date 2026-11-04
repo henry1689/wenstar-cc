@@ -77,12 +77,17 @@ function seedGroup(db: any, dgId: string, opts: SeedOpts = {}): void {
     reason = 'topic_switch',
     body = '我们聊聊杭州的机票吧',
   } = opts;
+  // 🔴 批4b：摘要内容**不再写 `dialog_groups.block_summary`** —— 批2 已把它迁到
+  //    `conversations`（is_summary=1 行），准入谓词与摘要内容都改读那张表。
+  //    这里只写 `summary_state` 状态机（它仍在 dialog_groups，是幂等判据）。
+  //    block_summary 列保持默认 NULL：若实现仍依赖它，本 seed 下所有用例会立刻红
+  //    —— 这正是拆除守卫要的形态（测试数据对齐生产，不给旧通道留活口）。
   db.run(
     'INSERT OR REPLACE INTO dialog_groups (dialog_group_id, belong_entity_uuid, narrative_tag, ' +
     'block_calcium_score, scene_anchor_hash, turn_count, block_close_reason, lifecycle_state, ' +
     'is_landmark, created_at, block_summary, summary_state, last_ts) ' +
-    "VALUES (?,?,?,?,?,?,?, 'active', 0, ?, ?, ?, ?)",
-    [dgId, uuid, 'neutral', calcium, 'h-' + dgId, turns, reason, lastTs, summary, summaryState, lastTs],
+    "VALUES (?,?,?,?,?,?,?, 'active', 0, ?, NULL, ?, ?)",
+    [dgId, uuid, 'neutral', calcium, 'h-' + dgId, turns, reason, lastTs, summaryState, lastTs],
   );
   // 组内两轮原文（供"原文命中"相关性校验）
   db.run(
@@ -90,6 +95,14 @@ function seedGroup(db: any, dgId: string, opts: SeedOpts = {}): void {
     "VALUES ('user', ?, ?, 1, ?, 0, ?)",
     [body, lastTs, dgId, uuid],
   );
+  // 摘要行（批2 迁移后的生产形态：role=assistant / is_summary=1 / seq_pos 在原文之后）
+  if (summary) {
+    db.run(
+      'INSERT INTO conversations (role, content, timestamp, seq_pos, dialog_group_id, is_test, is_summary, belong_entity_uuid) ' +
+      "VALUES ('assistant', ?, ?, 2, ?, 0, 1, ?)",
+      [summary, lastTs, dgId, uuid],
+    );
+  }
 }
 
 const ctxOf = (db: any, over: Partial<RetrievalContext> = {}): RetrievalContext => {
@@ -250,5 +263,66 @@ describe('⑤ 适配器契约（独立 route / 去重键 / 回源键 / 摘要前
     expect(h.score).toBeLessThanOrEqual(1);
     expect((h.payload as any)?.source).toBe('high_calcium_group');
     expect((h.payload as any)?.calciumFloor).toBeGreaterThan(0);
+  });
+});
+
+describe('[摘要归并批4b] 拆除守卫 —— 高钙组路不得再依赖 dialog_groups.block_summary', () => {
+  const MEETING_RECALL = join(HERE, '..', 'meeting-recall.ts');
+  /** 剥注释后再判：换源说明里必然会提到 `block_summary`，不剥会把文档当违规 */
+  const stripComments = (t: string): string =>
+    t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  it('🔴 meeting-recall.ts 剥注释后零 block_summary 引用（该列批6 DROP 的前提）', () => {
+    const text = stripComments(readFileSync(MEETING_RECALL, 'utf-8'));
+    const offenders = text.split('\n')
+      .map((l, i) => ({ n: i + 1, l }))
+      .filter(({ l }) => /block_summary/.test(l));
+    expect(
+      offenders,
+      '摘要通道已按业主「拆干净」裁定改读 conversations 的 is_summary=1 行；' +
+        '只要还有一处 SQL/表达式读 block_summary，批6 就 DROP 不掉该列',
+    ).toEqual([]);
+  });
+
+  it('🔴 三处谓词（主池/补选/计数）共用 summaryExistsSql —— 判据单源，不得各写一份', () => {
+    const text = stripComments(readFileSync(MEETING_RECALL, 'utf-8'));
+    const defn = (text.match(/const summaryExistsSql\s*=/g) || []).length;
+    // 定义行是 `const summaryExistsSql = (likeCond...)` —— 没有 `summaryExistsSql(`，
+    // 故该正则命中的**全是调用**（首版按「总出现 − 定义」算，恒差 1，判成 2）。
+    const calls = (text.match(/summaryExistsSql\(/g) || []).length;
+    expect(defn, '谓词必须只有一个定义点（不变量 #7：同一规则不得多处实现）').toBe(1);
+    expect(calls, '主池 / 补选 / 计数三处都要调它，少一处即口径漂移').toBe(3);
+  });
+
+  it('🔴 摘要内容来自 conversations 的 is_summary=1 行（不是 block_summary 列）', async () => {
+    const db = await buildDb();
+    seedGroup(db, 'DG_SUM', { lastTs: ago(90) });
+    const rows = highCalciumGroups(srcOf(db), UUID_A, 3, { nowMs: NOW, keywords: ['杭州'] });
+    expect(rows.length).toBe(1);
+    expect(rows[0].summary, '回表必须把摘要行 content 填进 summary').toContain('【叙事】');
+    // 该组的 block_summary 列在本 seed 下恒为 NULL —— 拿到摘要就证明来源是 conversations
+    const col = q(db, "SELECT block_summary FROM dialog_groups WHERE dialog_group_id='DG_SUM'");
+    expect(col[0].block_summary, '测试形态：旧列保持 NULL，逼实现从别处取摘要').toBeNull();
+    expect(q(db,
+      "SELECT COUNT(*) AS n FROM conversations WHERE dialog_group_id='DG_SUM' AND is_summary=1",
+    )[0].n).toBe(1);
+  });
+
+  it('🔴 无摘要行的组不进高钙候选 —— 换源后准入语义与旧谓词一致（不是「放宽」）', async () => {
+    const db = await buildDb();
+    seedGroup(db, 'DG_NOSUM', { lastTs: ago(90), summary: null }); // 不播摘要行
+    seedGroup(db, 'DG_OK', { lastTs: ago(120) });
+
+    const rows = highCalciumGroups(srcOf(db), UUID_A, 3, { nowMs: NOW, keywords: ['杭州'] });
+    // 高钙通道的准入条件本就含「有三层摘要」（§13.2）；旧谓词 `block_summary IS NOT NULL`
+    // 排除它，新谓词 `EXISTS(is_summary=1 行)` 同样排除 —— 行为不变即守恒。
+    expect(rows.map((r) => r.dg_id)).not.toContain('DG_NOSUM');
+    expect(rows.map((r) => r.dg_id)).toContain('DG_OK');
+    // 自检计数同口径（countHighCalciumGroups 与真源共用同一谓词常量）
+    expect(countHighCalciumGroups(srcOf(db), UUID_A, { nowMs: NOW })).toBe(1);
+    // 摘要内容缺失时不得凭空拼【摘要】空壳（防上游把 null 拼成占位符）
+    const h = await new HighCalciumGroupAdapter(srcOf(db)).search(ctxOf(db));
+    expect(h.map((x) => x.id)).not.toContain('DG_NOSUM');
+    for (const x of h) expect(x.text).toContain('【摘要】'); // 有摘要的组才带前缀
   });
 });

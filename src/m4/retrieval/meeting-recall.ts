@@ -793,6 +793,67 @@ export interface HighCalciumGroupOptions {
 type HighCalciumPoolRow = Omit<HighCalciumGroupRow, 'relevant' | 'matched_terms'>;
 
 /**
+ * 🔴 批4b（摘要归并）· 摘要存在性谓词 —— 摘要内容源由 `dialog_groups.block_summary`
+ * 改为 `conversations` 的 `is_summary=1` 行（批2 迁移的落点），主池 / 补选 / 计数三处共用。
+ *
+ * 为什么必须换源：业主 2026-11-04 裁定「摘要通道也拆干净」「最终只保留原文通道一个」，
+ * `block_summary` 列批6 要 DROP —— 只要还有一个检索读取点依赖它，就 DROP 不掉。
+ *
+ * `TRIM(content) != ''` 与旧谓词 `TRIM(block_summary) != ''` 语义对齐（空摘要不算有摘要）。
+ * 实测守恒（2026-11-04 生产库只读探针）：新旧谓词可召回组 **557 = 557，丢失 0、新增 0**；
+ * 补选 LIKE 判据 10 词 × 557 组全部一致 ⇒ 召回面零变化。
+ *
+ * ⚠️ 不在 SQL 里用嵌套 CASE 带参数做计数 —— 实测 sql.js 对该写法静默返回 0 行且不报错
+ *    （批4a 踩过），会把整条召回路打成空。本谓词是纯 EXISTS，无该形态。
+ */
+/**
+ * 产出「摘要行存在」的 EXISTS 子句。`likeCond` 非空时在子句内追加 AND 条件
+ * （补选路要按摘要内容 LIKE）—— **判据只此一处**，三处调用共用（不变量 #7：
+ * 同一规则不得多处实现；曾出现常量 + 内联副本两份，改一处必漏另一处）。
+ */
+const summaryExistsSql = (likeCond = ''): string => `EXISTS (
+        SELECT 1 FROM conversations sc
+         WHERE sc.dialog_group_id = dialog_groups.dialog_group_id
+           AND COALESCE(sc.is_summary, 0) = 1
+           AND (sc.is_test IS NULL OR sc.is_test = 0)
+           AND TRIM(COALESCE(sc.content, '')) != ''${likeCond ? `\n           AND (${likeCond})` : ''})`;
+
+/**
+ * 批4b · 摘要内容回表 —— 池与补选共用，把摘要行 content 写回各组的 `summary` 字段。
+ *
+ * 改造前 `block_summary AS summary` 由池查询直接带出；换源后摘要在另一张表 ⇒ 必须回表。
+ * 分批查（每批 400 个占位符）避开 IN 参数上限；同组多条摘要行取 `seq_pos` 最小的那条。
+ * 回表失败由调用方 try/catch 兜住（summary 留 null ⇒ 相关性门摘要路失效，原文兜底路仍在）。
+ */
+function loadSummaries(src: RecallSource, rows: HighCalciumPoolRow[]): void {
+  const ids = rows.map((r) => String(r.dg_id)).filter(Boolean);
+  if (ids.length === 0) return;
+  const CHUNK = 400;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const part = ids.slice(i, i + CHUNK);
+    const ph = part.map(() => '?').join(',');
+    const sumRows = src.queryAll<{ dialog_group_id: string; content: string }>(
+      `SELECT dialog_group_id, content FROM conversations
+        WHERE dialog_group_id IN (${ph})
+          AND COALESCE(is_summary, 0) = 1
+          AND (is_test IS NULL OR is_test = 0)
+        ORDER BY seq_pos ASC`,
+      part,
+    ) || [];
+    const byGid = new Map<string, string>();
+    for (const s of sumRows) {
+      const k = String(s.dialog_group_id);
+      // 只取第一条（seq_pos 最小）—— 与旧 `block_summary` 单值语义一致
+      if (!byGid.has(k)) byGid.set(k, String(s.content || ''));
+    }
+    for (const r of rows) {
+      const c = byGid.get(String(r.dg_id));
+      if (c !== undefined) r.summary = c;
+    }
+  }
+}
+
+/**
  * 高钙对话组召回（真源）。返回**已按（相关性 → 时间近因 → 钙分）排序**的候选，长度 ≤ limit。
  *
  * @param entityUuid 会晤实体 UUID（组级归属过滤，绝不跨实体串档）
@@ -817,13 +878,15 @@ export function highCalciumGroups(
   const poolLimit = Math.max(limit, Math.ceil(limit * (opts.poolFactor ?? 5)));
 
   const pool = (src.queryAll(
+    // 批4b：摘要内容不再由 `block_summary AS summary` 带出（该列批6 DROP），
+    // 改由下面 loadSummaries 回表填 summary；准入谓词换 SUMMARY_EXISTS。
     `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid, block_calcium_score AS calcium,
-            last_ts, block_summary AS summary, turn_count AS turns, block_close_reason AS reason
+            last_ts, turn_count AS turns, block_close_reason AS reason
      FROM dialog_groups
      WHERE belong_entity_uuid = ?
        AND COALESCE(block_calcium_score, 0) >= ?
        AND summary_state = 'done'
-       AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
+       AND ${summaryExistsSql()}
        AND last_ts IS NOT NULL
        AND last_ts <= ?
      ORDER BY last_ts DESC, block_calcium_score DESC
@@ -831,6 +894,14 @@ export function highCalciumGroups(
     [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString(), poolLimit],
   ) || []) as HighCalciumPoolRow[];
   if (pool.length === 0) return [];
+
+  // 批4b：回表填 summary —— 必须在相关性门之前（第一步就是拿 summary 做 JS 匹配）
+  try {
+    loadSummaries(src, pool);
+  } catch (e) {
+    // 回表失败 ⇒ summary 留 null：摘要路判相关失效，但下面原文兜底路仍能判
+    console.warn('[highCalciumGroups] 摘要回表失败（摘要路相关性判据降级为仅原文）:', (e as Error)?.message);
+  }
 
   // ── 相关性门：摘要命中优先，摘要没命中的再查组内原文 ──
   const matched = new Map<string, string[]>();
@@ -856,7 +927,9 @@ export function highCalciumGroups(
           const rows = src.queryAll<{ dg_id: string }>(
             `SELECT DISTINCT dialog_group_id AS dg_id FROM conversations
              WHERE dialog_group_id IN (${phs})
-               AND (is_test IS NULL OR is_test = 0) AND content LIKE ?`,
+               AND (is_test IS NULL OR is_test = 0)
+               AND COALESCE(is_summary, 0) = 0
+               AND content LIKE ?`,
             [...missIds, `%${t}%`],
           ) || [];
           for (const r of rows) {
@@ -878,23 +951,32 @@ export function highCalciumGroups(
   //   这里在**全部**高钙组上按摘要命中补选，补够 limit 条为止；只在有关键词判据时进行。
   if (terms.length > 0 && matched.size < limit) {
     const seen = new Set(pool.map((g) => String(g.dg_id)));
-    const likePhs = terms.map(() => 'block_summary LIKE ?').join(' OR ');
+    // 批4b：`block_summary LIKE ?` → 摘要行（conversations is_summary=1）`sc.content LIKE ?`，
+    // 与主池同源（都读 is_summary=1 行）。EXISTS 内联 OR 语义等价于原 `LIKE OR LIKE`。
+    // 🔴 参数顺序与改造前一致（`last_ts <= ?` 仍在 LIKE 之前）—— 改动顺序必然错位，别动。
+    const likePhs = terms.map(() => 'sc.content LIKE ?').join(' OR ');
     try {
       const extra = (src.queryAll(
         `SELECT dialog_group_id AS dg_id, belong_entity_uuid AS uuid, block_calcium_score AS calcium,
-                last_ts, block_summary AS summary, turn_count AS turns, block_close_reason AS reason
+                last_ts, turn_count AS turns, block_close_reason AS reason
          FROM dialog_groups
          WHERE belong_entity_uuid = ?
            AND COALESCE(block_calcium_score, 0) >= ?
            AND summary_state = 'done'
-           AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
            AND last_ts IS NOT NULL AND last_ts <= ?
-           AND (${likePhs})
+           AND ${summaryExistsSql(likePhs)}
          ORDER BY last_ts DESC, block_calcium_score DESC
          LIMIT ?`,
         [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString(),
          ...terms.map((t) => `%${t}%`), poolLimit],
       ) || []) as HighCalciumPoolRow[];
+      // 批4b：补选结果同样没有 summary 列 ⇒ 只对**新增**的组回表（已在池的不必重取）
+      const fresh = extra.filter((g) => !seen.has(String(g.dg_id)));
+      try {
+        loadSummaries(src, fresh);
+      } catch {
+        // 留 null：该组摘要路判相关失效，仍会进池按近因/钙分参与排序（不整组丢弃）
+      }
       for (const g of extra) {
         const id = String(g.dg_id);
         if (seen.has(id)) continue;
@@ -969,7 +1051,7 @@ export function countHighCalciumGroups(
        WHERE belong_entity_uuid = ?
          AND COALESCE(block_calcium_score, 0) >= ?
          AND summary_state = 'done'
-         AND block_summary IS NOT NULL AND TRIM(block_summary) != ''
+         AND ${summaryExistsSql()}
          AND last_ts IS NOT NULL AND last_ts <= ?`,
       [entityUuid, floor, new Date(nowMs - settleMin * 60000).toISOString()],
     ) || [];

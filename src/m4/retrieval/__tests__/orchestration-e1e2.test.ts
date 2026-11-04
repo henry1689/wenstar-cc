@@ -65,10 +65,20 @@ function seedBlock(db: any, dgId: string, state: string, calcium = 5): void {
     //   块路（dialog_group）的召回源是 block_summary 本身（v11 围栏直接分片 LIKE），
     //   高钙路走 recallByStructured，两者都不再读倒排表 —— 会话行本身即足够。
   }
+  // 🔴 批4b：`block_summary` 置 NULL、摘要改播进 conversations（is_summary=1 行）。
+  //   高钙路准入谓词已换源为 EXISTS(摘要行)，本 seed 若只写 block_summary，高钙路
+  //   会静默召不到 ⇒「两路同组去重」那条断言假红（实测踩过）。
+  const summary = '【标签】出行\n【叙事】杭州机票事宜\n【情感】平静';
   db.run(
     "INSERT OR REPLACE INTO dialog_groups (dialog_group_id,belong_entity_uuid,narrative_tag,block_calcium_score,scene_anchor_hash,turn_count,block_close_reason,lifecycle_state,is_landmark,created_at,block_summary,summary_state,last_ts) " +
-    "VALUES (?,?,?,?,?,?,?, ?,0,?, '【标签】出行\n【叙事】杭州机票事宜\n【情感】平静', 'done', ?)",
+    "VALUES (?,?,?,?,?,?,?, ?,0,?, NULL, 'done', ?)",
     [dgId, UUID_A, 'neutral', calcium, 'h-' + dgId, 2, 'topic_switch', state, '2026-10-06T00:00:00.000Z', '2026-10-06T00:10:00.000Z'],
+  );
+  // 摘要行（批2 迁移后的生产形态：role=assistant / is_summary=1 / seq_pos 在原文之后）
+  db.run(
+    "INSERT INTO conversations (role,content,timestamp,seq_pos,dialog_group_id,is_test,is_summary,belong_entity_uuid) " +
+    "VALUES ('assistant', ?, ?, ?, ?, 0, 1, ?)",
+    [summary, '2026-10-06T00:00:00.000Z', ++seq, dgId, UUID_A],
   );
 }
 
