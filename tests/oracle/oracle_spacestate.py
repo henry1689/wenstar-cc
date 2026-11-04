@@ -58,6 +58,7 @@ def quant_int8(x):
 
 def dequant_int8(q):
     if not finite(q): return 0.0
+    q = max(-127.0, min(127.0, float(q)))
     return q / 127.0
 
 def phase(minutes):
@@ -127,3 +128,16 @@ def shrink_var(n_b, ss, s_parent2, nu0=10):
 def sigma_decay(sigma0, lam, c, t_days, t0=7.0):
     if not (0.0 <= c <= 1.0): raise ValueError("c out of [0,1]")
     return sigma0 * (1 + lam * (1 - c) * math.log(1 + t_days / t0))
+
+# ---------- 测试（切片#2 收尾任务：oracle 侧此前无 test_* ，本函数为新建） ----------
+def test_quant_int8():
+    # G-004 量化黄金值
+    assert quant_int8(0.5) == 64
+    assert quant_int8(-0.5) == -64
+    assert quant_int8(0.3) == 38
+    assert quant_int8(1.0) == 127
+    assert quant_int8(-1.2) == -127
+    assert quant_int8(0.0039) == 0
+    assert quant_int8(0.00394) == 1
+    # 收尾任务：反量化钳位（越界输入不再产生值域外结果）
+    assert dequant_int8(300) == 1.0 and dequant_int8(-300) == -1.0

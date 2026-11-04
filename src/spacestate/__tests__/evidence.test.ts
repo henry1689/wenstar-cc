@@ -155,6 +155,35 @@ describe('S-013 · ℓ 截断到 [-3, 3]', () => {
   }, 30000);
 });
 
+describe('S-063 · 稀有值严格递增', () => {
+  it('d ∈ {0,0.1,0.2,0.4,0.6,0.8}，q=x=d 时 ℓ 单调不减（>=，非 >）', () => {
+    const ds = [0, 0.1, 0.2, 0.4, 0.6, 0.8];
+    const ells = ds.map((d) => dimEvidence(d, 100, d, 100, 0, 0.3));
+
+    // 逐项断言单调不减（0.8 附近接近截断上限，故用 >= 而非 >）
+    for (let i = 1; i < ells.length; i++) {
+      expect(ells[i], `d=${ds[i]} (i=${i}) 应 >= d=${ds[i - 1]} 的 ${ells[i - 1]}`)
+        .toBeGreaterThanOrEqual(ells[i - 1]);
+    }
+
+    // 全部有限且在截断域内
+    for (const ell of ells) {
+      expect(Number.isFinite(ell)).toBe(true);
+      expect(ell).toBeGreaterThanOrEqual(-CLIP);
+      expect(ell).toBeLessThanOrEqual(CLIP);
+    }
+
+    // 稀有度越高证据越大：首尾必须严格拉开
+    expect(ells[ells.length - 1]).toBeGreaterThan(ells[0]);
+  });
+
+  it('0.8 附近接近截断上限但未越界', () => {
+    const at08 = dimEvidence(0.8, 100, 0.8, 100, 0, 0.3);
+    expect(at08).toBeLessThanOrEqual(CLIP);
+    expect(Number.isFinite(at08)).toBe(true);
+  });
+});
+
 describe('S-014 · 收缩不放大噪声', () => {
   it('|x̂−μ| ≤ |x−μ|：收缩到 [x, μ] 区间内', () => {
     // 用输出反推：印记越接近 μ，收缩后证据不应高于未收缩的直接比较。
