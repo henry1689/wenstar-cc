@@ -2284,16 +2284,33 @@ try {
       const _fgPolice = ctx.m4?.getFamilyGraph?.();
       const _meetingUuidPolice = _fgPolice?.getUUIDByName?.(_meetingEntityName) ?? null;
       if (_meetingUuidPolice) {
-        const _screenText = memoryFragments.join('\n');
-        const _filtered = _screenCtx(_screenText, {
+        // 🔴 2026-11-05 修复「闸门拆碎记忆」：原实现用 `join('\n') → screenContext → split('\n')`
+        //   往返传递**结构化数组**，而 screenContext 内部是按行 `split('\n')` 逐行判标签的
+        //   （UUIDPoliceFilter.ts:251）。只要某条 fragment 自身含换行，往返之后条数就会膨胀 ——
+        //   真机日志：`注入边界闸门: 8→22 条（剔除他人实体片段）`、`10→18 条`，
+        //   标着「剔除」却越剔越多。后果是记忆条目被拆碎：标签前缀【XX的记忆】只落在首行，
+        //   后续行变成无主碎片，去重与优先级都按碎片算 —— 这是「没有记忆」的直接成因之一。
+        //
+        //   改为**逐条调用**：每条单进单出，条数只减不增，条内换行原样保留。
+        //   刻意不改 screenContext 的签名 —— 那是治理层公共 API（src/governance/police/），
+        //   改它要动全部调用方，收益却只在这里。
+        const _policy = {
           visibleUuids: new Set([_meetingUuidPolice]),
           allowUnowned: false,
-        }, (name: string) => {
+        };
+        const _resolveName = (name: string): string | null => {
           try { return _fgPolice?.getUUIDByName?.(name) ?? null; } catch { return null; }
-        });
-        const _after = _filtered ? _filtered.split('\n').filter((s: string) => s.trim().length > 0) : [];
-        if (_after.length !== memoryFragments.length) {
-          console.log(`[UUIDPolice] 注入边界闸门: ${memoryFragments.length}→${_after.length} 条（剔除他人实体片段）`);
+        };
+        const _after: string[] = [];
+        let _dropped = 0;
+        for (const _frag of memoryFragments) {
+          if (!_frag || !String(_frag).trim()) continue;
+          const _kept = _screenCtx(String(_frag), _policy, _resolveName);
+          if (_kept && _kept.trim()) _after.push(_kept);
+          else _dropped++;
+        }
+        if (_dropped > 0 || _after.length !== memoryFragments.length) {
+          console.log(`[UUIDPolice] 注入边界闸门: ${memoryFragments.length}→${_after.length} 条（剔除他人实体片段 ${_dropped} 条）`);
         }
         memoryFragments.length = 0;
         memoryFragments.push(..._after);
