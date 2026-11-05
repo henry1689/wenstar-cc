@@ -1323,7 +1323,10 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   // ── V11.0: 统一语义搜索 — n-gram初筛 + 自有40D向量精排（替代旧LIKE黑钻检索） ──
   // ── V13.0: WS_SEARCH_V13=true 时走七层仿生管线 ──
   const WS_SEARCH_V13 = true; // 硬编码开启，绕过 env 加载问题
-  console.error('[RETRIEVAL-STAGE-V13] ENTERED runRetrieval, WS_SEARCH_V13=' + WS_SEARCH_V13 + ' m4=' + !!ctx.m4 + ' retrieveFn=' + !!(ctx.m4?.retrieveMultiRankForSearch));
+  // ── V14: MemArch v2 主召回（拆旧链路第 1 步）──
+  //   置 false 即完整回滚到 V13/V11，零数据变更。
+  const WS_SEARCH_V14 = true;
+  console.error('[RETRIEVAL-STAGE-V13] ENTERED runRetrieval, WS_SEARCH_V13=' + WS_SEARCH_V13 + ' WS_SEARCH_V14=' + WS_SEARCH_V14 + ' m4=' + !!ctx.m4 + ' retrieveFn=' + !!(ctx.m4?.retrieveMultiRankForSearch));
   try {
     if (message.trim().length > 1) {
       const _sqlite = ctx.storage.getSQLite();
@@ -1332,9 +1335,34 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         let _v13Result: any = null;
         let _dbResult: any = null;
         let _v13Failed = false;  // P1-D1: V13 异常标志（触发 V11 真正降级）
+        let _v2Hit = false;      // V14: v2 是否命中（命中则跳过 V13/V11）
+
+        // ── V14: MemArch v2 主召回 ──
+        //   namespace 由 _activeEntityUuids 经 registry 映射（解析不到回落 ns_yuyao）。
+        //   抛错/返回空 → _v2Hit 保持 false → V13 照常执行 → V13 失败 → V11 兜底。
+        //   任一环节失败都不会导致空检索。
+        if (WS_SEARCH_V14) {
+          try {
+            const { memarchRetrieve, resolveNamespace } = await import('../memarch-runtime.js');
+            const _ns = resolveNamespace(_activeEntityUuids);
+            const _ev = await memarchRetrieve(message, _ns, isTopicShift ? 12 : 8);
+            for (const _e of _ev) {
+              const _t = String(_e.text || '').trim();
+              // 去重判据沿用 V13/V11 现有规则，不引入新的重复风险
+              if (_t && !memoryFragments.some(f => f.includes(_t.substring(0, 40)))) {
+                memoryFragments.push(_t);
+              }
+            }
+            _v2Hit = _ev.length > 0;
+            console.log(`[searchV14] ns=${_ns} 命中 ${_ev.length} 条 → memoryFragments +${memoryFragments.length}`);
+          } catch (_v2Err) {
+            // 降级必须可见 —— 不得静默退化成空检索
+            console.warn('[searchV14] v2 召回失败，降级 V13:', (_v2Err as Error)?.message);
+          }
+        }
 
         // ── V13 七层仿生管线 ──
-        if (WS_SEARCH_V13 && ctx.m4?.retrieveMultiRankForSearch) {
+        if (!_v2Hit && WS_SEARCH_V13 && ctx.m4?.retrieveMultiRankForSearch) {
           try {
             const { searchV13: v13Search } = await import('../../m4/UnifiedSearchEngine.js');
             const { MemoryAssociationRepository } = await import('../../m4/graph/MemoryAssociationRepository.js');
