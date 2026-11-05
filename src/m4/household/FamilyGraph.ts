@@ -651,6 +651,50 @@ const CANDIDATE_PROMOTE_COUNT = 3;
 export const CHANGE_HISTORY_LIMIT = 200;
 
 /**
+ * B2(2026-11-05): `_changeHistory` 单条字节上限 —— 与 CHANGE_HISTORY_LIMIT 配对的单一真源。
+ *
+ * 批18 只收敛了**条数**没收敛**单条体积**：实测 dossier.misc._household 单条 3.8KB × 200 = 760KB/人，
+ * 24 节点顶满上限，nodes.properties 6.5MB/7.1MB(92%) 是变更历史。
+ * 超限时缩写 oldValue/newValue（数组/对象 → 规模摘要，字符串 → 截断预览），仍超则降级为占位条目。
+ */
+export const CHANGE_HISTORY_ENTRY_MAX_BYTES = 2048;
+
+/** 缩写单个值到预算字节内（保留类型与规模信息，不保留全量内容） */
+function _shrinkHistoryValue(v: any, budgetBytes: number): any {
+  if (v === null || v === undefined) return v;
+  let s: string | undefined;
+  try { s = JSON.stringify(v); } catch { return '[unserializable]'; }
+  if (s === undefined) return v;
+  if (Buffer.byteLength(s, 'utf8') <= budgetBytes) return v;
+  if (typeof v === 'string') {
+    const keep = Math.max(16, Math.floor(budgetBytes / 3));
+    return v.slice(0, keep) + `…[+${v.length - keep}字]`;
+  }
+  if (Array.isArray(v)) return { _truncated: true, type: 'array', len: v.length, bytes: Buffer.byteLength(s, 'utf8') };
+  if (typeof v === 'object') return { _truncated: true, type: 'object', keys: Object.keys(v).slice(0, 8), bytes: Buffer.byteLength(s, 'utf8') };
+  return v;
+}
+
+/** 单条变更历史字节封顶（超限先缩值字段，仍超则降级占位条目） */
+function capChangeHistoryEntry(entry: any): any {
+  let s: string;
+  try { s = JSON.stringify(entry); } catch { return entry; }
+  const bytes = Buffer.byteLength(s, 'utf8');
+  if (bytes <= CHANGE_HISTORY_ENTRY_MAX_BYTES) return entry;
+  const half = Math.floor(CHANGE_HISTORY_ENTRY_MAX_BYTES / 2) - 64;
+  const out: any = { ...entry };
+  if ('oldValue' in out) out.oldValue = _shrinkHistoryValue(out.oldValue, half);
+  if ('newValue' in out) out.newValue = _shrinkHistoryValue(out.newValue, half);
+  try {
+    const s2 = JSON.stringify(out);
+    if (Buffer.byteLength(s2, 'utf8') <= CHANGE_HISTORY_ENTRY_MAX_BYTES) return out;
+    return { field: out.field ?? out.operation ?? '?', timestamp: out.timestamp ?? out.time ?? null, _truncated: true, bytes };
+  } catch {
+    return { field: out.field ?? '?', _truncated: true, bytes };
+  }
+}
+
+/**
  * 批12(P2-6 二轮): 观察区晋升的证据分阈值。
  * 分制替代单一维度硬阈值，避免「首次提及 + 仅弱上下文 + 不再出现」被不可逆 void：
  *   强上下文（介绍句/关系词）×3  弱上下文（紧邻称谓动词）×1  每次提及 ×1
@@ -1347,12 +1391,11 @@ export class FamilyGraph implements FamilyGraphInterface {
           this.run('UPDATE nodes SET entity_source = ? WHERE id = ?', ['real', row.id]);
           result.upgraded++;
 
-          // 记录变更历史
-          if (!props._changeHistory) props._changeHistory = [];
           const reason = cond1 && hasEdges
             ? `提及${mentionCount}次 + 近期有交互(${Math.round(daysSince)}天)`
             : cond1 ? `累计提及${mentionCount}次` : `近${Math.round(daysSince)}天内有交互`;
-          props._changeHistory.push({
+          // 记录变更历史（B2 统一入口：单条字节封顶 + 条数上限）
+          this._appendChangeHistory(props, {
             time: new Date().toISOString(),
             operation: '实体来源升级',
             field: 'entity_source',
@@ -1361,8 +1404,6 @@ export class FamilyGraph implements FamilyGraphInterface {
             reason,
             source: '占位升级引擎',
           });
-          // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
           this.run('UPDATE nodes SET properties = ? WHERE id = ?', [JSON.stringify(props), row.id]);
 
           result.details.push(`${row.name}: placeholder→real (${reason})`);
@@ -1888,8 +1929,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     // 批15(A): 手动置 void 必须同步清理关联边（走唯一咽喉，不在此处另写 DELETE）
     if (newStatus === 'void') this.pruneVoidEdges();
 
-    if (!props._changeHistory) props._changeHistory = [];
-    props._changeHistory.push({
+    this._appendChangeHistory(props, {
       time: new Date().toISOString(),
       operation: '状态变更',
       field: 'status',
@@ -1898,8 +1938,6 @@ export class FamilyGraph implements FamilyGraphInterface {
       reason,
       source: '用户手动操作',
     });
-    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [
       JSON.stringify(props), new Date().toISOString(), node.id,
     ]);
@@ -1932,10 +1970,9 @@ export class FamilyGraph implements FamilyGraphInterface {
     // 1. 更新 nodes.category
     this.run('UPDATE nodes SET category = ? WHERE id = ?', [newCategory, node.id]);
 
-    // 2. 追加 _changeHistory
+    // 2. 追加 _changeHistory（B2 统一入口）
     const props = JSON.parse(node.properties || '{}');
-    if (!props._changeHistory) props._changeHistory = [];
-    props._changeHistory.push({
+    this._appendChangeHistory(props, {
       time: new Date().toISOString(),
       operation: 'category修正',
       field: 'category',
@@ -1944,8 +1981,6 @@ export class FamilyGraph implements FamilyGraphInterface {
       reason,
       source: '图谱同步',
     });
-    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
 
     // 3. 同步到 dossier: 关系变迁叙事
     if (!props.dossier) props.dossier = this.buildDossierFromFlat(props, props);
@@ -3026,9 +3061,46 @@ export class FamilyGraph implements FamilyGraphInterface {
    * @param names    本轮识别出的 person 名
    * @param rawInput 本轮原文（用于称谓上下文检测）
    */
+  /**
+   * B1(2026-11-05): 前缀切片判定 —— 写入端计数冻结的判据（单一真源）。
+   *
+   * 切片 = 已登记 active/dormant 人名或别名 + 1~2 字的扩展（阿珍→阿珍一），且自身无真实档案。
+   * 结构依据：切片 S 的每次文本命中必然也是真名 N 的命中（S 以 N 为前缀），
+   * 其全部『证据』都源自 N 的语境 —— 未获得独立档案前不构成独立实体证据，
+   * 计数只放大子串误计数正反馈（实测 阿珍一 mention=176 全来自「阿珍一个人」）。
+   *
+   * 逃生口：获得真实档案（description/relation_to_user）即自动解冻 —— 判据每次实时评估、无状态，
+   * PAE 提取/用户确认关系后计数立即恢复正常。
+   *
+   * 同实体豁免：name 自身已登记且与 base 归属同一主名（自身别名链）→ 非切片。
+   * 性能：先查档案（绝大多数真人命中即返回零查询），仅无档案者才查名库；
+   *       nameMap 可选参数供循环内复用（_accumulateCandidateEvidence 逐名调用时避免重复查询）。
+   */
+  private _isPrefixSlice(
+    name: string,
+    props: { description?: unknown; relation_to_user?: unknown } | null | undefined,
+    nameMap?: Map<string, string>,
+  ): boolean {
+    if (!name || name.length < 3) return false;
+    // 逃生口：已有真实档案 → 不是切片（实时评估，获得档案即自动解冻）
+    if (props && (props.description || props.relation_to_user)) return false;
+    const map = nameMap ?? this.getAllPersonNamesWithAliases();
+    const ownMain = map.get(name) ?? name;
+    for (const cut of [1, 2]) {
+      if (name.length - cut < 2) continue; // base 至少 2 字
+      const base = name.slice(0, name.length - cut);
+      const baseMain = map.get(base);
+      // base 已登记为另一实体 → 切片；同实体（自身别名链）豁免
+      if (baseMain !== undefined && baseMain !== ownMain) return true;
+    }
+    return false;
+  }
+
   private async _accumulateCandidateEvidence(names: string[], rawInput: string): Promise<void> {
     if (names.length === 0) return;
     const now = new Date().toISOString();
+    // B1: 名库循环内复用（active/dormant 主名+别名），避免逐名重复查询
+    const nameMap = this.getAllPersonNamesWithAliases();
     for (const name of names) {
       try {
         const rows = this.query(
@@ -3040,6 +3112,11 @@ export class FamilyGraph implements FamilyGraphInterface {
         const row = rows[0];
         let props: Record<string, any> = {};
         try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
+
+        // B1(2026-11-05): 前缀切片冻结 —— 跳过全部证据累积(count/title/strong/contexts)。
+        //   切片的『证据』全部源自真名语境，累积只会喂养晋升正反馈；
+        //   获得真实档案即自动解冻（本判据实时评估）。跳过后靠 30 天超期与 B5 自检处置。
+        if (this._isPrefixSlice(name, props, nameMap)) continue;
 
         const ev = (props.evidence && typeof props.evidence === 'object') ? props.evidence : {};
         ev.count = (typeof ev.count === 'number' ? ev.count : 0) + 1;
@@ -3240,17 +3317,14 @@ export class FamilyGraph implements FamilyGraphInterface {
         let props: Record<string, any> = {};
         try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
 
-        // 审计（沿用本类既有 _changeHistory 格式）
-        if (!Array.isArray(props._changeHistory)) props._changeHistory = [];
-        props._changeHistory.push({
+        // 审计（B2 统一入口：单条字节封顶 + 条数上限）
+        this._appendChangeHistory(props, {
           field: 'status',
           oldValue: 'candidate',
           newValue: 'active',
           timestamp: nowIso,
           reason: '离线终审判定为真人（来源:' + source + '）',
         });
-        // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
         if (!props._judge) props._judge = {};
         props._judge = { ...props._judge, verdict: 'person', source, at: nowIso };
 
@@ -4490,6 +4564,18 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /**
+   * B2(2026-11-05): `_changeHistory` 统一追加入口 —— 单条字节封顶 + 条数上限。
+   * 替换全仓 7 处手写 push+slice 块（单一真源，与 CHANGE_HISTORY_LIMIT/ENTRY_MAX 同处定义）。
+   */
+  private _appendChangeHistory(props: Record<string, any>, entry: Record<string, any>): void {
+    if (!Array.isArray(props._changeHistory)) props._changeHistory = [];
+    props._changeHistory.push(capChangeHistoryEntry(entry));
+    if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) {
+      props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
+    }
+  }
+
+  /**
    * 🏛️ 记录档案字段变更历史（时间向量）
    */
   addProfileChange(personName: string, field: string, oldValue: any, newValue: any): void {
@@ -4497,11 +4583,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (!node) return;
     const props = JSON.parse(node.properties || '{}');
     const now = new Date().toISOString();
-    if (!props._changeHistory) props._changeHistory = [];
-    props._changeHistory.push({ field, oldValue, newValue, timestamp: now });
-    // V2.0: 卷宗永久存档 — 主表保留10000条，超出自动归档（保留全部记录不删除）
-    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
+    this._appendChangeHistory(props, { field, oldValue, newValue, timestamp: now });
     this.run('UPDATE nodes SET properties=? WHERE id=?', [JSON.stringify(props), node.id]);
   }
 
@@ -4633,9 +4715,13 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     const existing: Partial<PersonProfile> = node.properties ? JSON.parse(node.properties) : {};
     const shouldCountMention = options?.countMention ?? !Object.prototype.hasOwnProperty.call(updates, 'mention_count');
+    // B1(2026-11-05): 前缀切片计数冻结 —— 未建档的「真名+1~2字」其 mention 增量只是
+    //   子串误计数正反馈（实测 阿珍一 mention=176 全来自「阿珍一个人」）。
+    //   获得真实档案即自动解冻；显式传 mention_count 数值（合并/修复路径）不受影响。
+    const mentionFrozen = shouldCountMention && this._isPrefixSlice(node.name, existing);
     const nextMentionCount = typeof updates.mention_count === 'number'
       ? updates.mention_count
-      : (existing.mention_count || 0) + (shouldCountMention ? 1 : 0);
+      : (existing.mention_count || 0) + (mentionFrozen ? 0 : (shouldCountMention ? 1 : 0));
     const merged: PersonProfile = {
       name: node.name,
       relation_to_user: existing.relation_to_user || '',
@@ -4723,10 +4809,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       const oldVal = (existing as any)[field];
       const newVal = (updates as any)[field];
       if (oldVal !== undefined && newVal !== undefined && JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-        if (!merged._changeHistory) merged._changeHistory = [];
-        merged._changeHistory.push({ field, oldValue: oldVal, newValue: newVal, timestamp: new Date().toISOString() });
-        // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (merged._changeHistory.length > CHANGE_HISTORY_LIMIT) merged._changeHistory = merged._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
+        this._appendChangeHistory(merged, { field, oldValue: oldVal, newValue: newVal, timestamp: new Date().toISOString() });
       }
     }
 
@@ -4767,28 +4850,42 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     const lastKey = parts[parts.length - 1];
     const oldValue = JSON.stringify(target[lastKey] ?? null);
-    const newValueStr = JSON.stringify(value);
 
     // V4.0: 系统只读保护 — systemReadOnly 标记的字段不可被 PAE 覆盖
     if (target._systemReadOnly && target._systemReadOnly[lastKey]) {
       return; // 只读字段，禁止覆盖
     }
 
-    // 值未变化则跳过
+    // B3(2026-11-05): 数组字段改【并集合并】而非整替 ——
+    //   实测 PAE 抽到 3 项 traits 会把已有 16 项整份盖掉（dossier.traits 历史 old=16→new=3 反复出现）。
+    //   仅当新旧**都是数组**时合并（旧序保留 + 新项追加，JSON 去重）；
+    //   非数组/类型变化维持原整替语义。两个现有调用方均为追加意图
+    //   （PAE 增量提取 / MeetingMinutesStore 构好全量传入），合并后结果与原语义等价或更完整。
+    let finalValue = value;
+    const curVal = target[lastKey];
+    if (Array.isArray(curVal) && Array.isArray(value)) {
+      const mergedArr = [...curVal];
+      const seen = new Set(mergedArr.map((x: any) => JSON.stringify(x)));
+      for (const it of value as any[]) {
+        const k = JSON.stringify(it);
+        if (!seen.has(k)) { seen.add(k); mergedArr.push(it); }
+      }
+      finalValue = mergedArr;
+    }
+    const newValueStr = JSON.stringify(finalValue);
+
+    // 值未变化则跳过（合并语义下重复提交同一数组 = 幂等，不写不记历史）
     if (oldValue === newValueStr) return;
 
-    target[lastKey] = value;
+    target[lastKey] = finalValue;
 
-    // 记录变更历史
-    if (!props._changeHistory) props._changeHistory = [];
-    props._changeHistory.push({
+    // 记录变更历史（B2 统一入口：单条字节封顶 + 条数上限）
+    this._appendChangeHistory(props, {
       field: `dossier.${fieldPath}`,
       oldValue: target[lastKey] !== undefined ? oldValue : null,
-      newValue: value,
+      newValue: finalValue,
       timestamp: new Date().toISOString(),
     });
-    // 批18: 上限走单一真源（原 10000 过大，是 properties 膨胀主因）
-        if (props._changeHistory.length > CHANGE_HISTORY_LIMIT) props._changeHistory = props._changeHistory.slice(-CHANGE_HISTORY_LIMIT);
 
     // V4.0: 置信度标记（PAE 提取 vs 用户手动）
     const lastEntry = props._changeHistory[props._changeHistory.length - 1];
@@ -5354,7 +5451,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       { regex: /急脾气|暴躁|火爆/, value: '急躁' },
       { regex: /幽默|风趣|搞笑/, value: '幽默' },
       { regex: /细心|细致|心细/, value: '细心' },
-      { regex: /大方|豪爽/, value: '大方' },
+      { regex: /大方|豪爽|不小气/, value: '大方' },  // B3: 原「大方|豪爽」与「大方|不小气」两条同 value 条目合并（双条目一次提取可推入重复项）
       { regex: /勤快|勤奋/, value: '勤奋' },
       { regex: /懒惰|懒散/, value: '懒散' },
       { regex: /乐观/, value: '乐观' },
@@ -5364,13 +5461,13 @@ export class FamilyGraph implements FamilyGraphInterface {
       { regex: /贤惠|体贴|顾家/, value: '顾家' },
       { regex: /善良|心软/, value: '善良' },
       { regex: /成熟|稳重/, value: '稳重' },
-      { regex: /大方|不小气/, value: '大方' },
     ];
     const newTraits: string[] = [];
     for (const hint of traitHints) {
       if (hint.regex.test(scanText)) {
         const existing = profile.traits || [];
-        if (!existing.includes(hint.value)) {
+        // B3: 除 existing 外也查 newTraits 自身 —— 双保险防同 value 条目/未来任何重复推入
+        if (!existing.includes(hint.value) && !newTraits.includes(hint.value)) {
           newTraits.push(hint.value);
         }
       }
