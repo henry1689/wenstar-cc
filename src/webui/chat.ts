@@ -3141,12 +3141,36 @@ if (_meetingExited) {
         // 🔴 2026-10-31：全名 + **短名**双匹配。
         //   只比全名时「诗雨」≠「徐诗雨」⇒ 真机说「诗雨，我悄悄跟你说句话」永不触发。
         //   短名口径与 EntityMeeting._fuzzyFindName 一致：≥3 字的全名取末尾 2 字。
+        //
+        // 🔴 2026-11-06 修复「耳语当场泄漏」：上面两档**都只认 displayName（主名）**，
+        //   而席位 displayName 存的是主名（罗珍思），业主却常按别名称呼（阿珍）——
+        //   `message.includes('罗珍思')` 与短名『珍思』恒不命中 ⇒ `_whisperToUuid=undefined`
+        //   ⇒ 该轮按普通消息处理（audience=room）⇒ **耳语当场全场可闻**。
+        //   实测铁证：行3785「耳语阿珍，你还记得…」无 [Whisper] 日志、
+        //             行16796「耳语徐诗雨，看来…」有 [Whisper] 日志。
+        //   连带把 belong 也写错了（记忆挂到当前发言人罗珍思名下，而耳语是给阿珍的）。
+        //
+        //   aliasMap 定义在 _runMeetingTransition 内（:1093），此处作用域访问不到，
+        //   故在本 IIFE 内自取。匹配用 `main===displayName || alias===displayName`
+        //   **双向**覆盖 —— FG 里谁是主名谁是别名并不确定，单向必漏一半。
+        const _fgW = ctx.m4?.getFamilyGraph?.();
+        const _aliasW: Map<string, string> = _fgW?.getAllPersonNamesWithAliases?.() ?? new Map<string, string>();
+        /** 该席位的全部叫法：主名 / 短名 / 关联别名 / 别名短名 —— 消息里出现任一即算点到她 */
+        const _namesOf = (displayName: string): string[] => {
+          const set = new Set<string>([displayName]);
+          if (displayName.length >= 3) set.add(displayName.slice(-2));
+          for (const [alias, main] of _aliasW) {
+            if (main !== displayName && alias !== displayName) continue;
+            set.add(alias); set.add(main);
+            if (alias.length >= 3) set.add(alias.slice(-2));
+            if (main.length >= 3) set.add(main.slice(-2));
+          }
+          return [...set].filter((x) => x && x.length >= 2);
+        };
         const _hit = _on.find((s) => {
           const _n = s.displayName;
           if (!_n) return false;
-          if (message.includes(_n)) return true;
-          const _short = _n.length >= 3 ? _n.slice(-2) : null;
-          return !!_short && message.includes(_short);
+          return _namesOf(_n).some((x) => message.includes(x));
         });
         return _hit?.uuid;
       } catch {
