@@ -5,7 +5,8 @@
  * 不得在别处硬编码下标，以防维度错位导致证据计算整体失真。
  */
 
-import { LAYOUT_SIZE } from './config.js';
+import { DIMS_BY_LAYER, LAYOUT_SIZE, LAYER_NAMES } from './config.js';
+import type { LayerName } from './config.js';
 import { clampPi } from './coding.js';
 
 /** 印记块 */
@@ -153,6 +154,57 @@ const BIPOLAR_DIMS: readonly DimId[] = Object.freeze([
 /** 该维度是否为双极维（S-002） */
 export function isBipolar(dim: DimId): boolean {
   return BIPOLAR_DIMS.includes(dim);
+}
+
+/**
+ * E-05 / S-018：层 → LAYOUT 下标（由 LAYOUT × config.DIMS_BY_LAYER 推导）。
+ *
+ * 🔴 **不写死任何下标**：LAYOUT 一旦调整（v3.2 增删维度），本表自动跟随；
+ * 下面的加载断言会把「错位」变成启动即失败，而不是运行时静默失真。
+ *
+ * 为什么只按维度编号过滤、不判块：D01–D31 在 self 与 user_est 各出现一次且同属
+ * 一层；D32–D40 只出现在 scene 块；Y1–Y8 只出现在 dyad 块。四块之间维度编号
+ * 互不重叠，故按编号过滤即得全部归属下标。
+ *
+ * 🔴 **E-10 已知交互**：`relation` 层含 D27，而 self / user_est 的 D27 存储精度
+ * 恒为 0（证据只在 dyad 块计算）。接入层准入/覆盖率时，须先把
+ * `D27_STORAGE_INDICES` 从该层的 piXs 中剔除，否则两项恒定 0 覆盖率会把
+ * 关系层覆盖率整体压低。
+ */
+function layerIndices(layer: LayerName): readonly number[] {
+  return Object.freeze(
+    LAYOUT.reduce<number[]>(
+      (acc, entry, index) =>
+        DIMS_BY_LAYER[layer].includes(entry.dim) ? [...acc, index] : acc,
+      [],
+    ),
+  );
+}
+
+/** 层名 → 该层在 79 维中的下标集合（键序与 LAYER_NAMES 一致） */
+export const LAYER_DIMS: Readonly<Record<LayerName, readonly number[]>> = Object.freeze({
+  body: layerIndices('body'),
+  core: layerIndices('core'),
+  appraisal: layerIndices('appraisal'),
+  motive: layerIndices('motive'),
+  relation: layerIndices('relation'),
+  scene: layerIndices('scene'),
+  dyad: layerIndices('dyad'),
+});
+
+// E-05 加载断言：七层必须恰好铺满 79 维且互不重叠。
+// 只在「漏了一维」或「一维被两层同时认领」时才失败——这两种错法都不会报错，
+// 只会让聚合结果悄悄偏掉，所以必须在加载期炸出来。
+{
+  const layered = LAYER_NAMES.flatMap((layer) => LAYER_DIMS[layer]);
+  if (layered.length !== LAYOUT.length) {
+    throw new Error(
+      `LAYER_DIMS 合计 ${layered.length} 项 !== LAYOUT 维数 ${LAYOUT.length}（E-05）`,
+    );
+  }
+  if (new Set(layered).size !== LAYOUT.length) {
+    throw new Error('LAYER_DIMS 存在跨层重复下标：同一维度被两层同时认领（E-05）');
+  }
 }
 
 /**

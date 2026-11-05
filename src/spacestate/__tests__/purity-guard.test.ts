@@ -126,5 +126,15 @@ describe('约束 4 · 参数集中配置源', () => {
     const locked = (config as { LOCKED_WEIGHT_DIMS?: readonly string[] }).LOCKED_WEIGHT_DIMS;
     expect(Object.isFrozen(locked)).toBe(true);
     expect(Object.isFrozen(config.LAYER_NAMES)).toBe(true);
+
+    // 层归属表是全局唯一的维度语义映射：被就地改写会让全部层的证据悄悄错配，
+    // 且不会抛任何错——故外层与每个层的数组都必须冻结。
+    const dimsByLayer = (config as { DIMS_BY_LAYER?: Record<string, readonly string[]> })
+      .DIMS_BY_LAYER;
+    expect(dimsByLayer).toBeDefined();
+    expect(Object.isFrozen(dimsByLayer)).toBe(true);
+    for (const [layer, list] of Object.entries(dimsByLayer!)) {
+      expect(Object.isFrozen(list), `DIMS_BY_LAYER.${layer} 内层应冻结`).toBe(true);
+    }
   });
 });
