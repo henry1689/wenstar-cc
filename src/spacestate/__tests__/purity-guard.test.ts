@@ -110,9 +110,18 @@ describe('约束 4 · 参数集中配置源', () => {
         expect(Number.isFinite(value), key).toBe(true);
         continue;
       }
-      // 切片#3 起 config 含数组/对象常量（掩码表、锁定维度、层名）：
+      // 层参数查询函数（layerOf / layerLambda / layerTau / resonanceMask）是
+      // 纯函数导出：绑定由 const 声明不可重赋值，函数体自身也无可变状态，
+      // 故不参与冻结断言（Object.freeze 对函数只锁属性、锁不住行为，断言无意义）
+      if (typeof value === 'function') continue;
+      // 切片#3 起 config 含数组/对象/Set 常量（掩码表、层名、层归属、维度开关）：
       // 必须 frozen，否则仍是可被就地改写的可变状态
       expect(Object.isFrozen(value), `${key} 应被 Object.freeze`).toBe(true);
+      // Set 的 .add/.delete 不受 Object.freeze 影响，冻结只是必要非充分条件，
+      // 这里额外保证开关集合非空——空集会让 OBSERVE_ONLY 之类的约束静默失效
+      if (value instanceof Set) {
+        expect(value.size, `${key} 不应为空集`).toBeGreaterThan(0);
+      }
     }
   });
 

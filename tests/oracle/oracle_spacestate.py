@@ -141,3 +141,82 @@ def test_quant_int8():
     assert quant_int8(0.00394) == 1
     # 收尾任务：反量化钳位（越界输入不再产生值域外结果）
     assert dequant_int8(300) == 1.0 and dequant_int8(-300) == -1.0
+
+# ---------- 切片#3 补包：层参数与维度级开关（与 TS 侧 config.ts 同步） ----------
+LAYER_NAMES = ("body", "core", "appraisal", "motive", "relation", "scene", "dyad")
+
+DIMS_BY_LAYER = {
+    "body":      ("D01", "D02", "D03", "D04", "D05", "D06"),
+    "core":      ("D07", "D08", "D09"),
+    "appraisal": ("D10", "D11", "D12", "D13", "D14", "D15", "D16"),
+    "motive":    ("D17", "D18", "D19", "D20", "D21", "D22", "D23"),
+    "relation":  ("D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31"),
+    "scene":     ("D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"),
+    "dyad":      ("Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8"),
+}
+
+# (lambda, tau_min); tau None = 不走 Kalman（跳变模型，无 τ 概念）
+LAYER_PARAMS = {
+    "body": (0.8, 60.0), "core": (0.15, 20.0), "appraisal": (0.4, 10.0),
+    "motive": (0.4, 30.0),
+    # 临时值：白皮书未给 relation 的 τ，取与 dyad 同值，待业主确认（E-28）
+    "relation": (0.15, 120.0),
+    "scene": (1.0, None),
+    "dyad": (0.15, 120.0),
+}
+
+NO_KALMAN = {"D27"} | {f"D{n}" for n in range(32, 41)}
+OBSERVE_ONLY = ("D29", "D30")
+PRIVATE_ONLY = ("D20",)
+
+def layer_of(dim):
+    for layer in LAYER_NAMES:
+        if dim in DIMS_BY_LAYER[layer]:
+            return layer
+    raise ValueError("layer_of: unknown dim %s" % dim)
+
+def layer_lambda(dim):
+    return LAYER_PARAMS[layer_of(dim)][0]
+
+def layer_tau(dim):
+    """返回 None 表示该维度不走 Kalman；层应有 τ 却为 None 则 raise。"""
+    if dim in NO_KALMAN:
+        return None
+    tau = LAYER_PARAMS[layer_of(dim)][1]
+    if tau is None:
+        raise ValueError("%s: layer %s has no tau" % (dim, layer_of(dim)))
+    return tau
+
+def test_layer_dims_counts():
+    assert {l: len(DIMS_BY_LAYER[l]) for l in LAYER_NAMES} == {
+        "body": 6, "core": 3, "appraisal": 7, "motive": 7,
+        "relation": 8, "scene": 9, "dyad": 8,
+    }
+    assert sum(len(v) for v in DIMS_BY_LAYER.values()) == 48
+
+def test_layer_lambda_order():
+    lam = {l: LAYER_PARAMS[l][0] for l in LAYER_NAMES}
+    # S-046: scene >= body >= appraisal = motive >= core = relation = dyad
+    assert lam["scene"] >= lam["body"] >= lam["appraisal"] >= lam["core"]
+    assert lam["appraisal"] == lam["motive"]
+    assert lam["core"] == lam["relation"] == lam["dyad"]
+    assert [l for l in LAYER_NAMES if LAYER_PARAMS[l][1] is None] == ["scene"]
+
+def test_layer_tau_none():
+    nulls = sorted(d for l in LAYER_NAMES for d in DIMS_BY_LAYER[l] if layer_tau(d) is None)
+    assert nulls == sorted(NO_KALMAN)
+    assert len(nulls) == 10  # D27 + D32..D40
+    assert layer_tau("D27") is None
+    assert layer_tau("D32") is None and layer_tau("D40") is None
+    # relation 层有 τ，只有 D27 这一个维度例外
+    assert layer_tau("D25") == 120.0
+
+def test_relation_tau():
+    for dim in DIMS_BY_LAYER["relation"]:
+        if dim == "D27":
+            assert layer_tau(dim) is None
+        else:
+            assert layer_tau(dim) == 120.0
+    assert layer_of("D24") == "relation"
+    assert layer_lambda("D24") == 0.15
+    assert layer_of("Y8") == "dyad" and layer_lambda("Y8") == 0.15

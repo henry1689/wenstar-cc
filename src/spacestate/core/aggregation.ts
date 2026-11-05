@@ -8,10 +8,9 @@
  *     → 覆盖率 + 掩码 + 阈值三条件准入（S-018）
  *     → Σ m_L·E_L 得总证据 E（S-016 层间）
  *
- * 🔴 **层→维度映射不在此文件**：`LAYER_DIMS` 尚缺（任务书指引的基线 E-05
- * 只有层名，active/ 全部 17 个文件均无映射表）。因此本文件的三个函数
- * 一律**把层分组作为参数接收**，不硬编码；映射到位后只需在 config.ts
- * 补一处常量，本文件零改动。
+ * 🔴 **层→维度映射不在此文件**：`LAYER_DIMS` / `LAYER_ADMISSION_DIMS` 在
+ * `layout.ts` 由 LAYOUT 推导，本文件的三个函数一律**把层分组作为参数接收**，
+ * 不硬编码——映射调整只需改 config/layout，聚合逻辑零改动。
  */
 
 import {
@@ -19,10 +18,11 @@ import {
   DELTA_MAX,
   ICC_B_LOWER,
   ICC_B_SPAN,
-  LOCKED_WEIGHT_DIMS,
+  OBSERVE_ONLY_DIMS,
   TAU_MIN,
 } from './config.js';
 import { posteriorVariance } from './evidence.js';
+import type { DimId } from './layout.js';
 
 // ============ S-017 · 维度权重 ============
 
@@ -48,17 +48,26 @@ export function iccCoefficient(icc: number, grade: IccGrade): number {
  *
  * - `baseI` 基础权重由调用方从配置读入，core 不硬编码
  * - `delta` 本切片固定 0（动态调整留后续），但仍强制 |δ| ≤ 0.3
- * - **D20/D29/D30 恒为 0**（E-14：依赖指标不进入排序，否则会主导打分）
+ *
+ * 🔴 **E-14 现行口径（细化，非推翻）**：
+ * - **D29 / D30 恒 0**（只观测）：依赖指标不得作为任何优化目标
+ *   （S-067 消融不变性），否则系统会主动放大依赖
+ * - **D20 由私密模式开关控制是否参与**：不再被本函数锁死为 0，
+ *   由调用方乘 `resonanceMask(dim, privateMode)` 决定（待登记勘误 E-29）
+ * - 三者均**不得作为任何优化目标**
+ *
+ * 为什么把私密开关留在调用方而不是加进本函数：`privateMode` 是**上下文**
+ * 而非维度属性，塞进来会让 core 的纯函数带上会话状态，也破坏本函数的签名稳定。
  */
 export function dimWeight(
-  dim: string,
+  dim: DimId,
   baseI: number,
   icc: number,
   grade: IccGrade,
   delta = 0,
 ): number {
-  // E-14：依赖指标锁死为 0，先于一切计算
-  if (LOCKED_WEIGHT_DIMS.includes(dim)) return 0;
+  // E-14：只观测维度锁死为 0，先于一切计算
+  if (OBSERVE_ONLY_DIMS.has(dim)) return 0;
 
   // S-017：|δ| ≤ 0.3，越界钳回
   const d = Math.min(Math.max(delta, -DELTA_MAX), DELTA_MAX);
@@ -86,6 +95,9 @@ export interface WeightedTerm {
  * 打乱顺序会得到不同末位，跨平台结果就会漂移。因此先按 `index` 升序
  * 排序再累加——调用方传入顺序无关紧要，结果恒定。
  * 校验：打乱输入顺序后结果差 ≤ 1e-12（属性测试）。
+ *
+ * 传入的下标集合由调用方选择：求和用 `LAYER_DIMS`（w=0 的项本不贡献），
+ * 覆盖率/准入用 `LAYER_ADMISSION_DIMS`（剔除 D27）。
  */
 export function layerEvidence(items: readonly WeightedTerm[]): number {
   const ordered = [...items].sort((a, b) => a.index - b.index);
@@ -111,6 +123,9 @@ export function coverage(piX: number, tau: number): number {
  * 层覆盖率 cov_L = mean(1 − v̂_i/τ_i²)（S-018）
  *
  * 空层返回 0——没有维度就没有覆盖，不能默认为满覆盖。
+ *
+ * 调用方应传入 `LAYER_ADMISSION_DIMS` 对应的 π 数组（剔除 D27），
+ * 否则两项恒 0 覆盖率会把关系层上限压到 0.875。
  */
 export function layerCoverage(piXs: readonly number[], tau: number): number {
   if (piXs.length === 0) return 0;

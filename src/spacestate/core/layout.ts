@@ -231,6 +231,68 @@ if (D27_STORAGE_INDICES.length !== 2) {
 }
 
 /**
+ * E-05 + E-10：层 → 用于**层准入 / 覆盖率**的下标集合。
+ *
+ * 与 `LAYER_DIMS` 的唯一差别：剔除 `D27_STORAGE_INDICES`（下标 35 / 66）。
+ *
+ * 🔴 为什么必须剔除：D27 同频只在 dyad 块计证据，主体块存储精度恒为 0。
+ * 若把这两项按 0 覆盖率计入层平均，关系层覆盖率的**上限**就被压到
+ * 14/16 = 0.875；再叠加其它未产出维度，极易跌破 `COVERAGE_MIN = 0.3`，
+ * 导致关系层**永远无法准入**——通路 C 的主动唤起会整体失效。
+ *
+ * 用途边界（两条不能混用）：
+ * - 求和 `E_L` 仍用 `LAYER_DIMS`（w = 0 的项本就不贡献，剔不剔除结果相同）
+ * - **算覆盖率 / 层准入必须用本表**
+ *
+ * 下标同样由 `LAYER_DIMS` 派生，不手写（S-001）。
+ */
+function admissionIndices(layer: LayerName): readonly number[] {
+  return Object.freeze(
+    LAYER_DIMS[layer].filter((index) => !D27_STORAGE_INDICES.includes(index)),
+  );
+}
+
+/** 层名 → 层准入/覆盖率用的下标集合（键序与 LAYER_NAMES 一致） */
+export const LAYER_ADMISSION_DIMS: Readonly<Record<LayerName, readonly number[]>> =
+  Object.freeze({
+    body: admissionIndices('body'),
+    core: admissionIndices('core'),
+    appraisal: admissionIndices('appraisal'),
+    motive: admissionIndices('motive'),
+    relation: admissionIndices('relation'),
+    scene: admissionIndices('scene'),
+    dyad: admissionIndices('dyad'),
+  });
+
+// 加载断言：只有 relation 层会因 D27 剔除而变短，其余六层必须与 LAYER_DIMS
+// 逐项相等；剔除后仍须铺满且无重复（同一维度不能被两层同时认领）。
+{
+  for (const layer of LAYER_NAMES) {
+    const expected =
+      layer === 'relation'
+        ? LAYER_DIMS[layer].length - D27_STORAGE_INDICES.length
+        : LAYER_DIMS[layer].length;
+    if (LAYER_ADMISSION_DIMS[layer].length !== expected) {
+      throw new Error(
+        `LAYER_ADMISSION_DIMS.${layer} 长度 ${LAYER_ADMISSION_DIMS[layer].length} !== 期望 ${expected}`,
+      );
+    }
+    if (layer !== 'relation') {
+      const same = LAYER_DIMS[layer].every(
+        (index, i) => LAYER_ADMISSION_DIMS[layer][i] === index,
+      );
+      if (!same) {
+        throw new Error(`LAYER_ADMISSION_DIMS.${layer} 应与 LAYER_DIMS 逐项相等（无 D27）`);
+      }
+    }
+  }
+  const admitted = LAYER_NAMES.flatMap((layer) => LAYER_ADMISSION_DIMS[layer]);
+  if (new Set(admitted).size !== admitted.length) {
+    throw new Error('LAYER_ADMISSION_DIMS 存在跨层重复下标（E-05）');
+  }
+}
+
+/**
  * S-008：写入印记时把主体块 D27 的存储精度强制置 0。
  *
  * D27 同频只在逻辑视图由 dyad Y1 回填，证据只在 dyad 块计算，

@@ -8,7 +8,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DIMS_BY_LAYER, DEFAULT_MASKS, LAYER_NAMES } from '../core/config.js';
-import { D27_STORAGE_INDICES, LAYER_DIMS, LAYOUT } from '../core/layout.js';
+import {
+  D27_STORAGE_INDICES,
+  LAYER_ADMISSION_DIMS,
+  LAYER_DIMS,
+  LAYOUT,
+} from '../core/layout.js';
 
 /** 闭区间下标序列，便于逐项比对 */
 const range = (from: number, to: number): number[] =>
@@ -127,5 +132,51 @@ describe('S-018 · 掩码与层序对齐', () => {
     const sceneIndex = LAYER_NAMES.indexOf('scene');
     expect(DEFAULT_MASKS.pathwayB[sceneIndex]).toBe(0);
     expect(DEFAULT_MASKS.sharedEpiphany[sceneIndex]).toBeGreaterThan(0);
+  });
+});
+
+describe('E-10 · LAYER_ADMISSION_DIMS（剔除 D27 的准入下标）', () => {
+  it('只有 relation 层变短（16 → 14），其余六层与 LAYER_DIMS 逐项相等', () => {
+    for (const layer of LAYER_NAMES) {
+      if (layer === 'relation') {
+        expect(LAYER_ADMISSION_DIMS.relation).toHaveLength(14);
+        expect(LAYER_DIMS.relation).toHaveLength(16);
+        continue;
+      }
+      expect([...LAYER_ADMISSION_DIMS[layer]], layer).toEqual([...LAYER_DIMS[layer]]);
+    }
+  });
+
+  it('relation 层恰好剔除下标 35 / 66，顺序不变', () => {
+    const expected = LAYER_DIMS.relation.filter(
+      (index) => !D27_STORAGE_INDICES.includes(index),
+    );
+    expect([...LAYER_ADMISSION_DIMS.relation]).toEqual(expected);
+    expect(expected).not.toContain(35);
+    expect(expected).not.toContain(66);
+    // 剔除后仍是连续两段（self 32..34+36..39 与 user_est 63..65+67..70）
+    expect(LAYER_ADMISSION_DIMS.relation).toHaveLength(14);
+  });
+
+  it('覆盖率上限不再被 D27 压低：16 项 vs 14 项的差异正是 E-10 要避免的', () => {
+    // 16 项里有 2 项恒 0 覆盖率 → 关系层上限 14/16 = 0.875，
+    // 叠加其它未产出维度极易跌破 COVERAGE_MIN，导致关系层永难准入
+    const ratio = LAYER_ADMISSION_DIMS.relation.length / LAYER_DIMS.relation.length;
+    expect(ratio).toBeCloseTo(14 / 16, 12);
+    expect(ratio).toBeLessThan(1);
+  });
+
+  it('准入下标并集仍铺满且无重复', () => {
+    const all = LAYER_NAMES.flatMap((layer) => [...LAYER_ADMISSION_DIMS[layer]]);
+    expect(new Set(all).size).toBe(all.length);
+    expect(all).toHaveLength(79 - D27_STORAGE_INDICES.length);
+  });
+
+  it('键序与 LAYER_NAMES 一致，内层冻结', () => {
+    expect(Object.keys(LAYER_ADMISSION_DIMS)).toEqual([...LAYER_NAMES]);
+    expect(Object.isFrozen(LAYER_ADMISSION_DIMS)).toBe(true);
+    for (const layer of LAYER_NAMES) {
+      expect(Object.isFrozen(LAYER_ADMISSION_DIMS[layer]), layer).toBe(true);
+    }
   });
 });

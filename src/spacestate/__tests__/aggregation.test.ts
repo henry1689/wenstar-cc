@@ -19,7 +19,9 @@ import {
   COVERAGE_MIN,
   DELTA_MAX,
   ICC_B_SPAN,
-  LOCKED_WEIGHT_DIMS,
+  OBSERVE_ONLY_DIMS,
+  PRIVATE_ONLY_DIMS,
+  resonanceMask,
 } from '../core/config.js';
 
 const TAU = 0.3;
@@ -87,14 +89,28 @@ describe('S-017 · 维度权重', () => {
     expect(dimWeight('D01', 1, 1, 'A', -5)).toBeCloseTo(0.7, 12);
   });
 
-  it('E-14：D20/D29/D30 权重恒为 0（依赖指标不进排序）', () => {
-    expect(LOCKED_WEIGHT_DIMS).toEqual(['D20', 'D29', 'D30']);
-    for (const dim of LOCKED_WEIGHT_DIMS) {
+  it('E-14 细化：D29/D30 只观测恒 0；D20 改由私密模式开关控制', () => {
+    expect([...OBSERVE_ONLY_DIMS]).toEqual(['D29', 'D30']);
+    for (const dim of OBSERVE_ONLY_DIMS) {
       // 即使 base、ICC、δ 都给满，也必须是 0
+      // （依赖指标不得作为任何优化目标，S-067 消融不变性）
       expect(dimWeight(dim, 1, 1, 'A', 0.3), dim).toBe(0);
       expect(dimWeight(dim, 1, 1, 'A'), dim).toBe(0);
     }
-    // 同 base 的非锁定维度不受影响
+
+    // 🔴 行为变更：D20 不再被 dimWeight 锁死为 0，权重本身正常算出
+    expect([...PRIVATE_ONLY_DIMS]).toEqual(['D20']);
+    expect(dimWeight('D20', 1, 1, 'A', 0.3)).toBeCloseTo(1.3, 12);
+    // 是否参与共鸣由 resonanceMask 决定：非私密 0、私密 1
+    expect(resonanceMask('D20', false)).toBe(0);
+    expect(resonanceMask('D20', true)).toBe(1);
+    // 只观测维度在私密模式下也仍是 0
+    expect(resonanceMask('D29', true)).toBe(0);
+    // 普通维度不受开关影响
+    expect(resonanceMask('D21', false)).toBe(1);
+    expect(resonanceMask('D01', true)).toBe(1);
+
+    // 同 base 的普通维度不受影响
     expect(dimWeight('D21', 1, 1, 'A')).toBe(1);
   });
 
