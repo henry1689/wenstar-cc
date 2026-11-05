@@ -2338,9 +2338,27 @@ try {
   const _memCapByHist = _histChars > 0 && Number.isFinite(_ratioOfHist) && _ratioOfHist > 0
     ? Math.floor(_histChars * _ratioOfHist)
     : _hardCap;
-  const _memCap = Math.max(200, Math.min(_hardCap, _memCapByHist));
+  // 🔴 下界 200 → 1000（业主 2026-11-05 裁定：**极端短历史时豁免「历史 ≥ 记忆」**）。
+  //
+  //   原下界 200 的设计意图写在上面那段注释里：「避免极短对话时把记忆一刀切没
+  //   （那会让"问起旧事"完全失能）」。但 200 字符实际只放得下 2~12 条短记忆 ——
+  //   意图与实现差了一个量级，等于没兜住，「完全失能」照旧发生。
+  //
+  //   实测触发路径（2026-11-05 生产日志）：
+  //     新人入场 ⇒ 任期隔离让她的可见历史天然少（20 条 / 273 字符）
+  //     ⇒ _memCap 被压到 273 ⇒ 记忆 473→273 被截断 ⇒ 业主实测「没有记忆了」。
+  //   隔离让历史少是设计的必然，但**不能连带把记忆清零** —— 两者是不同的事。
+  //
+  //   1000 ≈ 24 条典型记忆（实测均条约 42 字符），仍远低于 hardCap 8000。
+  //   🔴 本值与原 200 一样保持硬编码：下界一直是写死的，配置里只放比例与上限
+  //     （hard_max_chars / memory_max_ratio_of_history）。要频繁调再单独配置化。
+  const _MEM_FLOOR_CHARS = 1000;
+  const _memCap = Math.max(_MEM_FLOOR_CHARS, Math.min(_hardCap, _memCapByHist));
   if (_memCap < _hardCap) {
-    console.log(`[V35-C·对话是主体] 记忆预算由历史体量派生: 历史 ${_histChars} 字符 ⇒ 记忆上限 ${_memCap}（hardCap ${_hardCap}）`);
+    // 下界兜底时必须可观测 —— 否则「豁免发生了没有」只能靠体感判断（V32 教训）
+    const _floored = _memCapByHist < _MEM_FLOOR_CHARS;
+    console.log(`[V35-C·对话是主体] 记忆预算由历史体量派生: 历史 ${_histChars} 字符 ⇒ 记忆上限 ${_memCap}`
+      + `${_floored ? `（下界兜底，豁免「历史≥记忆」：按体量本应 ${_memCapByHist}）` : ''}（hardCap ${_hardCap}）`);
   }
   // 🔴 P2 建议1: 事实查询增强 — 用户问"答应过/记得你说过/之前说好"时拉高金库优先级
   const _vaultBoost = /答应过|记得你说过|之前说好|承诺过|答应我|你说过要|之前约定|说好了/.test(message);
