@@ -153,17 +153,22 @@ export interface LayerParam {
 /**
  * 层参数表（白皮书 §2.4 τ 回归时间常数 / §4.2 λ 精度衰减）。
  *
- * 🔴 **未决项（不得写成已冻结）**：`relation` 的 τ 白皮书未给出，暂取与 dyad
- * 同值 120 作为**临时值**，待业主确认（建议登记 E-28）。改判只改本常量。
- * 该临时值不是无害默认——τ 直接决定无观测期的回归速度，敏感度实测见
- * `__tests__/tau-sensitivity.test.ts`。
+ * ✅ **relation τ = 120 分钟已获业主批准（2026-11-05）**。
+ * 白皮书 §2.4 无 Ⅴ 关系层，该值由业主裁定；批准依据与 τ 敏感度实测见下条注释。
+ * τ 直接决定无观测期的回归速度，数值变更须重跑
+ * `__tests__/tau-sensitivity.test.ts` 并重新走批准流程。
  */
 export const LAYER_PARAMS: Readonly<Record<LayerName, LayerParam>> = Object.freeze({
   body: Object.freeze({ lambda: 0.8, tauMin: 60 }),
   core: Object.freeze({ lambda: 0.15, tauMin: 20 }),
   appraisal: Object.freeze({ lambda: 0.4, tauMin: 10 }),
   motive: Object.freeze({ lambda: 0.4, tauMin: 30 }),
-  // ⚠️ E-28 未决项：白皮书未给 relation 的 τ，取与 dyad 同值（120）作临时值
+  // relation τ = 120 分钟。**业主已批准（2026-11-05）**。
+  // 白皮书 §2.4 的 τ 表无 Ⅴ 关系层，此值由业主裁定。
+  // 批准依据：① λ 与 dyad 同为 0.15，属同一慢度类别；
+  //          ② τ 序列中应慢于 body(60)、不快于 dyad(120)；
+  //          ③ τ 敏感度实测（阶跃 0.9 → 90 分钟无观测，基线 0.5）：
+  //             τ=60/120/240 → 终态残差 0.066034 / 0.156890 / 0.242668
   relation: Object.freeze({ lambda: 0.15, tauMin: 120 }),
   scene: Object.freeze({ lambda: 1.0, tauMin: null }),
   dyad: Object.freeze({ lambda: 0.15, tauMin: 120 }),
@@ -274,11 +279,18 @@ export const OBSERVE_ONLY_DIMS: ReadonlySet<DimId> = Object.freeze(
 );
 
 /**
- * 仅私密模式参与的维度（D20 团队集体保护）。
+ * 仅私密模式参与的维度（D20 欲求）。
  *
- * E-14 细化（待登记勘误 E-29）：D20 曾与 D29/D30 一并被锁死为 0，现改为由
+ * ⚠️ 旧 40D v2.1 表中 D20 为「团队集体保护」（`d20_team_protection`），
+ *    与 v3.1 口径不同义，**禁止混用**（见 `contract/legacy-dim.ts` 的禁令）。
+ *    依据：v3.1 D20 = 欲求（Opus v3 维度表）；白皮书正文从不给 D20 语义，
+ *    仅在 §3.7 称其为「低发维度」——「低发」支持「欲求」，不支持
+ *    「团队集体保护」（后者是持续状态，不会低发）。
+ *
+ * E-29（已获 Sonnet 同意登记）：D20 曾与 D29/D30 一并被锁死为 0，现改为由
  * 私密模式开关控制是否参与——非私密模式下恒 0，私密模式下按 1 参与。
  * 非私密模式启用 D20 属 L3 事项（需业主审批 + 快照 + 账本）。
+ * 判定依据见 `ADR-002-私密模式定义与边界`。
  */
 export const PRIVATE_ONLY_DIMS: ReadonlySet<DimId> = Object.freeze(
   new Set<DimId>(['D20']),
@@ -328,15 +340,27 @@ export function layerTau(dim: DimId): number | null {
  * 用途掩码 `layerMask` 不能覆盖这个结果。
  *
  * - `OBSERVE_ONLY_DIMS` → 恒 0
- * - `PRIVATE_ONLY_DIMS` → `privateMode ? 1 : 0`
+ * - `PRIVATE_ONLY_DIMS` → **仅当 `privateMode === true`** 才为 1
  * - 其余 → 1
  *
- * 与 `dimWeight()` 的分工：`dimWeight` 只算 base × r_ICC × (1+δ)，
- * 私密模式这种**上下文相关**的开关留在调用方，以保持 core 纯函数与职责单一。
+ * 🔴 **保守规则（ADR-002 §4）**：`privateMode` 为 `true` 之外的任何值
+ * （`undefined` / `null` / `1` / `'true'` / `{}`）一律视为**关**。
+ * 上游 `effectiveWeight` 已传入 `ctx.privateMode === true`，但本函数是
+ * **导出函数、可被单独调用**，故在此再收紧一次——双保险不增加成本。
+ *
+ * 🔴 **来源限制（ADR-002 §3.1）**：
+ * ```
+ * privateMode 只允许来自显式来源（用户显式指令 / 事先授权的会话标定）。
+ * 禁止从内容检测、话题敏感度、语义推断、语调、关键词推断。
+ * 判定行为本身即侵犯（ADR-002 §3.1）。
+ * ```
+ *
+ * 与 `effectiveWeight()` 的分工：`rawDimWeight` 只算 base × r_ICC × (1+δ)，
+ * 私密模式这种**上下文相关**的开关在唯一入口内生效，以保持 core 纯函数与职责单一。
  */
 export function resonanceMask(dim: DimId, privateMode: boolean): 0 | 1 {
   if (OBSERVE_ONLY_DIMS.has(dim)) return 0;
-  if (PRIVATE_ONLY_DIMS.has(dim)) return privateMode ? 1 : 0;
+  if (PRIVATE_ONLY_DIMS.has(dim)) return privateMode === true ? 1 : 0;
   return 1;
 }
 

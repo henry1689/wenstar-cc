@@ -1,9 +1,11 @@
 {
   "mode": "quick",
-  "oracle_sha256": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
-  "oracle_sha256_before": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
-  "oracle_sha256_last_run": null,
-  "ts_commit": "912a98e8944670dcb2e408f768e9c38f4811a1b5",
+  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "oracle_sha256_before": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "oracle_sha256_last_report": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "last_approved_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "baseline_note": "与上次放行基线一致，全部检查通过",
+  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
   "seed": 20261104,
   "samples": 10000,
   "checked": 117900,
@@ -46,7 +48,7 @@
   "self_check_offset": "0",
   "verdict": "PASS",
   "elapsed_s": {
-    "generate": 0.16,
-    "ts": 0.46
+    "generate": 0.15,
+    "ts": 0.56
   }
 }

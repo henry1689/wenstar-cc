@@ -1,7 +1,9 @@
 /**
  * 工程约束静态守卫（任务书「四、工程约束」违反即阻断合并）
  *
- * - 约束 2：core/ 全部纯函数 —— 禁止 import fs/db、Date.now、Math.random、process.env
+ * - 约束 2：core/ 全部纯函数 —— 禁止 import fs/db、Date.now、Math.random、环境变量读取
+ *   （禁止项的字面量只允许出现在本文件的正则里，注释与用例名一律用中文描述，
+ *    以免裸 rg 扫描时把说明文字误判为违规）
  * - 约束 3：全部 float64，禁止 Float32Array
  * - 约束 4：参数集中在配置源，core 中除 0/1/2/0.5 外不出现数值字面量
  *
@@ -51,7 +53,7 @@ describe('约束 2 · core 纯函数', () => {
     }
   });
 
-  it('不调用 Date.now / Math.random / process.env', () => {
+  it('不调用 Date.now / Math.random / 环境变量读取', () => {
     const forbiddenCall = /\b(?:Date\.now|Math\.random|process\.env)\b/;
     for (const { name, raw } of sources) {
       // 剥注释：dial.ts 的文档注释里写了「core 禁止 Date.now」，那是说明不是调用

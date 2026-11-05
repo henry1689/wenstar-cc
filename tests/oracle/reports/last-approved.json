@@ -1,0 +1,7 @@
+{
+  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
+  "mode": "quick",
+  "approved_at": "2026-11-05T19:43:24",
+  "note": "首次运行建立的基线；此后每次差分须与此哈希比对"
+}

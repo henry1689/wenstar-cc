@@ -1,14 +1,16 @@
 {
   "mode": "selfcheck",
-  "oracle_sha256": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
-  "oracle_sha256_before": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
-  "oracle_sha256_last_run": null,
-  "ts_commit": "912a98e8944670dcb2e408f768e9c38f4811a1b5",
+  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "oracle_sha256_before": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "oracle_sha256_last_report": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
+  "last_approved_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "baseline_note": "",
+  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
   "seed": 20261104,
-  "samples": 10000,
-  "checked": 117900,
-  "max_abs_diff": 1.000000000139778e-06,
-  "mismatches": 10000,
+  "samples": 100000,
+  "checked": 1179000,
+  "max_abs_diff": 1.0000000010279564e-06,
+  "mismatches": 100000,
   "mismatch_samples": [
     "dim_evidence: exp=0.0 act=1e-06 abs=1e-06",
     "dim_evidence: exp=0.0 act=1e-06 abs=1e-06",
@@ -17,28 +19,28 @@
     "dim_evidence: exp=0.0 act=1e-06 abs=1e-06"
   ],
   "branch_stats": {
-    "total": 10000,
-    "values_sampled": 47900,
-    "wild_values": 14389,
-    "wild_ratio": 0.3004,
+    "total": 100000,
+    "values_sampled": 479000,
+    "wild_values": 143524,
+    "wild_ratio": 0.2996,
     "flags": {
-      "nan": 378,
-      "pos_inf": 401,
-      "negative": 1497,
-      "bad_value": 1294,
-      "range_clamped": 2539,
-      "none": 3891
+      "nan": 3796,
+      "pos_inf": 3723,
+      "negative": 14723,
+      "bad_value": 12774,
+      "range_clamped": 25591,
+      "none": 39393
     },
     "branches": {
-      "dim_evidence.piQ_le_0": 3841,
-      "dim_evidence.sigmaQ2_ge_tau2": 785,
-      "dim_evidence.piX_le_0": 2126,
-      "dim_evidence.clip_hit": 1909,
-      "dim_evidence.finite_ok": 1339,
-      "phase.non_finite": 817,
-      "phase.normal": 9183,
-      "sanitize.clamped": 2539,
-      "encode.pi_zero": 3394
+      "dim_evidence.piQ_le_0": 38146,
+      "dim_evidence.sigmaQ2_ge_tau2": 7980,
+      "dim_evidence.piX_le_0": 20779,
+      "dim_evidence.clip_hit": 19508,
+      "dim_evidence.finite_ok": 13587,
+      "phase.non_finite": 8147,
+      "phase.normal": 91853,
+      "sanitize.clamped": 25591,
+      "encode.pi_zero": 33901
     }
   },
   "unhit_branches": [],
@@ -52,7 +54,7 @@
   "self_check_offset": "1e-6",
   "verdict": "SELF-CHECK PASS（注入 1e-6 后如期报红）",
   "elapsed_s": {
-    "generate": 0.25,
-    "ts": 1.54
+    "generate": 1.54,
+    "ts": 1.98
   }
 }

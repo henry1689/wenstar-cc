@@ -100,8 +100,36 @@ def report_path(mode: str) -> str:
     return os.path.join(HERE, f"diff-report-{mode}.json")
 
 
-def previous_oracle_hash(mode: str):
-    """上次放行记录里的 oracle 哈希；没有则返回 None"""
+# 上次放行基线（补包 B2 第 6 项）。首次运行建立，此后每次比对。
+LAST_APPROVED_PATH = os.path.join(HERE, "reports", "last-approved.json")
+
+
+def last_approved():
+    """返回上次放行记录里的 oracle 哈希；没有则 None（= 尚未建立基线）"""
+    if not os.path.exists(LAST_APPROVED_PATH):
+        return None
+    try:
+        with open(LAST_APPROVED_PATH, encoding="utf-8") as f:
+            return json.load(f).get("oracle_sha256")
+    except Exception:
+        return None
+
+
+def write_last_approved(sha: str, mode: str, ts_commit: str) -> None:
+    os.makedirs(os.path.dirname(LAST_APPROVED_PATH), exist_ok=True)
+    payload = {
+        "oracle_sha256": sha,
+        "ts_commit": ts_commit,
+        "mode": mode,
+        "approved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "note": "首次运行建立的基线；此后每次差分须与此哈希比对",
+    }
+    with open(LAST_APPROVED_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def previous_report_hash(mode: str):
+    """同档位上一份报告里的 oracle 哈希（仅用于打印，不参与判定）"""
     path = report_path(mode)
     if not os.path.exists(path):
         return None
@@ -416,8 +444,10 @@ def compare(cases, results, stats: Stats):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="快速档（1 万组，PR/CI）")
-    ap.add_argument("--self-check", action="store_true",
-                    help="自检：注入 1e-6 偏差，预期报红")
+    ap.add_argument("--full", action="store_true",
+                    help="完整档（10 万组，切片验收 / oracle 哈希变化时）—— 默认值，显式写法")
+    ap.add_argument("--self-check", "--self-test", dest="self_check", action="store_true",
+                    help="自检：注入 1e-6 偏差，预期报红（不改源文件）")
     args = ap.parse_args()
 
     mode = "selfcheck" if args.self_check else ("quick" if args.quick else "full")
@@ -431,9 +461,14 @@ def main() -> int:
     h_before = sha256_file(ORACLE_PATH)
     print(f"oracle sha256 (before): {h_before}")
 
-    prev = previous_oracle_hash(mode)
-    if prev:
-        print(f"oracle sha256 (last run): {prev}")
+    prev_report = previous_report_hash(mode)
+    if prev_report:
+        print(f"oracle sha256 (last report): {prev_report}")
+    approved_sha = last_approved()
+    if approved_sha:
+        print(f"oracle sha256 (last approved): {approved_sha}")
+    else:
+        print("oracle sha256 (last approved): 无（基线尚未建立）")
     ts_head = git_head()
     print(f"ts commit: {ts_head}")
 
@@ -460,7 +495,7 @@ def main() -> int:
     h_after = sha256_file(ORACLE_PATH)
     print(f"oracle sha256 (after):  {h_after}")
     hash_stable = h_before == h_after
-    hash_changed_since_last = prev is not None and prev != h_after
+    hash_changed_since_last = prev_report is not None and prev_report != h_after
 
     print("\n--- 分支命中统计 ---")
     print(f"wild 占比: {stats_dict['wild_ratio']}  (目标 ≥ {WILD_RATIO})")
@@ -483,29 +518,53 @@ def main() -> int:
     unhit = [k for k in required if stats_dict["branches"][k] == 0]
     print(f"未命中分支: {unhit if unhit else '无'}")
 
-    verdict = "PASS"
+    # ══════════ 判定（补包 B2 第 6 项：首次运行口径修正） ══════════
+    #
+    # BASELINE_ESTABLISHED：首次运行，无任何可比基线。
+    #   → 可作为基线写入 last-approved.json，但**当次不得作为放行依据**
+    #     （没有参照，只能说明「这一版自己和自己一致」）
+    # REVIEW_REQUIRED：哈希不一致 / 分支未覆盖 / 自检未报红，**不得作为放行依据**
+    # PASS：与上次放行基线一致且全部检查通过 → 唯一可作放行依据的结论
+    baseline_note = ""
     if args.self_check:
-        # 自检档：注入偏差后**必须**报红
-        verdict = "SELF-CHECK PASS（注入 1e-6 后如期报红）" if diff["mismatches"] > 0 \
-            else "SELF-CHECK FAIL（注入偏差却仍全绿 → 脚本失去检出能力）"
+        # 自检档：注入偏差后**必须**报红；自检不报红 = 脚本失去检出能力
         ok = diff["mismatches"] > 0
+        verdict = "SELF-CHECK PASS（注入 1e-6 后如期报红）" if ok \
+            else "REVIEW_REQUIRED（注入偏差却仍全绿 → 脚本失去检出能力）"
+    elif not hash_stable:
+        verdict, ok = "REVIEW_REQUIRED", False
+        baseline_note = "运行中 oracle 被改动（before != after），判定作废"
+    elif approved_sha is None:
+        verdict, ok = "BASELINE_ESTABLISHED", True
+        baseline_note = ("首次运行，无可比基线 —— 当次**不得作为放行依据**，"
+                         "仅建立基线供后续比对")
+        write_last_approved(h_before, mode, ts_head)
+    elif approved_sha != h_before:
+        verdict, ok = "REVIEW_REQUIRED", False
+        baseline_note = "oracle 哈希与上次放行基线不一致（oracle 已变更，需复核）"
+    elif unhit:
+        verdict, ok = "REVIEW_REQUIRED", False
+        baseline_note = f"存在未命中分支：{unhit}（采样未覆盖早退/截断路径）"
+    elif diff["mismatches"]:
+        verdict, ok = "REVIEW_REQUIRED", False
+        baseline_note = "存在超出 E-27 容差的差异"
     else:
-        ok = diff["mismatches"] == 0 and not unhit and hash_stable
-        verdict = "PASS" if ok else "FAIL"
-        if not hash_stable:
-            verdict = "待复核（运行中 oracle 被改动）"
-        elif hash_changed_since_last:
-            verdict = "待复核（oracle 哈希与上次放行记录不一致）"
-        elif unhit:
-            verdict = "FAIL（存在未命中分支，采样未覆盖早退/截断路径）"
-        elif diff["mismatches"]:
-            verdict = "FAIL（存在超出 E-27 容差的差异）"
+        verdict, ok = "PASS", True
+        baseline_note = "与上次放行基线一致，全部检查通过"
+
+    if baseline_note:
+        print(f"判定说明: {baseline_note}")
+    if verdict == "BASELINE_ESTABLISHED":
+        print("⚠️ BASELINE_ESTABLISHED ≠ PASS：本次只建立基线，不作为放行依据。")
+        print(f"   基线已写入 {LAST_APPROVED_PATH}")
 
     report = {
         "mode": mode,
         "oracle_sha256": h_after,
         "oracle_sha256_before": h_before,
-        "oracle_sha256_last_run": prev,
+        "oracle_sha256_last_report": prev_report,
+        "last_approved_sha256": approved_sha,
+        "baseline_note": baseline_note,
         "ts_commit": ts_head,
         "seed": SEED,
         "samples": n,
