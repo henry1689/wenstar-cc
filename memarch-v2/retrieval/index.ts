@@ -65,8 +65,20 @@ export class Retriever {
     this.reranker = getSharedCrossEncoder();
   }
 
-  /** 涓诲叆鍙?*/
-  async retrieve(rawQuery: string, namespace: string): Promise<RetrieveResult> {
+  /**
+   * 主入口。
+   *
+   * 🔴 `opts.topK`：MMR 最终保留条数的**上限覆盖**。
+   *   此前该参数**只在旧链路（legacy）路径上被使用**，v2 路径完全忽略它 ——
+   *   调用方即使明确传 `topK: 8`，也仍然返回 `budget.mmr_top_k`（默认 20）。
+   *   实测 V14 每次「命中 20 条」顶格，直接把上下文撑到 22000+ tokens 超限。
+   */
+  async retrieve(
+    rawQuery: string,
+    namespace: string,
+    opts?: { topK?: number },
+  ): Promise<RetrieveResult> {
+    const finalTopK = Math.max(1, Math.min(opts?.topK ?? this.budget.mmr_top_k, 50));
     const metrics: RetrievalMetrics = {
       phase_ms: { query_understand: 0, embed: 0, recall_total: 0, rerank: 0 },
       recall_leg_ms: {},
@@ -161,7 +173,7 @@ export class Retriever {
     metrics.phase_ms.rerank = Date.now() - rt1;
 
     // 5. MMR 鍘婚噸
-    const final = mmrSelect(reranked, this.budget.mmr_top_k, 0.7);
+    const final = mmrSelect(reranked, finalTopK, 0.7);
     metrics.final_count = final.length;
 
     return { evidence: final, metrics };

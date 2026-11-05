@@ -82,7 +82,13 @@ export class OldRetrievalAdapter implements MemoryRetrievePort {
     // 🔴 2026-11-04 契约对齐：namespace 现在是 M4 的**显式参数**（第二参），
     //   不再是"假设 db 已按 ns 打开视图"。各 recall leg 的 SQL 已加
     //   `AND m.namespace = @ns`，隔离边界在查询里可读。
-    const result = await this.v2Retriever.retrieve(query, namespace);
+    // 🔴 ctx.topK 必须透传：此前只在 legacy 分支用了它，v2 分支直接忽略，
+    //   导致调用方传 topK: 8 也照样返回预算里的 20 条。
+    const result = await this.v2Retriever.retrieve(
+      query,
+      namespace,
+      ctx.topK != null ? { topK: ctx.topK } : undefined,
+    );
 
     // 字段映射以 M4 `Evidence` 的真实结构为准（memory_id/text/source_namespace/
     // strength/activation/timestamp/recall_sources）。M4 没有 summary / pathway /
