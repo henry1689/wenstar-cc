@@ -358,6 +358,29 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     // 🛡️ V5.2: 会晤信息隔离墙 — 阻断用户记忆，检索实体自有记忆
   if (_meetingEntityName) {
     try {
+      // ── V14: MemArch v2 主召回（会晤分支）──
+      //   🔴 为什么 V14 必须在这里也有一份：会晤分支在函数末尾之前（1051 行）就 return，
+      //      1323 行那份 V14 对 mode=meeting 永远不可达 —— 实测清空日志后跑真实会晤，
+      //      `[RETRIEVAL-STAGE-V13] ENTERED` 一次都没出现，就是这个原因。
+      //   旧逻辑不动，v2 结果只追加（40 字前缀去重）；这是过渡态，下一步再关停旧路径。
+      try {
+        const { memarchRetrieve, resolveNamespace } = await import('../memarch-runtime.js');
+        const _fgV14 = ctx.m4?.getFamilyGraph?.();
+        const _uuidV14 = _fgV14?.getUUIDByName?.(_meetingEntityName);
+        const _nsV14 = resolveNamespace(_uuidV14 ? [_uuidV14] : []);
+        const _ev14 = await memarchRetrieve(message, _nsV14, 8);
+        for (const _e of _ev14) {
+          const _t = String(_e.text || '').trim();
+          if (_t && !memoryFragments.some(f => f.includes(_t.substring(0, 40)))) {
+            memoryFragments.push(_t);
+          }
+        }
+        console.log(`[searchV14:meeting] ns=${_nsV14} 命中 ${_ev14.length} 条`);
+      } catch (_e14) {
+        // 降级必须可见 —— v2 失败不能影响会晤分支后续的旧链路检索
+        console.warn('[searchV14:meeting] v2 召回失败，继续旧链路:', (_e14 as Error)?.message);
+      }
+
       const _fg = ctx.m4?.getFamilyGraph?.();
       // 🔴 T013 Phase 2 批B（B2）: 检索主体 UUID **优先取自群聊状态**，而非靠实体名反查 FG。
       //   名字反查一旦失败/错配（FG 主名变更、别名、名字含特殊字），白名单就是错的或空的
