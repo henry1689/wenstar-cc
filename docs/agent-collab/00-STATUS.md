@@ -119,6 +119,15 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-05 **🔍 FG 体检 + A/C/B 三阶段治理全部完成（主任务PI）— `4b7c1c3` + `7802a7c` 已推送**：
+  - **体检**：结构层健康（幽灵/重复/无户籍全0），但四个真问题：13个垃圾active(占1/3)、candidate=1708且85%的边触及、_changeHistory占properties 92%、traits三槽漂移。
+  - **A 存量清理**（停服窗口，业主拍板雷灵叶保留）：void 13 + changeHistory截断24节点 + traits去重 → **properties 7.1MB→2.22MB(−69%)**，运行时名单13垃圾零泄漏。
+  - **C 自检补强** `4b7c1c3`：detectSlidingWindowJunk 新增通道B(前缀扩展/计数倒挂/单句低证)，hitChannel标注，通道A零改动只预警；测试8/8绿。
+  - **B 写入端根治** `7802a7c`：①_isPrefixSlice前缀切片计数冻结(获得档案自动解冻)②CHANGE_HISTORY_ENTRY_MAX_BYTES=2048+统一入口替换7处手写块③traitHints去重+setDossierField数组并集合并(幂等)。测试16/16绿、回归427/427绿、**全量差集验证stash修前修后失败集一致零归因**。
+  - **S6-B五项运行时验收全部实测**：对话200无幻觉/会晤ns隔离/FG快照零污染/标注率96.5%+99.0%/停服重启零丢失(-3归因锚点重建派生行3322→3319,非锚点14326→14326)。
+  - Harness：C `run_mw3bay98_9rrn` + B `run_mw3m3k3t_3zwl` 全10阶段；诊断底稿 `D:\work\FG体检与写入端诊断-20261105.md`，详见 `active/P147`。
+  - ⚠️ 遗留：DeepSeek 402余额不足(LLM提取间歇失败,需充值)；雷灵叶会每日出现在自检预警(已知保留)；交接备注"立即行动"节仍为10-23旧状态待刷新。
+
 - 2026-11-04 **✅ P137 归档收尾（主任务PI，口令「1号」续接）**：P137 实体早在 10-30 完成（`808effc` + STATUS 登记），但归档链未走完——文件仍留 `active/`、frontmatter 仍 `in_progress`、INDEX 未登记（`644f2c0` 只改了 STATUS 未移文件）。本次补齐：frontmatter→`done_waiting_review` + 移入 `09-archive/` + INDEX 登记 P137 + 进行中清零；复验 `privacy-guard-unblacklist.test.ts` 14/14 绿（knowledge 全套 89/89 绿）。进行中列表现为 0 项。
 
 - 2026-11-04 **✅ 工作区 67 项收口全部完成（Claude Code，67→0，15 提交已推送）**：
