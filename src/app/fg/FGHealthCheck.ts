@@ -211,16 +211,35 @@ export class FGHealthCheck {
    *
    * 判据（复用 NON_NAME_TAIL_CHARS 单一真源，不复制判据；只预警不自动 void，
    *   避免误杀真人 —— 是否清除由人工/离线终审定夺）：
+   *
+   *   ── 通道A（2026-10-23 原判据，零改动）──
    *   ① type='person' 且 status='active' 且 name != '我'
    *   ② 无 description 且无 relation_to_user（从未获得真实档案）
    *   ③ 名尾命中 NON_NAME_TAIL_CHARS（跨词边界滑窗片段的强特征）
    *   ④ evidence.contexts 显示源自单句（短窗口，非多轮真实交往）
-   * 四条全中 → 疑似滑窗垃圾，返回预警清单。
+   *   四条全中 → 疑似滑窗垃圾。
+   *
+   *   ── 通道B（2026-11-05 C 阶段补强，业主批准 A→C→B 顺序）──
+   *   背景：13 个已确认滑窗垃圾 active（阿珍一/毕竟所/相处/师大…）实测**全部漏过**
+   *   通道A —— 尾字集刻意保守（一/叫/所/处/大 不在集，防误伤真人）+ ④ contexts≤1
+   *   过严（后妈 ctx=3 漏）。漏检是系统性的，不是偶发。
+   *   ①② 之后命中以下任一即列入预警：
+   *   ⑤ 前缀扩展：存在另一 active/dormant 人名或别名 base，name 以 base 开头且多 1-2 字
+   *      （阿珍→阿珍一/阿珍叫/阿珍继 —— 滑窗切片最典型结构特征）
+   *   ⑥ 计数倒挂：mention_count≥8 且 evidence.count≥1 且 mention≥3×evidence.count
+   *      （子串误计数正反馈的指纹：「阿珍一个人」每次都被算作阿珍一被提及 176/11）
+   *   ⑦ 单句低证：evidence 字段存在且 count≤2 且 contexts≤2
+   *      🔴 evidence 必须存在才评估 —— 存量真人（陈锋华等 15/16 active）无 evidence
+   *      字段，若按 0 计会全体误报；「低证」语义本就要求有证可评。
+   *   命中结果以 hitChannel 标注（A / B5 / B6 / B7 可叠加）。
+   *
+   *   ⚠️ 已知预期命中：雷灵叶（业主 2026-11-05 拍板保留，单句引入+提及倒挂的数据
+   *   特征与切片垃圾不可区分）——会出现在预警清单属正常，人工复核时已知保留。
    *
    * @returns 疑似垃圾实体清单（空数组 = 健康）
    */
-  detectSlidingWindowJunk(): Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string }> {
-    const suspects: Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string }> = [];
+  detectSlidingWindowJunk(): Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string; hitChannel: string }> {
+    const suspects: Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string; hitChannel: string }> = [];
     let rows: any[] = [];
     try {
       rows = this.q("SELECT id, name, uuid, properties FROM nodes WHERE type='person' AND status='active' AND name != '我'");
@@ -228,25 +247,69 @@ export class FGHealthCheck {
       console.warn('[FG SelfCheck] 滑窗自检查询失败(非阻塞):', e?.message || e);
       return suspects;
     }
+    // 通道B⑤：active/dormant 人名+别名前缀集（单次构建；查询失败则该子通道降级关闭）
+    const prefixSet = this._buildActiveNamePrefixes();
     for (const row of rows) {
       const name = String(row.name || '');
       if (!name) continue;
       let props: any = {};
       try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-      // ② 无真实档案
+      // ①② 无真实档案（两通道共用前提）
       const hasProfile = !!(props.description || props.relation_to_user);
       if (hasProfile) continue;
-      // ③ 名尾命中非名尾字集（复用单一真源）
       const tail = name[name.length - 1];
-      if (!NON_NAME_TAIL_CHARS.has(tail)) continue;
-      // ④ 源自单句：contexts ≤1 或无 contexts（老垃圾无 evidence 字段）都算单句来源
-      const ev = props.evidence || {};
-      const ctxCount = Array.isArray(ev.contexts) ? ev.contexts.length : 0;
-      const mentions = typeof ev.count === 'number' ? ev.count : (props.mention_count ?? 0);
-      if (ctxCount <= 1) {
-        suspects.push({ name, id: row.id, uuid: row.uuid || null, mentions, tail });
+      const ev = props.evidence;
+      const evObj = ev && typeof ev === 'object' && !Array.isArray(ev);
+      const ec = evObj && typeof ev.count === 'number' ? ev.count : 0;
+      const ctxCount = evObj && Array.isArray(ev.contexts) ? ev.contexts.length : 0;
+      const mentions = evObj && typeof ev.count === 'number' ? ev.count : (props.mention_count ?? 0);
+      const mc = typeof props.mention_count === 'number' ? props.mention_count : 0;
+
+      const channels: string[] = [];
+      // ── 通道A：③尾字 + ④单句（原四条件语义零改动，含无 evidence 老垃圾 ctxCount=0≤1）──
+      if (NON_NAME_TAIL_CHARS.has(tail) && ctxCount <= 1) channels.push('A');
+      // ── 通道B⑤：前缀扩展 ──
+      if (prefixSet.size > 0) {
+        for (const b of prefixSet) {
+          if (name !== b && name.startsWith(b) && name.length - b.length >= 1 && name.length - b.length <= 2) {
+            channels.push('B5'); break;
+          }
+        }
+      }
+      // ── 通道B⑥：计数倒挂 ──
+      if (mc >= 8 && ec >= 1 && mc >= ec * 3) channels.push('B6');
+      // ── 通道B⑦：单句低证（evidence 必须存在，见方法头 🔴）──
+      if (evObj && ec <= 2 && ctxCount <= 2) channels.push('B7');
+
+      if (channels.length > 0) {
+        suspects.push({ name, id: row.id, uuid: row.uuid || null, mentions, tail, hitChannel: channels.join('+') });
       }
     }
     return suspects;
+  }
+
+  /**
+   * 通道B⑤ 辅助：构建 active/dormant 人名+别名前缀集。
+   * 单次查询 + 别名 JSON 解析；任何失败返回空集（子通道降级关闭，不影响通道A）。
+   */
+  private _buildActiveNamePrefixes(): Set<string> {
+    const set = new Set<string>();
+    try {
+      const rows = this.q("SELECT name, aliases FROM nodes WHERE type='person' AND status IN ('active','dormant')") as Array<{ name: string; aliases: string }>;
+      for (const r of rows) {
+        const n = String(r.name || '');
+        if (n.length >= 2) set.add(n);
+        try {
+          const arr = JSON.parse(r.aliases || '[]');
+          if (Array.isArray(arr)) {
+            for (const a of arr) if (typeof a === 'string' && a.length >= 2) set.add(a);
+          }
+        } catch { /* 单个节点别名损坏不阻断整体 */ }
+      }
+    } catch (e: any) {
+      console.warn('[FG SelfCheck] 前缀集构建失败(通道B⑤降级):', e?.message || e);
+      return new Set();
+    }
+    return set;
   }
 }
