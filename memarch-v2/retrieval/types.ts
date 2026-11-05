@@ -41,6 +41,17 @@ export interface QueryContext {
   raw_query: string;
   /** 40D 感知向量（设计文档 §1.3 perception_40d） */
   vec40: number[];
+  /**
+   * 🔴 语义查询向量（512 维，bge-small-zh-v1.5）。
+   *
+   * 为什么与 vec40 并列而不是复用：vec40 是**哈希投影**（token bigram → 10 维等），
+   * 与库里 memories.perception_40d 的真实感知向量**不在同一空间**，拿它做
+   * vec_mem_semantic 的 KNN 只会得到一个恒定的小距离。语义腿必须用真 embedding。
+   *
+   * 可选：embedding 冷启动要 ~2.6s，超出 query_understand 预算时该字段为
+   * undefined，语义腿据此降级到 FTS5 而不是用零向量去污染结果。
+   */
+  semantic_vec?: number[];
   /** 重要性概率 p_A ∈ [0,1]：高=语义/PPR 权重上调，低=BM25/档案上调 */
   p_A: number;
   /** 解析出的实体（已归一化为 uuid 或表面字符串） */
@@ -93,6 +104,12 @@ export interface RecallStrategy {
 export interface DegradeBudget {
   /** 查询理解阶段硬超时（ms） */
   query_understand_ms: number;
+  /**
+   * 查询向量化硬超时（ms）。
+   * 热态单条 ~30ms；冷启动要加载 ONNX session（~2.6s）—— 冷态必然超时，
+   * 此时 `semantic_vec` 留空、语义腿降级 FTS5，**绝不能让首查卡住整条检索**。
+   */
+  embed_ms: number;
   /** 多路召回并行硬超时（ms，Promise.all 之外的整体 race） */
   recall_ms: number;
   /** 重排阶段硬超时（ms） */
@@ -105,6 +122,7 @@ export interface DegradeBudget {
 
 export const DEFAULT_DEGRADE: DegradeBudget = {
   query_understand_ms: 50,
+  embed_ms: 120,
   recall_ms: 120,
   rerank_ms: 200,
   rerank_top_n: 50,
@@ -115,6 +133,8 @@ export const DEFAULT_DEGRADE: DegradeBudget = {
 export interface RetrievalMetrics {
   phase_ms: {
     query_understand: number;
+    /** 查询向量化耗时（含冷启动超时判定） */
+    embed: number;
     recall_total: number;
     rerank: number;
   };

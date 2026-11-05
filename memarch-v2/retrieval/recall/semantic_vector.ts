@@ -26,9 +26,16 @@ export class SemanticVectorRecall extends BaseRecallStrategy {
   }
 
   async recall(q: QueryContext): Promise<RawCandidate[]> {
-    if (!this.vec0Ready) {
+    // 🔴 两个前提缺一不可：① vec0 扩展在当前连接上可用；② 本次查询拿到了真实
+    //   embedding（`semantic_vec`）。旧的实现只判 ① 却拿 `q.vec40`（40D 哈希投影）
+    //   去 MATCH 512 维表，维度不匹配必然抛错 —— 即使建了表也永远走降级。
+    if (!this.vec0Ready || !q.semantic_vec || q.semantic_vec.length === 0) {
       if (!this.warned) {
-        console.warn('[memarch-recall] vec0 extension not loaded; falling back to FTS5 for semantic leg');
+        console.warn(
+          this.vec0Ready
+            ? '[memarch-recall] semantic_vec 缺失（embedding 未就绪或超时）；本腿降级 FTS5'
+            : '[memarch-recall] vec0 extension not loaded; falling back to FTS5 for semantic leg',
+        );
         this.warned = true;
       }
       // 闄嶇骇锛氬鐢?Bm25Recall 鐨勭粨鏋滐紙浣嗘墦涓嶅悓鐨?label锛?
@@ -38,8 +45,8 @@ export class SemanticVectorRecall extends BaseRecallStrategy {
     }
 
     try {
-      // 鎶?40D 鍚戦噺搴忓垪鎴?blob锛坰qlite-vec 鎺ュ彈 Float32 浜岃繘鍒讹級
-      const buf = Buffer.from(new Float32Array(q.vec40).buffer);
+      // 512 维真 embedding 序列化成 blob（sqlite-vec 接受 Float32 二进制）
+      const buf = Buffer.from(new Float32Array(q.semantic_vec).buffer);
       const sql = `
         SELECT s.trace_id AS id,
                s.distance AS distance,

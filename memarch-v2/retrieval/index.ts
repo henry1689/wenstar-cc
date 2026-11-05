@@ -19,6 +19,7 @@ import type {
 } from './types';
 import { DEFAULT_DEGRADE } from './types';
 import { understandQuery } from './query_understanding';
+import { getEmbeddingProvider } from './embedding/EmbeddingProvider';
 import { weightedRRF, LegName } from './fusion/weighted_rrf';
 import { CrossEncoderReranker } from './rerank/cross_encoder';
 import { mmrSelect } from './postprocess/mmr';
@@ -63,7 +64,7 @@ export class Retriever {
   /** 涓诲叆鍙?*/
   async retrieve(rawQuery: string, namespace: string): Promise<RetrieveResult> {
     const metrics: RetrievalMetrics = {
-      phase_ms: { query_understand: 0, recall_total: 0, rerank: 0 },
+      phase_ms: { query_understand: 0, embed: 0, recall_total: 0, rerank: 0 },
       recall_leg_ms: {},
       degraded_legs: [],
       rerank_skipped: false,
@@ -78,8 +79,31 @@ export class Retriever {
       understandQuery(rawQuery, namespace, Date.now()) // fallback 鐢ㄥ悓姝ュ厹搴?
     );
     const q: QueryContext = qWrap.value;
-    metrics.phase_ms.query_understand = Date.now() - qt0;
     if (qWrap.timedOut) metrics.degraded_legs.push('query_understand');
+
+    // 1b. 语义查询向量（真 embedding）。冷启动 ~2.6s 必然超出 embed_ms →
+    //     此时 semantic_vec 留空，语义腿据此降级 FTS5，而不是拿 40D 哈希投影
+    //     去 MATCH 512 维表（旧实现的必然失败路径）。
+    const et0 = Date.now();
+    const eWrap = await withTimeout(
+      (async () => {
+        try {
+          const v = await getEmbeddingProvider().embed(rawQuery);
+          return Array.from(v);
+        } catch {
+          return null;
+        }
+      })(),
+      this.budget.embed_ms,
+      null
+    );
+    if (eWrap.value && eWrap.value.length > 0) {
+      q.semantic_vec = eWrap.value;
+    } else {
+      metrics.degraded_legs.push('semantic_embed');
+    }
+    metrics.phase_ms.query_understand = Date.now() - qt0;
+    metrics.phase_ms.embed = Date.now() - et0;
 
     // 2. 鍏矾鍙洖骞惰锛堟瘡璺嫭绔嬭秴鏃?+ 鏁翠綋 120ms 纭笂闄愶級
     const rt0 = Date.now();

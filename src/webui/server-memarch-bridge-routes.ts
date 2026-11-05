@@ -21,6 +21,12 @@
  *   v2Db 只能指向 data/memarch-v2.db，**禁止**指向 sql.js 正在使用的主库
  *   （sql.js 的 flushNow 整库覆盖磁盘，与 better-sqlite3 并存会整库丢失）。
  *
+ * 🔴 allowExtension 是 vec0 的前置条件：
+ *   `createBridge` 内部会调 `ensureVectorIndex` 加载 sqlite-vec 扩展，而
+ *   better-sqlite3 只有在连接以 `{ allowExtension: true }` 打开时才允许
+ *   `loadExtension`。少了这个选项，语义/情感两条召回腿永远降级 FTS5 ——
+ *   这正是此前「向量检索从未真正上线」的直接原因。
+ *
  * 🔴 为什么这里手写 bridge 契约，而不用 `typeof import(...)`：
  *   主 tsconfig 的 `rootDir` 限定在 `src/`，而 bridge 子工程在 `src/` 之外。
  *   **类型位置**的 `typeof import('../../memarch-bridge/...')` 同样会把整个子工程
@@ -30,7 +36,7 @@
  *   同理，运行时 import 用变量说明符，让 TS 不做静态解析。
  *
  * 端点：
- *   GET  /api/memarch-bridge/health     健康与端口就绪快照
+ *   GET  /api/memarch-bridge/health     健康与端口就绪快照（含向量索引状态）
  *   GET  /api/memarch-bridge/namespaces 命名空间注册表
  *   POST /api/memarch-bridge/ratio      调某 namespace 的新链路比例
  *   POST /api/memarch-bridge/promote    某 namespace 全量走新
@@ -45,6 +51,11 @@ import { join } from 'node:path';
 
 /** 物理隔离的关键参数。运行时是 string，类型上是 branded string，此处只做窄化。 */
 type RetrievalNamespace = string & { readonly __namespaceBrand?: never };
+
+/** better-sqlite3 连接的极窄视图 —— 只用于读计数，不暴露给任何业务代码 */
+interface SqliteHandle {
+  prepare(sql: string): { get(): unknown };
+}
 
 /** bridge 检索端口（对应 MemoryPort.MemoryRetrievePort，只取本文件用到的形态） */
 interface BridgeRetrievePort {
@@ -87,6 +98,8 @@ interface BridgeModule {
 /** undefined = 尚未尝试；null = 尝试过且失败（避免每次请求都重试并刷日志） */
 let _bridgeMod: BridgeModule | null | undefined;
 let _initError: string | null = null;
+/** v2 库句柄，仅供 /health 读向量表计数 */
+let _v2Db: SqliteHandle | null = null;
 
 export type MemarchBridgeRouteDeps = {
   req: http.IncomingMessage;
@@ -107,6 +120,28 @@ function json(res: http.ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** 表名是代码内常量，不存在注入面 */
+function countRows(db: SqliteHandle | null, table: string): number | null {
+  if (!db) return null;
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c?: unknown } | undefined;
+    return typeof row?.c === 'number' ? row.c : null;
+  } catch {
+    return null;
+  }
+}
+
+/** vec0 扩展是否在当前连接上可用（真探测：vec_version() 只在扩展加载后存在） */
+function probeVec0(db: SqliteHandle | null): boolean {
+  if (!db) return false;
+  try {
+    const row = db.prepare('SELECT vec_version() AS v').get() as { v?: unknown } | undefined;
+    return typeof row?.v === 'string' && row.v.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 懒初始化 bridge。任何异常都收敛成 null + 记录原因，**绝不抛给请求方**。
  */
@@ -123,7 +158,9 @@ async function ensureBridge(dataDir: string): Promise<BridgeModule | null> {
     }
 
     const BetterSqlite = (await import('better-sqlite3')).default;
-    const v2Db = new BetterSqlite(v2DbPath);
+    // 🔴 allowExtension 是 vec0 扩展加载的前置条件，缺了它向量检索永远降级
+    const v2Db = new BetterSqlite(v2DbPath, { allowExtension: true });
+    _v2Db = v2Db as unknown as SqliteHandle;
 
     // LegacyConfig 适配：读 MEMORY_CONFIG；写只进内存覆盖，**不改原常量**
     const { MEMORY_CONFIG } = await import('../config/MemoryConfig.js');
@@ -181,6 +218,13 @@ export async function handleMemarchBridgeRoutes(deps: MemarchBridgeRouteDeps): P
         write: typeof bridge?.write?.write === 'function',
         retrieve: typeof bridge?.retrieve?.retrieve === 'function',
         present: typeof bridge?.present?.present === 'function',
+      },
+      // 向量能力是否真的上线 —— 运维判断「语义/情感腿有没有在降级」的唯一入口
+      vector: {
+        vec0: probeVec0(_v2Db),
+        vec_mem_semantic: countRows(_v2Db, 'vec_mem_semantic'),
+        vec_ep_semantic: countRows(_v2Db, 'vec_ep_semantic'),
+        vec_mem_perception: countRows(_v2Db, 'vec_mem_perception'),
       },
     });
     return true;

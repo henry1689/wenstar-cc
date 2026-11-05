@@ -51,10 +51,20 @@ export abstract class BaseRecallStrategy implements RecallStrategy {
 }
 
 /** 宸ュ叿锛氭鏌?vec0 鎵╁睍鏄惁鍙敤 */
+/**
+ * 探测 vec0 扩展是否在**当前连接**上可用。
+ *
+ * 🔴 旧实现是假探测：它只查 `sqlite_master` 里有没有 `vec_mem_perception` 这张表。
+ *    那个查询永远不抛异常（找不到就返回 undefined），所以**恒返回 true** ——
+ *    即使扩展没加载、表不存在，也报告"可用"。实测导致 semantic/emotion 两条腿
+ *    在 vec0 缺失时仍然走进 KNN 分支，靠外层 catch 才降级。
+ *
+ * 真探测必须调用扩展提供的函数：`vec_version()` 只在扩展加载后存在。
+ */
 export function isVec0Available(db: Database.Database): boolean {
   try {
-    db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vec_mem_perception'`).get();
-    return true;
+    const row = db.prepare('SELECT vec_version() AS v').get() as { v?: unknown } | undefined;
+    return typeof row?.v === 'string' && row.v.length > 0;
   } catch {
     return false;
   }

@@ -31,6 +31,7 @@ import { OldStorageAdapter } from '../adapters/OldStorageAdapter.js';
 import { OldGateAdapter } from '../adapters/OldGateAdapter.js';
 import { OldConfigAdapter, type LegacyConfig } from '../adapters/OldConfigAdapter.js';
 import { NamespaceManager } from '../namespace/NamespaceManager.js';
+import { ensureVectorIndex } from '../../../memarch-v2/storage/vector_index.js';
 
 export interface BridgeDeps {
   /** 新 MemArch v2 的 SQLite db 句柄（已跑过 M1 DDL） */
@@ -49,6 +50,17 @@ export interface BridgeDeps {
 
 export function createBridge(deps: BridgeDeps): MemArchBridge {
   const flag = deps.flag ?? globalFeatureFlag;
+
+  // 🔴 vec0 扩展 + 向量表建置。失败只记录、不阻塞：语义/情感两条腿各自有
+  //   FTS5 降级路径，把 bridge 初始化拖挂才是更坏的结果。
+  //   注意 db 连接必须由调用方以 `{ allowExtension: true }` 打开。
+  const vec = ensureVectorIndex(deps.v2Db);
+  if (vec.ok) {
+    console.log(`[bridge] vec0 ${vec.version} 已加载，向量表就绪`);
+  } else {
+    console.warn('[bridge] vec0 不可用，语义/情感腿将降级 FTS5:', vec.error);
+  }
+
   const nsManager = new NamespaceManager(deps.v2Db);
 
   const write = new OldWriteAdapter(deps.v2Db, flag, deps.legacyWriteGateway);
