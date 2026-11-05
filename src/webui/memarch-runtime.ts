@@ -80,6 +80,8 @@ let _db: SqliteLike | null = null;
 let _nsByUuid: Map<string, string> | null = null;
 let _initPromise: Promise<boolean> | null = null;
 let _initError: string | null = null;
+/** 上一次已经打过日志的错误内容 —— 允许重试后用它避免重复刷屏 */
+let lastLoggedError: string | null = null;
 
 export function isMemarchReady(): boolean {
   return _bridge !== null;
@@ -94,15 +96,21 @@ export function memarchInitError(): string | null {
  */
 export async function initMemarchRuntime(dataDir: string): Promise<boolean> {
   if (_bridge) return true;
-  if (_initError) return false;
   if (_initPromise) return _initPromise;
+  // 🔴 失败后**允许重试**（不在此 early-return）。
+  //   旧逻辑「失败过就永久返回 false」会毒化整个单例：只要有一个调用方传错了
+  //   dataDir，后续所有调用方（包括调用方走对路径的 V14）都会拿到同一个失败状态。
+  //   重试的代价有限：失败分支只在错误**内容变化**时才打日志，避免刷屏。
 
   _initPromise = (async () => {
     try {
       const v2DbPath = join(dataDir, 'memarch-v2.db');
       if (!existsSync(v2DbPath)) {
         _initError = `v2 db not found: ${v2DbPath}`;
-        console.warn('[MemArchRuntime] 初始化跳过:', _initError);
+        if (_initError !== lastLoggedError) console.warn('[MemArchRuntime] 初始化跳过:', _initError);
+        lastLoggedError = _initError;
+        // 与 catch 分支同理：失败必须清 promise，否则「一次传错 dataDir 永久失败」
+        _initPromise = null;
         return false;
       }
 
@@ -141,8 +149,14 @@ export async function initMemarchRuntime(dataDir: string): Promise<boolean> {
       console.log(`[MemArchRuntime] 已初始化（registry ${_nsByUuid.size} 个角色映射）`);
       return true;
     } catch (e) {
-      _initError = (e as Error)?.message || String(e);
-      console.warn('[MemArchRuntime] 初始化失败（主流程将回退旧链路）:', _initError);
+      const msg = (e as Error)?.message || String(e);
+      // 错误内容没变就不重复刷日志（重试路径下每次调用都会走到这里）
+      if (msg !== lastLoggedError) console.warn('[MemArchRuntime] 初始化失败（主流程将回退旧链路）:', msg);
+      lastLoggedError = msg;
+      _initError = msg;
+      // 🔴 失败后清空 promise —— 否则下次调用拿到的还是这个已 resolve=false 的
+      //   旧 promise，等于「失败一次永久失败」，与下面的重试意图自相矛盾。
+      _initPromise = null;
       return false;
     }
   })();

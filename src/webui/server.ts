@@ -552,8 +552,11 @@ async function initPipeline(): Promise<void> {
   //   超时就放弃并回落到懒加载，由后续请求自行重试。
   try {
     const { initMemarchRuntime } = await import('./memarch-runtime.js');
+    // 🔴 不能传 DATA_DIR（= data/webui，主系统库目录）—— memarch-v2.db 在 data/ 根下。
+    //   传错时返回 false 而不是抛错，日志只显示「预热超时/失败」，极难定位
+    //   （实测就是它导致预热形同虚设，V14 却因为走的另一条路径而正常）。
     const _v2Warmed = await Promise.race([
-      initMemarchRuntime(DATA_DIR),
+      initMemarchRuntime(path.join(PROJECT_ROOT, 'data')),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 15000)),
     ]);
     if (_v2Warmed) {
