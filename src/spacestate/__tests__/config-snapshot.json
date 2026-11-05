@@ -1,0 +1,23 @@
+{
+  "dimsByLayer": {
+    "body": ["D01", "D02", "D03", "D04", "D05", "D06"],
+    "core": ["D07", "D08", "D09"],
+    "appraisal": ["D10", "D11", "D12", "D13", "D14", "D15", "D16"],
+    "motive": ["D17", "D18", "D19", "D20", "D21", "D22", "D23"],
+    "relation": ["D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31"],
+    "scene": ["D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"],
+    "dyad": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8"]
+  },
+  "layerParams": {
+    "body": { "lambda": 0.8, "tauMin": 60 },
+    "core": { "lambda": 0.15, "tauMin": 20 },
+    "appraisal": { "lambda": 0.4, "tauMin": 10 },
+    "motive": { "lambda": 0.4, "tauMin": 30 },
+    "relation": { "lambda": 0.15, "tauMin": 120 },
+    "scene": { "lambda": 1.0, "tauMin": null },
+    "dyad": { "lambda": 0.15, "tauMin": 120 }
+  },
+  "noKalman": ["D27", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"],
+  "observeOnly": ["D29", "D30"],
+  "privateOnly": ["D20"]
+}

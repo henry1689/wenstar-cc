@@ -8,9 +8,10 @@
  *     → 覆盖率 + 掩码 + 阈值三条件准入（S-018）
  *     → Σ m_L·E_L 得总证据 E（S-016 层间）
  *
- * 🔴 **层→维度映射不在此文件**：`LAYER_DIMS` / `LAYER_ADMISSION_DIMS` 在
- * `layout.ts` 由 LAYOUT 推导，本文件的三个函数一律**把层分组作为参数接收**，
- * 不硬编码——映射调整只需改 config/layout，聚合逻辑零改动。
+ * 🔴 **层→维度映射不在此文件**：下标只能经 `layout.ts` 的
+ * `layerIndices(layer, purpose)` 取（`'sum'` 求和 / `'admission'` 覆盖率），
+ * 本文件的三个函数一律**把层分组作为参数接收**，不硬编码——
+ * 映射调整只需改 config/layout，聚合逻辑零改动。
  */
 
 import {
@@ -20,6 +21,7 @@ import {
   ICC_B_SPAN,
   OBSERVE_ONLY_DIMS,
   TAU_MIN,
+  resonanceMask,
 } from './config.js';
 import { posteriorVariance } from './evidence.js';
 import type { DimId } from './layout.js';
@@ -44,7 +46,7 @@ export function iccCoefficient(icc: number, grade: IccGrade): number {
 }
 
 /**
- * S-017 维度权重 w_i = base_i × r_ICC × (1 + δ_i)
+ * S-017 维度权重（**未导出**）：w_i = base_i × r_ICC × (1 + δ_i)
  *
  * - `baseI` 基础权重由调用方从配置读入，core 不硬编码
  * - `delta` 本切片固定 0（动态调整留后续），但仍强制 |δ| ≤ 0.3
@@ -52,14 +54,12 @@ export function iccCoefficient(icc: number, grade: IccGrade): number {
  * 🔴 **E-14 现行口径（细化，非推翻）**：
  * - **D29 / D30 恒 0**（只观测）：依赖指标不得作为任何优化目标
  *   （S-067 消融不变性），否则系统会主动放大依赖
- * - **D20 由私密模式开关控制是否参与**：不再被本函数锁死为 0，
- *   由调用方乘 `resonanceMask(dim, privateMode)` 决定（待登记勘误 E-29）
- * - 三者均**不得作为任何优化目标**
+ * - **D20 由私密模式开关控制是否参与**，默认关（待登记 E-29）；
+ *   三者均**不得作为任何优化目标**
  *
- * 为什么把私密开关留在调用方而不是加进本函数：`privateMode` 是**上下文**
- * 而非维度属性，塞进来会让 core 的纯函数带上会话状态，也破坏本函数的签名稳定。
+ * ⚠️ 本函数**不处理私密模式**，故不导出——见下方 `effectiveWeight`。
  */
-export function dimWeight(
+function rawDimWeight(
   dim: DimId,
   baseI: number,
   icc: number,
@@ -72,6 +72,40 @@ export function dimWeight(
   // S-017：|δ| ≤ 0.3，越界钳回
   const d = Math.min(Math.max(delta, -DELTA_MAX), DELTA_MAX);
   return baseI * iccCoefficient(icc, grade) * (1 + d);
+}
+
+/** 打分所需的上下文（`privateMode` 是会话状态，不是维度属性） */
+export interface WeightContext {
+  readonly privateMode: boolean;
+}
+
+/**
+ * 🔴 **维度权重的唯一打分入口**（补包 B 第 1 项）。
+ *
+ * `rawDimWeight` 只算 base × r_ICC × (1+δ)，**不处理私密模式**；
+ * D20 是否参与必须在这里乘上 `resonanceMask`。之所以不把开关拆给调用方：
+ * 漏乘即 D20 静默进打分，而这是**放行方向**的风险——拦截会报 0 看得见，
+ * 放行看不出任何异常。唯一入口让漏乘在类型层就不可能发生。
+ *
+ * 🔴 **D20 保守规则**：`ctx.privateMode` 为 `true` 之外的任何值（含
+ * `undefined`、`null`、字符串）一律视为**关**。故意写 `=== true` 而非真值判断，
+ * 是为了让「传了但传错」和「没传」同样落到安全侧。
+ *
+ * 📌 **进度表标注**：`privateMode = true` 分支**无生产触发路径**——
+ * 私密模式的判定来源白皮书未定义（未决项），当前只能传 `false`，
+ * 故 D20 恒 0，行为与旧版一致。**契约已就位，功能未启用。**
+ *
+ * 🔴 E-29：D20 共鸣权重默认关，非私密模式启用属 L3，不得作为优化目标。
+ */
+export function effectiveWeight(
+  dim: DimId,
+  baseI: number,
+  icc: number,
+  grade: IccGrade,
+  ctx: Readonly<WeightContext>,
+  delta = 0,
+): number {
+  return rawDimWeight(dim, baseI, icc, grade, delta) * resonanceMask(dim, ctx.privateMode === true);
 }
 
 // ============ S-016 · 层内聚合 ============
@@ -96,8 +130,8 @@ export interface WeightedTerm {
  * 排序再累加——调用方传入顺序无关紧要，结果恒定。
  * 校验：打乱输入顺序后结果差 ≤ 1e-12（属性测试）。
  *
- * 传入的下标集合由调用方选择：求和用 `LAYER_DIMS`（w=0 的项本不贡献），
- * 覆盖率/准入用 `LAYER_ADMISSION_DIMS`（剔除 D27）。
+ * 传入的下标集合由调用方选择：求和用 `layerIndices(layer, 'sum')`（w=0 的项本不贡献），
+ * 覆盖率/准入用 `layerIndices(layer, 'admission')`（剔除 D27）。
  */
 export function layerEvidence(items: readonly WeightedTerm[]): number {
   const ordered = [...items].sort((a, b) => a.index - b.index);
@@ -124,7 +158,7 @@ export function coverage(piX: number, tau: number): number {
  *
  * 空层返回 0——没有维度就没有覆盖，不能默认为满覆盖。
  *
- * 调用方应传入 `LAYER_ADMISSION_DIMS` 对应的 π 数组（剔除 D27），
+ * 调用方应传入 `layerIndices(layer, 'admission')` 对应的 π 数组（剔除 D27），
  * 否则两项恒 0 覆盖率会把关系层上限压到 0.875。
  */
 export function layerCoverage(piXs: readonly number[], tau: number): number {

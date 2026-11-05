@@ -115,7 +115,11 @@ describe('约束 4 · 参数集中配置源', () => {
       // 故不参与冻结断言（Object.freeze 对函数只锁属性、锁不住行为，断言无意义）
       if (typeof value === 'function') continue;
       // 切片#3 起 config 含数组/对象/Set 常量（掩码表、层名、层归属、维度开关）：
-      // 必须 frozen，否则仍是可被就地改写的可变状态
+      // 必须 frozen，否则仍是可被就地改写的可变状态。
+      // 🔴 冻结断言前先证明入参是对象：Object.isFrozen(undefined) === true，
+      // 对可能为 undefined 的值做冻结断言是永真且零验证的（补包 B 第 6 项）
+      expect(typeof value, `${key} 应为对象`).toBe('object');
+      expect(value, `${key} 不应为 null`).not.toBeNull();
       expect(Object.isFrozen(value), `${key} 应被 Object.freeze`).toBe(true);
       // Set 的 .add/.delete 不受 Object.freeze 影响，冻结只是必要非充分条件，
       // 这里额外保证开关集合非空——空集会让 OBSERVE_ONLY 之类的约束静默失效
@@ -126,24 +130,65 @@ describe('约束 4 · 参数集中配置源', () => {
   });
 
   it('config 中的数组常量内层也已冻结', async () => {
+    // 直接用模块的真实导出类型，**不再用 `as { X?: ... }` 可选断言**——
+    // 可选属性断言会把「已删除的属性」变成 undefined 而不报编译错，
+    // 正是永真断言的成因（补包 B 第 6 项）
     const config = await import('../core/config.js');
-    const masks = (config as { DEFAULT_MASKS?: Record<string, readonly number[]> }).DEFAULT_MASKS;
-    expect(masks).toBeDefined();
-    for (const [name, arr] of Object.entries(masks!)) {
-      expect(Object.isFrozen(arr), `DEFAULT_MASKS.${name} 内层应冻结`).toBe(true);
+
+    /** 冻结断言前先证明入参是对象：Object.isFrozen(undefined) === true，恒真零验证 */
+    const assertFrozenObject = (value: unknown, label: string): void => {
+      expect(typeof value, `${label} 应为对象`).toBe('object');
+      expect(value, `${label} 不应为 null`).not.toBeNull();
+      expect(Object.isFrozen(value), `${label} 应被 Object.freeze`).toBe(true);
+    };
+
+    const masks = config.DEFAULT_MASKS;
+    assertFrozenObject(masks, 'DEFAULT_MASKS');
+    for (const [name, arr] of Object.entries(masks)) {
+      assertFrozenObject(arr, `DEFAULT_MASKS.${name}`);
     }
-    const locked = (config as { LOCKED_WEIGHT_DIMS?: readonly string[] }).LOCKED_WEIGHT_DIMS;
-    expect(Object.isFrozen(locked)).toBe(true);
-    expect(Object.isFrozen(config.LAYER_NAMES)).toBe(true);
+
+    // 🔴 已删除常量的**正向**断言。旧写法是
+    //   Object.isFrozen(config.LOCKED_WEIGHT_DIMS) === true
+    // 属性删除后取到 undefined，而 Object.isFrozen(undefined) 恒为 true ——
+    // 断言永远通过、却什么都不验证。改为断言「该属性确实不存在」。
+    expect('LOCKED_WEIGHT_DIMS' in config).toBe(false);
+
+    assertFrozenObject(config.LAYER_NAMES, 'LAYER_NAMES');
 
     // 层归属表是全局唯一的维度语义映射：被就地改写会让全部层的证据悄悄错配，
     // 且不会抛任何错——故外层与每个层的数组都必须冻结。
-    const dimsByLayer = (config as { DIMS_BY_LAYER?: Record<string, readonly string[]> })
-      .DIMS_BY_LAYER;
-    expect(dimsByLayer).toBeDefined();
-    expect(Object.isFrozen(dimsByLayer)).toBe(true);
-    for (const [layer, list] of Object.entries(dimsByLayer!)) {
-      expect(Object.isFrozen(list), `DIMS_BY_LAYER.${layer} 内层应冻结`).toBe(true);
+    const dimsByLayer = config.DIMS_BY_LAYER;
+    assertFrozenObject(dimsByLayer, 'DIMS_BY_LAYER');
+    for (const [layer, list] of Object.entries(dimsByLayer)) {
+      assertFrozenObject(list, `DIMS_BY_LAYER.${layer}`);
     }
+
+    // 层参数与三个维度级开关（补包 B 第 4 项同源：这些常量必须有消费者断言）
+    assertFrozenObject(config.LAYER_PARAMS, 'LAYER_PARAMS');
+    for (const [layer, param] of Object.entries(config.LAYER_PARAMS)) {
+      assertFrozenObject(param, `LAYER_PARAMS.${layer}`);
+    }
+    assertFrozenObject(config.NO_KALMAN_DIMS, 'NO_KALMAN_DIMS');
+    assertFrozenObject(config.OBSERVE_ONLY_DIMS, 'OBSERVE_ONLY_DIMS');
+    assertFrozenObject(config.PRIVATE_ONLY_DIMS, 'PRIVATE_ONLY_DIMS');
+  });
+
+  it('本文件无残留的可选属性类型断言（会掩盖已删除属性）', async () => {
+    // 本用例是「排查规则」的落点：新增断言时若再引入可选属性断言，
+    // 下面的源码扫描会报红，逼迫改用真实导出类型 + 正向存在性断言。
+    // 扫描前先剥注释与字符串，避免说明文字里的示例被误判为代码。
+    const raw = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), 'purity-guard.test.ts'),
+      'utf8',
+    );
+    const code = raw
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/[^\n]*/g, ' ')
+      .replace(/'(?:[^'\\]|\\.)*'/g, ' ')
+      .replace(/"(?:[^"\\]|\\.)*"/g, ' ')
+      .replace(/`(?:[^`\\]|\\.)*`/g, ' ');
+    const offenders = code.match(/as\s*\{\s*\w+\s*\??:/g) ?? [];
+    expect(offenders).toEqual([]);
   });
 });

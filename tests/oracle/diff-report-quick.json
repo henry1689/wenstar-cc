@@ -1,0 +1,52 @@
+{
+  "mode": "quick",
+  "oracle_sha256": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
+  "oracle_sha256_before": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
+  "oracle_sha256_last_run": null,
+  "ts_commit": "912a98e8944670dcb2e408f768e9c38f4811a1b5",
+  "seed": 20261104,
+  "samples": 10000,
+  "checked": 117900,
+  "max_abs_diff": 2.842170943040401e-14,
+  "mismatches": 0,
+  "mismatch_samples": [],
+  "branch_stats": {
+    "total": 10000,
+    "values_sampled": 47900,
+    "wild_values": 14389,
+    "wild_ratio": 0.3004,
+    "flags": {
+      "nan": 378,
+      "pos_inf": 401,
+      "negative": 1497,
+      "bad_value": 1294,
+      "range_clamped": 2539,
+      "none": 3891
+    },
+    "branches": {
+      "dim_evidence.piQ_le_0": 3841,
+      "dim_evidence.sigmaQ2_ge_tau2": 785,
+      "dim_evidence.piX_le_0": 2126,
+      "dim_evidence.clip_hit": 1909,
+      "dim_evidence.finite_ok": 1339,
+      "phase.non_finite": 817,
+      "phase.normal": 9183,
+      "sanitize.clamped": 2539,
+      "encode.pi_zero": 3394
+    }
+  },
+  "unhit_branches": [],
+  "tolerance": {
+    "abs": 1e-09,
+    "rel": 1e-09,
+    "floor": 1e-06,
+    "rule": "E-27 混合容差（待裁决）"
+  },
+  "coverage_scope": "差分只覆盖 ℓ、量化、编码、清洗、相位、精度戳记；不覆盖层参数、Kalman、聚合",
+  "self_check_offset": "0",
+  "verdict": "PASS",
+  "elapsed_s": {
+    "generate": 0.16,
+    "ts": 0.46
+  }
+}

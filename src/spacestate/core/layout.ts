@@ -171,7 +171,7 @@ export function isBipolar(dim: DimId): boolean {
  * `D27_STORAGE_INDICES` 从该层的 piXs 中剔除，否则两项恒定 0 覆盖率会把
  * 关系层覆盖率整体压低。
  */
-function layerIndices(layer: LayerName): readonly number[] {
+function deriveLayerIndices(layer: LayerName): readonly number[] {
   return Object.freeze(
     LAYOUT.reduce<number[]>(
       (acc, entry, index) =>
@@ -181,15 +181,24 @@ function layerIndices(layer: LayerName): readonly number[] {
   );
 }
 
+/**
+ * 取层下标时的用途（S-001 / E-10）。
+ *
+ * - `sum`：层内求和 `E_L` 用。`w=0` 的项本就不贡献，D27 剔不剔除结果相同
+ * - `admission`：覆盖率 / 层准入用。**必须**剔除 D27（主体块 π 恒 0），
+ *   否则关系层覆盖率上限被压到 14/16 = 0.875，极易跌破 `COVERAGE_MIN`
+ */
+export type IndexPurpose = 'sum' | 'admission';
+
 /** 层名 → 该层在 79 维中的下标集合（键序与 LAYER_NAMES 一致） */
-export const LAYER_DIMS: Readonly<Record<LayerName, readonly number[]>> = Object.freeze({
-  body: layerIndices('body'),
-  core: layerIndices('core'),
-  appraisal: layerIndices('appraisal'),
-  motive: layerIndices('motive'),
-  relation: layerIndices('relation'),
-  scene: layerIndices('scene'),
-  dyad: layerIndices('dyad'),
+const LAYER_DIMS: Readonly<Record<LayerName, readonly number[]>> = Object.freeze({
+  body: deriveLayerIndices('body'),
+  core: deriveLayerIndices('core'),
+  appraisal: deriveLayerIndices('appraisal'),
+  motive: deriveLayerIndices('motive'),
+  relation: deriveLayerIndices('relation'),
+  scene: deriveLayerIndices('scene'),
+  dyad: deriveLayerIndices('dyad'),
 });
 
 // E-05 加载断言：七层必须恰好铺满 79 维且互不重叠。
@@ -253,7 +262,7 @@ function admissionIndices(layer: LayerName): readonly number[] {
 }
 
 /** 层名 → 层准入/覆盖率用的下标集合（键序与 LAYER_NAMES 一致） */
-export const LAYER_ADMISSION_DIMS: Readonly<Record<LayerName, readonly number[]>> =
+const LAYER_ADMISSION_DIMS: Readonly<Record<LayerName, readonly number[]>> =
   Object.freeze({
     body: admissionIndices('body'),
     core: admissionIndices('core'),
@@ -277,19 +286,42 @@ export const LAYER_ADMISSION_DIMS: Readonly<Record<LayerName, readonly number[]>
         `LAYER_ADMISSION_DIMS.${layer} 长度 ${LAYER_ADMISSION_DIMS[layer].length} !== 期望 ${expected}`,
       );
     }
-    if (layer !== 'relation') {
-      const same = LAYER_DIMS[layer].every(
-        (index, i) => LAYER_ADMISSION_DIMS[layer][i] === index,
-      );
-      if (!same) {
-        throw new Error(`LAYER_ADMISSION_DIMS.${layer} 应与 LAYER_DIMS 逐项相等（无 D27）`);
-      }
-    }
+    // 逐项相等 / relation 必须不同，由下方「sum vs admission」专用断言统一校验
   }
   const admitted = LAYER_NAMES.flatMap((layer) => LAYER_ADMISSION_DIMS[layer]);
   if (new Set(admitted).size !== admitted.length) {
     throw new Error('LAYER_ADMISSION_DIMS 存在跨层重复下标（E-05）');
   }
+
+  // 两套下标**只有 relation 层不同**：其余六层若也不同，说明 D27 被误剔到了别的层
+  for (const layer of LAYER_NAMES) {
+    const same =
+      LAYER_DIMS[layer].length === LAYER_ADMISSION_DIMS[layer].length &&
+      LAYER_DIMS[layer].every((index, i) => LAYER_ADMISSION_DIMS[layer][i] === index);
+    if (layer === 'relation') {
+      if (same) {
+        throw new Error('relation 层的 sum 与 admission 下标应不同（D27 未被剔除）');
+      }
+    } else if (!same) {
+      throw new Error(`LAYER_ADMISSION_DIMS.${layer} 应与 LAYER_DIMS 完全一致（无 D27）`);
+    }
+  }
+}
+
+/**
+ * 取层下标的**唯一入口**（第 2 项）。
+ *
+ * 🔴 `LAYER_DIMS` / `LAYER_ADMISSION_DIMS` 已改为模块私有：两套集合的差别只有
+ * D27 剔除与否，直接暴露常量会让调用方「顺手」拿错一套——拿 `sum` 算覆盖率会让
+ * 关系层永难准入，拿 `admission` 求和则丢掉 D27 的证据归属。
+ * 统一从这里按 `purpose` 取，错用会在类型与运行期双重暴露。
+ *
+ * @throws 非法 `purpose` 直接抛错，不静默回落到默认集合
+ */
+export function layerIndices(layer: LayerName, purpose: IndexPurpose): readonly number[] {
+  if (purpose === 'sum') return LAYER_DIMS[layer];
+  if (purpose === 'admission') return LAYER_ADMISSION_DIMS[layer];
+  throw new Error(`layerIndices: 非法 purpose ${String(purpose)}`);
 }
 
 /**

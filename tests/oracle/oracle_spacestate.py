@@ -220,3 +220,48 @@ def test_relation_tau():
     assert layer_of("D24") == "relation"
     assert layer_lambda("D24") == 0.15
     assert layer_of("Y8") == "dyad" and layer_lambda("Y8") == 0.15
+
+def test_ts_layer_constants_crosscheck():
+    """补包 B 第 5 项：TS 侧常量 vs oracle 常量逐项对拍。
+
+    10⁵ 差分跑不到层参数（它只覆盖 ℓ / 量化 / 编码），
+    常量的唯一交叉验证就是这份对拍。
+    产出文件由 TS 侧 exportLayerConstants() 生成，随代码入库。
+    """
+    import json, os
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "layer-constants-ts.json")
+    with open(path, encoding="utf-8") as f:
+        ts = json.load(f)
+
+    assert ts["dimsByLayer"] == {k: list(v) for k, v in DIMS_BY_LAYER.items()}, \
+        "DIMS_BY_LAYER 与 TS 侧不一致"
+    assert ts["layerParams"] == {
+        k: {"lambda": v[0], "tauMin": v[1]} for k, v in LAYER_PARAMS.items()
+    }, "LAYER_PARAMS 与 TS 侧不一致"
+    assert ts["noKalman"] == sorted(NO_KALMAN), "NO_KALMAN 与 TS 侧不一致"
+    assert ts["observeOnly"] == sorted(OBSERVE_ONLY), "OBSERVE_ONLY 与 TS 侧不一致"
+    assert ts["privateOnly"] == sorted(PRIVATE_ONLY), "PRIVATE_ONLY 与 TS 侧不一致"
+
+# ---------- 依赖拓扑（补包 B 第二节；白皮书 §1.6） ----------
+#
+# 层 Kalman 与关系指数 Y* 的**五步顺序**，写在这里是为了让后续 kalman 模块
+# 的实现者不必再去翻白皮书：
+#
+#   ① core 层 Kalman（D07–D09）                      → 供 Y1 / Y2
+#   ② relation 层 Kalman（D24–D26, D28–D31；不含 D27） → 供 Y3 / Y4
+#   ③ 计算 Y1 / Y2 / Y3 / Y4 / Y7
+#   ④ Y1 → 回填 D27
+#   ⑤ Y5 / Y6 / Y8（LLM 估计）
+#
+# 四条约束（实现时不得违背）：
+# 1. D27 在 relation Kalman 中被排除的原因是「由步骤④回填」，**不是「缺观测」**
+# 2. relation 层 Kalman **不得等 Y1**——Y1 只依赖 core 层（步骤①）
+# 3. D27 回填时间点白皮书未说明：先按「**片段封口时回填**」，作为**未决项记入 E-28**
+# 4. Y7 的输入（话题发起、提问比例）**不在 Kalman 里**，可**并行**计算，
+#    注释不得让人误以为要等 relation 层
+#
+# 依据（§1.6 原文）：
+#   Y1 同频 | [0,1] | 计算 | self 与 user_est 核心情感轨迹的相关度 × 水平接近度
+#   Y3 相互亲近 | [0,1] | 计算 | self.D24 · user.D24
+#   Y4 亲近不对称 | [−1,1] | 计算 | user.D24 − self.D24

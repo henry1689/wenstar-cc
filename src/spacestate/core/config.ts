@@ -120,7 +120,7 @@ export type LayerName = (typeof LAYER_NAMES)[number];
  * 表出处，白皮书正文未直接引用，归属靠连续区间与邻近维度佐证推出。
  * 若业主改判，只改本常量，其余代码零改动。
  *
- * 下标不在此处：`layout.ts` 的 `LAYER_DIMS` 由 LAYOUT × 本表推导，不写死下标。
+ * 下标不在此处：`layout.ts` 的 `layerIndices(layer, purpose)` 由 LAYOUT × 本表推导，不写死下标。
  */
 export const DIMS_BY_LAYER: Readonly<Record<LayerName, readonly DimId[]>> = Object.freeze({
   body: Object.freeze(['D01', 'D02', 'D03', 'D04', 'D05', 'D06'] as const),
@@ -169,16 +169,30 @@ export const LAYER_PARAMS: Readonly<Record<LayerName, LayerParam>> = Object.free
   dyad: Object.freeze({ lambda: 0.15, tauMin: 120 }),
 });
 
-// 三条加载断言：层参数配错不会报错，只会让遗忘节奏与层级顺序悄悄跑偏，
-// 所以必须在模块加载期炸出来。
-{
+/**
+ * 层参数加载断言（补包 B 第 5 项：抽成纯函数）。
+ *
+ * 🔴 **为什么必须是纯函数**：原本这段是模块顶层代码，测试里触发不到——变异测试
+ * 只能靠 `vi.resetModules()` + 动态 import 重新加载整个模块，既慢又容易污染其它
+ * 用例。抽成可传参的纯函数后，模块加载时用真实参数调一次，变异测试直接用变异后的
+ * 参数调，两条路径共用同一份规则，抓得率才可度量。
+ *
+ * 三条规则（任一不满足即抛错，**不给默认值、不静默降级**）：
+ * ① 键序与 `LAYER_NAMES` 一致（掩码 / λ / τ 共用同一序，错位会张冠李戴）
+ * ② S-046 λ 层级顺序：scene ≥ body ≥ appraisal = motive ≥ core = relation = dyad
+ * ③ 只有 `scene` 不走 Kalman；其余六层必须有正有限的 τ
+ *
+ * 🔴 属 **R2 区域**（见 `tests/oracle/oracle-change-policy.md`）：
+ * 放宽任一断言需业主签字。
+ */
+export function assertLayerParams(params: Record<LayerName, LayerParam>): void {
   // ① 键序与 LAYER_NAMES 一致
-  const keys = Object.keys(LAYER_PARAMS);
+  const keys = Object.keys(params);
   if (keys.length !== LAYER_NAMES.length || keys.some((k, i) => k !== LAYER_NAMES[i])) {
     throw new Error('LAYER_PARAMS 键序必须与 LAYER_NAMES 一致（掩码/λ/τ 共用同一序）');
   }
 
-  const lambdaOf = (layer: LayerName): number => LAYER_PARAMS[layer].lambda;
+  const lambdaOf = (layer: LayerName): number => params[layer].lambda;
 
   // ② S-046 λ 层级顺序：scene ≥ body ≥ appraisal = motive ≥ core = relation = dyad
   const tiers: readonly (readonly [LayerName, LayerName])[] = [
@@ -216,12 +230,12 @@ export const LAYER_PARAMS: Readonly<Record<LayerName, LayerParam>> = Object.free
   }
 
   // ③ 只有 scene 不走 Kalman（整层跳变模型）；其余六层必须有正有限的 τ
-  const withoutTau = LAYER_NAMES.filter((layer) => LAYER_PARAMS[layer].tauMin === null);
+  const withoutTau = LAYER_NAMES.filter((layer) => params[layer].tauMin === null);
   if (withoutTau.length !== 1 || withoutTau[0] !== 'scene') {
     throw new Error(`τ 为 null 的层应只有 scene，实际：${withoutTau.join(', ') || '（无）'}`);
   }
   for (const layer of LAYER_NAMES) {
-    const { lambda, tauMin } = LAYER_PARAMS[layer];
+    const { lambda, tauMin } = params[layer];
     if (!Number.isFinite(lambda) || lambda < 0) {
       throw new Error(`${layer} 的 λ 必须为非负有限数，实际 ${lambda}`);
     }
@@ -231,13 +245,17 @@ export const LAYER_PARAMS: Readonly<Record<LayerName, LayerParam>> = Object.free
   }
 }
 
+// 模块加载期用真实参数执行一次：层参数配错不会报错，只会让遗忘节奏与层级顺序
+// 悄悄跑偏，所以必须在加载期炸出来。
+assertLayerParams(LAYER_PARAMS);
+
 // ============ 维度级开关（E-14 细化 / E-10） ============
 
 /**
  * 不走 OU–Kalman 的维度。
  *
  * - `D27`：同频，由 dyad 的 Y1 回填，主体块不独立滤波（E-10）
- * - `D32`–`D40`：场景整层走跳变模型，无 τ 概念；`D39`/`D40` 由 `phase()` 直接给出
+ * - `D32`–`D40`：场景整层走跳变模型，无 τ 概念
  *
  * 与「层没有 τ」不是一回事：`relation` 层**有** τ（除 D27 外都走 Kalman），
  * `scene` 层是**整层**不走。两者不得混为一谈。
@@ -334,3 +352,31 @@ export const DEFAULT_MASKS = Object.freeze({
   /** 共同经历隐喻：0 / 1 / 0 / 0 / 0.8 / 0.8 / 0.8 */
   sharedEpiphany: Object.freeze([0, 1, 0, 0, 0.8, 0.8, 0.8]),
 });
+
+/**
+ * 测试专用：导出需与 oracle 逐项对拍的常量快照（补包 B 第 5 项）。
+ *
+ * 产出 `tests/oracle/layer-constants-ts.json`，由 oracle 侧读取后与
+ * `oracle_spacestate.py` 的同名常量**逐项比对**——10⁵ 差分跑不到层参数，
+ * 对常量零保护力，这层对拍是常量的唯一交叉验证。
+ *
+ * 全部返回**拷贝**，不暴露内部引用（`DIMS_BY_LAYER` / `LAYER_PARAMS` 是冻结常量，
+ * 直接返回会让调用方拿到可被 `Object.freeze` 之外方式误用的引用）。
+ */
+export function exportLayerConstants(): {
+  readonly dimsByLayer: Record<string, readonly string[]>;
+  readonly layerParams: Record<string, { readonly lambda: number; readonly tauMin: number | null }>;
+  readonly noKalman: readonly string[];
+  readonly observeOnly: readonly string[];
+  readonly privateOnly: readonly string[];
+} {
+  return {
+    dimsByLayer: Object.fromEntries(LAYER_NAMES.map((l) => [l, [...DIMS_BY_LAYER[l]]])),
+    layerParams: Object.fromEntries(
+      LAYER_NAMES.map((l) => [l, { lambda: LAYER_PARAMS[l].lambda, tauMin: LAYER_PARAMS[l].tauMin }]),
+    ),
+    noKalman: [...NO_KALMAN_DIMS].sort(),
+    observeOnly: [...OBSERVE_ONLY_DIMS].sort(),
+    privateOnly: [...PRIVATE_ONLY_DIMS].sort(),
+  };
+}

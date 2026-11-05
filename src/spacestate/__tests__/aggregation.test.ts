@@ -1,11 +1,15 @@
 /**
  * 切片#3 · 多层聚合与权重（S-016 / S-017 / S-018）
  * 黄金算例 G-018 + 打乱顺序属性测试（E-06）
+ *
+ * 补包 B 第 1 项：打分入口由 `dimWeight` 收敛为 `effectiveWeight`，
+ * 私密模式开关在唯一入口内强制生效。
  */
 import { describe, it, expect } from 'vitest';
+import * as agg from '../core/aggregation.js';
 import {
   iccCoefficient,
-  dimWeight,
+  effectiveWeight,
   layerEvidence,
   coverage,
   layerCoverage,
@@ -25,6 +29,13 @@ import {
 } from '../core/config.js';
 
 const TAU = 0.3;
+
+/**
+ * `privateMode = false` 是**当前唯一生产路径**（私密模式判定来源白皮书未定义）。
+ * `true` 分支：契约已就位，功能未启用。
+ */
+const OFF = { privateMode: false } as const;
+const ON = { privateMode: true } as const;
 
 describe('G-018 · 覆盖率', () => {
   it('τ=0.3、πx=100 → v̂=0.009 → cov=0.9', () => {
@@ -62,12 +73,12 @@ describe('G-018 · 覆盖率', () => {
 describe('S-017 · 维度权重', () => {
   it('A 级 r=1，权重 = base', () => {
     expect(iccCoefficient(0.9, 'A')).toBe(1);
-    expect(dimWeight('D01', 0.5, 0.9, 'A')).toBeCloseTo(0.5, 12);
+    expect(effectiveWeight('D01', 0.5, 0.9, 'A', OFF)).toBeCloseTo(0.5, 12);
   });
 
   it('C 级 r=0，权重 = 0', () => {
     expect(iccCoefficient(0.1, 'C')).toBe(0);
-    expect(dimWeight('D01', 0.5, 0.1, 'C')).toBe(0);
+    expect(effectiveWeight('D01', 0.5, 0.1, 'C', OFF)).toBe(0);
   });
 
   it('B 级 r=(ICC−0.5)/0.25 钳到 [0,1]', () => {
@@ -82,26 +93,25 @@ describe('S-017 · 维度权重', () => {
 
   it('|δ| ≤ 0.3 被强制钳位', () => {
     expect(DELTA_MAX).toBe(0.3);
-    expect(dimWeight('D01', 1, 1, 'A', 0.3)).toBeCloseTo(1.3, 12);
-    expect(dimWeight('D01', 1, 1, 'A', -0.3)).toBeCloseTo(0.7, 12);
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF, 0.3)).toBeCloseTo(1.3, 12);
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF, -0.3)).toBeCloseTo(0.7, 12);
     // 越界 δ 被钳回 ±0.3
-    expect(dimWeight('D01', 1, 1, 'A', 5)).toBeCloseTo(1.3, 12);
-    expect(dimWeight('D01', 1, 1, 'A', -5)).toBeCloseTo(0.7, 12);
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF, 5)).toBeCloseTo(1.3, 12);
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF, -5)).toBeCloseTo(0.7, 12);
   });
 
-  it('E-14 细化：D29/D30 只观测恒 0；D20 改由私密模式开关控制', () => {
+  it('E-14 细化：D29/D30 只观测恒 0；D20 由私密模式开关控制', () => {
     expect([...OBSERVE_ONLY_DIMS]).toEqual(['D29', 'D30']);
     for (const dim of OBSERVE_ONLY_DIMS) {
       // 即使 base、ICC、δ 都给满，也必须是 0
       // （依赖指标不得作为任何优化目标，S-067 消融不变性）
-      expect(dimWeight(dim, 1, 1, 'A', 0.3), dim).toBe(0);
-      expect(dimWeight(dim, 1, 1, 'A'), dim).toBe(0);
+      expect(effectiveWeight(dim, 1, 1, 'A', OFF, 0.3), dim).toBe(0);
+      expect(effectiveWeight(dim, 1, 1, 'A', ON, 0.3), dim).toBe(0);
+      expect(effectiveWeight(dim, 1, 1, 'A', OFF), dim).toBe(0);
     }
 
-    // 🔴 行为变更：D20 不再被 dimWeight 锁死为 0，权重本身正常算出
+    // 🔴 D20 不再被锁死：权重本身正常算出，是否参与由开关决定
     expect([...PRIVATE_ONLY_DIMS]).toEqual(['D20']);
-    expect(dimWeight('D20', 1, 1, 'A', 0.3)).toBeCloseTo(1.3, 12);
-    // 是否参与共鸣由 resonanceMask 决定：非私密 0、私密 1
     expect(resonanceMask('D20', false)).toBe(0);
     expect(resonanceMask('D20', true)).toBe(1);
     // 只观测维度在私密模式下也仍是 0
@@ -111,17 +121,76 @@ describe('S-017 · 维度权重', () => {
     expect(resonanceMask('D01', true)).toBe(1);
 
     // 同 base 的普通维度不受影响
-    expect(dimWeight('D21', 1, 1, 'A')).toBe(1);
+    expect(effectiveWeight('D21', 1, 1, 'A', OFF)).toBe(1);
   });
 
   it('权重恒非负（r_ICC ∈ [0,1] 且 1+δ ≥ 0.7）', () => {
     for (const grade of ['A', 'B', 'C'] as const) {
       for (const icc of [0, 0.3, 0.5, 0.6, 0.75, 1]) {
-        const w = dimWeight('D01', 0.8, icc, grade, 0);
+        const w = effectiveWeight('D01', 0.8, icc, grade, OFF, 0);
         expect(Number.isFinite(w)).toBe(true);
         expect(w).toBeGreaterThanOrEqual(0);
       }
     }
+  });
+});
+
+// ============ 补包 B 第 1 项：effectiveWeight 是唯一打分入口 ============
+
+describe('effectiveWeight · 唯一打分入口', () => {
+  it('D20：privateMode=false → 0；true → 非 0', () => {
+    expect(effectiveWeight('D20', 1, 1, 'A', OFF, 0.3)).toBe(0);
+    expect(effectiveWeight('D20', 1, 1, 'A', ON, 0.3)).not.toBe(0);
+    expect(effectiveWeight('D20', 1, 1, 'A', ON, 0.3)).toBeCloseTo(1.3, 12);
+  });
+
+  it('🔴 保守规则：privateMode 非 true 的任何值（含 undefined）一律视为关', () => {
+    // 漏传 / 传错 → 落到安全侧（D20 不参与），而不是「真值判断」放行
+    const cases = [
+      { privateMode: undefined },
+      { privateMode: null },
+      { privateMode: 1 },
+      { privateMode: 'true' },
+      {},
+    ];
+    for (const ctx of cases) {
+      const w = effectiveWeight(
+        'D20',
+        1,
+        1,
+        'A',
+        ctx as unknown as { privateMode: boolean },
+        0.3,
+      );
+      expect(w, JSON.stringify(ctx)).toBe(0);
+    }
+  });
+
+  it("🔴 'dimWeight' 已不再导出（漏乘风险在类型层消除）", () => {
+    expect('dimWeight' in agg).toBe(false);
+    expect('rawDimWeight' in agg).toBe(false);
+    expect('effectiveWeight' in agg).toBe(true);
+  });
+
+  it('只观测维度即使 privateMode=true 也恒 0', () => {
+    expect(effectiveWeight('D29', 1, 1, 'A', ON, 0.3)).toBe(0);
+    expect(effectiveWeight('D30', 1, 1, 'A', ON, 0.3)).toBe(0);
+  });
+
+  it('普通维度与私密模式无关', () => {
+    expect(effectiveWeight('D01', 0.5, 0.9, 'A', OFF)).toBe(
+      effectiveWeight('D01', 0.5, 0.9, 'A', ON),
+    );
+  });
+
+  it('ctx 为只读引用，不可被就地改写影响结果', () => {
+    const ctx = { privateMode: true };
+    const before = effectiveWeight('D20', 1, 1, 'A', ctx, 0.3);
+    expect(before).toBeCloseTo(1.3, 12);
+    expect(() => {
+      (ctx as { privateMode: boolean }).privateMode = false;
+    }).not.toThrow(); // JS 层拦不住，但每次调用都重新读 ctx，结果不被缓存
+    expect(effectiveWeight('D20', 1, 1, 'A', { privateMode: false }, 0.3)).toBe(0);
   });
 });
 
