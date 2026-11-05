@@ -1301,19 +1301,40 @@ export async function processChat(
           _em.addSessionEntitySideEffect(_joinU, intent.targets[0]);
           console.log('[GroupSession] 群聊加人: +' + intent.targets[0]);
         }
-      } else if (intent.kind === 'addressOnly' && intent.targets.length === 1) {
-        // ── D2（2026-11-01）：会晤中点名 = **本轮由她答，下一轮自动回原主** ──
-        //   与下方 switch 的区别：switch 是业主明确要换人（「换阿珍来」）⇒ 永久；
-        //   点名只是「这句话我问她」⇒ reduce 记下原主 UUID，下一轮请求开头回退。
+      } else if ((intent.kind === 'addressOnly' || (_isMulti && intent.kind === 'switch')) && intent.targets.length === 1) {
+        // ── 点名（addressOnly，仅本轮）与换主（switch，永久）合并处理 ──
+        //   两者只差一个 action：TRANSIENT_SPEAK 记原主、下一轮回退；SPEAK 永久。
         //   🔴 不在这里手改 speakerUuid：ADR-013 硬约束②，状态只有 reduce 一处写。
-        const _addrU = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(intent.targets[0]) || intent.targets[0]);
-        _gs!.dispatch({ type: 'TRANSIENT_SPEAK', target: _addrU, now: Date.now() });
-        console.log('[GroupSession] 点名应答（仅本轮）: → ' + intent.targets[0]);
-      } else if (_isMulti && intent.kind === 'switch' && intent.targets.length === 1) {
-        // ── 群聊换主发言（switch）──
+        //
+        //   🔴 2026-11-05 修复「换人静默失败」：此前两分支都直接 dispatch 就打日志，
+        //      而 reduce 对**非参与者**的契约是 `return prev`（静默不操作）——
+        //      目标不在场时状态根本没变，日志却报成功。真机实测：
+        //        [GroupSession] 群聊换主发言: → 陈雪花
+        //        [Hook] action=SPEAK status=unchanged effects=0   ← 实际没换成
+        //      她全程 0 次发言，业主看到的仍是原人在说 —— 转场因此不自然。
+        //
+        //   🔴 点名即入场（交互规约 §2.1 C6 R1 明文要求）：叫不在场的人，
+        //      她会被自动拉进来并开一段任期，不需要先说「进来」。
+        //      此前只有下方兜底换人分支（P0 判据那段）实现了这条，点名/换主两处漏了。
+        //      合并两分支也正是为了不让 JOIN 逻辑在本函数里出现第三份（不变量 #7）。
         {
-          _gs!.dispatch({ type: 'SPEAK', target: intent.targets[0], now: Date.now() });
-          console.log('[GroupSession] 群聊换主发言: → ' + intent.targets[0]);
+          const _tName = intent.targets[0];
+          const _tU = String(ctx.m4?.getFamilyGraph?.()?.getUUIDByName?.(_tName) || _tName);
+          const _transient = intent.kind === 'addressOnly';
+          // ① 不在场先入场（已在场则跳过，避免重复 JOIN）
+          if (_tU && !_gs!.getParticipants().some((p: { uuid: string }) => p.uuid === _tU)) {
+            _gs!.dispatch({ type: 'JOIN', target: { uuid: _tU, name: _tName, category: '' }, now: Date.now() });
+            // 🔴 P078：补进纪要素材名单，否则纪要参与者名只有 uuid、不可读
+            _em.addSessionEntitySideEffect(_tU, _tName);
+          }
+          // ② 切发言权，**按结果判定**而非按「调没调」—— 后者在目标不在场时会谎报成功
+          _gs!.dispatch({ type: _transient ? 'TRANSIENT_SPEAK' : 'SPEAK', target: _tU, now: Date.now() });
+          const _landed = _gs!.getState().speakerUuid === _tU;
+          console.log(_landed
+            ? (_transient
+                ? '[GroupSession] 点名应答（仅本轮）: → ' + _tName
+                : '[GroupSession] 群聊换主发言: → ' + _tName)
+            : '[GroupSession] 换人未生效（发言权未转移）: → ' + _tName + ' uuid=' + _tU);
         }
       } else if (intent.kind === 'wake' && intent.targets.length >= 2 && !_isMulti) {
         // ── P129 任务2 · 单人态多目标“找X和Y一起聊聊” → 扩员（叫人来 ≠ 换主发言）──
