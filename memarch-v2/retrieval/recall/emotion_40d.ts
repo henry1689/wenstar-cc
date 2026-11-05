@@ -31,7 +31,16 @@ export class Emotion40dRecall extends BaseRecallStrategy {
     }
 
     try {
-      const buf = Buffer.from(new Float32Array(q.emotion_vec).buffer);
+      // 🔴 维度必须与 vec_mem_perception.embedding = float[40] 一致。
+      //   旧代码传的是 `q.emotion_vec`（40D 的第 20~29 维切片，只有 10 维），
+      //   实测 sqlite-vec 直接报 "Expected 40 dimensions but received 10" ——
+      //   这条腿从来没有成功跑过一次 KNN。
+      //
+      //   ⚠️ 已知局限：`q.vec40` 是 query_understanding 的**哈希投影**，
+      //   与主库 memories.perception_40d（真实感知向量）不在同一语义空间，
+      //   因此本腿的 distance 只能当**弱信号**用（同情绪关键词的查询会聚到一起）。
+      //   真正的对齐需要 M2 的感知编码器，属独立任务。
+      const buf = Buffer.from(new Float32Array(q.vec40).buffer);
       const sql = `
         SELECT s.trace_id AS id,
                s.distance AS distance,

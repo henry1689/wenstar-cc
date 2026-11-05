@@ -110,7 +110,14 @@ export interface DegradeBudget {
    * 此时 `semantic_vec` 留空、语义腿降级 FTS5，**绝不能让首查卡住整条检索**。
    */
   embed_ms: number;
-  /** 多路召回并行硬超时（ms，Promise.all 之外的整体 race） */
+  /**
+   * 多路召回并行硬超时（ms）。
+   *
+   * 原设计 120ms —— 实测不成立：v2 库 82MB、8 条腿并行查 SQLite，
+   * 冷启动（page cache 未热）时 bm25/semantic/ppr/emotion 会**同时**撞线，
+   * 首查召回直接归零。热态下 bm25 也常年 100ms+。300ms 是实测能稳定跑完
+   * 全部腿的最小值，对对话场景仍无明显体感。
+   */
   recall_ms: number;
   /** 重排阶段硬超时（ms） */
   rerank_ms: number;
@@ -123,7 +130,7 @@ export interface DegradeBudget {
 export const DEFAULT_DEGRADE: DegradeBudget = {
   query_understand_ms: 50,
   embed_ms: 120,
-  recall_ms: 120,
+  recall_ms: 300,
   rerank_ms: 200,
   rerank_top_n: 50,
   mmr_top_k: 20,

@@ -61,6 +61,19 @@ export function createBridge(deps: BridgeDeps): MemArchBridge {
     console.warn('[bridge] vec0 不可用，语义/情感腿将降级 FTS5:', vec.error);
   }
 
+  // 🔴 后台预热 embedding 模型。冷启动加载要 ~0.8s，而 retrieve 的 embed 预算
+  //   只有 120ms —— 不预热的话服务重启后头几次对话的语义腿必然降级。
+  //   这里**不 await**：预热失败或慢都不该影响 bridge 初始化。
+  void (async () => {
+    try {
+      const { getEmbeddingProvider } = await import('../../../memarch-v2/retrieval/embedding/EmbeddingProvider.js');
+      await getEmbeddingProvider().embed('预热');
+      console.log('[bridge] embedding 模型已预热');
+    } catch (e) {
+      console.warn('[bridge] embedding 预热失败（语义腿将按需懒加载）:', (e as Error)?.message || String(e));
+    }
+  })();
+
   const nsManager = new NamespaceManager(deps.v2Db);
 
   const write = new OldWriteAdapter(deps.v2Db, flag, deps.legacyWriteGateway);

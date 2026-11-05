@@ -15,17 +15,22 @@ export async function withTimeout<T>(
 ): Promise<{ value: T; timedOut: boolean; elapsed: number }> {
   const t0 = Date.now();
   let timer: NodeJS.Timeout | null = null;
+  // 🔴 必须用「fallback 是否真的被采用」判定超时，不能用 `elapsed >= ms`。
+  //   旧实现拿总耗时与阈值比大小：当任务恰好在阈值边界（比如 300.4ms）完成时，
+  //   拿到的是**真实结果**，却被标记成「已超时降级」—— 实测首查 bm25/semantic
+  //   明明返回了数据，指标里却记成 null、degraded_legs 还多两条。
+  //   指标失真会让人误判「召回腿坏了」，而其实只是跑得慢一点。
+  let usedFallback = false;
   try {
     const value = await Promise.race([
       p,
       new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(fallback), ms);
+        timer = setTimeout(() => { usedFallback = true; resolve(fallback); }, ms);
       }),
     ]);
     const elapsed = Date.now() - t0;
-    const timedOut = elapsed >= ms;
-    if (timedOut && onTimeout) onTimeout(elapsed);
-    return { value, timedOut, elapsed };
+    if (usedFallback && onTimeout) onTimeout(elapsed);
+    return { value, timedOut: usedFallback, elapsed };
   } finally {
     if (timer) clearTimeout(timer);
   }
