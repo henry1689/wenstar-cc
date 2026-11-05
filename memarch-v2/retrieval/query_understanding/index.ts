@@ -65,10 +65,43 @@ function extractEntities(text: string): string[] {
   return Array.from(out).slice(0, 8);
 }
 
-/** 时间词解析：相对时间 → recent_days；绝对时间窗返回 null（调用方按需） */
+/**
+ * 时间词解析：相对时间 → recent_days + **精确日界时间窗** abs_[start,end)。
+ *
+ * 🔴 为什么必须给精确日界，而不是「now - N*DAY ~ now」：
+ *   中文的「前天」指**前天那一整天**，不是「最近 48 小时」。按滑动窗口算，
+ *   「前天的事」会把昨天和今天的内容也圈进来，时间约束形同虚设。
+ *   实测：旧实现下「前天的事还记得吗」召回的全是今天/昨天的高相似问句。
+ */
 function parseTimeRange(text: string, now: number): TimeRange {
   const r: TimeRange = { recent_days: null, abs_start: null, abs_end: null };
   const DAY = 24 * 3600 * 1000;
+  const d = new Date(now);
+  /** 今天 00:00 的 epoch ms */
+  const todayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayWindow = (dayOffset: number): TimeRange => ({
+    recent_days: Math.abs(dayOffset),
+    abs_start: todayStart - dayOffset * DAY,
+    abs_end: todayStart - (dayOffset - 1) * DAY,
+  });
+  // 中文日历日（本地时区），偏移 1 = 昨天，2 = 前天
+  if (/前天/.test(text)) return dayWindow(2);
+  if (/昨天|昨晚/.test(text)) return dayWindow(1);
+  if (/今天|今日|刚才|刚刚|几分钟/.test(text)) {
+    return { recent_days: 0.5, abs_start: todayStart, abs_end: now };
+  }
+  // 周粒度：本周一 00:00 为界
+  if (/上周/.test(text)) {
+    const dow = (d.getDay() + 6) % 7;              // 周一=0
+    const thisMonday = todayStart - dow * DAY;
+    return { recent_days: 7, abs_start: thisMonday - 7 * DAY, abs_end: thisMonday };
+  }
+  // 月粒度：本月 1 日 00:00 为界
+  if (/上个月|上月/.test(text)) {
+    const thisMonthStart = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    const prevMonthStart = new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime();
+    return { recent_days: 60, abs_start: prevMonthStart, abs_end: thisMonthStart };
+  }
   // 中文数字映射
   const cnNum: Record<string, number> = { '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
   const mN = text.match(/(最近|近|过去)\s*(\d+|[一二两三四五六七八九十])\s*(天|日|周|星期|个月)/);
@@ -84,11 +117,8 @@ function parseTimeRange(text: string, now: number): TimeRange {
     r.abs_end = now;
     return r;
   }
-  if (/昨天/.test(text)) { r.recent_days = 1; r.abs_start = now - 1 * DAY; r.abs_end = now; return r; }
-  if (/前天/.test(text)) { r.recent_days = 2; r.abs_start = now - 2 * DAY; r.abs_end = now; return r; }
-  if (/上周/.test(text)) { r.recent_days = 14; r.abs_start = now - 14 * DAY; r.abs_end = now; return r; }
-  if (/上个月/.test(text)) { r.recent_days = 60; r.abs_start = now - 60 * DAY; r.abs_end = now; return r; }
-  if (/刚才|刚刚|几分钟/.test(text)) { r.recent_days = 0.5; r.abs_start = now - 12 * 3600 * 1000; r.abs_end = now; return r; }
+  // 日/周/月粒度的中文日历词已在函数开头用精确日界处理（并提前 return），
+  // 此处不能再重复判断 —— 否则是永远走不到的死代码。
   return r;
 }
 

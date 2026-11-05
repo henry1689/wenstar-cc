@@ -27,7 +27,23 @@
 //   sum          | 1.00  | 1.00
 // =====================================================================
 
-import type { RawCandidate, Evidence } from '../types';
+import type { RawCandidate, Evidence, TimeRange } from '../types';
+
+/**
+ * 时间契合度（设计 §8.4「查询带时间表达时，区间外的条目乘 0.2」）。
+ *
+ * 🔴 这是 `QueryContext.time_range` 的**唯一消费点** —— 在此之前的实现里，
+ *   时间表达被解析出来后只塞进 vec40 的几个维度，召回/融合/重排/MMR 全程不看，
+ *   等于「前天」「上周」这些词对结果零影响。实测「前天的事还记得吗」
+ *   召回的全是今天和昨天的内容。
+ */
+function computeTimeFit(ts: number, tr?: TimeRange): number {
+  if (!tr) return 1;
+  if (tr.abs_start == null && tr.abs_end == null) return 1; // 查询无时间表达
+  const start = tr.abs_start ?? 0;
+  const end = tr.abs_end ?? Date.now();
+  return ts >= start && ts < end ? 1 : 0.2;
+}
 
 export const RRF_K = 60;
 
@@ -71,7 +87,8 @@ interface FusedEntry {
 export function weightedRRF(
   legs: Partial<Record<LegName, RawCandidate[]>>,
   p_A: number,
-  topN: number = 50
+  topN: number = 50,
+  timeRange?: TimeRange,
 ): Evidence[] {
   const w = legWeights(p_A);
 
@@ -117,11 +134,12 @@ export function weightedRRF(
   const out: Evidence[] = [];
   for (const e of agg.values()) {
     const boost = 1 + 0.25 * e.strength + 0.15 * e.activation;
+    const timeFit = computeTimeFit(e.timestamp, timeRange);
     out.push({
       memory_id: e.memory_id,
       text: e.text,
       source_namespace: e.source_namespace,
-      score: e.rrf_score * boost,
+      score: e.rrf_score * boost * timeFit,
       recall_sources: e.recall_sources,
       recency: e.recency,
       strength: e.strength,

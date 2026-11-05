@@ -145,7 +145,8 @@ export class Retriever {
     const legsMap = Object.fromEntries(legResults.map((r) => [r.name, r.data])) as Partial<Record<LegName, RawCandidate[]>>;
 
     // 3. Weighted RRF + M3 鍏堥獙 boost
-    const fused = weightedRRF(legsMap, q.p_A, this.budget.rerank_top_n);
+    // 第 4 参传入时间窗：设计 §8.4 要求「查询带时间表达时，区间外条目 ×0.2」
+    const fused = weightedRRF(legsMap, q.p_A, this.budget.rerank_top_n, q.time_range);
 
     // 4. 閲嶆帓锛堚墹200ms锛岃秴鏃剁洿鎺ョ敤 RRF 缁撴灉锛?
     const rt1 = Date.now();
