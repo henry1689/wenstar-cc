@@ -53,9 +53,19 @@ export class OldRetrievalAdapter implements MemoryRetrievePort {
       throw new Error('[retrieve] 缺少 namespace。请通过 ctx.namespace 或 NamespaceContext 传入。');
     }
 
-    const decision = this.flag.route(namespace, query.slice(0, 32));
+    // 🔴 forcePathway 优先于灰度比例 —— 这个字段在 MemoryPort 契约里定义了很久
+    //   却零实现，导致灰度 0% 时运维自检和主流程接入都拿不到 v2 结果。
+    //   'B' = MemArch v2，'A' = 旧 RAG。
+    //
+    //   🔴 KILL SWITCH 优先级最高：紧急回滚不能被诊断通道或接入通道绕过。
+    //   否则「回滚」就成了一个可以被代码绕开的口号。
+    const base = this.flag.route(namespace, query.slice(0, 32));
+    const killed = this.flag.snapshot().globalKillSwitch;
+    const target = !killed && ctx.forcePathway
+      ? (ctx.forcePathway === 'B' ? 'v2' : 'legacy')
+      : base.target;
 
-    if (decision.target === 'v2') {
+    if (target === 'v2') {
       return this.retrieveViaV2(query, namespace, ctx);
     } else if (this.legacyRetriever) {
       return this.retrieveViaLegacy(query, namespace, ctx);

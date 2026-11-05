@@ -159,7 +159,12 @@ export interface RetrieveContext {
   namespace: Namespace;
   /** 召回 topK */
   topK?: number;
-  /** 是否强制走某通路（调试用） */
+  /**
+   * 强制通路（诊断 / A-B 对照实验 / 主流程接入用）。'A' = 旧 RAG，'B' = MemArch v2。
+   *
+   * 🔴 不改变 KILL SWITCH 的优先级：全局回滚开启时本字段一律失效。
+   *   紧急回滚不能被任何"强制"参数绕过，否则回滚就只是口号。
+   */
   forcePathway?: 'A' | 'B';
 }
 

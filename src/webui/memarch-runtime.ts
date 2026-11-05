@@ -14,6 +14,11 @@
  *   · namespace 解析：v2 的隔离边界是 `ns_<entity>`，而主流程手里只有实体 uuid
  *     （`_activeEntityUuids`）。这里用 namespace_registry 的 role_uuid 做映射，
  *     解析不到时回落到本体的 ns_yuyao —— **不静默落到 default**，否则隔离形同虚设。
+ *   · 🔴 强制通路 `forcePathway: 'B'`：主流程走 v2 是**目标状态**（拆旧链路），
+ *     不再受灰度比例约束。KILL SWITCH 仍然最高优先 —— 调 `/rollback` 后本字段
+ *     一律失效，旧链路立刻接管。
+ *   · 🔴 证据字段归一化：端口层产出 `{uuid, rawText, ...}`，M4 内部是
+ *     `{memory_id, text, ...}`，两套命名。出口统一成后者，下游只认一套。
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,15 +36,37 @@ export interface MemarchEvidence {
   recall_sources?: string[];
 }
 
+/**
+ * 端口层的证据形态（OldRetrievalAdapter 按 MemoryPort 契约产出）：
+ * `{ uuid, rawText, score, consolidation, tsUtc, recallLeg }`
+ * 与 M4 内部形态（`memory_id/text/recall_sources`）是两套命名 —— 这里两者都收，
+ * 归一化成 MemarchEvidence 再出口。
+ */
+interface RawEvidence {
+  memory_id?: string;
+  uuid?: string;
+  text?: string;
+  rawText?: string;
+  score?: number;
+  source_namespace?: string;
+  namespace?: string;
+  strength?: number;
+  consolidation?: number;
+  timestamp?: number;
+  tsUtc?: number;
+  recall_sources?: string[];
+  recallLeg?: string;
+}
+
 interface RetrieveResultLike {
-  evidence: MemarchEvidence[];
+  evidence: RawEvidence[];
 }
 
 interface BridgeLike {
   retrieve: {
     retrieve(
       q: string,
-      ctx: { namespace: string; topK?: number },
+      ctx: { namespace: string; topK?: number; forcePathway?: 'A' | 'B' },
     ): Promise<RetrieveResultLike>;
   };
 }
@@ -143,6 +170,9 @@ export function resolveNamespace(entityUuids: readonly string[] | undefined): st
 /**
  * 走 v2 检索。未初始化或异常时抛错 —— 调用方负责降级，这里不吞异常，
  * 否则「v2 静默返回空」会被误读成「确实没有相关记忆」。
+ *
+ * 🔴 `forcePathway: 'B'` —— 主流程走 v2 是目标状态，不受灰度比例约束。
+ *   KILL SWITCH（`POST /rollback`）优先级更高，开启后本参数失效、旧链路接管。
  */
 export async function memarchRetrieve(
   query: string,
@@ -153,8 +183,30 @@ export async function memarchRetrieve(
     const ok = await initMemarchRuntime(process.env.WENSTAR_DATA_DIR || join(process.cwd(), 'data'));
     if (!ok || !_bridge) throw new Error(`[MemArchRuntime] bridge 未就绪: ${_initError ?? 'unknown'}`);
   }
-  const r = await _bridge.retrieve.retrieve(query, topK ? { namespace, topK } : { namespace });
-  return r.evidence || [];
+  const ctx: { namespace: string; topK?: number; forcePathway: 'A' | 'B' } = {
+    namespace,
+    forcePathway: 'B',
+  };
+  if (topK) ctx.topK = topK;
+  const r = await _bridge.retrieve.retrieve(query, ctx);
+
+  // 归一化：端口层与 M4 内部两套字段名都收，统一出口形态（下游只认 memory_id/text）
+  return (r.evidence || []).map((e) => {
+    const out: MemarchEvidence = {
+      memory_id: e.memory_id ?? e.uuid ?? '',
+      text: e.text ?? e.rawText ?? '',
+      score: e.score ?? 0,
+    };
+    const ns = e.source_namespace ?? e.namespace;
+    if (ns) out.source_namespace = ns;
+    const st = e.strength ?? e.consolidation;
+    if (st !== undefined) out.strength = st;
+    const ts = e.timestamp ?? e.tsUtc;
+    if (ts !== undefined) out.timestamp = ts;
+    if (Array.isArray(e.recall_sources)) out.recall_sources = e.recall_sources;
+    else if (typeof e.recallLeg === 'string' && e.recallLeg) out.recall_sources = e.recallLeg.split(',');
+    return out;
+  });
 }
 
 /** 测试用：重置单例 */
