@@ -105,7 +105,9 @@ export class CrossEncoderReranker {
     const fn = this.extractor as (input: unknown, opts?: Record<string, unknown>) => Promise<
       Array<{ label: string; score: number }> | Array<Array<{ label: string; score: number }>>
     >;
-    const pairs = docs.map((d) => [query, d.slice(0, 400)]); // 截断：reranker 输入上限 512 token
+    // 🔴 成对输入必须是 { text, text_pair } 对象，不能是 [a, b] 数组 ——
+    //   传数组时 pipeline 会把整组当成一条文本，报 "text.replace is not a function"。
+    const pairs = docs.map((d) => ({ text: query, text_pair: d.slice(0, 400) })); // 截断：reranker 输入上限 512 token
 
     const work = (async () => {
       const raw = await fn(pairs, { topk: 1 });
@@ -171,4 +173,15 @@ export class CrossEncoderReranker {
   async warmup(): Promise<void> {
     await this.ensureModel();
   }
+}
+
+/**
+ * 进程内单例。ONNX session 很重（bge-reranker-base ~280MB），
+ * 多个 Retriever 实例不得各持一份；预热也必须是同一个实例，否则热了白热。
+ */
+let _shared: CrossEncoderReranker | null = null;
+
+export function getSharedCrossEncoder(): CrossEncoderReranker {
+  if (!_shared) _shared = new CrossEncoderReranker();
+  return _shared;
 }

@@ -69,8 +69,19 @@ export function createBridge(deps: BridgeDeps): MemArchBridge {
       const { getEmbeddingProvider } = await import('../../../memarch-v2/retrieval/embedding/EmbeddingProvider.js');
       await getEmbeddingProvider().embed('预热');
       console.log('[bridge] embedding 模型已预热');
+
+      // 🔴 cross-encoder 也要预热：它比 embedding 重得多（~280MB），
+      //   不预热的话服务重启后头几次查询全是「算法 fallback 重排」，
+      //   而 fallback 正是那个区分不了问题和答案的 Jaccard 打分。
+      const { getSharedCrossEncoder } = await import('../../../memarch-v2/retrieval/rerank/cross_encoder.js');
+      await getSharedCrossEncoder().warmup();
+      if (getSharedCrossEncoder().isModelLoaded()) {
+        console.log('[bridge] cross-encoder 模型已预热');
+      } else {
+        console.warn('[bridge] cross-encoder 未就绪，重排将走算法 fallback');
+      }
     } catch (e) {
-      console.warn('[bridge] embedding 预热失败（语义腿将按需懒加载）:', (e as Error)?.message || String(e));
+      console.warn('[bridge] 模型预热失败（将按需懒加载）:', (e as Error)?.message || String(e));
     }
   })();
 

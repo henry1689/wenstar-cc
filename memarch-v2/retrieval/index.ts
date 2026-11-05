@@ -22,7 +22,7 @@ import { understandQuery } from './query_understanding';
 import { getEmbeddingProvider } from './embedding/EmbeddingProvider';
 import { ensureEntityDict, matchEntitiesInQuery } from '../storage/entity_dict';
 import { weightedRRF, LegName } from './fusion/weighted_rrf';
-import { CrossEncoderReranker } from './rerank/cross_encoder';
+import { CrossEncoderReranker, getSharedCrossEncoder } from './rerank/cross_encoder';
 import { mmrSelect } from './postprocess/mmr';
 import { withTimeout } from './degrade/timeout_breaker';
 
@@ -61,7 +61,8 @@ export class Retriever {
       new KnowledgeBaseRecall(db),
       new ForesightRecall(db),
     ];
-    this.reranker = new CrossEncoderReranker();
+    // 用共享单例：预热（BridgeRegistry 启动时）与实际重排必须是同一个实例
+    this.reranker = getSharedCrossEncoder();
   }
 
   /** 涓诲叆鍙?*/
