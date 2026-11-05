@@ -744,9 +744,37 @@ async function sendStream(t){
       // finalize 全量段(audio_urls)就永远到不了前端。轮询自行掌控终止(hasAudio||超时)。
       done=1;
       const finalTxt=dd.reply||lastTxt||'';
-      b.textContent=finalTxt;scrollChat();
-      // P2-2: 流式 done 后同步当前聊天对象状态（顶部/标题/发言者前缀）
-      applyChatStateAsync(b);
+      // 🔴 2026-11-05 修复「多人共同回答标签错位」：
+      //   正文必须**先赋值再加前缀** —— 上面 `chat-done` 监听器里那次加前缀会被
+      //   `b.textContent=finalTxt` 这一整行纯赋值冲掉，随后旧代码又调
+      //   applyChatStateAsync 去 /api/conversation 取「**请求结束时**」的状态重加。
+      //   换人 / 点名 / 散会之后，「生成时」与「请求结束时」两份状态必然错位 ⇒
+      //   实测出现「标签写徐诗雨、正文是罗珍思」，多人共同回答时更是整条对不上。
+      //   故前缀与标签统一在**这里**、以 **dd.chat_state（生成该回复时）** 为准重算。
+      b.textContent=finalTxt;
+      try{
+        const _cs=dd.chat_state;
+        if(_cs){
+          applyChatState(_cs);
+          const _ml=b.closest('.msg')?.querySelector('.ml');
+          if(_cs.mode==='meeting'&&_cs.speakerName){
+            // 单发言人：正文可能已被服务端 attributeReply 补过【名】，防双叠
+            if(b.textContent.indexOf('【'+_cs.speakerName+'】')!==0)b.textContent='【'+_cs.speakerName+'】'+b.textContent;
+            if(_ml)_ml.textContent=_cs.speakerName;
+          }else if(_cs.mode==='meeting'){
+            // 多发言人轮次：attributeReply 刻意返回 speakerName=null，正文自带【名】分段。
+            // 🔴 绝不能再套单一前缀 —— 套了就是「【熊梓铭】【罗珍思】…【徐诗雨】…」的套娃，
+            //   正是业主说的「共同回答混乱不清楚」。标签如实标多人，正文靠分段标记区分。
+            if(_ml)_ml.textContent='（多人）';
+          }else{
+            if(_ml)_ml.textContent=(_cs.mode==='yuyao')?getPersonaLabel():(_cs.targetName||'玉瑶');
+          }
+        }else{
+          // 服务端没回传 chat_state 时才走旧路径（去 /api/conversation 取请求结束时的状态）
+          applyChatStateAsync(b);
+        }
+      }catch(_cse){console.warn('[Stream] chat_state 应用失败:',_cse);}
+      scrollChat();
       if(dd.result){
         tc.textContent=dd.result.turn_count+' 轮';
         var _es=dd.result.emotionMatchScore||dd.result.sceneFitScore?'情'+dd.result.emotionMatchScore+'场'+dd.result.sceneFitScore:'';
