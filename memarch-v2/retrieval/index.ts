@@ -20,6 +20,7 @@ import type {
 import { DEFAULT_DEGRADE } from './types';
 import { understandQuery } from './query_understanding';
 import { getEmbeddingProvider } from './embedding/EmbeddingProvider';
+import { ensureEntityDict, matchEntitiesInQuery } from '../storage/entity_dict';
 import { weightedRRF, LegName } from './fusion/weighted_rrf';
 import { CrossEncoderReranker } from './rerank/cross_encoder';
 import { mmrSelect } from './postprocess/mmr';
@@ -44,6 +45,8 @@ export class Retriever {
   private legs: RecallStrategy[];
   private reranker: CrossEncoderReranker;
   private budget: DegradeBudget;
+  /** entity_names 字典是否已确保建表（首个查询时建一次） */
+  private dictReady = false;
 
   constructor(db: Database.Database, budget: Partial<DegradeBudget> = {}) {
     this.db = db;
@@ -104,6 +107,19 @@ export class Retriever {
     }
     metrics.phase_ms.query_understand = Date.now() - qt0;
     metrics.phase_ms.embed = Date.now() - et0;
+
+    // 1c. 实体识别（PPR 种子）。
+    //   `understandQuery.extractEntities` 只认括号/引号/英文词，中文人名一个都抽不出，
+    //   所以 PPR 腿此前种子恒空 —— 即使 entity_edges 已迁满 13,636 行仍返回 0 条。
+    //   这里用 entity_names 字典做最长匹配，把命中结果**归一化成 uuid** 覆盖掉
+    //   表面字符串（`trace_entities.entity_uuid` 要的是 uuid，不是名字）。
+    try {
+      if (!this.dictReady) { ensureEntityDict(this.db); this.dictReady = true; }
+      const hits = matchEntitiesInQuery(this.db, rawQuery);
+      if (hits.length > 0) q.entities = hits;
+    } catch {
+      /* 字典表缺失时退回原行为，不影响其它腿 */
+    }
 
     // 2. 鍏矾鍙洖骞惰锛堟瘡璺嫭绔嬭秴鏃?+ 鏁翠綋 120ms 纭笂闄愶級
     const rt0 = Date.now();
