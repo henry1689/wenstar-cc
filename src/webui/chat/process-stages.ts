@@ -257,26 +257,12 @@ export async function runMeetingStage(input: Stage2Input): Promise<Stage2Output>
         }
         _entityContextText = ecResult.systemText;
 
-        // 🔴 2026-10-31 在场感知：把「**此刻谁在场**」明确告诉模型。
-        //
-        //   缺陷：上下文里从来没有在场名单，模型只能从对话历史里猜。猜错时会出现两种相反的症状——
-        //     · 「她这会儿不在这头」：明明阿珍就在场，诗雨却说她不在（把缺席当默认）；
-        //     · 「我没听到」：明明全场都听见了，某个角色却说不知道刚才说了什么。
-        //   业主实测的第 5、6 条就是这个 —— 这不是可见性过滤算错了，是**模型根本没被告知**。
-        //   🔴 只陈述事实，不解释机制：不要让模型在回复里讨论「在场/不在场」的实现。
-        try {
-          const _gsAny = (ctx as any)._groupSession;
-          const _list: Array<{ name?: string }> =
-            (typeof _gsAny?.getParticipants === 'function' ? _gsAny.getParticipants() : null)
-            ?? (ctx._entityMeeting?.getParticipants?.() ?? []);
-          const _names = _list.map((p) => String(p?.name || '').trim()).filter(Boolean);
-          if (_names.length > 0) {
-            _entityContextText +=
-              '\n\n【当前在场】此刻能听见你这番话的人：' + _names.join('、') +
-              '（还有鸿艺本人）。' +
-              '除非有人明确离场，否则不要声称他们不在场、也不要声称自己没听见刚才的对话。';
-          }
-        } catch { /* 在场名单失败不影响主流程 */ }
+        // 🔴 在场名单的**唯一实现**在 `src/webui/chat.ts`（`【当前在场】此刻在这间屋里的人`，
+        //   位于 buildEntityContext 之后）。此处原有一份同功能实现，因 runMeetingStage
+        //   全仓零调用点而从未生效，且措辞与主链路那份不一致 —— 按不变量 #7
+        //   （同一业务规则禁止多处实现）已删除，只留交叉引用。
+        //   ⚠️ 不要在这里再写一遍：两份实现一旦同时生效，一份 prompt 会出现
+        //   两段互相矛盾的在场指令（「还有鸿艺本人」vs「还有你」）。
 
         // KB 缓存（通过闭包引用 processChat 中的 Map）
         const _meetingKBCache: Map<string, string> = (ctx as any)._meetingKBCache;

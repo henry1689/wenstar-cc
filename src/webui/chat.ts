@@ -1568,6 +1568,54 @@ export async function processChat(
           // V27 结构修复: 会晤铁律的结构化输出（由 PromptAssembler 统一承载与去重，见下方 assembler 段）
           _entityRules = ecResult.rules || [];
 
+          // 🔴 2026-11-05 转场自然化：把「此刻谁在场」写进上下文。
+          //
+          //   根因（实查）：`【当前在场】` 原本只有 process-stages.ts 的 runMeetingStage 一份实现，
+          //   而该函数**全仓零调用点**（stage-types.ts 自身也无人 import）⇒ 主链路的 prompt
+          //   从来没有过在场名单。模型只能从对话历史猜房间里有谁，猜错了就出现
+          //   「明明在场却说她不在」——这正是业主说的转场不丝滑。
+          //   （那份死实现已改为交叉引用注释，避免同一规则两处实现 —— 不变量 #7。）
+          //
+          //   数据源 = GroupSession.getState().participants（在场状态唯一真源，ADR-013 硬约束②），
+          //   不读 space adapter、不读 _multiParticipants —— 后两者与状态机是两套真源，必漂移。
+          //   🔴 鸿艺必须**显式列进名单**：participants 只由 intent.targets（FG 人名）填充，
+          //   业主不会把自己叫进会晤 ⇒ 名单里没有他。而会晤指示词框架里「你」= 实体本人、
+          //   鸿艺是第三人称（core-rules.ts:103「你正在以另一个人的身份与鸿艺对话」），
+          //   漏掉他会触发下面「不在名单里的人不要对他说话」—— 模型正在回复的人被自己禁掉。
+          //   🔴 只陈述事实，不解释机制；末尾带禁复述标记（先例：core-rules.ts「禁复述此行」）。
+          try {
+            const _gsRoster = ctx._groupSession?.getState?.();
+            const _roster = _gsRoster?.participants ?? [];
+            if (_roster.length > 0) {
+              const _nowMs = Date.now();
+              // 到场时长是客观事实（joinedAt），不引入「刚加入」的判定阈值 ——
+              // 分档只用于给人类可读的标签，「要不要招呼」交给模型按标签自己判断。
+              const _desc = [
+                // 鸿艺全程在场，排最前：他是对话的另一方，不是「刚来的」
+                `${(ctx as any)._userName || '鸿艺'}（全程在场）`,
+                ..._roster.map((pp: { name: string; joinedAt?: number }) => {
+                  // 上界 joinedAt <= _nowMs：挡掉脏数据/单位错算出的「在场 49 万小时」
+                  const _mins = (typeof pp.joinedAt === 'number' && pp.joinedAt > 0 && pp.joinedAt <= _nowMs)
+                    ? Math.round((_nowMs - pp.joinedAt) / 60000)
+                    : null;
+                  return _mins === null ? pp.name
+                    : _mins < 1 ? `${pp.name}（刚到）`
+                    : _mins < 60 ? `${pp.name}（在场 ${_mins} 分钟）`
+                    : `${pp.name}（在场 ${Math.floor(_mins / 60)} 小时）`;
+                }),
+              ].join('、');
+              _entityContextText +=
+                '\n\n【当前在场】此刻在这间屋里的人：' + _desc + '。（此为背景事实，非对话内容，不要在回复里提及"名单""在场"这类词）' +
+                '\n标着「刚到」的人还没参与前面的话题——自然地跟他打个招呼、简单说一句聊到哪了，不要当作他一直都在。' +
+                '\n不在名单里的人此刻不在屋里：不要对他说话，也不要假装他听见了刚才的对话。' +
+                '\n名单是系统状态，可能滞后于对话——若对话里有人明确说自己走了/要走，以对话为准，别拿名单反驳他。' +
+                '\n反过来，只要没听到谁说要走，就不要声称名单上的人不在场。';
+            }
+          } catch (_rosterErr) {
+            // 这一段是本次修复的全部价值所在：静默失败 = 功能整体下线且零遥测（V32 铁律形态）
+            console.warn('[Roster] 在场名单注入失败（不影响主流程）:', (_rosterErr as Error)?.message);
+          }
+
           // 🆕 编码健康修复: 警幻仙姑（太虚境之主/系统维护者）会晤时注入户口本
           //   户口/UUID 权限归属警幻仙姑：仅她会晤时可查全部成员户口号；玉瑶不掌户口（见 lover-persona 边界）
           if (_meetingEntityName === '警幻仙姑' || _meetingEntityName === '景幻仙姑') {
