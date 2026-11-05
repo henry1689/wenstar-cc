@@ -8,6 +8,20 @@
 import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
 import { NON_NAME_TAIL_CHARS } from '../entity/EntityCandidateGrader.js';
 
+/**
+ * C2(2026-11-05): dossier 实质档案完整度阈值 —— 判据②的单一真源。
+ *
+ * completeness ≥ 本值视为「已正式录入」（即使顶层 description/relation_to_user
+ * 尚未回填，如雷灵叶因 PAE Hook C 限流+LLM 失败未回填）。
+ * 阈值依据（全库实测，2026-11-05）：
+ *   13 个 void 滑窗垃圾 completeness = 0.00~0.37（max 崔莺莺 0.37）
+ *   真实实体：雷灵叶 0.46 / 宁清华 0.38 / 罗珍思 0.81 / 安琪 0.69
+ *   → 0.40 落在垃圾 max 与真实主体之间，两侧干净分离。
+ * ⚠️ 宁清华 0.38 < 0.40 未达阈值，但其无 evidence 字段 → B6/B7 结构上不可能命中，
+ *    且尾字不在非名尾集 → 通道A也不命中，实际零影响（已用真实库实跑验证）。
+ */
+export const PROFILE_COMPLETENESS_MIN = 0.40;
+
 export interface FGHealthReport {
   totalNodes: number;
   totalEdges: number;
@@ -233,8 +247,13 @@ export class FGHealthCheck {
    *      字段，若按 0 计会全体误报；「低证」语义本就要求有证可评。
    *   命中结果以 hitChannel 标注（A / B5 / B6 / B7 可叠加）。
    *
-   *   ⚠️ 已知预期命中：雷灵叶（业主 2026-11-05 拍板保留，单句引入+提及倒挂的数据
-   *   特征与切片垃圾不可区分）——会出现在预警清单属正常，人工复核时已知保留。
+   * 🔴 C2(2026-11-05 业主裁定「系统代码有问题，没设计好」)：②判据升级 ——
+   *   除顶层 description/relation_to_user 外，**dossier 实质档案**（completeness ≥
+   *   PROFILE_COMPLETENESS_MIN）也视为有档案。原判据只认顶层两字段，把「已正式录入
+   *   但顶层描述未回填」的实体（雷灵叶：dossier 齐全 completeness=0.46 却无顶层
+   *   description，因 PAE Hook C 限流+LLM 失败未回填）误判为无档案而误报。
+   *   阈值 0.40 为全库实测安全边界：13 个 void 垃圾 completeness 0.00~0.37（max
+   *   崔莺莺 0.37），真实实体雷灵叶 0.46/罗珍思 0.81/安琪 0.69 —— 两侧干净分离。
    *
    * @returns 疑似垃圾实体清单（空数组 = 健康）
    */
@@ -255,7 +274,11 @@ export class FGHealthCheck {
       let props: any = {};
       try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
       // ①② 无真实档案（两通道共用前提）
-      const hasProfile = !!(props.description || props.relation_to_user);
+      // C2(2026-11-05): dossier 实质档案（completeness ≥ 阈值）也算有档案 ——
+      //   修复「已录入但顶层描述未回填」实体（雷灵叶 0.46）被误报；
+      //   垃圾实体 completeness ≤ 0.37（全库实测）不受影响仍会被报。
+      const hasProfile = !!(props.description || props.relation_to_user
+        || (typeof props.completeness === 'number' && props.completeness >= PROFILE_COMPLETENESS_MIN));
       if (hasProfile) continue;
       const tail = name[name.length - 1];
       const ev = props.evidence;

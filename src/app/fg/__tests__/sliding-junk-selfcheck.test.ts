@@ -115,4 +115,51 @@ describe('FGHealthCheck.detectSlidingWindowJunk — 通道B 正负样本', () =>
     expect(ch).toContain('B5');
     expect(ch!.split('+').length).toBeGreaterThanOrEqual(2);
   });
+
+  // ───────────── C2(2026-11-05) 判据②升级：dossier 实质档案视为有档案 ─────────────
+
+  it('C2 正样本（雷灵叶形态）：无顶层description但 dossier完整度0.46 → 不报', () => {
+    // 实库实证：雷灵叶 completeness=0.46、dossier齐全（birthYear/traits/pending10），
+    // 仅顶层 description 因 PAE Hook C 限流+LLM失败未回填 → 原判据误报
+    upsert('实质档案人', {
+      mention_count: 93,
+      completeness: 0.46,
+      evidence: { count: 1, strongHits: 1, titleHits: 1, contexts: ['单句引入'] },
+    });
+    const list = detect();
+    expect(channelOf(list, '实质档案人')).toBeNull();
+  });
+
+  it('C2 负样本：垃圾完整度≤0.37（全库实测垃圾max）→ 仍被报', () => {
+    // 13个void垃圾 completeness=0.00~0.37（max崔莺莺0.37），不得因②升级逃逸
+    upsert('低完整垃圾', {
+      mention_count: 40,
+      completeness: 0.37,
+      evidence: { count: 1, contexts: ['单句'] },
+    });
+    const list = detect();
+    const ch = channelOf(list, '低完整垃圾');
+    expect(ch).toBeTruthy();
+    expect(ch).toContain('B7');
+  });
+
+  it('C2 边界：完整度恰好低于阈值 0.39 → 仍报（阈值开区间语义）', () => {
+    upsert('临界低档', { mention_count: 40, completeness: 0.39, evidence: { count: 1, contexts: ['单句'] } });
+    const list = detect();
+    expect(channelOf(list, '临界低档')).toContain('B7');
+  });
+
+  it('C2 边界：完整度恰好等于阈值 0.40 → 豁免不报', () => {
+    upsert('临界高档', { mention_count: 40, completeness: 0.40, evidence: { count: 1, contexts: ['单句'] } });
+    const list = detect();
+    expect(channelOf(list, '临界高档')).toBeNull();
+  });
+
+  it('C2 回归：顶层description/relation_to_user 原判据仍有效', () => {
+    upsert('顶层描述人', { mention_count: 93, completeness: 0.1, description: '顶层描述', evidence: { count: 1, contexts: ['单句'] } });
+    upsert('顶层关系人', { mention_count: 93, completeness: 0.1, relation_to_user: '朋友', evidence: { count: 1, contexts: ['单句'] } });
+    const list = detect();
+    expect(channelOf(list, '顶层描述人')).toBeNull();
+    expect(channelOf(list, '顶层关系人')).toBeNull();
+  });
 });
