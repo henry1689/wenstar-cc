@@ -541,6 +541,29 @@ async function initPipeline(): Promise<void> {
   setGlobal('familyGraph', familyGraph);
   m4 = new M4Orchestrator(storage, familyGraph, knowledgeBase);
   await m4.initialize();
+
+  // MemArch v2 运行时预热（embedding 0.8s + cross-encoder 4.2s）
+  // 🔴 为什么必须在启动时做：`initMemarchRuntime` 是懒加载的，只有第一次检索
+  //   才触发初始化 —— 而模型加载远超 embed_ms(120) 预算，结果就是**每次重启后
+  //   头几轮对话**语义腿退回 FTS5、重排退回 Jaccard 算法打分
+  //   （后者正是区分不了「问题」和「答案」的那套）。实测日志里那条
+  //   「semantic_vec 缺失…本腿降级 FTS5」就是它。
+  // 🔴 15s 超时守护：模型首次下载可能很慢，绝不能因此卡住启动；
+  //   超时就放弃并回落到懒加载，由后续请求自行重试。
+  try {
+    const { initMemarchRuntime } = await import('./memarch-runtime.js');
+    const _v2Warmed = await Promise.race([
+      initMemarchRuntime(DATA_DIR),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 15000)),
+    ]);
+    if (_v2Warmed) {
+      console.log('  MemArch v2 运行时已预热 ✓（embedding + cross-encoder）');
+    } else {
+      console.warn('  ⚠️ MemArch v2 预热超时/失败，将按需懒加载（不影响主流程）');
+    }
+  } catch (e: any) {
+    console.warn('  ⚠️ MemArch v2 预热异常（不影响主流程）:', e?.message || e);
+  }
   // 使用与 FusionStorageAdapter 共享的 ConversationDB（三段存储③砂金库）
   conversationDB = storage.getConversationDB();
   if (conversationDB) console.log('  对话存储库已启动 ✓（共享 fusion_memory.db）');
