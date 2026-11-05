@@ -30,8 +30,16 @@ import type { Evidence } from '../types';
 const MODEL_ID = 'Xenova/bge-reranker-base';
 const CACHE_DIR = 'D:/tools/wenstar-cc/.cache/huggingface';
 const MIRROR = 'https://hf-mirror.com/';
-/** 单次推理上限；超时直接用 RRF 序（设计 §8.6 降级方案） */
-const INFER_TIMEOUT_MS = 8000;
+/**
+ * 单次推理上限。
+ *
+ * ⚠️ 8000 → 220ms：外层 `retrieval/index.ts` 用 `withTimeout(rerank_ms=200)` 包着，
+ *   超时会返回 RRF 序 —— 但**原 promise 仍在跑**，280MB 模型继续占 CPU，
+ *   下一轮检索接着排队，实测把 retrieval 阶段推到 1.5~5s。
+ *   这里把上限压到 220（略高于外层 200），超时立刻放弃并走算法打分，
+ *   让推理真正停下来。打不赢就别拖着。
+ */
+const INFER_TIMEOUT_MS = 220;
 
 /** 融合权重（设计 §8.4 默认值，全部可调） */
 const W_REL = 0.55;
@@ -83,7 +91,10 @@ export class CrossEncoderReranker {
         tf.env.remoteHost = MIRROR;
         if (!existsSync(CACHE_DIR)) console.log(`[CrossEncoder] 缓存目录将创建于 ${CACHE_DIR}`);
         tf.env.cacheDir = CACHE_DIR;
-        this.extractor = await tf.pipeline('text-classification', MODEL_ID, { quantized: true });
+        // 🔴 v4 用 dtype 取代 v2/v3 的 quantized（后者类型定义已无该字段，传了不生效）。
+        //   q8 → model_quantized.onnx(267MB)；不写则落 DEFAULT_DEVICE_DTYPE=fp32 → model.onnx(1060MB)，
+        //   fp32 权重常驻堆外即稳态 RSS 1246MB / 峰值 2756MB 的主因之一。
+        this.extractor = await tf.pipeline('text-classification', MODEL_ID, { dtype: 'q8' });
         this.status = 'ready';
         console.log(`[CrossEncoder] ${MODEL_ID} 就绪`);
       } catch (e) {
@@ -134,7 +145,7 @@ export class CrossEncoderReranker {
       void this.ensureModel();
     }
 
-    const top = candidates.slice(0, 30); // 短列表：cross-encoder 成本随条数线性增长
+    const top = candidates.slice(0, 15); // 短列表：成对推理耗时随条数线性增长，15 对是延迟与质量的平衡点
     let rel: number[] | null = null;
     if (this.status === 'ready') {
       try {
