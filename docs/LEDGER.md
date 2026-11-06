@@ -325,6 +325,29 @@ v10 迁移的整段替换根本没有落盘。
 **正确顺序**：跑 `harness_run_flow` 拿令牌 → 改文件 → 立即 `grep` 核验 → commit 消费令牌。
 令牌是**一个文件一次写入**，多文件需分别签发；签发到 commit 之间不得再动该文件。
 
+### §6.9 2026-11-07 存储底座迁移（sql.js → better-sqlite3）
+
+**问题**：sql.js 整库导出（126.5MB/次、1854~5155ms、同步阻塞主线程）导致 MemArch v2 召回腿全部超时、
+切流恒返 0；同时为它堆了四套 flush 机制与多条补丁。
+
+**处置**：业主批准「一次性做完、彻底治本」，并明确同意推翻 REDLINE 两条
+（`scheduleFlush` 不可移除 / `export()` 必须保持）。落地见 [ADR-017](adr/ADR-017-20261107-存储底座迁移better-sqlite3.md)。
+
+**关键实施事实（供后续排查）**：
+1. **换引擎不换 API**：651 处 `writeRaw/queryAll` 与业务逻辑零改动，兼容壳 `SqlJsCompat` 吸收全部语义差异。
+2. **三处语义差异必须对齐**：`exec()` 返回形态、多语句 DDL、**外键默认值（better-sqlite3 默认 ON，sql.js 默认 OFF）**。
+   第三处若不显式关闭，实测出现 `FOREIGN KEY constraint failed`。
+3. **WAL 引入文件级语义**：主库被删但 `-wal` 残留时，旧 WAL 会被重放进新建空库 ⇒ UNIQUE 冲突/旧行复活。
+   兼容层已内置孤儿 WAL 清理；测试与备份脚本必须「先 close 再删/拷」。
+4. **原生驱动持有 OS 文件句柄**：Windows 上不 close 就删库会静默失败（测试里表现为下个用例 UNIQUE 冲突）。
+
+**已知债务**：
+- 离线工具（`migrate-entity-relations.ts` / `scan-knowledge-intimate.ts` / `MigrationManager` 离线分支）
+  仍用 sql.js，**必须在服务停止时运行**（迁移前既有约束，未扩大）。
+- `server-memarch-bridge-routes.ts` 历史注释待顺手更新。
+
+**计划处理**：离线工具在下次触碰时迁移；其余无待办。
+
 ---
 
 ## 相关文档

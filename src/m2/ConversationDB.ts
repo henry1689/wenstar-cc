@@ -1,15 +1,18 @@
 /**
  * ConversationDB — P0-9 对话独立存储库（已合入 fusion_memory.db）
  *
- * v2.0: 构造函数接受 existingDb 参数，共享 sql.js 实例而非独立文件。
- * 保留独立文件模式向后兼容。flush 在共享模式下为空操作
- *（由 SQLiteAdapter 统一落盘管理）。
+ * v2.0: 构造函数接受 existingDb 参数，与 SQLiteAdapter 共享同一连接而非独立文件。
+ * 保留独立文件模式向后兼容。
+ *
+ * 🔴 2026-11-06 存储底座迁移：底层换 better-sqlite3（经 SqlJsCompat），写即落盘 ——
+ *   原先「共享模式委托 owner 统一 export / 独立模式 150ms 防抖 export」整套落盘逻辑已删除。
  */
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 // C3(2026-09-11): 实体名序列化收口到 EntityNameCodec（唯一事实源）
 import { formatNames } from './EntityNameCodec.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SqlJsCompat } from './SqlJsCompat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -134,22 +137,13 @@ export class ConversationDB {
   private dbPath: string;
   private initialized = false;
   private sharedMode = false;
-  /** C4: 共享模式下，把落盘委托给共享 db 的 owner（SQLiteAdapter），避免重复 export 同一 96MB 库 */
-  private _flushCoordinator: (() => void) | null = null;
-  /** C4: 独立模式的防抖落盘状态 */
-  private _flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private _dirty = false;
-  private readonly _FLUSH_INTERVAL = 150;
 
-  constructor(dbPath?: string, existingDb?: any, flushCoordinator?: () => void) {
+  constructor(dbPath?: string, existingDb?: any) {
     if (existingDb) {
-      this.db = existingDb;        // 共享 fusion_memory.db 实例
+      this.db = existingDb;        // 与 SQLiteAdapter 共享同一连接
       this.sharedMode = true;
       this.initialized = true;
-      // C4: 共享模式下仍需知道真实路径以便独立落盘兜底
       this.dbPath = dbPath || DEFAULT_DB_PATH;
-      // C4: 委托给 owner 统一落盘（未提供则回退独立防抖落盘，仍然正确只是可能重复 export）
-      this._flushCoordinator = flushCoordinator || null;
       return;
     }
     this.dbPath = dbPath || DEFAULT_DB_PATH;
@@ -163,18 +157,12 @@ export class ConversationDB {
       }
       return;
     }
-    const initSqlJs = (await import('sql.js')).default;
-    const SQL = await initSqlJs();
 
     const dir = dirname(this.dbPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    if (existsSync(this.dbPath)) {
-      const buf = readFileSync(this.dbPath);
-      this.db = new SQL.Database(buf);
-    } else {
-      this.db = new SQL.Database();
-    }
+    // 🔴 2026-11-06 迁移：独立模式同样用 SqlJsCompat（better-sqlite3）直接打开文件
+    this.db = new SqlJsCompat(this.dbPath);
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS conversations (
@@ -301,18 +289,13 @@ export class ConversationDB {
     // 而 rebuildAllIndexes 用的是 `SELECT id ... String(id)` —— 口径不一致导致
     // search_index.source_id 越过 conversations.id 上限（实测 18121 条）。
     //
-    // ⚠️ P1(S4 独立评审发现并实证): rowid 必须在 scheduleFlush() **之前**读取。
-    // 共享模式下 scheduleFlush() 会同步委托 SQLiteAdapter.save()，累计到 _FLUSH_BATCH 时
-    // 同步 flushNow() → db.export()；而 sql.js 的 export() 会关闭并重开连接，
-    // last_insert_rowid() 是**连接级**状态 → 重开后恒为 0（已实测: export 前=1、后=0）。
-    // 若先 flush 再取，约每 _FLUSH_BATCH 次写入就静默降级为 seqPos，D5 缺陷当场复活。
+    // 🔴 2026-11-06 迁移：better-sqlite3 始终在同一连接上执行，last_insert_rowid() 不再因
+    //   整库导出（sql.js export() 会关闭并重开连接）而清零 ——
+    //   原「rowid 必须早于 flush 读取」的陷阱随导出机制一并消失。
     let _rid = 0;
     try {
       _rid = Number(this.queryAll('SELECT last_insert_rowid() AS id')?.[0]?.id);
     } catch { /* 降级为 seqPos */ }
-
-    // C4: 触发防抖落盘（共享模式委托 owner；独立模式 150ms 合并落盘），防止用户/助手消息因崩溃丢失
-    this.scheduleFlush();
 
     if (Number.isFinite(_rid) && _rid > 0) return _rid;
     // 降级必须可见：seqPos 与自增主键是两套序列，跨写入点混用会让 id 口径分叉。
@@ -428,8 +411,6 @@ export class ConversationDB {
     // 兼容 writeRaw(sql, a, b) 与 writeRaw(sql, [a, b])：单个数组参数展开为绑定值列表
     const bind = (params.length === 1 && Array.isArray(params[0])) ? params[0] : params;
     this.db.run(sql, bind.length > 0 ? bind : undefined);
-    // C4: 关键写入触发防抖落盘（对话组回填等）
-    this.scheduleFlush();
   }
 
   queryAll(sql: string, params?: any[]): any[] {
@@ -442,71 +423,15 @@ export class ConversationDB {
     return rows;
   }
 
-  /** P0-3: 关闭前安全落盘（清定时器 + 强制落盘，不关闭共享 db） */
-  shutdownFlush(): void {
-    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
-    if (!this.db) return;
-    if (this.sharedMode) {
-      // 共享 db：落盘后不关闭数据库（owner 负责关闭）
-      try {
-        writeFileSync(this.dbPath, Buffer.from(this.db.export()));
-      } catch (err) {
-        console.error('[ConversationDB] shutdownFlush 落盘失败:', err);
-      }
-      return;
-    }
-    // 独立模式：落盘
-    try {
-      writeFileSync(this.dbPath, Buffer.from(this.db.export()));
-    } catch (err) {
-      console.error('[ConversationDB] shutdownFlush 落盘失败:', err);
-    }
-  }
-
+  /**
+   * 关闭会话库。
+   * 🔴 2026-11-06 迁移：共享模式下连接归 SQLiteAdapter 所有 —— 这里只解除引用，绝不 close；
+   *   独立模式由本类持有连接，close 时 SqlJsCompat 会先 wal_checkpoint(TRUNCATE)。
+   */
   close(): void {
     if (!this.db) return;
-    if (this.sharedMode) {
-      // C4: 共享 db 由 owner(SQLiteAdapter) 负责关闭；这里同步 export 一次作为兜底，
-      // 保证无论 owner 关闭顺序如何，最新的对话写入都已落盘，绝不 close 共享实例
-      try {
-        writeFileSync(this.dbPath, Buffer.from(this.db.export()));
-      } catch (err) {
-        console.error('[ConversationDB] 关闭落盘失败:', err);
-      }
-      this.db = null;
-      return;
-    }
-    // 独立模式：同步落盘后关闭
-    this.flushNow();
-    this.db.close();
+    if (!this.sharedMode) this.db.close();
     this.db = null;
-  }
-
-  /**
-   * C4: 防抖落盘调度。
-   * - 共享模式：委托 owner(SQLiteAdapter) 统一 export，避免两个类各自 export 同一 96MB 库
-   * - 独立模式：150ms 内的写入合并为一次 export（崩溃窗口 ~150ms）
-   */
-  private scheduleFlush(): void {
-    if (this._flushCoordinator) { this._flushCoordinator(); return; }
-    if (!this.db) return;
-    this._dirty = true;
-    if (!this._flushTimer) {
-      this._flushTimer = setTimeout(() => this.flushNow(), this._FLUSH_INTERVAL);
-    }
-  }
-
-  /** 独立模式立即落盘（共享模式由 owner 负责，此处不导出共享库） */
-  private flushNow(): void {
-    if (!this.db || this.sharedMode || !this._dirty) return;
-    try {
-      const data = this.db.export();
-      writeFileSync(this.dbPath, Buffer.from(data));
-      this._dirty = false;
-    } catch (err) {
-      console.error('[ConversationDB] 落盘失败:', err);
-    }
-    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
   }
 
   private ensureReady(): void {

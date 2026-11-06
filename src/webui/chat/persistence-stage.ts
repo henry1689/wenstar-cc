@@ -553,7 +553,7 @@ export async function persistConversation(input: PersistInput): Promise<void> {
         console.warn('[DualHelix] 写入失败 (将在下次定时重试):', dhResult.error);
       }
     } catch (e) { console.warn('[DualHelix] 写入跳过:', (e as Error).message); }
-    try { dhsqlite.flushNow?.(); } catch { /* flush optional */ }
+    // 🔴 2026-11-06 迁移：better-sqlite3 写即落盘，原先的 flushNow() 兜底调用已无对应实现。
   }
 
   // ── Step 3.6: Transcoder 序列化验证 (蓝皮书 §8.3, P4 前置) ──

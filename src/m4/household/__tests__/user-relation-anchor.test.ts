@@ -31,9 +31,15 @@ const HER = 't-xsy';
 const HER_UUID = 'TXS-T-XSY';
 const DAD = 't-xdw';
 
+/** 上一个用例的实例 —— 原生驱动持有文件句柄，必须先 close 才能删库（2026-11-06 迁移） */
+let _lastFg: any = null;
+
 async function freshFg(): Promise<any> {
+  try { _lastFg?.close(); } catch { /* 已关闭 */ }
+  _lastFg = null;
   try { if (existsSync(DB)) rmSync(DB); } catch { /* 清理失败不阻塞 */ }
   const fg: any = new FamilyGraph(DB);
+  _lastFg = fg;
   await fg.initialize();
   // 用户锚点节点（正常路径由 _ensureSelfNode 建；测试里兜底建一次，保证锚点确定存在）
   if (!fg.getUserNodeId()) {
@@ -80,7 +86,12 @@ const HER_PROPS = {
 
 describe('[A2] 「与用户的关系」只认用户那一条边', () => {
   beforeEach(() => { try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
-  afterEach(() => { try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
+  afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄，必须先 close 才能删库
+    try { _lastFg?.close(); } catch { /* 已关闭 */ }
+    _lastFg = null;
+    try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ }
+  });
 
   it('🔴 核心回归：与父亲的 child_of 边不得被渲染成「与鸿艺的关系」', async () => {
     const fg = await freshFg();
@@ -147,7 +158,12 @@ describe('[A2] 「与用户的关系」只认用户那一条边', () => {
 
 describe('[A2] 热力只写「实体 ↔ 用户」的关系边', () => {
   beforeEach(() => { try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
-  afterEach(() => { try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
+  afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄，必须先 close 才能删库
+    try { _lastFg?.close(); } catch { /* 已关闭 */ }
+    _lastFg = null;
+    try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ }
+  });
 
   it('🔴 核心回归：互动不得被写到父女边上（原 edges[0] 盲取）', async () => {
     const fg = await freshFg();

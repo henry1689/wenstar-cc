@@ -16,7 +16,7 @@
  *   与迁移强相关的断言用运行时守卫，迁移落地后自动激活。
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ROOT = process.cwd();
@@ -36,15 +36,21 @@ const adapterSrc = read(ADAPTER);
  * 「backfill 用 better-sqlite3 写盘却被 sql.js 内存态覆盖」），裸匹配会
  * 在迁移**之前**就误判为已迁移，导致断言全红、S5 失败。
  */
+// 🔴 2026-11-06 迁移落地后的实现形态：SQLiteAdapter 经 SqlJsCompat 接入 better-sqlite3，
+//   不再直接 import 原生包 —— 故判据改为「适配器引用 SqlJsCompat」+「兼容层 import better-sqlite3」。
+const COMPAT = 'src/m2/SqlJsCompat.ts';
+const compatSrc = existsSync(resolve(ROOT, COMPAT)) ? read(COMPAT) : '';
 const migrated =
-  /^\s*import[^;'"]*from\s*['"]better-sqlite3['"]/m.test(adapterSrc) ||
-  /require\(\s*['"]better-sqlite3['"]\s*\)/.test(adapterSrc);
+  /from\s*['"]\.\/SqlJsCompat\.js['"]/.test(adapterSrc) &&
+  /from\s*['"]better-sqlite3['"]/.test(compatSrc);
 const mi = migrated ? it : it.skip; // 迁移落地后自动激活
 
 describe('[方案甲] 与迁移无关的恒真不变量（两个阶段都跑）', () => {
   it('🔴 SQLiteAdapter 必须仍是唯一持久写入通道（对外 API 不得削减）', () => {
     const src = adapterSrc;
-    for (const api of ['writeRaw', 'queryAll', 'save', 'scheduleFlush']) {
+    // 🔴 2026-11-06 迁移后：save/scheduleFlush 随整库导出机制一并删除（写即落盘），
+    //   对外写入/查询契约不变，关闭走 close()。
+    for (const api of ['writeRaw', 'queryAll', 'close', 'getDb']) {
       expect(src, `SQLiteAdapter 必须保留 ${api}`).toContain(api);
     }
   });
@@ -62,8 +68,10 @@ describe('[方案甲] 与迁移无关的恒真不变量（两个阶段都跑）'
 });
 
 describe('[方案甲] 迁移后必须成立（迁移落地后自动激活）', () => {
-  mi('🔴 SQLiteAdapter 已换 better-sqlite3（不再 initSqlJs）', () => {
-    expect(adapterSrc).toContain('better-sqlite3');
+  mi('🔴 SQLiteAdapter 已换 better-sqlite3（经 SqlJsCompat，不再 initSqlJs）', () => {
+    expect(readCode(ADAPTER)).not.toMatch(/initSqlJs/);
+    expect(adapterSrc).toMatch(/from\s*['"]\.\/SqlJsCompat\.js['"]/);
+    expect(compatSrc).toMatch(/from\s*['"]better-sqlite3['"]/);
   });
 
   mi('🔴 主库已无 `db.export()` —— 全量导出彻底移除', () => {

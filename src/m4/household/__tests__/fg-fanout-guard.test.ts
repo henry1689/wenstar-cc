@@ -159,8 +159,9 @@ describe('[V30] 扇出已消除（迁移落地后自动激活）', () => {
   li('🔴 读时计算方法带缓存失效（批量加载 60 份档案不得退化为 60 次全表算）', () => {
     expect(fgCode).toMatch(/_householdCache/);
     expect(fgCode).toMatch(/_socialGroupCache/);
-    // 缓存必须挂在 markDirty 上失效（与既有 _familyCache 同一处）
-    const md = fgCode.indexOf('private markDirty(');
+    // 缓存必须挂在缓存失效入口上失效（2026-11-06 迁移：markDirty → invalidateCaches，
+    // 因落盘职责随 better-sqlite3 迁移删除，该方法只剩缓存失效语义）
+    const md = fgCode.indexOf('private invalidateCaches(');
     expect(md).toBeGreaterThan(-1);
     const scope = fgCode.slice(md, md + 900);
     expect(scope).toMatch(/_householdCache\s*=\s*null/);

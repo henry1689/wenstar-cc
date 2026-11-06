@@ -26,11 +26,11 @@
  * 日期: 2026-06-02  |  V4.0 归入户籍管理体系: 2026-07-18
  */
 
-// @ts-ignore - sql.js ships its own types via dist/sql-wasm.js
-import initSqlJs from 'sql.js';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { promises as fsp } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
+// 🔴 2026-11-06 存储底座迁移：sql.js → better-sqlite3（经 SqlJsCompat 兼容壳）。
+//   原 FG 落盘 = db.export() 整库 42.4MB 覆盖写（实测 integrateFG 4–8s 尖峰）；
+//   原生驱动写即落盘，这套机制整体删除。
+import { SqlJsCompat } from '../../m2/SqlJsCompat.js';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EntityGene } from '../../m1/types/dna.js';
@@ -757,9 +757,6 @@ export class FamilyGraph implements FamilyGraphInterface {
   private db: any | null = null;
   private dbPath: string;
   private userNodeId: string | null = null;
-  /** P4: 批量落盘 — 减少IO */
-  private _dirty = false;
-  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private ready = false;
   /** 🛡️ 隐私 — 仅调试模式输出人名/关系到日志 */
   private _verbose = false;
@@ -769,18 +766,13 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   async initialize(): Promise<void> {
-    const SQL = await initSqlJs();
     const dir = dirname(this.dbPath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
 
-    if (existsSync(this.dbPath)) {
-      const buffer = readFileSync(this.dbPath);
-      this.db = new SQL.Database(buffer);
-    } else {
-      this.db = new SQL.Database();
-    }
+    // 🔴 2026-11-06 迁移：直接打开磁盘文件（不再整库载入 WASM 内存）
+    this.db = new SqlJsCompat(this.dbPath);
 
     this.run(`
       CREATE TABLE IF NOT EXISTS nodes (
@@ -844,7 +836,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_social_genes ON nodes(social_group_genes)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
     try { this.run('CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)'); } catch (e) { console.warn(`[FamilyGraph] 操作失败`, (e as Error)?.message || e); }
 
-    this.markDirty();
+    this.invalidateCaches();
     this.ready = true;
 
     this._ensureSelfNode();
@@ -966,7 +958,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
       this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
         [JSON.stringify(updatedProps), new Date().toISOString(), existing[0].id]);
-      this.markDirty(true);
+      this.invalidateCaches();
 
       // 🛡️ 玉瑶的 category 必须是 S (Self)，不是 A
       const currentCat = this.query('SELECT category FROM nodes WHERE id = ?', [existing[0].id]);
@@ -1548,7 +1540,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     } catch { /* 缓存归一失败不阻塞 */ }
 
-    this.markDirty();
+    this.invalidateCaches();
     console.log(
       `[FamilyGraph] V6 迁移·用户边关系归一: ${USER_EDGE_REPAIR_ENTITY} 删互斥边 ${conflicts.length} 条 / ` +
       `建正确边 ${created} 条（${USER_EDGE_REPAIR_KEEP.join('、')}）/ 复制互动 ${carriedIx.length} 条` +
@@ -1897,7 +1889,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       const after = (this.query('SELECT COUNT(*) as c FROM edges') as Array<{ c: number }>)[0]?.c ?? 0;
       const deleted = before - after;
       if (deleted > 0) {
-        this.markDirty(true);
+        this.invalidateCaches();
         console.log('[FG SelfHeal] 清理 void 参与边: ' + deleted + ' 条');
       }
       return deleted;
@@ -2332,7 +2324,7 @@ export class FamilyGraph implements FamilyGraphInterface {
           'UPDATE nodes SET id = ?, aliases = ?, properties = ?, updated_at = ? WHERE id = ?',
           [targetId, JSON.stringify(aliases), JSON.stringify(mergedProps), new Date().toISOString(), existing.id]
         );
-        this.markDirty(true);
+        this.invalidateCaches();
         return;
       }
     }
@@ -2358,7 +2350,7 @@ export class FamilyGraph implements FamilyGraphInterface {
         new Date().toISOString(),
       ]
     );
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -2445,7 +2437,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     //   单次 addEdge 14.4~16.1 秒，101 次合计 1180 秒，占 FG 总耗时 92%）。
     //   名单可随时从图谱算出 ⇒ 改由读取方 `householdOf` / `socialGroupsOf` 现算。
     //   删掉这个 await 后 `_addEdgeInner` **不再含任何 await**，建边变成纯同步微秒级。
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /** V3.3: 建边时自动同步 family_gene / social_group_genes */
@@ -2793,7 +2785,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       new Date().toISOString(),
       nodeId,
     ]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   private dedupePendingItems(items: PendingItem[]): PendingItem[] {
@@ -3041,7 +3033,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     this.run('DELETE FROM nodes WHERE id = ?', [sourceNode.id]);
     if (this.userNodeId === sourceNode.id) this.userNodeId = SELF_NODE_ID;
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -3206,7 +3198,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
     // 🔵 批12(P2-8): 循环结束后统一落盘一次，避免每个候选名一次整库写
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -3399,7 +3391,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
 
-    if (promoted || annotated) this.markDirty(true);
+    if (promoted || annotated) this.invalidateCaches();
     return { promoted, annotated };
   }
 
@@ -3743,7 +3735,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
 
     // 🛡️ P2-4: 边关系变更后立即落盘，避免崩溃窗口
-    this.markDirty(true);
+    this.invalidateCaches();
 
     this._ensureSelfNode();
   }
@@ -4036,7 +4028,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(merged), new Date().toISOString(), nodes[0].id]);
     // 🛡️ P2-4: 节点属性变更立即落盘
-    this.markDirty(true);
+    this.invalidateCaches();
 
     this._ensureSelfNode();
   }
@@ -4184,147 +4176,31 @@ export class FamilyGraph implements FamilyGraphInterface {
     return results;
   }
 
-  /** 标记脏数据（500ms聚合落盘，平衡IO与可靠性） */
-  /**
-   * 🔴 2026-09-23 FG 落盘重构（已实测定位为 M4 剩余卡点）：
-   *   原实现 `markDirty(true)` ⇒ 每次变更都 **`db.export()` 42.4MB + 同步 `writeFileSync`** ✗
-   *   ⇒ 一轮对话多次全量导出+同步写 = 实测 `integrateFG` 6.4s（且阻塞事件循环），
-   *   且**无原子写/无空库守卫**（写中途失败会留下截断的 FG 库 ✗ = 数据安全隐患）。
-   *   修法与主库（SQLiteAdapter）同构：**异步 + 原子替换（tmp→fsync→rename）+ 合并并发 + 写入代次**。
-   */
-  private _flushing = false;
-  private _flushPending = false;
-  private _writeSeq = 0;
-  /**
-   * 🔴 2026-09-23 FG “立即落盘”的**最小间隔**。
-   *   背景：`markDirty(true)` 被 ~20 处变更调用，每次触发 `db.export()`（42MB，**同步、耗时 0.4–3.1s**）
-   *   ⇒ 一轮对话多次全量导出 = 实测 `integrateFG` 4–8s 尖峰（M4 倒数第一个卡点）。
-   *   与主库同思路（用户已批准的 60s 防抖窗口）：60s 内的“立即落盘”退化为防抖。
-   */
-  private readonly _IMMEDIATE_MIN_INTERVAL_MS = Number(process.env.FG_FLUSH_MIN_INTERVAL_MS) || 60_000;
-  private _lastFlushAt = 0;
   /** 🔴 2026-09-23（A 诊断）：本轮 integrateFromEntity 的子阶段耗时明细（仅诊断，每轮清空） */
   private _stageTimes: Array<[string, number]> = [];
 
-  private markDirty(immediate = false): void {
-    this._dirty = true;
+  /**
+   * 使读缓存失效。
+   * 🔴 2026-11-06 存储底座迁移：本方法原为 markDirty(immediate) —— 除清缓存外还负责
+   *   「脏标记 + 60s 地板 + db.export() 42.4MB 覆盖写」（实测 integrateFG 4–8s 尖峰）。
+   *   better-sqlite3 写即落盘后，落盘职责整体消失，只保留缓存失效语义。
+   */
+  private invalidateCaches(): void {
     this._familyCache = null;
     this._socialCache = null;
     // 🔵 V30 甲：读时计算结果同样挂既有失效钩子失效
     //   （批量加载 60 份档案期间无写入 ⇒ 缓存保持温暖，不退化为 60 次全组算）
     this._householdCache = null;
     this._socialGroupCache = null;
-    if (immediate) {
-      // 🔴 时间地板：60s 内的“立即落盘”退化为防抖（避免一轮对话多次 42MB 同步导出）
-      if (Date.now() - this._lastFlushAt >= this._IMMEDIATE_MIN_INTERVAL_MS) {
-        void this.flushAsync();
-        return;
-      }
-      if (!this._saveTimer) {
-        this._saveTimer = setTimeout(() => void this.flushAsync(), 500);
-      }
-      return;
-    }
-    if (!this._saveTimer) {
-      this._saveTimer = setTimeout(() => void this.flushAsync(), 500);
-    }
   }
 
-  /** 🔴 异步落盘（不阻塞事件循环）+ 原子替换 + 并发合并（N 次变更 ⇒ 1 次导出） */
-  private async flushAsync(): Promise<void> {
-    if (!this._dirty || !this.db) return;
-    if (this._flushing) { this._flushPending = true; return; }
-    this._flushing = true;
-    let wrote = false;
-    let deferred = false; // 🔴 地板拦截（已安排好延后重试）⇒ finally 不得清掉该定时器
-    try {
-      // 🔴 2026-09-23：**必须先让出事件循环再 export**。
-      //   `db.export()`（42MB）是**同步**的，若写在 await 之前，它仍会在**调用方的同步栈**上执行
-      //   ⇒ 每个 markDirty(true) 都真真实实阻塞一次（实测：修改后 integrateFG **仍有 7.9s 尖峰**）。
-      //   先 setImmediate 让出，使导出发生在后续 tick；且导出前重查 _dirty —— 同一轮的 N 次变更
-      //   被合并为 **1 次**导出（后续调用因 _dirty=false 直接返回）。
-      await new Promise((r) => setImmediate(r));
-      if (!this._dirty || !this.db) return;
-      // 🔴 统一地板：无论“立即”还是防抖路径，60s 内只允许一次 42MB 全量导出。
-      //   实测教训：只给 immediate 加地板时，防抖路径（500ms）仍会一轮多次导出
-      //   ⇒ 单轮 7 次导出 ≈ 4397ms 尖峰（M4·timing 实测）。
-      const _sinceLast = Date.now() - this._lastFlushAt;
-      if (_sinceLast < this._IMMEDIATE_MIN_INTERVAL_MS) {
-        deferred = true;
-        if (!this._saveTimer) {
-          this._saveTimer = setTimeout(() => {
-            this._saveTimer = null;
-            void this.flushAsync();
-          }, this._IMMEDIATE_MIN_INTERVAL_MS - _sinceLast + 50);
-        }
-        return;
-      }
-      const t0 = Date.now();
-      const data = this.db.export();
-      const _mySeq = ++this._writeSeq;
-      const tmp = `${this.dbPath}.tmp-${process.pid}`;
-      let fh: FileHandle | null = null;
-      try {
-        fh = await fsp.open(tmp, 'w');
-        await fh.write(Buffer.from(data));
-        await fh.sync(); // 强制刷盘，避免 rename 后内容仍在页缓存
-      } finally {
-        if (fh) { try { await fh.close(); } catch { /* ignore */ } }
-      }
-      if (_mySeq !== this._writeSeq) {
-        // 期间有更新的同步落盘（如 close()）⇒ 放弃本次 rename，防止旧内容覆盖新内容
-        try { await fsp.unlink(tmp); } catch { /* ignore */ }
-      } else {
-        await fsp.rename(tmp, this.dbPath);
-        wrote = true;
-      }
-      const dt = Date.now() - t0;
-      if (dt > 300) console.log(`[FamilyGraph] 异步落盘 ${(data.length / 1048576).toFixed(1)}MB 用时 ${dt}ms（原为同步阻塞）`);
-    } catch (err) {
-      console.error('[FamilyGraph] 异步落盘失败（保留脏标记待重试）:', (err as Error)?.message);
-    } finally {
-      this._flushing = false;
-      if (this._saveTimer && !deferred) { clearTimeout(this._saveTimer); this._saveTimer = null; }
-      if (this._flushPending) { this._flushPending = false; void this.flushAsync(); }
-    }
-    if (wrote) { this._dirty = false; this._lastFlushAt = Date.now(); }
-  }
-
-  /** P4: **同步**强制落盘（仅供 close/关闭前等需要“确定已落盘”的场景） */
-  private flush(): void {
-    if (!this._dirty || !this.db) return;
-    try {
-      this._writeSeq++; // 登记代次：让在途的异步旧写入放弃 rename
-      const data = this.db.export();
-      const buffer = Buffer.from(data);
-      writeFileSync(this.dbPath, buffer);
-      this._dirty = false;
-    } catch (err) {
-      console.error('[FamilyGraph] 落盘失败:', err);
-    }
-    if (this._saveTimer) {
-      clearTimeout(this._saveTimer);
-      this._saveTimer = null;
-    }
-  }
-
-  /** 关闭数据库连接，释放 WASM 内存。调用后此实例不可再用。 */
+  /** 关闭数据库连接。调用后此实例不可再用。 */
   close(): void {
-    if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; }
-    if (this._dirty && this.db) {
-      try {
-        this._writeSeq++; // 代次：阻止在途异步写入回写旧内容
-        const data = this.db.export();
-        writeFileSync(this.dbPath, Buffer.from(data));
-      } catch (err) { console.error('[FamilyGraph] 关闭前落盘失败:', err); }
+    if (this.db) {
+      this.db.close(); // SqlJsCompat.close() 内部先 wal_checkpoint(TRUNCATE) 再关闭
+      this.db = undefined as any;
     }
-    if (this.db) { this.db.close(); this.db = undefined as any; }
     this.ready = false;
-  }
-
-  /** P4: 显式触发落盘（关闭前调用） */
-  async flushAll(): Promise<void> {
-    this.flush();
   }
 
   // ═══════════════════════════════════════════════════
@@ -4815,7 +4691,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(merged), new Date().toISOString(), node.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -4902,7 +4778,7 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), node.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -5033,7 +4909,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.dossier = dossier;
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), nodes[0].id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /**
@@ -5064,7 +4940,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       } catch { errors++; }
     }
     if (migrated > 0) {
-      this.markDirty(true);
+      this.invalidateCaches();
       if (errors > 0) console.warn(`[FamilyGraph] dossier 迁移: ${migrated} 人升级, ${errors} 错误`);
       else console.log(`[FamilyGraph] dossier 迁移: ${migrated} 人升级`);
     }
@@ -5096,7 +4972,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(parsed), new Date().toISOString(), node.id]);
     // 🛡️ P2-4: 人物档案变更立即落盘
-    this.markDirty(true);
+    this.invalidateCaches();
 
     this._ensureSelfNode();
   }
@@ -5159,7 +5035,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), node.id]);
     // 🛡️ P2-4: 冲突解决是用户手动操作，立即落盘
-    this.markDirty(true);
+    this.invalidateCaches();
     console.log(`[FamilyGraph] 冲突解决: ${personName} ${field} → ${resolution}`);
   }
 
@@ -5184,7 +5060,7 @@ export class FamilyGraph implements FamilyGraphInterface {
         }
       } catch { /* skip */ }
     }
-    if (total > 0) { this.markDirty(); console.log(`[FamilyGraph] 清理 ${total} 条过期 pending`); }
+    if (total > 0) { this.invalidateCaches(); console.log(`[FamilyGraph] 清理 ${total} 条过期 pending`); }
     return total;
   }
 
@@ -5292,7 +5168,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       } catch { /* skip */ }
     }
     if (enriched > 0) {
-      this.markDirty();
+      this.invalidateCaches();
       console.log(`[FamilyGraph] 档案骨架建立: ${enriched} 人`);
     }
     return { total: all.length, enriched, details };
@@ -5765,7 +5641,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
 
     if (completed > 0) {
-      this.markDirty(true);
+      this.invalidateCaches();
       if (errors > 0) console.warn(`[FamilyGraph] 反向边补全: ${completed} 条新增, ${errors} 错误`);
       else console.log(`[FamilyGraph] 反向边补全: ${completed} 条新增`);
     }
@@ -6411,16 +6287,18 @@ export class FamilyGraph implements FamilyGraphInterface {
    * 恢复前自动备份当前版本，恢复后自行校验完整性
    */
   async restoreFromBackup(backupPath: string): Promise<{ success: boolean; error?: string; preBackupPath?: string; verified: boolean }> {
-    const { existsSync, copyFileSync, writeFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
+    const { existsSync, copyFileSync, unlinkSync } = await import('node:fs');
 
-    // 1. 自动备份当前版本
+    // 1. 自动备份当前版本：先 close() 触发 wal_checkpoint(TRUNCATE)，
+    //    保证 .db 是自包含最新数据的完整单文件，再文件级复制。
     const preBackupPath = this.dbPath + '.pre-restore.' + Date.now() + '.bak';
     try {
-      const currentData = this.db!.export();
-      writeFileSync(preBackupPath, Buffer.from(currentData));
+      this.db?.close();
+      copyFileSync(this.dbPath, preBackupPath);
     } catch (e) {
       return { success: false, error: `当前版本备份失败: ${e}`, preBackupPath, verified: false };
+    } finally {
+      this.db = new SqlJsCompat(this.dbPath); // 无论成败都重开，避免实例停留在已关闭状态
     }
 
     // 2. 检查备份文件
@@ -6428,18 +6306,17 @@ export class FamilyGraph implements FamilyGraphInterface {
       return { success: false, error: '备份文件不存在', preBackupPath, verified: false };
     }
 
-    // 3. 验证备份文件可读性
+    // 3. 验证备份文件可读性（只读连接，不整库载入内存）
     try {
-      const SQL = await initSqlJs();
-      const backupData = await import('node:fs').then(fs => fs.readFileSync(backupPath));
-      const testDb = new SQL.Database(backupData);
-      const nodes = testDb.exec('SELECT COUNT(*) as cnt FROM nodes');
-      const edges = testDb.exec('SELECT COUNT(*) as cnt FROM edges');
-      const nodeCnt = nodes[0]?.values[0]?.[0] || 0;
-      const edgeCnt = edges[0]?.values[0]?.[0] || 0;
-      testDb.close();
-      if (nodeCnt === 0) {
-        return { success: false, error: '备份文件无效（nodes 表为空）', preBackupPath, verified: false };
+      const testDb = new SqlJsCompat(backupPath, { readonly: true, fileMustExist: true });
+      try {
+        const nodes = testDb.exec('SELECT COUNT(*) as cnt FROM nodes');
+        const nodeCnt = nodes[0]?.values[0]?.[0] || 0;
+        if (nodeCnt === 0) {
+          return { success: false, error: '备份文件无效（nodes 表为空）', preBackupPath, verified: false };
+        }
+      } finally {
+        testDb.close();
       }
     } catch (e) {
       return { success: false, error: `备份文件不可读: ${e}`, preBackupPath, verified: false };
@@ -6447,11 +6324,13 @@ export class FamilyGraph implements FamilyGraphInterface {
 
     // 4. 替换当前库
     try {
+      this.db?.close();
+      // 清掉残留的 -wal/-shm：否则旧 WAL 可能在下次打开时覆盖刚复制进来的新库
+      for (const suffix of ['-wal', '-shm']) {
+        try { unlinkSync(this.dbPath + suffix); } catch { /* 不存在 */ }
+      }
       copyFileSync(backupPath, this.dbPath);
-      // 重新加载
-      const SQL = await initSqlJs();
-      const buffer = await import('node:fs').then(fs => fs.readFileSync(this.dbPath));
-      this.db = new SQL.Database(buffer);
+      this.db = new SqlJsCompat(this.dbPath);
       console.log(`[FamilyGraph] 已从备份恢复: ${backupPath}`);
     } catch (e) {
       return { success: false, error: `恢复失败: ${e}`, preBackupPath, verified: false };
@@ -6606,7 +6485,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
     if (cleaned > 0) {
       console.log(`[FamilyGraph] 清洗 ${cleaned} 个脏节点`);
-      this.markDirty(true);
+      this.invalidateCaches();
     }
     return cleaned;
   }
@@ -7150,7 +7029,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (orphanEdgeCount > 0) {
       // 清理孤儿边
       this.run("DELETE FROM edges WHERE source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)");
-      this.markDirty(true);
+      this.invalidateCaches();
     }
     checks.push({ name: '无孤儿边', passed: orphanEdgeCount === 0, detail: orphanEdgeCount > 0 ? `已清理${orphanEdgeCount}条` : '通过' });
     if (orphanEdgeCount > 0) errors.push(`${orphanEdgeCount} 条孤儿边已自动清理`);
@@ -7214,7 +7093,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.circle_locked = manual ? true : (props.circle_locked || false);
     this.run('UPDATE nodes SET circle_level = ?, properties = ?, updated_at = ? WHERE id = ?',
       [level, JSON.stringify(props), new Date().toISOString(), nodes[0].id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /** 获取人物圈层级别 */
@@ -7269,8 +7148,7 @@ export class FamilyGraph implements FamilyGraphInterface {
       this.run('UPDATE nodes SET circle_level = ? WHERE name = ? AND type = ?', [level, p.name, 'person']);
       assigned++;
     }
-    this.markDirty(true);
-    this.flush();
+    this.invalidateCaches();
     return { assigned, locked };
   }
 
@@ -7293,7 +7171,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.weights = current;
     this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), edge.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   getRelationWeights(sourceName: string, targetName: string): RelationWeights | null {
@@ -7311,7 +7189,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.weights = w;
     this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), edge.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   unlockWeight(sourceName: string, targetName: string, field: string): void {
@@ -7323,7 +7201,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.weights = w;
     this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), edge.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /** 每轮对话增量更新互动频次 */
@@ -7337,7 +7215,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.weights = w;
     this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), edge.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   /** 从情绪状态向量更新情绪强度 (EMA平滑；🔴 Heart 24 命名属 P076 待裁) */
@@ -7354,7 +7232,7 @@ export class FamilyGraph implements FamilyGraphInterface {
     props.weights = w;
     this.run('UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?',
       [JSON.stringify(props), new Date().toISOString(), edge.id]);
-    this.markDirty(true);
+    this.invalidateCaches();
   }
 
   getEffectiveIntimacy(sourceName: string, targetName: string): number {

@@ -3,30 +3,53 @@ redlines:
   severity: "S"
   description: "SQLite 持久化规则 —— 数据必须可靠写入并在重启后可恢复"
 
+  # ════════════════════════════════════════════════════════════════════
+  # 🔴 2026-11-06 被业主裁定推翻并重写（存储底座迁移：sql.js → better-sqlite3）
+  # ════════════════════════════════════════════════════════════════════
+  # 被推翻的两条（原文见 git 历史）：
+  #   ① 「scheduleFlush() 防抖落盘机制不可移除」
+  #   ② 「export() 导出函数必须保持与 save() 格式兼容」
+  # 业主裁定理据：「写代码也要与时俱进……敢于打破红线、打破过去的一些规则，把系统设计制造的更优」。
+  # 技术依据：这两条是为 sql.js 的「整库载入内存 + 整库序列化覆盖磁盘」架构服务的补丁；
+  #   better-sqlite3 页级写盘后，该架构整体退场 —— 保留它们等于给旧链路留门。
+  #   实测代价：单次整库导出 126.5MB / 1854~5155ms、同步阻塞主线程，
+  #   导致 MemArch v2 召回腿（预算 300ms）全部超时、切流恒返 0。
+  # 权限说明：本文件仍为 S 级红线，修改须走完整流水线/人工通道；本次为业主显式批准。
+  # ════════════════════════════════════════════════════════════════════
+
   rules:
-    - "SQLiteAdapter.save() 是唯一写入通道，不允许绕开直接写库"
-    - "scheduleFlush() 防抖落盘机制不可移除"
+    - "写入必须经 SqlJsCompat（better-sqlite3）页级落盘；禁止任何形式的整库导出/整文件覆盖写"
+    - "禁止重新引入 sql.js（initSqlJs / db.export() / _FLUSH_BATCH / _FLUSH_INTERVAL）"
     - "SQLiteAdapter 必须保持单实例模式"
+    - "所有读库者必须 WAL 感知：跨进程/跨实例读取一律用 better-sqlite3 只读连接，禁止用 sql.js 读文件快照"
+    - "关库前必须 wal_checkpoint(TRUNCATE)：SqlJsCompat.close() 已内建，禁止绕过 close() 直接退进程"
+    - "备份/恢复必须先 close()（触发 checkpoint）再复制文件；替换库文件前须清除残留 -wal/-shm"
     - "停服→重启→查库 三步验证：每次持久化相关修改后必须执行"
-    - "export() 导出函数必须保持与 save() 格式兼容"
     - "标注率（belong_entity_uuid 非空比例）不得异常下降超过 5%"
     - "fusion_memory.db 文件完整性：停服后文件大小不应为 0 或显著缩小"
 
   critical_methods:
-    - name: "save()"
-      file: "src/m2/SQLiteAdapter.ts"
-      description: "主写入方法，含防抖和事务"
-    - name: "scheduleFlush()"
-      file: "src/m2/SQLiteAdapter.ts"
-      description: "延迟落盘调度器"
-    - name: "export()"
-      file: "src/m2/SQLiteAdapter.ts"
-      description: "全量导出，供备份和检查"
+    - name: "SqlJsCompat"
+      file: "src/m2/SqlJsCompat.ts"
+      description: "唯一持久化通道：better-sqlite3 兼容壳（run/exec/prepare/getRowsModified/close），刻意不提供 export()"
+    - name: "close()"
+      file: "src/m2/SqliteCompat 使用方（SQLiteAdapter / FamilyGraph / MemoryVault / ConversationDB）"
+      description: "关闭即 wal_checkpoint(TRUNCATE) + close；禁止绕过"
+
+  forbidden_symbols:
+    # 迁移后不得在源码（剥除注释后）出现；health-check 与 agent-cnc persist meter 双重守护
+    - "initSqlJs"
+    - "db.export()"
+    - "_FLUSH_BATCH"
+    - "_FLUSH_INTERVAL"
+    - "scheduleFlush"
+    - "shutdownFlush"
 
   restart_verification:
     steps:
-      - "1. 停止服务"
-      - "2. 记录 data/webui/fusion_memory.db 文件大小和修改时间"
+      - "1. 停止服务（SIGINT/SIGTERM → close() 内含 checkpoint）"
+      - "2. 记录 data/webui/fusion_memory.db（及 -wal/-shm 是否存在）文件大小和修改时间"
       - "3. 重启服务"
       - "4. 查询 SELECT COUNT(*), COUNT(DISTINCT belong_entity_uuid) FROM memories"
       - "5. 对比停服前后的标注率和记录数"
+      - "6. 确认启动日志无「拒绝启动」且磁盘验证为 ✅（独立只读连接重读）"

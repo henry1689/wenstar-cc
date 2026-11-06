@@ -36,30 +36,53 @@ export async function runSqlitePersistMeter(
     return result;
   }
 
-  // 检查关键方法
-  const criticalMethods = ['save()', 'save', 'scheduleFlush', 'export()', 'export'];
+  // 🔴 2026-11-06 存储底座迁移：判据反转。
+  //   迁移前：必须存在 save/scheduleFlush/export（防落盘逻辑被误删）。
+  //   迁移后：better-sqlite3 写即落盘 —— **不得**再出现整库导出/防抖落盘符号，
+  //   且主库必须经 SqlJsCompat 接入原生驱动。
+  //   ⚠️ 必须剥除注释后统计：迁移说明注释里会提到这些符号本身，否则恒定误报。
+  const stripComments = (filePath: string): string => {
+    try {
+      return fs
+        .readFileSync(filePath, 'utf-8')
+        .split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join('\n');
+    } catch {
+      return '';
+    }
+  };
+
+  const legacySymbols = ['initSqlJs', 'scheduleFlush', 'shutdownFlush', 'export()'];
   const fileList = [sqlitePath, fusionPath, persistPath];
 
   let totalFound = 0;
   for (const file of fileList) {
-    if (!fileExists(file)) continue;
-    for (const method of criticalMethods) {
-      const count = countOccurrences(file, method);
+    const code = stripComments(file);
+    for (const sym of legacySymbols) {
+      let count = 0;
+      let idx = 0;
+      while ((idx = code.indexOf(sym, idx)) !== -1) { count++; idx += sym.length; }
       if (count > 0) {
         totalFound += count;
-        const fileName = path.basename(file);
-        result.evidence.push(`${fileName}: "${method}" 出现 ${count} 次`);
+        result.evidence.push(`${path.basename(file)}: "${sym}" 出现 ${count} 次`);
       }
     }
   }
 
-  // 验证关键方法存在
-  if (!criticalMethods.some((m) => countOccurrences(sqlitePath, m) > 0)) {
-    result.failures.push('SQLiteAdapter.ts 中未找到 save/scheduleFlush/export 方法');
+  const usesCompat = stripComments(sqlitePath).includes('SqlJsCompat');
+  if (totalFound > 0) {
+    result.failures.push(
+      `持久化旧链路残留 ${totalFound} 处（initSqlJs/scheduleFlush/shutdownFlush/export()）—— 应已随 better-sqlite3 迁移删除`,
+    );
+    result.status = 'fail';
+    result.score = 0;
+  } else if (!usesCompat) {
+    result.failures.push('SQLiteAdapter.ts 未通过 SqlJsCompat 接入 better-sqlite3');
     result.status = 'fail';
     result.score = 0;
   } else {
-    result.evidence.push(`关键持久化方法共出现 ${totalFound} 次`);
+    result.evidence.push('better-sqlite3 页级落盘（无整库导出残留）');
     result.score = 100;
   }
 

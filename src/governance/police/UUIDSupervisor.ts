@@ -22,12 +22,14 @@ export interface SupResult {
 }
 
 async function loadDb(path: string): Promise<any | null> {
-  const { existsSync, readFileSync } = await import('node:fs');
+  const { existsSync } = await import('node:fs');
   if (!existsSync(path)) return null;
-  const initSqlJs = (await import('sql.js')).default;
-  const SQL = await initSqlJs();
   try {
-    return new SQL.Database(readFileSync(path));
+    // 🔴 2026-11-06 存储底座迁移：改用只读原生连接（better-sqlite3 经 SqlJsCompat）。
+    //   sql.js 读的是文件快照 —— 主库/FG 库迁到 WAL 后，未 checkpoint 的最新写入会被漏掉，
+    //   户籍巡检会基于过期数据给出错误结论。只读连接由 SQLite 自身保证 WAL 可见性。
+    const { SqlJsCompat } = await import('../../m2/SqlJsCompat.js');
+    return new SqlJsCompat(path, { readonly: true, fileMustExist: true });
   } catch {
     return null;
   }

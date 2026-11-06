@@ -318,8 +318,11 @@ describe('[M2守卫] SQLiteAdapter 公开方法', () => {
     expect(typeof proto.queryAll).toBe('function');
   });
 
-  it('flushNow() — 强制落盘', () => {
-    expect(typeof proto.flushNow).toBe('function');
+  it('🔴 落盘旧链路必须已删除（flushNow/scheduleFlush/shutdownFlush）', () => {
+    // 2026-11-06 迁移：better-sqlite3 写即落盘 —— 这三个方法不得复活。
+    expect(proto.flushNow).toBeUndefined();
+    expect(proto.scheduleFlush).toBeUndefined();
+    expect(proto.shutdownFlush).toBeUndefined();
   });
 
   it('findRelatedEntities(entityNames, minStrength?)', () => {

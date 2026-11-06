@@ -6,11 +6,11 @@
  *
  * 遵循 `src/m4/FamilyGraph.ts` 中已建立的 sql.js 使用模式。
  */
-// @ts-ignore - sql.js ships its own types
-import initSqlJs from 'sql.js';
-import { readFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
-import { promises as fsp } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
+// 🔴 2026-11-06 存储底座迁移（业主批准）：sql.js → better-sqlite3，经 SqlJsCompat 兼容壳。
+//   根因见 SqlJsCompat.ts 文件头：整库导出 126.5MB/次、1854~5155ms 同步阻塞主线程，
+//   是 MemArch v2 切流恒返 0 的直接原因。原生驱动写即落盘，不存在「整库导出」这一步。
+import { SqlJsCompat } from './SqlJsCompat.js';
+import { readFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
@@ -170,6 +170,10 @@ const DEFAULT_DB_PATH = join(PROJECT_ROOT, 'data', 'webui', 'fusion_memory.db');
 const DB_EMPTY_GUARD_MIN_BYTES = 5 * 1024 * 1024;
 const SCHEMA_PATH = join(__dirname, 'schema.sql');
 
+/**
+ * 兼容层接口（由 SqlJsCompat 实现）。
+ * 🔴 刻意不含 `export()`：整库导出已从系统中移除 —— 保留该成员等于给旧落盘路径留门。
+ */
 interface SqlJsDatabase {
   run(sql: string, params?: any[]): void;
   exec(sql: string): Array<{
@@ -177,8 +181,8 @@ interface SqlJsDatabase {
     values: any[][];
   }>;
   prepare(sql: string): SqlJsStatement;
+  getRowsModified(): number;
   close(): void;
-  export(): Uint8Array;
 }
 
 interface SqlJsStatement {
@@ -296,22 +300,13 @@ export class SQLiteAdapter {
   private db: SqlJsDatabase | null = null;
   private dbPath: string;
 
-  /** 获取 sql.js 原始实例 — 供 DualHelixWriter 底层写入使用 */
+  /** 获取底层兼容实例 — 供 DualHelixWriter / UUIDHealthReport 等底层写入与巡检使用 */
   get rawDb(): SqlJsDatabase | null { return this.db; }
   private ready = false;
   private blackDiamondFtsReady = false;
-  /**
-   * 防抖合并落盘：export() 会序列化整个内存库（当前 ~96MB），不能每次写入都落盘。
-   * 策略：一轮对话内的多次写入（消息×2 + 对话组锚点/碎片/黑钻 ~10 次）合并为一次 export。
-   * - _FLUSH_INTERVAL：首次写入后 150ms 内的写入合并落盘（崩溃丢失窗口 ~150ms，远小于旧的 2s）
-   * - _FLUSH_BATCH：硬上限，仅当同步突发写入积压过多时才强制立即落盘（兜底，避免内存无界）
-   *
-   * P0-3 加固：
-   * - flushNow() 公开强制落盘（替代旧私有 flush()）
-   * - shutdownFlush() 关闭前清除定时器 + 强制落盘 + 关闭数据库
-   * - close() 增强：落盘前清定时器，确保不丢数据
-   */
-  private _dirtyCount = 0;
+  // 🔴 2026-11-06 存储底座迁移：_dirtyCount / _flushTimer / _flushing / _flushPending /
+  //   _writeSeq / _FLUSH_BATCH / _FLUSH_INTERVAL 全部随「整库导出」机制一并删除。
+  //   better-sqlite3 写即落盘（页级增量），不再存在「脏计数 + 定时整库导出」这一层。
   /**
    * 🔴 V49 判据真源之二：FamilyGraph nodes 的 uuid 集合。
    *
@@ -334,28 +329,6 @@ export class SQLiteAdapter {
    * 默认 false —— 不走 init() 的调用方行为不变。
    */
   private _fgLoadFailed = false;
-  private _flushTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 🔴 C1-a（2026-09-20）异步落盘互斥 + 写入代次（防止在途的旧写入 rename 覆盖更新的内容） */
-  private _flushing = false;
-  private _flushPending = false;
-  private _writeSeq = 0;
-  private readonly _FLUSH_BATCH = 50;  // 硬上限：突发积压超过 50 次才强制落盘（兜底，避免内存无界）
-  /**
-   * 防抖窗口（毫秒）：窗口内的写入合并为一次落盘。
-   *
-   * 演进：`2000`（原始）→ `150`（批 C4，缩小崩溃丢失窗口）→ `10000`（C1-b）→ **`60000`**（C1-d/A，2026-09-20）。
-   *
-   * 依据（实测）：一轮真实对话曾触发 **19 次整库重写（224MB × 19 ≈ 4.16GB）**，因为该轮写入在时间上分散
-   * （收尾阶段约每 2 秒一次）⇒ 150ms 窗口合并不上；10s 后降到 ~6 次；60s 与上层 M9 缓冲窗口（60s）对齐。
-   * 代价：断电/强杀最多丢一个窗口（60s）；**正常关闭/重启不丢**（`shutdownFlush()` 仍同步全量落盘）。
-   * 上限：`_FLUSH_BATCH = 50` 仍为硬上限兜底（突发积压即落盘）。
-   *
-   * ⚠️ **必须保持纯数字字面量**：`src/cli/health-check.ts` 用静态正则（`_FLUSH_INTERVAL\s*=\s*(\d+)`）
-   * 提取本值并校验安全区间（其 `INTERVAL_MAX = 60000`），由 `src/cli/__tests__/structure-guard.test.ts` 守护。
-   * 写成表达式（如 `Number(process.env.X ?? 10_000)`）会让运维检查“提取不到 → 误报致命”（已踩过）。
-   * 运行期覆盖请用 `TIANQUAN_FLUSH_INTERVAL_MS`（见 `_flushIntervalMs()`）。
-   */
-  private readonly _FLUSH_INTERVAL = 60000;
   /** P1: ServerLock 写入准入检查的 TTL 缓存到期时间戳（0 = 待检查） */
   private _writeAllowedUntil = 0;
 
@@ -386,38 +359,34 @@ export class SQLiteAdapter {
 
   async initialize(): Promise<void> {
     // P1: ServerLock 写保护 — 若另一进程正在托管生产库（持锁），禁止本进程加载/写入。
-    // 防第二 sql.js 实例与运行中服务并发写同一库，互相 flush 覆写（经验 #19）。
+    // （迁移后不再有「第二实例内存态 flush 覆写」问题，但多进程并发写仍应显式禁止。）
     assertWriteAllowed(this.dbPath, '初始化生产库');
 
-    // @ts-ignore
-    const SQL = await initSqlJs();
     const dir = dirname(this.dbPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    if (existsSync(this.dbPath)) {
-      const buffer = readFileSync(this.dbPath);
-      this.db = new SQL.Database(buffer) as unknown as SqlJsDatabase;
-      // 🔴🔴 2026-09-19 数据安全守卫（事故后加固，最高优先）——
-      //   事故：229MB 生产库被覆盖为 3.9MB 空库（磁盘文件曾存在的行被清空）。
-      //   机理：sql.js 内存库 → flushNow() 直接 export 覆盖磁盘文件，且**无空库保护**；
-      //   一旦某个实例以「空库/加载异常」状态运行，它的 flush 就会抹掉真实数据。
-      //   本守卫：磁盘文件存在且 ≥ 阈值，但载入后 memories/conversations 两表**均 0 行**
-      //   ⇒ 判定加载异常/半读，**抛错拒绝启动**（宁停不毁数据；PM2 会重启并在日志里反复大声报错）。
+    // 🔴 2026-11-06 迁移：better-sqlite3 直接打开磁盘文件（不再把整库读进 WASM），
+    //   「空内存库 export 覆盖磁盘」的事故路径已彻底消失。保留启动守卫作为**损坏探测**：
+    //   文件存在且 ≥ 阈值，却读不到 memories/conversations 任何一行 ⇒ 库损坏/被截断，
+    //   宁停不毁数据（PM2 会重启并在日志里反复大声报错）。
+    const existed = existsSync(this.dbPath);
+    const sizeOnDisk = existed ? statSync(this.dbPath).size : 0;
+    this.db = new SqlJsCompat(this.dbPath);
+    if (existed) {
       const _guardCnt = (t: string): number => {
-        try { return Number((this.db as any).exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
+        try { return Number(this.db!.exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
         catch { return -1; } // 表不存在（全新库）
       };
       const _memCnt = _guardCnt('memories');
       const _convCnt = _guardCnt('conversations');
-      if (buffer.length >= DB_EMPTY_GUARD_MIN_BYTES && _memCnt === 0 && _convCnt === 0) {
+      if (sizeOnDisk >= DB_EMPTY_GUARD_MIN_BYTES && _memCnt === 0 && _convCnt === 0) {
+        this.db.close();
         throw new Error(
-          `[SQLiteAdapter] 🔴 拒绝启动：磁盘库 ${this.dbPath} 有 ${buffer.length} 字节，` +
-            `但载入后 memories=0 / conversations=0 —— 加载异常或半读。` +
-            `若以空库继续，后续 flush 会把空库 export 覆盖真实文件（本仓已发生过 229MB→3.9MB 数据丢失事故）。`,
+          `[SQLiteAdapter] 🔴 拒绝启动：磁盘库 ${this.dbPath} 有 ${sizeOnDisk} 字节，` +
+            `但读取后 memories=0 / conversations=0 —— 库损坏或被截断。` +
+            `（本仓曾发生 229MB→3.9MB 数据丢失事故；宁停不毁数据）`,
         );
       }
-    } else {
-      this.db = new SQL.Database() as unknown as SqlJsDatabase;
     }
 
     // ⚠️ 迁移必须在 DDL 之前执行：旧数据库缺少新列时，schema.sql 中的
@@ -513,18 +482,12 @@ export class SQLiteAdapter {
       const fgPath = join(dirname(this.dbPath), 'knowledge', 'family_graph.db');
       const repairResult = await repairDataIntegrity(this.db, fgPath);
       console.error('[SQLiteAdapter] 数据完整性修复结果:', JSON.stringify(repairResult));
-      // 🔴 修复后立即强制落盘：repairDataIntegrity 直接操作 sql.js db.run()，绕过了 _dirtyCount 计数
-      // flushNow() 依赖 _dirtyCount>0 才执行 export，所以这里直接 export+write
-      // 🔴 批次1(2026-09-11): 新派生段（entity_genes）也需触发落盘，否则内存派生不持久
-      // 🔴 A2(2026-10-19): 批次6（组级生命周期流转）同样绕过脏计数 —— 历史实测：仅流转发生时
-      //   本条件不满足 → 不落盘 → 状态只在内存，下次启动又重流转（幂等失效）。补 dialogGroups。
-      if (repairResult.entityUuid > 0 || repairResult.globalUid > 0 || repairResult.entityGenes > 0 || (repairResult.dialogGroups ?? 0) > 0) {
-        try {
-          const data = (this.db as any).export();
-          if (this._safeWriteDbFile(data, 'repairDataIntegrity')) {
-            console.error('[SQLiteAdapter] 修复数据已直接 export 落盘 (' + (repairResult.entityUuid + repairResult.globalUid + repairResult.entityGenes) + ' 条变更)');
-          }
-        } catch (e) { console.error('[SQLiteAdapter] 修复落盘失败:', e); }
+      // 🔴 2026-11-06 迁移：better-sqlite3 写即落盘，修复结果已在磁盘上 —— 原先
+      //   「绕过 _dirtyCount ⇒ 必须手动 export 一次」的前提随整库导出机制一并消失。
+      //   仅保留变更条数的可观测日志。
+      const _repaired = repairResult.entityUuid + repairResult.globalUid + repairResult.entityGenes + (repairResult.dialogGroups ?? 0);
+      if (_repaired > 0) {
+        console.error(`[SQLiteAdapter] 修复数据已落盘（${_repaired} 条变更）`);
       }
     } catch (err) {
       console.error('[SQLiteAdapter] 数据完整性修复失败:', err);
@@ -773,13 +736,11 @@ export class SQLiteAdapter {
         const _memAfter = (this.queryAll('SELECT COUNT(*) as cnt FROM memories WHERE belong_entity_uuid IS NOT NULL')[0] as any)?.cnt || 0;
         console.log('[Backfill] memories标注: ' + _memBefore + '→' + _memAfter);
 
-        // 🔴 持久化：回填必须立即 flush（save 只计数不落盘）
-        this.flushNow();
       } catch (_bfErr) { console.warn('[Backfill] 自动回填失败:', (_bfErr as Error)?.message); }
     }
 
-    // 🔴 V17: 锚点重建 + 完整性检查 — init() 最末端，确保所有上游修复完成后执行
-    //   必须在 Backfill 落盘之后执行，否则 Backfill 的 flushNow() 会覆盖锚点重建的写入
+    // 🔴 V17: 锚点重建 + 完整性检查 — init() 最末端，确保所有上游修复完成后执行。
+    //   （2026-11-06 迁移后：backfill 与锚点重建都是页级落盘，不再存在「后一次整库导出覆盖前一次写入」的问题）
     try {
       // 🔴 V49: 判据真源之二 —— 必须在重建**之前**载入 FG nodes 的 uuid。
       //   运行期写锚点第一层真源是 FG（resolveAnchorOwnership → fg.getUUIDByName），
@@ -807,34 +768,32 @@ export class SQLiteAdapter {
         this._upgradePerception40DToV2();
       } catch (_upErr) { console.warn('[V12.4] 40D 编码升级失败:', (_upErr as Error)?.message); }
       this._runIntegrityChecks();
-      // 强制落盘
-      if (this._dirtyCount > 0) { this.flushNow(); }
-      // 磁盘验证：sql.js 重读磁盘文件确认持久化成功
-      {
-        const data2 = (this.db as any).export();
-        this._safeWriteDbFile(data2, 'startup-verify-flush');
-        const initSqlJs2 = (await import('sql.js')).default;
-        const SQL2 = await initSqlJs2();
-        const verifyBuf = readFileSync(this.dbPath);
-        const vDb = new (SQL2 as any).Database(verifyBuf);
-        const vRes = (vDb as any).exec("SELECT COUNT(*) as c FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
-        const vCount = (vRes.length && vRes[0]?.values?.[0]?.[0]) ? Number(vRes[0].values[0][0]) : 0;
-        // V18: ANCHOR 重建结果观测 — 重建产物恒带 UUID（INSERT 前已跳过空 UUID）。
-        //     空 UUID 锚点的真正检测点在 _rebuildMemoryAnchors() 的 DELETE 之前（见该函数 V18 注释）。
-        const aRes = (vDb as any).exec("SELECT COUNT(*) as c FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
-        const aTotal = (aRes.length && aRes[0]?.values?.[0]?.[0]) ? Number(aRes[0].values[0][0]) : 0;
-        const aAllRes = (vDb as any).exec("SELECT COUNT(*) as c FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\'");
-        const aAll = (aAllRes.length && aAllRes[0]?.values?.[0]?.[0]) ? Number(aAllRes[0].values[0][0]) : 0;
-        (vDb as any).close();
-        const icon = vCount >= 600 ? '✅' : '🔴';
-        const aIcon = (aAll > 0 && aTotal === aAll) ? '✅' : '🔴';
-        console.log(`[SQLiteAdapter] ${icon} 磁盘验证: ${vCount}条有UUID (重读磁盘)`);
-        console.log(`[SQLiteAdapter] ${aIcon} ANCHOR重建结果: ${aTotal}/${aAll} 锚点带UUID`);
+      // 磁盘验证：用**独立只读连接**重读磁盘，确认写入真的落盘（不依赖任何内存态）。
+      try {
+        const vDb = new SqlJsCompat(this.dbPath, { readonly: true, fileMustExist: true });
+        try {
+          const vRes = vDb.exec("SELECT COUNT(*) as c FROM memories WHERE belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
+          const vCount = (vRes.length && vRes[0]?.values?.[0]?.[0]) ? Number(vRes[0].values[0][0]) : 0;
+          // V18: ANCHOR 重建结果观测 — 重建产物恒带 UUID（INSERT 前已跳过空 UUID）。
+          //     空 UUID 锚点的真正检测点在 _rebuildMemoryAnchors() 的 DELETE 之前（见该函数 V18 注释）。
+          const aRes = vDb.exec("SELECT COUNT(*) as c FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
+          const aTotal = (aRes.length && aRes[0]?.values?.[0]?.[0]) ? Number(aRes[0].values[0][0]) : 0;
+          const aAllRes = vDb.exec("SELECT COUNT(*) as c FROM memories WHERE id LIKE '%\\_ANCHOR' ESCAPE '\\'");
+          const aAll = (aAllRes.length && aAllRes[0]?.values?.[0]?.[0]) ? Number(aAllRes[0].values[0][0]) : 0;
+          const icon = vCount >= 600 ? '✅' : '🔴';
+          const aIcon = (aAll > 0 && aTotal === aAll) ? '✅' : '🔴';
+          console.log(`[SQLiteAdapter] ${icon} 磁盘验证: ${vCount}条有UUID (独立只读连接重读磁盘)`);
+          console.log(`[SQLiteAdapter] ${aIcon} ANCHOR重建结果: ${aTotal}/${aAll} 锚点带UUID`);
+        } finally {
+          vDb.close();
+        }
+      } catch (e) {
+        console.warn('[SQLiteAdapter] 磁盘验证失败（不阻塞启动）:', (e as Error)?.message);
       }
     } catch (err) { console.warn('[SQLiteAdapter] 锚点重建失败:', (err as Error)?.message); }
   }
 
-  /** 获取原始 sql.js 实例（供 ConversationDB 共享） */
+  /** 获取底层兼容实例（供 ConversationDB 共享） */
   getDb(): any { return this.db; }
 
   isBlackDiamondFTSReady(): boolean {
@@ -842,9 +801,10 @@ export class SQLiteAdapter {
   }
 
   close(): void {
-    // C4: 关闭前确保所有待写入数据已落盘
-    this.flushNow();
-    if (this.db) this.db.close();
+    if (this.db) {
+      this.db.close(); // SqlJsCompat.close() 内部先 wal_checkpoint(TRUNCATE) 再关闭
+      this.db = null;
+    }
     this.ready = false;
   }
 
@@ -893,12 +853,10 @@ export class SQLiteAdapter {
       messageId: options?.messageId,
     });
     this.runSql(sql, bind);
-    // ⚠️ P1(S4 独立评审): rowid 必须在 save() **之前**读取——与 ConversationDB.insertConversation 同一陷阱。
-    // save() 达到 _FLUSH_BATCH 时会同步 flushNow() → db.export()，而 sql.js 的 export()
-    // 会关闭并重开连接，last_insert_rowid() 作为连接级状态将归 0（已实测证实）→ 原实现会返回 0。
+    // 🔴 2026-11-06 迁移：better-sqlite3 始终在同一连接上执行，last_insert_rowid() 不再因
+    //   整库导出（sql.js export() 会关闭并重开连接）而清零 —— 原「rowid 必须早于 save() 读取」
+    //   的陷阱随导出机制一并消失。
     const _rowIdRes = this.queryAll('SELECT last_insert_rowid() as id');
-    // C4: 关键写入触发防抖落盘（合并在 150ms 窗口，避免 per-write 96MB export）
-    this.save();
     // 降级可见性（S4 复审 P2-D 对称要求）：与 ConversationDB.insertConversation 保持一致
     const _finalRid = Number(_rowIdRes?.[0]?.id) || 0;
     if (_finalRid <= 0) {
@@ -1157,9 +1115,6 @@ export class SQLiteAdapter {
         [record.id, gene.name, gene.type, gene.allele, gene.phenotype, gene.knowledge_type],
       );
     }
-
-    // 持久化到磁盘
-    this.save();
   }
 
   /**
@@ -1323,7 +1278,6 @@ export class SQLiteAdapter {
           opts.repeatRule ?? null,
         ],
       );
-      this.save();
       return true;
     } catch (e: any) {
       console.error(`[SQLiteAdapter] ❌ writeMemory 失败 seq=${opts.seqPos} zone=${opts.leafZone}:`, e?.message);
@@ -1839,9 +1793,8 @@ export class SQLiteAdapter {
       (this.db as any).run("DELETE FROM aqc_records WHERE created_at < ?", [d30]);
     } catch (e: any) { /* 非致命 — 表可能不存在 */ }
 
-    // 🔴 V27批6（评审 P2-3）: 本轮若写入极少（低强度行长期停留跳过态），
-    //   decay_log INSERT / vault_log / aqc_records DELETE 只留在内存 —— 显式落盘一次。
-    try { this.save(); } catch (se: any) { console.warn("[Decay] 落盘失败:", se?.message); }
+    // 🔴 2026-11-06 迁移：decay_log INSERT / vault_log / aqc_records DELETE 均已是页级落盘，
+    //   原「本轮写入极少 → 显式落盘一次」的补丁不再需要。
 
     return { total, archived };
     } finally {
@@ -1963,7 +1916,6 @@ export class SQLiteAdapter {
         `UPDATE memories SET vad_spectrum = ? WHERE id = ?`,
         [vadJson, memoryId],
       );
-      this.save();
       return true;
     } catch (err) {
       console.warn(`[SQLite] updateVadSpectrum 失败:`, err);
@@ -2021,8 +1973,6 @@ export class SQLiteAdapter {
     // 其余 ? 变 NULL，导致 UPDATE ... WHERE id=? 恒不命中（静默无操作）。
     const bind = (params.length === 1 && Array.isArray(params[0])) ? params[0] : params;
     this.runSql(sql, bind.length > 0 ? bind : undefined);
-    // C4: 对话组锚点/碎片/黑钻晋升等关键写入触发防抖落盘（同轮突发写入合并为一次 export）
-    this.save();
   }
 
   /** P8: 类型安全查询 — 默认返回 Record<string, unknown>，可显式泛型约束 */
@@ -2053,7 +2003,6 @@ export class SQLiteAdapter {
     this.ensureReady();
     try {
       this.runSql('UPDATE memories SET effective_strength = 1.0, strength_updated_at = ? WHERE id = ?', [new Date().toISOString(), id]);
-      this.save();
       return true;
     } catch { return false; }
   }
@@ -2063,7 +2012,6 @@ export class SQLiteAdapter {
     this.ensureReady();
     try {
       this.runSql('DELETE FROM memories WHERE id = ?', [id]);
-      this.save();
       return true;
     } catch { return false; }
   }
@@ -2077,7 +2025,6 @@ export class SQLiteAdapter {
         const oldTag = existing[0].narrative_tag || '';
         const newTag = oldTag ? oldTag + ',' + tag : tag;
         this.runSql('UPDATE memories SET narrative_tag = ? WHERE id = ?', [newTag, id]);
-        this.save();
       }
       return true;
     } catch { return false; }
@@ -2332,7 +2279,6 @@ export class SQLiteAdapter {
         this.db.run('INSERT OR IGNORE INTO entity_relations (entity_a_id,entity_b_id,relation,strength,updated_at) VALUES (?,?,?,1.0,?)', [a, b, rel, now]);
       } catch {}
     }
-    this._dirtyCount++;
   }
 
   /**
@@ -2621,8 +2567,10 @@ export class SQLiteAdapter {
         console.warn('[SQLiteAdapter] 🔴 V49 FG 库不存在 → 本轮锚点重建整轮跳过（不 DELETE）:', fgPath);
         return;
       }
-      const SQL = await initSqlJs();
-      const fgDb = new SQL.Database(readFileSync(fgPath));
+      // 🔴 2026-11-06 迁移：改用 better-sqlite3 只读连接读取 FG 库。
+      //   sql.js 读的是主库文件快照 —— FG 迁到 WAL 后会漏掉尚未 checkpoint 的最新写入，
+      //   锚点判据将基于过期户籍集合。原生只读连接由 SQLite 自身保证 WAL 可见性。
+      const fgDb = new SqlJsCompat(fgPath, { readonly: true, fileMustExist: true });
       // 🔴 V49 P3-3：按 type='person' 过滤 —— 与另外两处真源对齐，消除同一概念的口径分叉：
       //   ① 运行期写锚点真源 FamilyGraph.getUUIDByName() → findPersonNodeByNameOrAlias（只认 person）
       //   ② MigrationManager.detectOrphanEntityUUIDs() `WHERE type='person'`
@@ -2966,18 +2914,22 @@ export class SQLiteAdapter {
       console.warn(`[SQLiteAdapter] ⚠️ V49 实体户籍: 跳过 ${nOrphaned} 行 / ${orphanUuids.size} 个 uuid 的锚点重建（不在 entities∪FG 集合内）: ${_sample}${_more}  ← 若其中有 status=active 的实体，属判据误杀，须立即核查`);
     }
     if (n > 0) {
-      this._dirtyCount += Math.ceil(n / 10);
-      // 🔴 V16: 强制立即落盘 — 防止 AlignmentGuard 后续写操作前 server 崩溃丢失数据
-      try {
-        this.flushNow();
-        console.log(`[SQLiteAdapter] memories锚点落盘完成: ${n}条`);
-      } catch (e) { console.warn('[SQLiteAdapter] memories锚点落盘失败:', (e as Error)?.message); }
-      // 落盘后验证
+      // 🔴 2026-11-06 迁移：better-sqlite3 写即落盘 —— 原先「V16 强制立即落盘」不再需要。
+      console.log(`[SQLiteAdapter] memories锚点写入完成: ${n}条`);
+      // 🔴 M 层埋点（HOOK_M_LAYER）：原埋点位于 flushNowAsync（整库导出＝最高频慢操作）；
+      //   导出机制删除后迁到本处锚点自检 —— 对全库锚点做聚合查询，是真实的批量操作，
+      //   entry/exit + 耗时仍具观测价值。
+      //   ⚠️ head 必须是**字面串**：reasoning-leak-length-cap:305 是源码级断言（toMatch 读源码文本），
+      //   写成 `[Hook] ${event}` 拼接会恒不匹配。
+      const t0 = Date.now();
+      console.log(`[Hook] module_entry module=m2.SQLiteAdapter operation_type=anchor_verify rows=${n}`);
       try {
         const vfy = this.db.exec("SELECT COUNT(*) FROM memories WHERE id LIKE '%\_ANCHOR' ESCAPE '\\' AND belong_entity_uuid IS NOT NULL AND belong_entity_uuid != ''");
         const vfyCount = (vfy.length && vfy[0]?.values?.[0]?.[0]) ? Number(vfy[0].values[0][0]) : 0;
         if (vfyCount < n * 0.8) console.warn(`[SQLiteAdapter] ⚠️ 锚点自检异常: 写入${n}条 查询到${vfyCount}条有UUID`);
-      } catch {}
+      } catch { /* 自检查询失败不阻塞启动 */ } finally {
+        console.log(`[Hook] module_exit module=m2.SQLiteAdapter 耗时=${Date.now() - t0}ms operation_type=anchor_verify status=success`);
+      }
     }
     // ══════════════════════════════════════════════════════════════
     // 🔴 3b 运行时自检（2026-10-19，R012 铁律2-3）：启动即校验锚点归属
@@ -3017,267 +2969,16 @@ export class SQLiteAdapter {
     return n;
   }
 
-  /** 将内存数据库持久化到磁盘（批量 flush，非每次写入都落盘） */
-  /** 实际生效的防抖窗口：默认 `_FLUSH_INTERVAL`（纯字面量，供 health-check 静态提取），
-   *  可用 `TIANQUAN_FLUSH_INTERVAL_MS` 运行期覆盖（>0 才生效）。 */
-  private _flushIntervalMs(): number {
-    const o = Number(process.env.TIANQUAN_FLUSH_INTERVAL_MS);
-    return Number.isFinite(o) && o > 0 ? o : this._FLUSH_INTERVAL;
-  }
+  // 🔴 2026-11-06 存储底座迁移：_flushIntervalMs / save / scheduleFlush 已删除。
+  //   better-sqlite3 写即落盘（页级增量），不再存在「脏计数 + 防抖窗口 + 整库导出」这一层。
 
-  private save(): void {
-    if (!this.db) return;
-    this._dirtyCount++;
+  // 🔴 2026-11-06 存储底座迁移：_passesEmptyDbGuard / _safeWriteDbFile 已删除。
+  //   它们只服务于「把内存整库 export 后覆盖磁盘」——better-sqlite3 页级写盘不需要整文件替换，
+  //   空库覆盖的事故路径随之消失；启动期的损坏探测仍在 initialize() 保留。
 
-    // 每 _FLUSH_BATCH 次直接落盘（硬上限兜底）
-    if (this._dirtyCount >= this._FLUSH_BATCH) {
-      // 🔴 C1-a：走异步落盘，不再阻塞事件循环
-      void this.flushNowAsync();
-      return;
-    }
-
-    // 否则设定时器兜底（_FLUSH_INTERVAL 内没有再触发 save 则落盘）
-    if (!this._flushTimer) {
-      this._flushTimer = setTimeout(() => {
-        this._flushTimer = null; // 先清：否则后续 save() 看到非空计时器就不再排程
-        void this.flushNowAsync();
-      }, this._flushIntervalMs());
-    }
-  }
-
-  /**
-   * C4: 供共享同一 sql.js 实例的 ConversationDB 委托调用。
-   * ConversationDB 写入共享 db 后调用此方法，把 db 标记为脏并调度防抖落盘，
-   * 由 SQLiteAdapter 统一 export 一次（避免两个类各自 export 同一个 96MB 库）。
-   */
-  scheduleFlush(): void {
-    this.save();
-  }
-
-  /**
-   * 🔴🔴 2026-09-19 数据安全**单一咽喉点**（事故后加固）：所有落盘必须经此。
-   * ================================================================
-   * 事故：sql.js 内存库 flush 时直接 `export()` 覆盖磁盘文件，且**无空库保护** ⇒ 某实例以空库
-   *   运行一次，就把 229MB 生产库覆盖成 3.9MB 空库（实测事故，已用备份回滚）。
-   * 本方法把原先散在 4 处的 `writeFileSync(this.dbPath, ...)` 收成一个带守卫的入口：
-   *   磁盘既存文件 ≥ 阈值，而内存库 memories/conversations 均为 0 ⇒ **拒绝覆盖** + CRITICAL 告警。
-   * （与 `initialize()` 的加载期守卫构成纵深防御：一个是“不许带空库跑”，一个是“不许拿空库覆”。）
-   * @returns 是否真的写入
-   */
-  /**
-   * 🔴 2026-09-20：空库守卫抽为**同步/异步落盘共用**的单一事实源
-   * （新增异步落盘点后若各写一份判据，就会出现"一个口子守、一个口子不守"的分裂）。
-   * 判定异常时**保守拒绝写入**（fail-closed，与原实现行为一致）。
-   */
-  private _passesEmptyDbGuard(buf: Uint8Array | Buffer, why: string): boolean {
-    try {
-      const _c = (t: string): number => {
-        try { return Number((this.db as any)?.exec('SELECT COUNT(*) FROM ' + t)?.[0]?.values?.[0]?.[0] ?? 0); }
-        catch { return -1; }
-      };
-      const _mem = _c('memories');
-      const _conv = _c('conversations');
-      if (_mem === 0 && _conv === 0 && existsSync(this.dbPath)) {
-        const _onDisk = readFileSync(this.dbPath).length;
-        if (_onDisk >= DB_EMPTY_GUARD_MIN_BYTES && buf.length < _onDisk / 2) {
-          console.error(
-            `[SQLiteAdapter] 🔴🔴 拒绝落盘（空库守卫）：内存库 memories=0/conversations=0，` +
-              `待写 ${buf.length} 字节，而磁盘现有 ${_onDisk} 字节（${this.dbPath}）—— ` +
-              `这会覆盖真实数据，已阻断。来源: ${why}`,
-          );
-          return false;
-        }
-      }
-      return true;
-    } catch (e) {
-      console.error('[SQLiteAdapter] 空库守卫判定异常 ⇒ 保守起见拒绝本次落盘（fail-closed）:', (e as Error)?.message);
-      return false;
-    }
-  }
-
-  private _safeWriteDbFile(buf: Uint8Array | Buffer, why: string): boolean {
-    try {
-      if (!this._passesEmptyDbGuard(buf, why)) return false;
-      this._writeSeq++; // 2026-09-20：登记代次 —— 让在途的异步旧写入放弃 rename（不覆盖更新的内容）
-      // 🔴 2026-09-20 **原子写**（“数据丢失”这类的另一半风险）：`writeFileSync` 直接写目标文件
-      //   **不是原子操作** —— 若写入过程中进程被杀 / 磁盘满 / 内存分配失败，磁盘上的库会被留在
-      //   **截断/损坏**状态；后果与“空库覆盖”同源：加载守卫抛错（=停机），数据只能回到最近一次备份。
-      //   改为 tmp → fsync → rename：同盘 rename 在 NTFS 上是**原子替换**；任何一步失败都只影响
-      //   临时文件，**原文件保持完好**。
-      const _tmp = `${this.dbPath}.tmp-${process.pid}`;
-      let _fd: number | null = null;
-      try {
-        _fd = openSync(_tmp, 'w');
-        writeSync(_fd, Buffer.from(buf));
-        fsyncSync(_fd); // 强制刷盘：避免 rename 后数据仍在页缓存，掉电/崩溃丢内容
-      } finally {
-        if (_fd !== null) { try { closeSync(_fd); } catch { /* ignore */ } }
-      }
-      try {
-        renameSync(_tmp, this.dbPath); // 原子替换（覆盖已存在文件）
-      } catch (e) {
-        try { unlinkSync(_tmp); } catch { /* ignore */ }
-        throw e; // 交给外层 catch：记日志 + 返回 false，原文件未受影响
-      }
-      return true;
-    } catch (e) {
-      console.error('[SQLiteAdapter] 落盘失败:', (e as Error)?.message);
-      return false;
-    }
-  }
-
-  /**
-   * 🔴 2026-09-20 C1-a：**异步**落盘（不阻塞事件循环）。
-   *
-   * 背景（实测）：同步落盘（writeSync+fsyncSync）会在每次落盘期间**冻结整个服务 1–2 秒**
-   * （正常响应 30ms → 落盘当秒均值 807ms、峰值 2033ms）。周期 flush 是本仓最高频的落盘点，
-   * 因此改异步（fsp.open/write/sync/rename）。**数据安全语义与同步版完全一致**：
-   * 共用 `_passesEmptyDbGuard` + tmp → fdatasync → 原子 rename + 失败删 tmp 保原文件。
-   */
-  private async _safeWriteDbFileAsync(buf: Uint8Array | Buffer, why: string): Promise<boolean> {
-    if (!this._passesEmptyDbGuard(buf, why)) return false;
-    const _mySeq = ++this._writeSeq;
-    const _tmp = `${this.dbPath}.tmp-${process.pid}`;
-    let _fh: FileHandle | null = null;
-    try {
-      _fh = await fsp.open(_tmp, 'w');
-      await _fh.write(Buffer.from(buf));
-      await _fh.sync(); // 强制刷盘（异步，不阻塞事件循环）
-    } finally {
-      if (_fh) { try { await _fh.close(); } catch { /* ignore */ } }
-    }
-    try {
-      if (_mySeq !== this._writeSeq) {
-        // 期间开始了更新的一次落盘（如 shutdownFlush 的同步写）⇒ 放弃本次 rename，防止旧内容覆盖新内容
-        try { await fsp.unlink(_tmp); } catch { /* ignore */ }
-        return false;
-      }
-      await fsp.rename(_tmp, this.dbPath); // 原子替换
-    } catch (e) {
-      try { await fsp.unlink(_tmp); } catch { /* ignore */ }
-      throw e;
-    }
-    return true;
-  }
-
-  /**
-   * 🔴 C1-a：周期性路径的**异步**落盘入口（配合 10s 防抖窗口）。
-   * 语义：并发防重入（`_flushing`）；在途期间又有新改动则再排一次（`_flushPending`），
-   * 保证"最后一次写入之后一定还会落盘"。失败**不丢数据**（内存仍在，下一轮重试）。
-   */
-  async flushNowAsync(): Promise<void> {
-    if (!this.db || this._dirtyCount === 0) return;
-    if (this._flushing) { this._flushPending = true; return; }
-    this._flushing = true;
-    const t0 = Date.now();
-    // 🔴 2026-09-20 M 层节点埋点（module_entry / module_exit + 耗时）：落盘是本仓最高频的 M 层操作，
-    //   有 entry/exit + 耗时才能在运维侧区分"是落盘慢还是别的慢"（原先仅 >300ms 才有一行日志）。
-    //
-    // 🔴 户籍三元组批3(2026-10-08) 补齐字段口径：评审要求持久化埋点带
-    //   `write_latency` / `save_flush` / `transaction_status`（原实现只有中文「耗时」，
-    //   机器侧无法按统一字段名解析）。现与全局口径对齐：`operation_type` / `duration_ms` / `status`
-    //   外加这三个持久化专属字段。**纯 stdout 结构化日志，不写库、不改变落盘语义。**
-    //   ⚠️ `transaction_status` 语义说明：本方法的落盘走**整库原子写**（`_safeWriteDbFileAsync`
-    //   内部为「写临时文件 + 原子改名」），不涉及 SQL 事务 —— 故取 `committed`（原子写成功）
-    //   或 `rolled_back`（失败，内存数据未受影响，等下一轮重试），而非 SQL 的 BEGIN/COMMIT 状态。
-    const _hook = (event: string, extra: Record<string, unknown>): void => {
-      try {
-        // 🔴 2026-11-03 埋点归位全仓 key=value 范式（业主批准批5）：
-        //   原 `JSON.stringify({module,event,...})` 是全仓唯一异类 —— DNAEncoder:201、
-        //   FamilyGraph:1001/:1011/:3498、DeepSeekLLMProvider 等**全是**
-        //   `[Hook] module_entry module=m1.X ...` 的 key=value 形态，而
-        //   reasoning-leak-length-cap:305 正断言该范式（另 DeepSeekLLMProvider:1290
-        //   注释还写着「埋点范式照 m2.SQLiteAdapter」，与现实相反）。
-        //   **只改序列化形态，字段一字不增不减**（operation_type / duration_ms / status /
-        //   save_flush / transaction_status / dirty 全保留），纯 stdout、不写库、不改落盘语义。
-        //   全仓无 JSON.parse 消费者（已 grep 核实，命中的 4 处均为注释/输出方本身）。
-        //   ⚠️ 关键：head 必须是**字面串**，不能写成 `[Hook] ${event}` 再拼 ——
-        //   reasoning-leak-length-cap:305 是**源码级**断言（toMatch 读源码文本，非运行日志），
-        //   要求源码里就能 grep 到 `[Hook] module_entry module=m2.SQLiteAdapter`，
-        //   与 DNAEncoder:201、FamilyGraph:1001/:1011 的字面写法同款；拼接写法源码里
-        //   只有 `[Hook] ${event}`，断言恒不匹配。
-        const _tail = Object.entries({ operation_type: 'persistence_flush', ...extra })
-          .map(([k, v]) => `${k}=${v}`).join(' ');
-        //   同理，exit 的**耗时字段也必须是字面模板**（reasoning-leak-length-cap:306 断言
-        //   源码含 `耗时=${Date.now() - t0}ms`，与 FamilyGraph:1011 同款；`t0` 即本函数
-        //   上方的落盘计时起点，作用域内可见）。`duration_ms` 是结构化字段，两者并存。
-        const _head = event === 'module_entry'
-          ? '[Hook] module_entry module=m2.SQLiteAdapter'
-          : `[Hook] module_exit module=m2.SQLiteAdapter 耗时=${Date.now() - t0}ms`;
-        console.log(`${_head} ${_tail}`);
-      } catch { /* 埋点失败绝不影响落盘 */ }
-    };
-    _hook('module_entry', { save_flush: 'start', transaction_status: 'in_progress', dirty: this._dirtyCount });
-    let _hookOk = false;
-    try {
-      const data = (this.db as any).export();
-      const ok = await this._safeWriteDbFileAsync(data, 'flushNowAsync');
-      _hookOk = ok;
-      if (ok) {
-        this._dirtyCount = 0;
-        const ms = Date.now() - t0;
-        if (ms > 300) {
-          console.log(`[SQLiteAdapter] 异步落盘 ${(data.length / 1048576).toFixed(1)}MB 用时 ${ms}ms（期间服务未被阻塞）`);
-        }
-      }
-    } catch (err) {
-      console.error('[SQLiteAdapter] 异步落盘失败（数据仍在内存，等下一轮重试）:', (err as Error)?.message);
-    } finally {
-      const ms = Date.now() - t0;
-      _hook('module_exit', {
-        duration_ms: ms,
-        write_latency: ms,                                   // 持久化专属：本次落盘写入耗时
-        save_flush: _hookOk ? 'done' : 'failed',
-        transaction_status: _hookOk ? 'committed' : 'rolled_back',
-        status: _hookOk ? 'success' : 'fail',
-      });
-      this._flushing = false;
-      if (this._flushPending) {
-        this._flushPending = false;
-        void this.flushNowAsync();
-      }
-    }
-  }
-
-  /** P0-3: 强制立即落盘（公开方法，供 handleShutdown 和关键路径调用） */
-  flushNow(): void {
-    if (!this.db || this._dirtyCount === 0) return;
-    try {
-      const data = (this.db as any).export();
-      if (this._safeWriteDbFile(data, 'flushNow')) this._dirtyCount = 0;
-    } catch (err) {
-      console.error('[SQLiteAdapter] flushNow failed:', err);
-    }
-    this._clearFlushTimer();
-  }
-
-  /** P0-3: 关闭前安全落盘 — 清定时器 → 强制落盘 → 关闭数据库 */
-  shutdownFlush(): void {
-    this._clearFlushTimer();
-    if (this.db && this._dirtyCount > 0) {
-      try {
-        const data = (this.db as any).export();
-        if (this._safeWriteDbFile(data, 'shutdownFlush')) {
-          this._dirtyCount = 0;
-          console.log('[SQLiteAdapter] shutdownFlush: 关闭前落盘完成');
-        }
-      } catch (err) {
-        console.error('[SQLiteAdapter] shutdownFlush failed:', err);
-      }
-    }
-    if (this.db) {
-      try { this.db.close(); } catch { /* best effort */ }
-      this.db = undefined as any;
-      this.ready = false;
-    }
-  }
-
-  private _clearFlushTimer(): void {
-    if (this._flushTimer) {
-      clearTimeout(this._flushTimer);
-      this._flushTimer = null;
-    }
-  }
+  // 🔴 2026-11-06 存储底座迁移：_safeWriteDbFileAsync / flushNowAsync / flushNow /
+  //   shutdownFlush / _clearFlushTimer 已删除（整库导出机制的最后一处本体）。
+  //   关闭与 WAL checkpoint 统一由 close() → SqlJsCompat.close() 完成。
 
   /** sql.js 的 run 方法运行时接受 params，但类型定义可能不完整 */
   /**

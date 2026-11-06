@@ -10,14 +10,17 @@
  * - 双写：SQLite + JSON Zone，故障时可互相恢复
  * - SHA256 manifest：启动时自检
  * - 每日快照：维护引擎自动备份
+ *
+ * 🔴 2026-11-06 存储底座迁移：sql.js → better-sqlite3（经 SqlJsCompat）。
+ *   原实现**每写一条记忆就 db.export() 整库 + 原子替换 vault.db**（文件虽小，但属同步整库写）；
+ *   迁移后写即落盘，backup() 改用 SQLite 原生 VACUUM INTO 生成一致性快照。
  */
-// @ts-ignore
-import initSqlJs from 'sql.js';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, appendFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isMetaDiscourse } from '../../config/ingestion-guard.js';
+import { SqlJsCompat } from '../../m2/SqlJsCompat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,7 +46,7 @@ interface VaultEntry {
 }
 
 export class MemoryVault {
-  private db: any = null;
+  private db: SqlJsCompat | null = null;
   private ready = false;
 
   constructor() {
@@ -54,11 +57,9 @@ export class MemoryVault {
 
   async initialize(): Promise<void> {
     try {
-      const SQL = await initSqlJs();
-      if (existsSync(VAULT_DB)) {
-        this.db = new SQL.Database(readFileSync(VAULT_DB));
-      } else {
-        this.db = new SQL.Database();
+      const existed = existsSync(VAULT_DB);
+      this.db = new SqlJsCompat(VAULT_DB);
+      if (!existed) {
         this.db.run(`CREATE TABLE memories (
           id TEXT PRIMARY KEY, type TEXT NOT NULL,
           created_at TEXT NOT NULL,
@@ -71,9 +72,8 @@ export class MemoryVault {
         this.db.run(`CREATE INDEX idx_memories_calcium ON memories(calcium_score DESC)`);
       }
       this.ready = true;
-      this.flush();
       this.verifyManifest();
-      console.log(`[MemoryVault] ✅ 初始化完成: ${existsSync(VAULT_DB) ? '已存在' : '新建'} (${this.db.exec('SELECT COUNT(*) as c FROM memories')?.[0]?.values[0][0] ?? 0} 条)`);
+      console.log(`[MemoryVault] ✅ 初始化完成: ${existed ? '已存在' : '新建'} (${this.db.exec('SELECT COUNT(*) as c FROM memories')?.[0]?.values[0][0] ?? 0} 条)`);
     } catch (err) {
       console.warn('[MemoryVault] ❌ 初始化失败:', err);
     }
@@ -81,7 +81,7 @@ export class MemoryVault {
 
   /** 写入一条记忆 */
   write(entry: VaultEntry): void {
-    if (!this.ready) return;
+    if (!this.ready || !this.db) return;
     // 🔴 2026-09-16 数据卫生: 元对话/自我陈述不写入金库
     if (isMetaDiscourse(entry.raw_input)) {
       console.log('[MemoryVault] 金库写入拦截: 命中元对话规则，跳过 ' + entry.id);
@@ -97,7 +97,7 @@ export class MemoryVault {
        entry.calcium_score, entry.calcium_level,
        entry.raw_input, entry.locus_path, entry.strength]
     );
-    this.flush();
+    // 🔴 2026-11-06 迁移：写即落盘，原先每次写入后的「整库 export + 原子替换」已删除。
 
     // JSON Zone 备份
     const zoneFile = join(ZONES_DIR, `${entry.type}_${entry.id}.json`);
@@ -114,7 +114,7 @@ export class MemoryVault {
 
   /** 查询记忆（按钙化排序） */
   query(limit = 20): VaultEntry[] {
-    if (!this.ready) return [];
+    if (!this.ready || !this.db) return [];
     const res = this.db.exec(`SELECT * FROM memories ORDER BY calcium_score DESC LIMIT ${limit}`);
     if (!res.length) return [];
     const cols = res[0].columns;
@@ -129,7 +129,7 @@ export class MemoryVault {
 
   /** 获取地标列表 */
   getLandmarks(): VaultEntry[] {
-    if (!this.ready) return [];
+    if (!this.ready || !this.db) return [];
     const res = this.db.exec(`SELECT * FROM memories WHERE type='landmark' ORDER BY calcium_score DESC LIMIT 50`);
     if (!res.length) return [];
     const cols = res[0].columns;
@@ -144,6 +144,7 @@ export class MemoryVault {
 
   /** 统计 */
   getStats() {
+    if (!this.db) return { totalMemories: 0, totalLandmarks: 0, vaultPath: VAULT_ROOT, dbSize: 0 };
     const count = this.db.exec(`SELECT COUNT(*) as c FROM memories`);
     const lm = this.db.exec(`SELECT COUNT(*) as c FROM memories WHERE type='landmark'`);
     return {
@@ -154,37 +155,34 @@ export class MemoryVault {
     };
   }
 
-  /** 备份当前 vault.db */
+  /**
+   * 备份当前 vault.db。
+   * 🔴 2026-11-06 迁移：改用 SQLite 原生 `VACUUM INTO` —— 由引擎保证快照一致性
+   *   （不必再 export 整库到内存）。目标文件必须不存在，故先删除同名旧备份。
+   */
   backup(): void {
-    if (!this.ready) return;
+    if (!this.ready || !this.db) return;
     const date = new Date().toISOString().slice(0, 10);
     const backupPath = join(BACKUPS_DIR, `vault_${date}.db`);
-    writeFileSync(backupPath, this.db.export());
-    console.log(`[MemoryVault] 备份完成: ${backupPath}`);
+    try {
+      if (existsSync(backupPath)) {
+        unlinkSync(backupPath);
+      }
+      const escaped = backupPath.replace(/\\/g, '/').replace(/'/g, "''");
+      this.db.exec(`VACUUM INTO '${escaped}'`);
+      console.log(`[MemoryVault] 备份完成: ${backupPath}`);
+    } catch (err) {
+      console.error('[MemoryVault] 备份失败（保留原库）:', (err as Error)?.message);
+    }
   }
 
   /** 关闭 */
   close(): void {
     if (this.db) {
-      this.flush();
-      this.db.close();
+      this.db.close(); // SqlJsCompat.close() 内部先 wal_checkpoint(TRUNCATE) 再关闭
+      this.db = null;
     }
-  }
-
-  /**
-   * 🔴 2026-09-23：改为**原子写**（tmp → rename）。
-   *   原实现直接 `writeFileSync(VAULT_DB, ...)`：写中途失败（磁盘满/进程被杀）会留下
-   *   **截断的 vault 库** ✗。与主库（SQLiteAdapter）/FG（FamilyGraph）同范式：先写临时文件再原子替换，
-   *   失败保留原文件并告警（不静默吞掉）。vault.db 仅 ~20KB，不属性能热点，本次只修数据安全。
-   */
-  private flush(): void {
-    try {
-      const tmp = `${VAULT_DB}.tmp-${process.pid}`;
-      writeFileSync(tmp, Buffer.from(this.db.export()));
-      renameSync(tmp, VAULT_DB);
-    } catch (err) {
-      console.error('[MemoryVault] 落盘失败（保留原库）:', (err as Error)?.message);
-    }
+    this.ready = false;
   }
 
   private checksum(data: string): string {
@@ -205,7 +203,7 @@ export class MemoryVault {
   }
 
   private verifyManifest(): void {
-    if (!existsSync(MANIFEST_PATH)) return;
+    if (!existsSync(MANIFEST_PATH) || !this.db) return;
     try {
       const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf-8'));
       const entryCount = Object.keys(manifest.entries).length;

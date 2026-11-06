@@ -3060,10 +3060,11 @@ async function main(): Promise<void> {
       console.error('[Server] 刷出失败:', err);
     }
     if (masterHarris) { try { await masterHarris.stop(); } catch (e) { /* ignore */ } }
-    // P0-3: 确保数据落盘 — shutdownFlush 清定时器 → 强制落盘 → 关闭数据库
+    // 🔴 2026-11-06 迁移：写即落盘，不再有"强制落盘"这一步；
+    //   close() 内部先 wal_checkpoint(TRUNCATE) 再关连接（保证冷备份是完整单文件）。
     flushConversationHistory();
-    try { storage?.shutdownFlush(); } catch (e: any) { console.error('[server] error:', e?.message); }
-    console.log('[Server] 数据已落盘');
+    try { storage?.close(); } catch (e: any) { console.error('[server] error:', e?.message); }
+    console.log('[Server] 存储已关闭');
     process.exit(0);
   }
   process.on('SIGINT', () => handleShutdown('SIGINT'));

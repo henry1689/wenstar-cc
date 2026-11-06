@@ -36,10 +36,7 @@ const SCHEMA_SQL = join(HERE, '..', 'schema.sql');
 /** 桩适配器：用真库驱动 `_rebuildMemoryAnchors()`，只截断落盘 */
 function makeAdapter(db: any): any {
   const a: any = new SQLiteAdapter('D:/tmp/__unused_restart_invariant_test.db');
-  a.db = db;
-  a.flushNow = () => {};
-  a.flushNowAsync = () => {};
-  a._dirtyCount = 0;
+  a.db = db;   // 2026-11-06 迁移：写即落盘，不再需要 flush 桩
   return a;
 }
 

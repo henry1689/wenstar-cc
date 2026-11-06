@@ -40,10 +40,14 @@ function fatal(dim: string, check: string, detail: string, fix?: string) {
 
 async function loadSQLite(path: string): Promise<any> {
   if (!existsSync(path)) return null;
-  const initSqlJs = (await import('sql.js')).default;
-  const SQL = await initSqlJs();
-  const buffer = readFileSync(path);
-  return new SQL.Database(buffer);
+  try {
+    // 🔴 2026-11-06 存储底座迁移：改用只读原生连接（better-sqlite3 经 SqlJsCompat）。
+    //   本工具常在服务运行中执行 —— sql.js 只读文件快照，会漏掉 WAL 中尚未 checkpoint 的写入。
+    const { SqlJsCompat } = await import('../m2/SqlJsCompat.js');
+    return new SqlJsCompat(path, { readonly: true, fileMustExist: true });
+  } catch {
+    return null;
+  }
 }
 
 function query(db: any, sql: string, params?: any[]): any[] {
@@ -227,40 +231,25 @@ async function run() {
   // ═══════════════════════════════════════
   console.log('💾 [维度4] 数据持久化安全');
 
-  // 4a. 检查 SQLiteAdapter flush 配置
+  // 4a. 存储底座检查（2026-11-06 迁移后：判据反转）
   const sqliteContent = readFileSync(join(PROJECT_ROOT, 'src', 'm2', 'SQLiteAdapter.ts'), 'utf-8');
-  // 🔵 批16: 原实现比对魔法数（'= 5' / '= 2000'），配置一经改进便误报（2026-09-20 实际发生：
-  // 另一会话把 flush 改为 50次/150ms —— 那是**改进**：崩溃丢失窗口从 ~2s 缩到 ~150ms，
-  // 但检查仍断言旧值 → 误判 fatal）。现改为「提取实际值 + 校验安全区间」：
-  //   · 配置演进（如 150ms → 100ms）不再误报；
-  //   · 真退化（如 interval 5000ms / batch 100000）仍会报警。
-  const batchMatch = sqliteContent.match(/_FLUSH_BATCH\s*=\s*(\d+)/);
-  const intervalMatch = sqliteContent.match(/_FLUSH_INTERVAL\s*=\s*(\d+)/);
-  const flushBatch = batchMatch ? Number(batchMatch[1]) : NaN;
-  const flushInterval = intervalMatch ? Number(intervalMatch[1]) : NaN;
+  // 🔴 迁移前：检查「_FLUSH_BATCH/_FLUSH_INTERVAL 存在且落在安全区间」。
+  //   迁移后整条 flush/export 机制已删除，判据改为「**不得**出现旧链路符号」——
+  //   任何一处回退（重新 initSqlJs / 重新 export 整库）都会让切流再次因 300ms 预算被吃光而恒返 0。
+  //   注释里提到这些符号属正常（迁移说明），故先剥掉行注释/块注释再判定，避免自命中。
+  const sqliteCode = sqliteContent
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n');
+  const legacyExport = /initSqlJs|\.export\(\)|_FLUSH_BATCH|_FLUSH_INTERVAL/.test(sqliteCode);
 
-  // 安全区间依据：
-  //   interval = 崩溃时最多丢失的时间窗 → 上限取旧值 2000ms；下限 50ms（过密会拖慢写入）
-  //   batch    = 内存积压硬上限（防无界）→ 上限 500；下限 1
-  const BATCH_MIN = 1, BATCH_MAX = 500;
-  // 2026-09-20 校准：INTERVAL 上限 2000 → 60000。依据：
-  //   ① 本窗口是「落盘层」的崩溃丢失上限，而 M9 缓冲层本来就有 60s 窗口
-  //      ⇒ 落盘层只要 ≤ 60s，就不会成为更差的那一层；
-  //   ② 实测一轮对话触发 19 次整库重写（224MB×19≈4.16GB）、落盘当秒响应 807ms，
-  //      用户批准把窗口放大到 10s 换取写放大下降（实测 19→6 次、807ms→99ms）。
-  // 护栏仍有效：窗口 > 60s（超出上层窗口）或在文件里被改成异常大值 ⇒ 依旧报警。
-  const INTERVAL_MIN = 50, INTERVAL_MAX = 60000;
-  const batchOk = Number.isFinite(flushBatch) && flushBatch >= BATCH_MIN && flushBatch <= BATCH_MAX;
-  const intervalOk = Number.isFinite(flushInterval) && flushInterval >= INTERVAL_MIN && flushInterval <= INTERVAL_MAX;
-
-  if (batchOk && intervalOk) {
-    pass('数据持久化安全', '批量 flush 配置',
-      flushBatch + '次写入/' + flushInterval + 'ms防抖, 崩溃丢失窗口 ~' + flushInterval + 'ms, 配置合理');
+  if (!legacyExport) {
+    pass('数据持久化安全', '存储底座',
+      'better-sqlite3 页级落盘（整库导出已移除：无 initSqlJs / export() / _FLUSH_*）');
   } else {
-    fatal('数据持久化安全', '批量 flush 配置',
-      '批量 flush 配置超出安全区间 (batch=' + (batchMatch ? flushBatch : '未找到') +
-      ', interval=' + (intervalMatch ? flushInterval + 'ms' : '未找到') + ')',
-      '要求 _FLUSH_BATCH ∈ [' + BATCH_MIN + ', ' + BATCH_MAX + '] 且 _FLUSH_INTERVAL ∈ [' + INTERVAL_MIN + ', ' + INTERVAL_MAX + ']ms');
+    fatal('数据持久化安全', '存储底座',
+      'SQLiteAdapter 仍含 sql.js 整库导出残留（initSqlJs / export() / _FLUSH_*）',
+      '迁移后写即落盘；请移除残留，勿回退到整库导出（曾致召回腿全部超时）');
   }
 
   // 4b. 检查 JSON Zone 备份

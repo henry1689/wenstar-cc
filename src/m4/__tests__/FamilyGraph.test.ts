@@ -14,6 +14,9 @@ describe('FamilyGraph — 基础操作', () => {
   });
 
   afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄 —— 必须先 close 再删，
+    //   否则 Windows 上 unlink 静默失败，下一个用例会在旧库上继续写（UNIQUE 冲突）。
+    try { graph?.close(); } catch {}
     try { if (existsSync(TEST_DB)) unlinkSync(TEST_DB); } catch {}
   });
 
@@ -43,6 +46,9 @@ describe('FamilyGraph — 自动推断', () => {
   });
 
   afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄 —— 必须先 close 再删，
+    //   否则 Windows 上 unlink 静默失败，下一个用例会在旧库上继续写（UNIQUE 冲突）。
+    try { graph?.close(); } catch {}
     try { if (existsSync(TEST_DB)) unlinkSync(TEST_DB); } catch {}
   });
 
@@ -160,6 +166,9 @@ describe('FamilyGraph — 归一化读取器 getPersonBio', () => {
   });
 
   afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄 —— 必须先 close 再删，
+    //   否则 Windows 上 unlink 静默失败，下一个用例会在旧库上继续写（UNIQUE 冲突）。
+    try { graph?.close(); } catch {}
     try { if (existsSync(TEST_DB)) unlinkSync(TEST_DB); } catch {}
   });
 
@@ -213,6 +222,9 @@ describe('FamilyGraph — 亲属称谓长幼判断（修复 birthYear 当 age）
   });
 
   afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄 —— 必须先 close 再删，
+    //   否则 Windows 上 unlink 静默失败，下一个用例会在旧库上继续写（UNIQUE 冲突）。
+    try { graph?.close(); } catch {}
     try { if (existsSync(TEST_DB)) unlinkSync(TEST_DB); } catch {}
   });
 

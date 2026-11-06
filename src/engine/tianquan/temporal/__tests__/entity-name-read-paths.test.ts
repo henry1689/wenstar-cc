@@ -68,7 +68,7 @@ describe('[C1] 实体名读路径端到端：写侧落库 → 三引擎可检索
         belongEntityUuid: 'TXS-000000011',
       });
     }
-    adapter.flushNow?.();
+    // 2026-11-06 迁移：better-sqlite3 写即落盘，无需 flushNow
     await new Promise((r) => setTimeout(r, 200));
   }, 60_000);
 

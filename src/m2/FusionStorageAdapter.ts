@@ -50,12 +50,12 @@ export class FusionStorageAdapter {
   async initialize(): Promise<void> {
     if (!existsSync(this.dataDir)) mkdirSync(this.dataDir, { recursive: true });
     await this.sqlite.initialize();
-    // 初始化共享 ConversationDB（使用同一个 sql.js 实例）
-    // C4: 传递真实路径 + 落盘协调器 — 共享 db 的落盘委托给 SQLiteAdapter 统一 export（防抖合并，避免重复导出 96MB 库）
+    // 初始化共享 ConversationDB（与主库共用同一个 better-sqlite3 连接）
+    // 🔴 2026-11-06 迁移：落盘协调器（() => sqlite.scheduleFlush()）已删除 ——
+    //   better-sqlite3 写即落盘，不再存在「委托 owner 统一整库 export」这一层。
     this._conversationDB = new ConversationDB(
       join(this.dataDir, 'fusion_memory.db'),
       this.sqlite.getDb(),
-      () => this.sqlite.scheduleFlush(),
     );
     await this._conversationDB.initialize();
     // 🔴 V50 根治「序号撞车」：起点必须是**已用最大序号**，不是**记录条数**。
@@ -522,20 +522,14 @@ export class FusionStorageAdapter {
     return this.sqlite;
   }
 
-  /** P0-3: 强制立即落盘（委托给 SQLiteAdapter） */
-  flushNow(): void {
-    this.sqlite.flushNow();
-  }
-
-  /** P0-3: 关闭前安全落盘 — 清定时器 → 强制落盘 → 关闭数据库 */
-  shutdownFlush(): void {
-    // 先让 ConversationDB 落盘（如果共享同一 db 实例则跳过）
-    try {
-      if (this._conversationDB?.shutdownFlush) {
-        this._conversationDB.shutdownFlush();
-      }
-    } catch { /* best effort */ }
-    this.sqlite.shutdownFlush();
+  /**
+   * 关闭存储（进程退出前调用）。
+   * 🔴 2026-11-06 迁移：flushNow/shutdownFlush 合并为 close —— 写即落盘，无需"先落盘"；
+   *   SqlJsCompat.close() 内部先 wal_checkpoint(TRUNCATE)（把 -wal 并回主库，保证冷备份完整）再关连接。
+   */
+  close(): void {
+    try { this._conversationDB?.close?.(); } catch { /* 共享连接由 SQLiteAdapter 负责关闭 */ }
+    this.sqlite.close();
   }
 
   /** 获取共享的 ConversationDB 实例（三段存储③砂金库） */

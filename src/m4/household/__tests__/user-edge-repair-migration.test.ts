@@ -29,10 +29,16 @@ const CONFLICT_RELS = [
   'father_of', 'parent_of', 'mother_of', 'grandfather_of',
 ];
 
+/** 上一个用例的实例 —— 原生驱动持有文件句柄，必须先 close 才能删库（2026-11-06 迁移） */
+let _lastFg: any = null;
+
 async function freshFg(): Promise<any> {
+  try { _lastFg?.close(); } catch { /* 已关闭 */ }
+  _lastFg = null;
   try { if (existsSync(DB)) rmSync(DB); } catch { /* 清理失败不阻塞 */ }
   const fg: any = new FamilyGraph(DB);
   await fg.initialize();
+  _lastFg = fg;
   return fg;
 }
 
@@ -55,10 +61,11 @@ function addEdge(fg: any, source: string, target: string, relation: string, prop
 
 /** 落盘并重开一个实例 —— `initialize()` 会跑迁移链，这就是迁移的触发路径 */
 async function reopen(fg: any): Promise<any> {
-  await fg.flushAll();
+  // 🔴 2026-11-06 迁移：better-sqlite3 写即落盘 —— 原 flushAll() 已删除，close() 即含 checkpoint
   fg.close();
   const fg2: any = new FamilyGraph(DB);
   await fg2.initialize();
+  _lastFg = fg2;
   return fg2;
 }
 
@@ -80,7 +87,12 @@ function relationsBetween(fg: any, a: string, b: string): string[] {
 
 describe('[A3] 用户边关系归一迁移', () => {
   beforeEach(() => { _edgeSeq = 0; try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
-  afterEach(() => { try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ } });
+  afterEach(() => {
+    // 🔴 2026-11-06 迁移：原生驱动持有文件句柄，必须先 close 才能删库
+    try { _lastFg?.close(); } catch { /* 已关闭 */ }
+    _lastFg = null;
+    try { if (existsSync(DB)) rmSync(DB); } catch { /* 同上 */ }
+  });
 
   it('🔴 核心：9 条互斥边被清掉，只留下 colleague_of + lover_of', async () => {
     const fg = await freshFg();
