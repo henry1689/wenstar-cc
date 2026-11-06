@@ -295,6 +295,10 @@ export function startFoundationRouteTask(
 
 export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutput> {
   const { ctx, message, dna, p, enrichedHistory, memoryFragments, _meetingEntityName } = input;
+  // 分段计时：retrieval 阶段实测 0.6~9.3s，但 v2 只占 ~312ms、旧检索块已被跳过，
+  // 剩余耗时必须逐段暴露出来才能定位（见 [RetT] 日志）。
+  const _trT0 = Date.now();
+  let _trPrev = _trT0;
 
   // 🔴 V22 作品召回: 指称词解析（"那篇小说/继续写/标题"）→ 作品主键 → 注入完整作品全文
   // 放在会晤隔离墙之前：户主钥匙和会晤场景都能解析（会晤场景在隔离墙内提前 return）
@@ -356,29 +360,81 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   }
 
     // 🛡️ V5.2: 会晤信息隔离墙 — 阻断用户记忆，检索实体自有记忆
+  // 🔴 V14 替代旧链路的开关。false = 退回「v2 与旧链路串联叠加」的老行为。
+  const WS_V2_REPLACE_LEGACY = true;
+  // 🔴 v2 结果达到这个条数才算「够用」，够用就跳过旧检索块。
+  //   取 6：低于此值说明 v2 召回质量不足（时间窗内无内容 / 短查询），
+  //   需要旧链路补位；高于此值则旧链路的增量有限，而代价是 ~1.8s 串行耗时。
+  const V2_REPLACE_MIN_HITS = 6;
+  // 🔴 v2 硬超时：v2 卡住绝不能拖垮整轮对话，超时即放弃、交回旧链路。
+  //
+  //   ⚠️ 300 → 800：原先取 300ms 是误判。实测 v2 全程约 350ms
+  //   （embedding ~30 + 8 路召回 ~100 + rerank 预算 200 + 尾部），
+  //   于是**每次都会超时**，回退到 ~1800ms 的旧链路 —— 等于「v2 越努力，总体越慢」。
+  //   放宽到 800ms 让 v2 有机会跑完，净耗时反而从 1800ms 降到 350ms。
+  //   800ms 远低于旧链路耗时，所以即使真的走到超时，也不会比退回旧链路更差。
+  const V2_TIMEOUT_MS = 800;
   if (_meetingEntityName) {
+    // 分段打点：作品召回/指称解析段（上文 299~357）到此的累计耗时
+    console.error(`[RetT] A.入口→作品召回结束 = ${Date.now() - _trT0}ms`);
     try {
       // ── V14: MemArch v2 主召回（会晤分支）──
       //   🔴 为什么 V14 必须在这里也有一份：会晤分支在函数末尾之前（1051 行）就 return，
       //      1323 行那份 V14 对 mode=meeting 永远不可达 —— 实测清空日志后跑真实会晤，
       //      `[RETRIEVAL-STAGE-V13] ENTERED` 一次都没出现，就是这个原因。
-      //   旧逻辑不动，v2 结果只追加（40 字前缀去重）；这是过渡态，下一步再关停旧路径。
-      try {
-        const { memarchRetrieve, resolveNamespace } = await import('../memarch-runtime.js');
-        const _fgV14 = ctx.m4?.getFamilyGraph?.();
-        const _uuidV14 = _fgV14?.getUUIDByName?.(_meetingEntityName);
-        const _nsV14 = resolveNamespace(_uuidV14 ? [_uuidV14] : []);
-        const _ev14 = await memarchRetrieve(message, _nsV14, 8);
-        for (const _e of _ev14) {
-          const _t = String(_e.text || '').trim();
-          if (_t && !memoryFragments.some(f => f.includes(_t.substring(0, 40)))) {
-            memoryFragments.push(_t);
+      //
+      //   🔴【为什么不能只追加】第一版实现是「v2 结果追加 + 旧链路照跑」，
+      //      V14 的 await 串行排在 700 行旧检索之前，等于**纯叠加**：
+      //      实测检索从 ~1.8s 涨到 2~6s，业主反馈「响应时间明显长了很多」。
+      //      现在改为：结果够用 → 跳过旧检索块；不足/超时/失败 → 交回旧链路。
+      //      净效果是**下降**（v2 ~300ms vs 旧链路 ~1800ms），同时保留兜底。
+      let _v2Replace = false;
+      if (WS_V2_REPLACE_LEGACY) {
+        let _v14Aborted = false;   // 超时后置位，阻止迟到的 push 污染本轮结果
+        try {
+          const _v2Work = (async () => {
+            const _t14 = Date.now();
+            const { memarchRetrieve, resolveNamespace } = await import('../memarch-runtime.js');
+            const _fgV14 = ctx.m4?.getFamilyGraph?.();
+            const _uuidV14 = _fgV14?.getUUIDByName?.(_meetingEntityName);
+            const _nsV14 = resolveNamespace(_uuidV14 ? [_uuidV14] : []);
+            const _ev14 = await memarchRetrieve(message, _nsV14, 8);
+            if (_v14Aborted) return -1;
+            for (const _e of _ev14) {
+              const _t = String(_e.text || '').trim();
+              if (_t && !memoryFragments.some(f => f.includes(_t.substring(0, 40)))) {
+                memoryFragments.push(_t);
+              }
+            }
+            // 打耗时：retrieval 阶段整体 1.5~5s，需要知道 v2 这一段占多少
+            console.log(
+              `[searchV14:meeting] ns=${_nsV14} 命中 ${_ev14.length} 条（${Date.now() - _t14}ms）`,
+            );
+            return _ev14.length;
+          })();
+          const _n14 = await Promise.race([
+            _v2Work,
+            new Promise<number>((resolve) => setTimeout(() => { _v14Aborted = true; resolve(-1); }, V2_TIMEOUT_MS)),
+          ]);
+          if (_n14 < 0) {
+            console.warn(`[searchV14:meeting] 超时 ${V2_TIMEOUT_MS}ms，回退旧链路`);
+          } else {
+            _v2Replace = _n14 >= V2_REPLACE_MIN_HITS;
+            if (_v2Replace) {
+              // 旧检索块整体被跳过，块内原有的出口配额闸门也随之不可达，
+              // 所以这里按「泛词从严」单独补一次，避免 v2 结果不加约束地全量注入。
+              console.log(`[searchV14:meeting] 结果足够（${_n14} 条），跳过旧链路检索`);
+              try {
+                applyRecallQuotaAtExit(memoryFragments, 'meeting', enrichedHistory, true);
+              } catch (_qErr) {
+                console.warn('[searchV14:meeting] 配额裁剪失败（不阻塞）:', (_qErr as Error)?.message);
+              }
+            }
           }
+        } catch (_e14) {
+          // 降级必须可见 —— v2 失败不能影响会晤分支后续的旧链路检索
+          console.warn('[searchV14:meeting] v2 召回失败，回退旧链路:', (_e14 as Error)?.message);
         }
-        console.log(`[searchV14:meeting] ns=${_nsV14} 命中 ${_ev14.length} 条`);
-      } catch (_e14) {
-        // 降级必须可见 —— v2 失败不能影响会晤分支后续的旧链路检索
-        console.warn('[searchV14:meeting] v2 召回失败，继续旧链路:', (_e14 as Error)?.message);
       }
 
       const _fg = ctx.m4?.getFamilyGraph?.();
@@ -407,7 +463,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         console.log('[GroupShadow] 检索主体 UUID 取自群聊状态（speakerUuid 优先）');
       }
       const _sqlite = ctx.storage?.getSQLite?.();
-      if (_entityUuid && _sqlite && typeof _sqlite.queryAll === 'function') {
+      // 🔴 _v2Replace = true 时跳过整个旧检索块（~1.8s），由 v2 单独负责召回。
+      //   v2 不足/超时/失败时 _v2Replace 保持 false，行为与改动前完全一致。
+      if (!_v2Replace && _entityUuid && _sqlite && typeof _sqlite.queryAll === 'function') {
         // 🔴 2026-11-02 业主裁决「彻底拆除 n-gram」：砂金库索引启动补齐段已删除。
         //   它补的是 search_index 的 conversation 分区 —— 该分区自 2026-10-27 起停建、
         //   索引整表已随本次拆除下线。砂金库召回改走 v11 结构化召回的 conversation 域
@@ -1071,6 +1129,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         applyRecallQuotaAtExit(memoryFragments, 'meeting', enrichedHistory, _rqGeneric);
       }
     } catch (_e) { /* non-critical */ }
+    // 分段打点：会晤分支整体（含 V14 + 被跳过的旧检索块）到此的累计耗时
+    console.error(`[RetT] B.会晤分支结束 = ${Date.now() - _trT0}ms（分段 ${Date.now() - _trPrev}ms）`);
+    _trPrev = Date.now();
     return {
       isTopicShift: false, isFollowUp: false, hasContinuationMarkers: false,
       isCasualChat: true, isLimitedRetrieval: false, hasNewEntity: false, hasPersonEntity: false,
