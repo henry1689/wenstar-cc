@@ -1,26 +1,30 @@
 -- =====================================================================
--- MemArch-v2.0.0 / M1-Storage / 05_views.sql
--- 命名空间隔离视图（业务代码只读入口，禁止直接查原表）
--- 规则：default 命名空间 + 非角色 + 非 tombstone/purged
+-- MemArch-v2.1.0 / M1-Storage / 05_views.sql
+-- 生命周期视图（业务代码只读入口，禁止直接查原表）
+-- 规则：非 tombstone/purged（**不再按 namespace 过滤**）
+--
+-- 🔴 v2.0.0 → v2.1.0 变更（ADR-016 §三 变更 #3 / #4）：
+--   原实现 `WHERE COALESCE(namespace,'default')='default'` —— 而按角色分 ns 写入的
+--   数据（ns_yuyao/ns_shiyu/… 共 17335 条）在 default 域** 0 条**，走本视图恒返回 0 条，
+--   却因「任何 ns 都命中 0、测不出区别」而看不出隔离已失效。
+--   namespace 隔离**下移到查询层显式参数**（QueryContext.namespace + SQL `AND m.namespace = @ns`），
+--   视图只保留生命周期过滤，不再冒充隔离边界。
 -- =====================================================================
 
--- 按任务书 §3.2 严格定义
+-- 按任务书 §3.2 严格定义（v2.1.0：只做生命周期过滤，namespace 由查询层显式提供）
 CREATE VIEW IF NOT EXISTS v_conv_real AS
   SELECT * FROM conversations
-  WHERE COALESCE(namespace, 'default') = 'default'
-    AND (roleplay_char IS NULL OR roleplay_char = '')
+  WHERE (roleplay_char IS NULL OR roleplay_char = '')
     AND COALESCE(lifecycle_state, 'fresh') NOT IN ('tombstone', 'purged');
 
 CREATE VIEW IF NOT EXISTS v_mem_real AS
   SELECT * FROM memories
-  WHERE COALESCE(namespace, 'default') = 'default'
-    AND lifecycle_state NOT IN ('tombstone', 'purged');
+  WHERE lifecycle_state NOT IN ('tombstone', 'purged');
 
--- 补充同名空间隔离视图（同一过滤规则，供其他模块使用，不扩接口）
+-- 补充同名空间视图（同一过滤规则，供其他模块使用，不扩接口）
 CREATE VIEW IF NOT EXISTS v_ep_real AS
   SELECT * FROM episodes
-  WHERE COALESCE(namespace, 'default') = 'default'
-    AND lifecycle_state NOT IN ('tombstone', 'purged');
+  WHERE lifecycle_state NOT IN ('tombstone', 'purged');
 
 CREATE VIEW IF NOT EXISTS v_fact_real AS
   SELECT * FROM semantic_facts
@@ -32,6 +36,8 @@ CREATE VIEW IF NOT EXISTS v_bd_active AS
   SELECT * FROM black_diamond_v2 WHERE status = 'active';
 
 -- 测试命名空间专用视图（仅测试代码使用，生产视图永远看不到 test 数据）
+-- 🔴 这两个**保留** namespace='test' 过滤：它们的职责就是把测试数据挡在生产之外，
+--   与上面三个「不再按 ns 过滤」的视图语义不同，不要一并改掉。
 CREATE VIEW IF NOT EXISTS v_conv_test AS
   SELECT * FROM conversations WHERE namespace = 'test';
 
@@ -42,4 +48,10 @@ CREATE VIEW IF NOT EXISTS v_mem_test AS
 -- 使用规则（CI lint 强制）：
 --   storage/ 目录外出现 "FROM conversations" / "FROM memories" / "FROM episodes"
 --   直接 lint 失败。必须走 v_conv_real / v_mem_real / v_ep_real。
+--
+-- ⚠️ 已知不一致（登记待修，不在本单范围）：
+--   memarch-v2/retrieval/recall/ 下 bm25 / emotion_40d / semantic_vector 实际**直接查原表**
+--   （`FROM fts_memories JOIN memories` / `FROM vec_*`）+ `AND m.namespace = @ns`，
+--   与本条 lint 意图冲突。二者取舍（改腿走视图 vs 放宽 lint）需单独决策 —— 注意
+--   改腿走视图反而会丢掉 namespace 隔离（视图已不再过滤 ns），故倾向放宽 lint。
 -- =====================================================================

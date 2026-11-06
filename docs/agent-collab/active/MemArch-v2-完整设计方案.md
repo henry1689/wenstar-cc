@@ -828,7 +828,11 @@ function verifyPassword(input: string, storedHash: Buffer, salt: Buffer): boolea
 ① 查询理解（≤ 50ms，规则优先，存疑才调用小模型）
    输出：p_A（回溯意图概率）、时间表达 → [from, to]、实体、查询情绪 40D
 
-② 硬过滤：namespace='default' ∧ 未进墓碑 ∧（通路 B 时排除 suppressed）
+② 硬过滤：namespace=:currentEntityNamespace ∧ 未进墓碑 ∧（通路 B 时排除 suppressed）
+   🔴 v2.1.0（ADR-016 §三 #3）：原写 `namespace='default'` —— 按角色分 ns 写入的数据
+      在 default 域 **0 条**（ns_yuyao/ns_shiyu/… 共 17335 条），走此硬过滤恒返回 0 条。
+      现改为**只读当前实体域**，**不并集 default**（§2.1：并集即保留一条串台通道，
+      历史「玉瑶的记忆被诗雨说出来」正是这类混流）。公共知识走 L4 `semantic_facts`。
 
 ③ 多路召回（并行，每路取前 30）
    R1 全文 BM25（L1 原文 + L2 gist）     R2 语义向量（L3 / L2 / L4）

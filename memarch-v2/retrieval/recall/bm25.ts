@@ -27,11 +27,15 @@ export class Bm25Recall extends BaseRecallStrategy {
     if (!this.isAvailable()) return [];
 
     // Split raw query into tokens, join with OR to avoid AND being too strict.
-    // FTS5 trigram handles CJK bigrams automatically.
+    // 🔴 FTS5 trigram 要求查询词 **>= 3 字符**，否则 MATCH 恒返回 0 条。
+    //   实测：match '诗雨'(2字)=0 / '诗雨晚'(3字)=5 / 'the'(3字符)=25。
+    //   原注释「trigram handles CJK bigrams automatically」是错的 —— trigram 切的是
+    //   三元组不是 bigram；length>=2 的 token 会被保留却永远匹配不上，2 字中文查询
+    //   （诗雨/电机/晚安…）在本腿静默失效，只能靠其他腿兜底。
     const tokens = q.raw_query
       .split(/[\s,，。.；;？?！!]+/)
       .map((t) => t.trim())
-      .filter((t) => t.length >= 2)
+      .filter((t) => t.length >= 3)
       .slice(0, 8);
     const matchExpr = tokens.length > 0
       ? tokens.map((t) => `"${t}"`).join(' OR ')
