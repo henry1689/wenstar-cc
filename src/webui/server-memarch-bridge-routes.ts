@@ -308,7 +308,33 @@ export async function handleMemarchBridgeRoutes(deps: MemarchBridgeRouteDeps): P
           if (!bridge?.retrieve?.retrieve) { json(res, 501, { ok: false, error: 'not_supported' }); return true; }
           const r = await bridge.retrieve.retrieve(q, { namespace: ns as RetrievalNamespace });
           const ev = (r as unknown as { evidence?: Array<{ uuid?: string }> })?.evidence ?? [];
-          json(res, 200, { ok: true, namespace: ns, count: ev.length, ids: ev.slice(0, 20).map((e) => e.uuid) });
+          // 🔴 2026-11-07 切流验证：原实现丢弃 metrics，导致「服务内 count=0」无法判断是
+          //   全腿降级、重排返回空还是真的无数据。这里只回计数与耗时（无记忆原文）。
+          const metrics = (r as unknown as { metrics?: unknown })?.metrics ?? null;
+          // 🔴 诊断字段：确认服务进程内句柄指向的文件与 ns 行数是否和磁盘一致
+          let dbName: string | null = null;
+          let nsRows: number | null = null;
+          let likeRows: number | null = null;
+          try {
+            const h = _v2Db as unknown as {
+              name?: string;
+              prepare(sql: string): { get(...a: unknown[]): unknown };
+            } | null;
+            if (h) {
+              dbName = h.name ?? null;
+              const row1 = h.prepare('SELECT COUNT(*) AS c FROM memories WHERE namespace = ?').get(ns) as { c?: number };
+              nsRows = Number(row1?.c ?? -1);
+              const row2 = h
+                .prepare("SELECT COUNT(*) AS c FROM memories WHERE namespace = ? AND (COALESCE(summary,'') || COALESCE(raw_input,'')) LIKE ?")
+                .get(ns, `%${q.slice(0, 8)}%`) as { c?: number };
+              likeRows = Number(row2?.c ?? -1);
+            }
+          } catch { /* 诊断失败不影响主响应 */ }
+          json(res, 200, {
+            ok: true, namespace: ns, count: ev.length,
+            ids: ev.slice(0, 20).map((e) => e.uuid),
+            metrics, diagnostics: { dbName, nsRows, likeRows },
+          });
         } catch (e) {
           const msg = (e as Error)?.message || String(e);
           // 不掩盖问题：状态码与原始 error 原样保留，只补一条可操作提示。
