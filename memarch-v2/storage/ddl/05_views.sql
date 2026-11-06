@@ -12,10 +12,15 @@
 -- =====================================================================
 
 -- 按任务书 §3.2 严格定义（v2.1.0：只做生命周期过滤，namespace 由查询层显式提供）
+-- 🔴 业主 2026-11-06 裁定：`roleplay_char` 语义 = **谁扮演的归谁**（存扮演者实体名），
+--   「不管他扮演的谁都不重要，只要他自己知道是他扮演的就行」；旧库「全 NULL = 扮演模式标记」
+--   的语义作废。实测迁移后 15256 行该字段为扮演者名（徐诗雨 6318 / 阿珍 3663 / 玉瑶 1998 …），
+--   仅 ns_legacy_unknown 2598 行为空 ⇒ 原过滤 `roleplay_char IS NULL` 只留下归属不明的数据、
+--   **排除全部真实实体对话（缺 85%）**。该字段值属「要的」，故过滤移除。
+--   namespace 隔离仍由查询层 `AND m.namespace = @ns` 承担（与本文件移除 ns 过滤同一原则）。
 CREATE VIEW IF NOT EXISTS v_conv_real AS
   SELECT * FROM conversations
-  WHERE (roleplay_char IS NULL OR roleplay_char = '')
-    AND COALESCE(lifecycle_state, 'fresh') NOT IN ('tombstone', 'purged');
+  WHERE COALESCE(lifecycle_state, 'fresh') NOT IN ('tombstone', 'purged');
 
 CREATE VIEW IF NOT EXISTS v_mem_real AS
   SELECT * FROM memories

@@ -1,16 +1,23 @@
 /**
  * 命名空间隔离测试（v2.1.0 / ADR-016 变更 #3 #4）
  *
- * 🔴 语义变更：视图**不再按 namespace 过滤**，只保留生命周期 + roleplay 过滤。
- *   namespace 隔离**下移到查询层显式参数**（QueryContext.namespace + `AND m.namespace = @ns`）。
- *   原因：按角色分 ns 写入的数据在 default 域 **0 条**，视图硬编码 `='default'` 会让生产检索
- *   恒返回 0 条，却因「任何 ns 都命中 0、测不出区别」而看不出隔离已经失效。
+ * 🔴 语义变更（两轮，业主 2026-11-06）：视图**不再按 namespace 过滤，也不再按 roleplay_char 过滤**，
+ *   只保留生命周期（tombstone/purged）过滤。
  *
- *   故本文件验收项由「视图按 ns 隔离」改为：
- *     ① 视图仍过滤 tombstone/purged 与 roleplay（生命周期语义，与 ns 无关）
+ *   第一轮 · namespace：按角色分 ns 写入的数据在 default 域 **0 条**，视图硬编码 `='default'`
+ *   会让生产检索恒返回 0 条，却因「任何 ns 都命中 0、测不出区别」而看不出隔离已失效。
+ *   ⇒ 隔离**下移到查询层显式参数**（QueryContext.namespace + `AND m.namespace = @ns`）。
+ *
+ *   第二轮 · roleplay_char：业主裁定其语义 = **谁扮演的归谁**（存扮演者实体名），
+ *   旧库「全 NULL = 扮演模式标记」的语义作废。实测迁移后 15256 行该字段为扮演者名，
+ *   仅 ns_legacy_unknown 2598 行为空 ⇒ 原过滤只留下归属不明的数据、**排除全部真实实体对话（缺 85%）**。
+ *
+ *   故本文件验收项：
+ *     ① 视图只过滤 tombstone/purged（生命周期语义，与 ns、与扮演者均无关）
  *     ② `v_*_test` 仍只暴露 test 数据（测试代码专用入口）
  *     ③ **查询层必须带 ns 参数** —— 由 retrieval 各腿的 `@ns` SQL 保证
  *        （见 memarch-v2/retrieval/recall/bm25.ts 等），不归视图管
+ *     ④ 扮演者数据（带 roleplay_char）**必须可见** —— 反向断言，防过滤被加回
  */
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
@@ -31,19 +38,21 @@ beforeAll(() => {
 });
 
 describe('命名空间隔离视图（v2.1.0 语义）', () => {
-  it('v_conv_real 过滤 roleplay/tombstone；namespace 不再由视图过滤', () => {
+  it('v_conv_real 只过滤 tombstone；扮演者数据与 namespace 均不过滤', () => {
     const rows = db.prepare(`SELECT message_id, namespace FROM v_conv_real ORDER BY message_id`).all() as { message_id: string; namespace: string }[];
     const ids = rows.map((r) => r.message_id);
     // default 数据可见
     expect(ids).toContain('test-msg-001');
     expect(ids).toContain('test-msg-002');
     expect(ids).toContain('test-msg-003');
-    // 仍必须不可见 —— 这两条与 namespace 无关，是视图保留的过滤职责
-    expect(ids).not.toContain('test-msg-r1');   // roleplay_char=王全芬
+    // tombstone 仍必须不可见 —— 这是视图保留的唯一过滤职责
     expect(ids).not.toContain('test-msg-x1');   // lifecycle_state=tombstone
-    // 🔴 v2.1.0 反向断言：namespace 不再由视图过滤，test 数据**会**出现在视图里。
-    //    故意断言 toContain —— 若有人把 ns 过滤偷偷加回视图（那正是让生产检索
-    //    恒返回 0 条的原因），本用例立刻失败并指向真正该改的地方：查询层 @ns 参数。
+    // 🔴 反向断言（业主「谁扮演的归谁」）：扮演者数据**不得**被过滤。
+    //    r1 带 roleplay_char=王全芬，原过滤会把它挡掉 ⇒ L1 检索缺 85%。
+    expect(ids).toContain('test-msg-r1');
+    // 🔴 反向断言：namespace 不再由视图过滤，test 数据**会**出现在视图里。
+    //    若有人把 ns 过滤偷偷加回视图（那正是让生产检索恒返回 0 条的原因），
+    //    本用例立刻失败并指向真正该改的地方：查询层 @ns 参数。
     expect(ids).toContain('test-msg-t1');
     expect(ids).toContain('test-msg-t2');
   });
@@ -71,7 +80,7 @@ describe('命名空间隔离视图（v2.1.0 语义）', () => {
     // 此处固化该事实，避免后人误以为"零重叠"仍是契约而把 ns 过滤加回视图。
     const real = db.prepare(`SELECT COUNT(*) AS c FROM v_conv_real`).get() as { c: number };
     const test = db.prepare(`SELECT COUNT(*) AS c FROM v_conv_test`).get() as { c: number };
-    expect(real.c).toBe(5);   // 3 default + 2 test（roleplay/tombstone 已排除）
+    expect(real.c).toBe(6);   // 3 default + 2 test + 1 扮演者 r1（仅 tombstone 已排除）
     expect(test.c).toBe(2);
     const overlap = db.prepare(`
       SELECT COUNT(*) AS c FROM v_conv_real r JOIN v_conv_test t ON r.message_id = t.message_id
