@@ -341,6 +341,17 @@ v10 迁移的整段替换根本没有落盘。
    兼容层已内置孤儿 WAL 清理；测试与备份脚本必须「先 close 再删/拷」。
 4. **原生驱动持有 OS 文件句柄**：Windows 上不 close 就删库会静默失败（测试里表现为下个用例 UNIQUE 冲突）。
 
+**实机验证（2026-11-07 01:18~01:27）**：
+- 启动：`✅ 磁盘验证: 17548条有UUID（独立只读连接重读磁盘）`、`✅ ANCHOR 3393/3393 带UUID`、`锚点归属自检 ✅`；HTTP `/` 与 `/api/memory` 均 200。
+- 崩溃恢复：`taskkill /F` 强杀 → pm2 重拉 → 主库 18165 记忆 / 21351 对话、FG 1858 节点 / 2116 边，两边 `integrity_check = ok`。
+- 优雅停止：`pm2 stop` 后 `-wal` 残留（Windows 下 start.cjs 监督进程不转发信号）——数据完整、下次打开自动重放；**备份前须显式 checkpoint**（已写入红线）。
+- 召回：`ns_yuyao` 5 条查询全部非 0（10 / 10 / 5 / 10 / 10），不再被整库导出抢占。
+
+**迁移期事故（已恢复，留档）**：全量测试期间 better-sqlite3 在 FG 库上生成 WAL，而仍在运行的 sql.js 服务照旧整库覆盖同一 `.db`
+⇒ WAL 重放后 `integrity_check` 报「2nd reference to page」。用 **checkpoint 前的干净备份**恢复（1857 节点 / 2115 边，ok）。
+损坏副本保留在 `data/webui/knowledge/family_graph.corrupt-20261107-0118.db` 供取证，确认后可删。
+**铁律：同一个库同一时刻只允许一种引擎写入。**
+
 **已知债务**：
 - 离线工具（`migrate-entity-relations.ts` / `scan-knowledge-intimate.ts` / `MigrationManager` 离线分支）
   仍用 sql.js，**必须在服务停止时运行**（迁移前既有约束，未扩大）。

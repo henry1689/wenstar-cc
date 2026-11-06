@@ -95,7 +95,13 @@ sql.js 的架构是「**整库载入 WASM 内存**」，落盘靠 `db.export()` 
 
 ## 6. 风险与已知边界
 
-1. **WAL 文件语义**：运行中冷拷贝单个 `.db` 可能缺最后一段（`-wal` 未 checkpoint）。对策：关库自动 `TRUNCATE`；停服后备份是单文件完整。运行中备份需一并复制 `-wal/-shm`。
+1. **WAL 文件语义**：运行中冷拷贝单个 `.db` 可能缺最后一段（`-wal` 未 checkpoint）。
+   - 进程内正常关闭（`close()`）会 `wal_checkpoint(TRUNCATE)`，此时 `.db` 是自包含单文件；
+   - 🔴 **实测边界（Windows + pm2）**：`pm2 stop` 杀的是 `start.cjs` 监督进程，它**不转发信号**给 `server.ts` 子进程（Windows 无 POSIX 信号），子进程被直接终止 ⇒ `close()` 不执行，`-wal` 残留。
+     数据不丢（下次打开自动重放，已用 kill -9 实测：18165 条记忆 / 21358 条对话 / FG 1858 节点全部完好，integrity ok），
+     但**备份前必须先做一次 checkpoint**：`PRAGMA wal_checkpoint(TRUNCATE)`，或把 `.db` 与 `-wal/-shm` 一起复制。
+   - ⚠️ 迁移期间曾因此出过一次事故：better-sqlite3 的 WAL 在盘时，仍以 sql.js 运行的旧服务整库覆盖了同一个 `.db`，随后 WAL 重放导致 `integrity_check` 报「2nd reference to page」。已用 checkpoint 前的干净备份恢复。
+     **铁律：同一个库同一时刻只能有一种引擎在写。**
 2. **外部删库必须连 `-wal/-shm` 一起删**：兼容层已兜底（主文件不存在时清理孤儿 WAL），但外部脚本仍应遵循。
 3. **离线 sql.js 工具**（`src/cli/migrate-entity-relations.ts`、`scan-knowledge-intimate.ts`、`MigrationManager` 的离线分支）**必须在服务停止时运行**——它们仍会整库 export 覆盖磁盘。此为迁移前既有约束，本次未改动；后续可单独迁移。
 4. **测试读写真实库**（`grader-non-name-tail` 等）：结果随数据状态变化，与本次改动无关。
