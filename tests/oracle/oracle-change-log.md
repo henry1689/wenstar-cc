@@ -50,18 +50,21 @@ a7ca56b  64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998   +5/�
 
 | 序 | commit | 对象 | 哈希 前 → 后 | 增/删 | 级别 | 关联 | 变更人 | 复核人 |
 |---|---|---|---|---|---|---|---|---|
-| 9 | 本包（`OCL-20261106-01`） | `oracle_spacestate.py` | `64c4fb4f…` → `803e4015…` | +10/−3 | R1 | 任务 3：`test_ts_layer_constants_crosscheck` 的对拍源由**人工维护的第三份副本**改为 `src/spacestate/__tests__/config-snapshot.json`（唯一镜像）；docstring 同步。**计算路径零改动**（只改路径与说明） | 执行方 | 待指定 |
-| 10 | 本包（`OCL-20261106-01`） | `diff_spacestate.py` | — | — | R1（档位选择） | 任务 8：`--self-check` 默认 10,000；**`quick`/`full` 的抽样数量与构成零改动** | 执行方 | 待指定 |
-| 11 | 本包（`OCL-20261106-01`） | `diff_spacestate.py` | — | — | **R2（本任务书授权）** | 任务 9：采样改**分层精确配额**，`wild` 恒等于 0.30；**容差零改动** | 执行方 | 待指定 |
-| 12 | 本包（`OCL-20261106-01`） | `diff_spacestate.py` | — | — | **R2（本任务书授权）** | 任务 4：判定抽成 `evaluate_verdict()` + 新增 R-5；除 R-5 外判定语义零改动（由 `test_diff_verdict.py` 回归守卫） | 执行方 | 待指定 |
-| 13 | 本包（`OCL-20261106-01`） | `oracle-change-log.md` / `test_diff_verdict.py` / `run_oracle_tests.py` / `.gitignore` | 新建 | — | R1 | 治理登记表 + 判定单测 + CI runner + 忽略 `__pycache__` | 执行方 | 待指定 |
-| 14 | 本包（`OCL-20261106-01`） | `reports/last-approved.json` | 旧结构 → 内容寻址（7 字段） | — | R3（放行记录） | 任务 4：由脚本在**干净工作区**上重建；待统筹者复核 | 执行方 | 待指定 |
+| 9 | `b977bce` | `oracle_spacestate.py` | `64c4fb4f…` → `803e4015…` | +10/−3 | R1 | 任务 3：`test_ts_layer_constants_crosscheck` 的对拍源由**人工维护的第三份副本**改为 `src/spacestate/__tests__/config-snapshot.json`（唯一镜像）；docstring 同步。**计算路径零改动**（只改路径与说明） | 执行方 | 待指定 |
+| 10 | `b977bce` | `diff_spacestate.py` | `66442693…` → `f8e2503a…` | 合计 +339/−63（序 10–12 同属一次提交，不拆分） | R1（档位选择） | 任务 8：`--self-check` 默认 10,000；**`quick`/`full` 的抽样数量与构成零改动** | 执行方 | 待指定 |
+| 11 | `b977bce` | `diff_spacestate.py` | 同上 | 同上 | **R2（本任务书授权）** | 任务 9：采样改**分层精确配额**，`wild` 恒等于 0.30；**容差零改动** | 执行方 | 待指定 |
+| 12 | `b977bce` | `diff_spacestate.py` | 同上 | 同上 | **R2（本任务书授权）** | 任务 4：判定抽成 `evaluate_verdict()` + 新增 R-5；除 R-5 外判定语义零改动（由 `test_diff_verdict.py` 回归守卫） | 执行方 | 待指定 |
+| 13 | `b977bce` | `oracle-change-log.md` / `test_diff_verdict.py` / `run_oracle_tests.py` / `.gitignore` | 新建（`f710f3ee…` / `d0676bf3…` / `7b758347…` / —） | 新建 | R1 | 治理登记表 + 判定单测 + CI runner + 忽略 `__pycache__` | 执行方 | 待指定 |
+| 14 | `9484a18` | `reports/last-approved.json` | 旧结构 → 内容寻址（7 字段）；现文件 `1de38261…` | +9/−5 | R3（放行记录） | 任务 4：由脚本在**干净工作区**（R-1 已验）上重建；`registration_ref=OCL-20261106-01`；待统筹者复核 | 执行方 | 待指定 |
 
-> 序 9–14 的 commit 与哈希列由**提交后**回填（提交前无法自指）。
-> 回填时不得改动本表以外的任何内容，也不得把「待指定」改成执行方自己。
+> 序 9–14 的 commit 与哈希列**已于 2026-11-07 提交后回填**，可用
+> `git show <commit> --stat` 与 `sha256sum <文件>` 逐行复核。
 >
 > 序 9 的 `64c4fb4f…` 是 `a7ca56b` 时的 oracle 哈希（见第一节末行）；
-> `803e4015…` 是本次对拍源迁移后的值，可由 `sha256sum tests/oracle/oracle_spacestate.py` 复核。
+> `803e4015…` 是本次对拍源迁移后的值。
+>
+> 序 10–12 是**同一文件、同一提交**里的三件事，故哈希与增删列相同，
+> 只有「关联」列区分是哪一项。拆成三行是为了让分级（R1 / R2 / R2）各自可查。
 
 ---
 
@@ -82,4 +85,4 @@ a7ca56b  64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998   +5/�
    须由统筹者指派第二人复核后回填，并注明复核日期。
 2. **序 7 `oracle-change-policy.md` 仍是「待业主签署」状态**（R3）。
    签署前 oracle 修改的放行效力受限，`last-approved.json` 不应被当作正式放行依据。
-3. **序 9–13 的 commit 列**待提交后回填。
+3. ~~序 9–13 的 commit 列待提交后回填~~ → 已于 2026-11-07 回填（见第二节说明）。
