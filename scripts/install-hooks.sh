@@ -25,5 +25,5 @@ cp hooks/pre-commit.template .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 
 echo "✅ 已安装 .git/hooks/pre-commit"
-echo "   检查项：Harness Gate / 鸿鸣 / 临时开关 / tsc --noEmit / PAS 规范测试"
+echo "   检查项：Harness Gate / 鸿鸣 / 临时开关 / tsc --noEmit / PAS 规范测试 / oracle 自测"
 echo "   紧急跳过：SKIP_HOOK_CHECKS=1 git commit ..."

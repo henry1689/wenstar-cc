@@ -4,16 +4,16 @@
   "oracle_sha256": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
   "oracle_sha256_before": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
   "oracle_sha256_last_report": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
-  "last_approved_hash": null,
-  "baseline_note": "无有效基线（记录不存在或缺内容寻址字段）——当次**不得作为放行依据**，仅建立基线供后续比对",
-  "baseline_written": "已写入 D:\\tools\\wenstar-cc\\tests\\oracle\\reports\\last-approved.json",
+  "last_approved_hash": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
+  "baseline_note": "与上次放行基线一致，全部检查通过",
+  "baseline_written": "未触发（本次不建立基线）",
   "ts_content_hash": "13b813c78e894f3e4c2caefaede64ed1a93a4544d4e173f871b1d56ab02b42ad",
-  "ts_commit": "b977bce2189e03ff99f07959d4804681917e0f95",
+  "ts_commit": "99f3d7c7d5988d074b5b6eca02cc6ea615e7784b",
   "ts_dirty": false,
   "script_hash": "f8e2503ab4b8ddeac13dc49f8c7357a6a43e0406e78b9705ea23d6ab0bdc5b67",
-  "registration_ref": null,
-  "registration_valid": false,
-  "registration_reason": "无有效基线（记录不存在或缺内容寻址字段）",
+  "registration_ref": "OCL-20261106-01",
+  "registration_valid": true,
+  "registration_reason": "registration_ref=OCL-20261106-01 已被提交说明引用",
   "seed": 20261104,
   "samples": 100000,
   "checked": 1179000,
@@ -56,10 +56,10 @@
   },
   "coverage_scope": "差分只覆盖 ℓ、量化、编码、清洗、相位、精度戳记；不覆盖层参数、Kalman、聚合",
   "self_check_offset": "0",
-  "verdict": "BASELINE_ESTABLISHED",
+  "verdict": "PASS",
   "elapsed_s": {
-    "generate": 2.56,
+    "generate": 2.47,
     "ts": 1.47,
-    "total": 4.02
+    "total": 3.94
   }
 }

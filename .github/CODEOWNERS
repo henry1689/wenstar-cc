@@ -1,0 +1,28 @@
+# CODEOWNERS —— 治理对象所有权约束（B-3 任务 10-4）
+
+# 🔴 上线前必须把 `@OWNER_TBD` 换成真实账号。
+#    本包**无权虚构 owner**（B-3 禁止事项 7），故统一留占位符。
+#    占位符状态下这些规则**不生效**（无法解析的 owner 会被忽略），
+#    也就是说 R-6「第二人复核」在 owner 指定前**尚未真正落地**——
+#    该状态已登记为未决项，不得对外声称已闭环。
+
+# 背景：oracle 是 TS 实现的对拍标准答案。若同一方既能改实现、又能改 oracle
+# 与放行记录，差分就退化成「自己和自己比」——任何实现缺陷都能靠改标准答案抹平。
+# 覆盖范围与 tests/oracle/oracle-change-policy.md 一致。
+
+# 标准答案本体
+/tests/oracle/oracle_spacestate.py        @OWNER_TBD
+
+# 放行记录：R-6 禁止工程方单独删除或重建
+/tests/oracle/reports/**                  @OWNER_TBD
+
+# 治理条文与变更登记表
+/tests/oracle/oracle-change-policy.md     @OWNER_TBD
+/tests/oracle/oracle-change-log.md        @OWNER_TBD
+
+# 判定单测与 CI 入口（改了就等于改了「什么算通过」）
+/tests/oracle/test_diff_verdict.py        @OWNER_TBD
+/tests/oracle/run_oracle_tests.py         @OWNER_TBD
+
+# 差分脚本：容差与采样是信任根（policy §七 R2）
+/tests/oracle/diff_spacestate.py          @OWNER_TBD
