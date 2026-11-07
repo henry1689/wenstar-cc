@@ -368,12 +368,20 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   const V2_REPLACE_MIN_HITS = 6;
   // 🔴 v2 硬超时：v2 卡住绝不能拖垮整轮对话，超时即放弃、交回旧链路。
   //
-  //   ⚠️ 300 → 800：原先取 300ms 是误判。实测 v2 全程约 350ms
-  //   （embedding ~30 + 8 路召回 ~100 + rerank 预算 200 + 尾部），
-  //   于是**每次都会超时**，回退到 ~1800ms 的旧链路 —— 等于「v2 越努力，总体越慢」。
-  //   放宽到 800ms 让 v2 有机会跑完，净耗时反而从 1800ms 降到 350ms。
-  //   800ms 远低于旧链路耗时，所以即使真的走到超时，也不会比退回旧链路更差。
-  const V2_TIMEOUT_MS = 800;
+  //   ⚠️ 300 → 800：原先取 300ms 是误判。实测 v2 全程约 350ms，于是**每次都会超时**，
+  //      回退到 ~1800ms 的旧链路 —— 等于「v2 越努力，总体越慢」。
+  //
+  //   ⚠️ 800 → 1500（2026-11-07 实测重标定）：
+  //     · 生产日志：会晤检索 311 次，其中 84 次超时（27%）；
+  //       已完成的 227 次 p50=275ms / p90=657ms / p95=813ms。
+  //     · 并发压测（同一 v2 路径）：并发 1 → p50 185ms；并发 4 → p50 995ms、max 1288ms；
+  //       并发 8 → p50 1060ms、max 1296ms。
+  //     ⇒ v2 在并发下稳定落在 1.0~1.3s。800ms 会先放弃、再回退 ~1.8s 旧链路，
+  //       单轮共 2.6s；放到 1500ms 则多数并发请求能在自身耗时内完成，约 1.2s。
+  //     真正的根治是把 ONNX 重排搬出主线程（同步推理 + 同步 SQLite 会互相排队），
+  //     那是独立改造；当前先用实测覆盖范围换取立即可见的延迟下降。
+  //     ⚠️ 代价：真卡死时最坏 1.5s + 1.8s = 3.3s。下方「迟到完成」埋点用于识别这种情况。
+  const V2_TIMEOUT_MS = 1500;
   if (_meetingEntityName) {
     // 分段打点：作品召回/指称解析段（上文 299~357）到此的累计耗时
     console.error(`[RetT] A.入口→作品召回结束 = ${Date.now() - _trT0}ms`);
@@ -399,7 +407,16 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             const _uuidV14 = _fgV14?.getUUIDByName?.(_meetingEntityName);
             const _nsV14 = resolveNamespace(_uuidV14 ? [_uuidV14] : []);
             const _ev14 = await memarchRetrieve(message, _nsV14, 8);
-            if (_v14Aborted) return -1;
+            if (_v14Aborted) {
+              // 🔴 迟到完成埋点：外层已按超时放弃（回退旧链路），这里只记录【真实耗时】，
+              //   结果照旧丢弃。用途：① 验证当前超时预算是否够 ② 识别「真卡死」——
+              //   若迟到耗时远大于超时值（例如 5s+），说明是事件循环被同步工作堵住，
+              //   应转向把 ONNX 重排移出主线程，而不是继续调大超时。
+              console.warn(
+                `[searchV14:meeting] 超时后迟到完成，真实耗时 ${Date.now() - _t14}ms（结果已丢弃，仍走旧链路）`,
+              );
+              return -1;
+            }
             for (const _e of _ev14) {
               const _t = String(_e.text || '').trim();
               if (_t && !memoryFragments.some(f => f.includes(_t.substring(0, 40)))) {
