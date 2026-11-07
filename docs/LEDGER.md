@@ -502,6 +502,46 @@ void 状态的 22 个历史垃圾待确认后硬删除。
 
 ---
 
+### §6.14 2026-11-07 实体提取架构收口 · 批1「止源」
+
+**业主决策**：完全取消「滑窗提取实体名 → 观察区 → 离线 LLM 补救」流程，
+前后只用一次 LLM 取证准入；生成器代码**物理删除**，避免死灰复燃。
+方案与任务书：`docs/实体提取架构收口方案-V1.md` / `docs/实体提取架构收口任务书-V1.md`（V2）。
+
+**本批删除（物理）**：
+| 生成器/旁路 | 位置 |
+|---|---|
+| M1 滑窗 `detectPersonNames` + `isPersonName` + 四个词表 | `src/m1/L3EntityAnnotator.ts` |
+| `slideDetected` 直通 | `src/webui/chat/ChatEntry.ts` |
+| 压缩前批量救名 `rescueNamesBeforeCompression` | `src/webui/maintenance.ts` |
+| 闭组自动补 `acquaintance_of` 边 | `src/webui/chat/dialog-group-stage.ts` |
+| 共现建实体 `buildEntityRelations/triggerEntityRelations` | `src/m7/InductionScheduler.ts` + `server.ts` + `assembleHippocampus.ts` |
+
+**保留**：FG 已登记人名**只读**精确匹配；`hasExplicitPersonIntro` 确定性判据；
+`entity_rules.json` 闭集词典（仅亲属称谓，无真人名）。
+
+**验证（2026-11-07 实测）**：
+- `tsc --noEmit` = 0；
+- 目标单测 32/32 通过；E2E Case 8 改为「准入层提供实体」后通过（原断言依赖滑窗）；
+- 运行时：普通对话正常回复；会晤 `mode=meeting speaker=徐诗雨`、实体检索 8 条；扮演医生正常；
+- FG person 跨 3 次重启恒为 **29**（17 active / 12 dormant），`integrity_check = ok`；
+- DB 标注率抽样：`entity_genes` 90.9%（16528/18173），`belong_entity_uuid` 96.6%；
+- 日志中「人名抢救 / 滑窗人名 / InductionGate / 实体关系图」全部静默。
+
+**全量测试**：4154 passed / 13 failed。除 E2E Case 8（已修）外，其余 12 项均在
+`governance/`、`memarch-v2/`、`scripts/`、`sql-schema-consistency`（server-memarch-bridge-routes.ts:328）、
+`grader-non-name-tail`（判据信息性阈值）、`storage-bench`（耗时阈值）—— 与本批改动无调用链关系，属既有失败。
+E2E Case 2 在全文件并发下 10.3s 超时、单跑 7.5s 通过（负载相关）。
+
+**新发现（既有缺陷，非本批引入）**：会晤退出后 `group_session_state` 停留
+`active=true + participants=[]`，`_soloMode` 短路全部回复，且 strict 模式阻止再次唤醒 ⇒ 会话死锁。
+本轮通过清除该键恢复（备份 `D:/tmp/group_session_state_backup.json`）。
+**计划处理：2026-11-09**（单独批次，不混入实体收口）。
+
+**下一步**：批2 —— 取证并入主回复调用 + `verifyAdmission` + 删除 `LLMEntityExtractor.ts`。
+
+---
+
 ## 相关文档
 
 - [GOVERNANCE.md](../GOVERNANCE.md) — 治理文件效力层级总表（**动手前必读**）

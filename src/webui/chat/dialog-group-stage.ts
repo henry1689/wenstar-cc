@@ -359,7 +359,9 @@ export async function flushDialogGroup(
           const userLines = dg.rounds.map((r: any) => r.q || '').join('\n');
           const assistantLines = dg.rounds.map((r: any) => r.a || '').join('\n');
           for (const name of dg.entities) {
-            if (validatePersonName(name)) fg.integrateSocialRelation(name, 'acquaintance_of', '').catch(() => {});
+            // 🔴 批1（2026-11-07）：闭组自动补 acquaintance_of 边已退役 —— dg.entities 来自
+            //   已被删除的滑窗/无证据提取链，是「关系边实体名全错」的直接来源。
+            //    这里只保留档案富化（extractProfileFromText 仅更新已登记节点，不建节点）。
             let selfText: string | undefined;
             if (name === '玉瑶') selfText = assistantLines;
             else if (name === '我') selfText = userLines;

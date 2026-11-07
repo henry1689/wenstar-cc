@@ -67,10 +67,6 @@ function getEntityRules(): NormalizedEntityRule[] {
 // - '花'(object) — 花园/花生/花费 误报
 // - '书'(object) — 书店/书法/秘书 误报
 
-// ── P2: 中国人名检测（复用 RelationshipExtractor.ts 的姓氏+停用词模式） ──
-
-// B1: 姓氏表统一 — 唯一数据源 app-identity.SURNAME_LIST
-import { SURNAME_LIST } from '../config/app-identity.js';
 // 🔴 DS-01 铁律（M1-M9 禁止低层 import 高层）：原为值导入 `import { FamilyGraph }`，
 //    被 CK-01 `checkNineLayerPipeline`（main_harness_checker.ts:254 isReverseDependency =
 //    fromNum < impNum）实测判为 m1→m4 反向依赖（:240 只豁免 import type，值导入不豁免），
@@ -78,57 +74,10 @@ import { SURNAME_LIST } from '../config/app-identity.js';
 //    改为**类型引用**（编译期擦除）+ 下方 initFg() 内动态 import 取值 ——
 //    `private fg: FamilyGraph | null` 的类型不受影响，运行时行为零变化。
 import type { FamilyGraph } from '../m4/household/FamilyGraph.js';
-const PERSON_SURNAMES = new Set(SURNAME_LIST);
 
-const NON_NAME_SUFFIX = new Set(['室','服','变','便','天','心','子','学','院','里','种','员','篇','摘','那','衣','呢','块','段','片','次','些','点','面','头','边','者','性','化','机','器','型','号','该','候','度','似','遇','职','责','储','述']);
-
-const COMMON_WORDS_PERSON = new Set(['应该','时候','强度','索引','关联','相遇','相似','职责','全长','公了','公桌','和种','史摘','和事','那那','白衬','鲁呢','段美','衣块','单员','公司','明天','谢谢','还是','或者','所以','因为','不过','而且','但是','如果','虽然','然后','家里','老说同','花卉','小镇','顺口','贝安','宝贝','姓名','身份','户口','归属','新人','登记','年龄','生日','性别','职业','住址','别女','别男','别问','别走','别的','关系','在里','了吗','吗的','怎么','什么','这样','那样','哪里','现在','刚刚','刚才','今天','明天','昨天','时候','如何','为啥','为何','多久','几次',
-  // V50 滑窗层词表同源（业主 2026-10-12 治本批 C-1）：与 app-identity.ENTITY_BLACKLIST 的
-  // 42 个观察区噪音词对齐 —— 此前两表**零交集**（0/42），上游滑窗照常产出这些词，
-  // 只能靠下游闸门兜住。本表的拦截机制本就为跨词碎片设计：
-  //   isPersonName `:101` 精确匹配（2 字与 3 字词）、`:105` 3 字取前两字、`:110` 3 字取后两字。
-  // 实测加词后可拦掉 6 个新碎片中的 5 个：
-  //   关于经(取「关于」)✔ 居然连(「居然」)✔ 周末终(「周末」)✔ 安全第(「安全」)✔ 经常加(「经常」)✔
-  //   于能休 仍漏（「于能」「能休」均不在表、首字「于」不在 GRAMMAR_WORDS_PERSON）
-  //   → 由闸门层（ENTITY_BLACKLIST）与 noise 安全阀（conf>=0.95 → void）兜住
-  '关于','经理','方便','经常','安全','厉害','居然','连续','满意','安静',
-  '周末','成真','乐趣','明白','高潮','经受','管用','都挺起','都进去','终于进',
-  '毕竟日','终于射','杭州玩','公室只','安排真','后看起','边理解','能学','边捏','都差',
-  '边聊','水吧','石公园','国画展','国美','何不同','公室','宿舍','方式','麻烦','能叫','滑液',
-]);
-
-const GRAMMAR_WORDS_PERSON = new Set('是说和的了在也都就来还要会能不很太把被让给对用从向跟与有没做走来看听等呢吗啊吧着过到比现起去回最');
-
-function isPersonName(token: string): boolean {
-  if (token.length < 2 || token.length > 3) return false;
-  if (token === '有人' || token === '某人' || token === '大家') return false;
-  if (token[0] === '阿' && /[一-龥]/.test(token[1]) && !NON_NAME_SUFFIX.has(token[1])) {
-    // 🆕 阿X昵称同样需虚词尾字过滤（防"阿芬在/阿芬最/阿芬了"误报）
-    if (GRAMMAR_WORDS_PERSON.has(token[token.length - 1])) return false;
-    return true;
-  }
-  // 老X/小X 要求第二字也必须是姓氏（防'老说同一件事'→'老说'误报）
-  if ((token[0] === '老' || token[0] === '小') && token.length === 2 && PERSON_SURNAMES.has(token[1]) && !NON_NAME_SUFFIX.has(token[1])) return true;
-  if (!PERSON_SURNAMES.has(token[0])) return false;
-  // 🆕 首字虚词过滤：滑窗在任意位置取2-3字，开头易粘上"和/的/是/在"等语法词（如"和全芬"）
-  if (GRAMMAR_WORDS_PERSON.has(token[0])) return false;
-  // 🆕 虚词尾字过滤：3字人名尾字不能是虚词（防"全芬在/全芬了/关系"误报）
-  //   滑窗在任意位置取2-3字，尾字易粘上"在/了/和/关系/吗/呢"等语法词
-  if (GRAMMAR_WORDS_PERSON.has(token[token.length - 1])) return false;
-  // 2字：检查常见非人名词 + 后缀过滤
-  if (token.length === 2) {
-    if (COMMON_WORDS_PERSON.has(token)) return false;
-    if (NON_NAME_SUFFIX.has(token[1])) return false;
-  }
-  // 3字：检查前两字是否为常见词（如"家里吃"→前两字"家里"在常见词表）
-  if (token.length === 3 && COMMON_WORDS_PERSON.has(token.substring(0, 2))) return false;
-  // 🔴 V27批11: **对称补全「后两字」检查** —— 原实现只查前两字，
-  //   导致以常见词**结尾**的滑窗碎片漏过（实测 FG 残留："家死心"(死心)、"米人死"(人死)、
-  //   "公室白"(室白)、"后找男"(找男)）。旧实现只覆盖"前两字是词"的方向。
-  //   ⚠️ 与既有的前两字检查同口径（同一词表），不扩大判定标准，仅补齐方向。
-  if (token.length === 3 && COMMON_WORDS_PERSON.has(token.substring(1))) return false;
-  return true;
-}
+// 🔴 批1（2026-11-07）：滑窗人名生成器已物理删除 ——
+//   NON_NAME_SUFFIX / COMMON_WORDS_PERSON / GRAMMAR_WORDS_PERSON / isPersonName 随
+//   detectPersonNames 一并退役。实体准入改由主回复调用的「原文证据」校验承担（批2）。
 
 // ──────────────────────────────────────────────
 // 中文正向最大匹配分词器
@@ -260,7 +209,7 @@ class TokenBasedEntityExtractor {
  */
 export class L3EntityAnnotator {
   private extractor: TokenBasedEntityExtractor;
-  // P1: FG 人名库兜底 — 用于匹配已知人名（滑窗检测无法覆盖的场景）
+  // P1: FG 人名库兜底 — 只读匹配已登记人名（不产生新名字）
   private fg: FamilyGraph | null = null;
 
   constructor() {
@@ -373,45 +322,11 @@ export class L3EntityAnnotator {
   ): L3AnnotationResult {
     if (!text) return { entity_genes: [] };
     const entities = this.extractor.extract(text);
-    // 🆕 编码健康修复: 恢复人名滑窗检测（P2 曾移除，注释称"由 LLM NER 处理"但 annotateWithLLM 全项目无调用方）
-    //   词典(entity_rules.json)无法覆盖新姓名（安琪/陈都灵等），导致 M1 识别不出 → PAE 档案采集收不到人
-    //   复用 isPersonName（姓氏表+停用词过滤，本文件早已实现），贪心长优先防重叠误报
-    const personNames = this.detectPersonNames(text);
-    if (personNames.length > 0) {
-      // 🆕 FG 交叉验证: 滑窗识别的2-3字人名若与 FG 全名存在子串关系，规范化为 FG 全名
-      //   例: 滑窗"全芬在/全芬" → FG 有"王全芬" → 规范化为"王全芬"（简称提升为全名，检索才命中）
-      let fgNameMap: Map<string, string> | null = null;
-      if (this.fg) {
-        try {
-          fgNameMap = new Map();
-          for (const fgName of this.fg.getAllPersonNames()) {
-            // 建立 FG 全名 → 自身；以及滑窗可能识别出的子串 → 全名的映射
-            fgNameMap.set(fgName, fgName);
-          }
-        } catch (_) { /* FG 查询失败不阻塞 */ }
-      }
-      const normalizedNames = personNames.map((nm) => {
-        // 先查精确命中 FG 全名
-        if (fgNameMap?.has(nm)) return nm;
-        // 否则找 FG 中包含该滑窗人名的全名（简称 → 全名）
-        if (fgNameMap) {
-          for (const fgFull of fgNameMap.keys()) {
-            if (fgFull.includes(nm) && fgFull !== nm) return fgFull;
-          }
-        }
-        return nm; // 非 FG 成员的新姓名保留（仍需识别）
-      });
-      // 🆕 P2 可观测: 滑窗识别到的新人名打日志（供巡检误报监控，仅含新姓名时触发）
-      console.log(`[L3] 滑窗人名: ${personNames.join('、')}${normalizedNames.some((n, i) => n !== personNames[i]) ? ' → 规范化: ' + [...new Set(normalizedNames)].join('、') : ''}`);
-      const existingNames = new Set(entities.map(e => e.name));
-      for (const nm of normalizedNames) {
-        if (existingNames.has(nm)) continue;
-        existingNames.add(nm);
-        // slideDetected 标记: 供 ChatEntry 在 LLM 实体覆盖时保留滑窗识别的可靠人名（LLM 提取常遗漏新姓名）
-        entities.push({ name: nm, type: 'person', allele: nm, slideDetected: true } as any);
-      }
-    }
-    // P1: FG 人名库兜底 — 匹配已知人名（滑窗检测无法覆盖新姓名时的补充）
+    // 🔴 批1（2026-11-07）：人名滑窗生成器已物理删除。
+    //   历史缺陷：2~3 字 n-gram × 姓氏表，无证据要求，输出「阿珍一/水乳交/全芬倒」等跨词碎片，
+    //   下游字面闸门与观察区 LLM 终审都在为它善后，但判定所需的信息在生成端已丢失。
+    //   新准入（批2）由主回复调用输出「原文证据」，代码用 message.includes(evidence) 校验。
+    // P1: FG 人名库兜底 — 只读匹配已登记人名（不产生新名字）
     // 🆕 扩展: 用 getAllPersonNamesWithAliases 支持简称/昵称匹配（"诗韵"→"徐诗韵"）
     if (this.fg) {
       try {
@@ -441,41 +356,9 @@ export class L3EntityAnnotator {
       allele: entity.allele,
       phenotype: this.determinePhenotype(entity.name, entity.type, fullContext, selfModel),
       knowledge_type: this.determineKnowledgeType(entity.type, entity.name),
-      // 🆕 编码健康修复: 透传 slideDetected 标记（否则 map 丢失 → ChatEntry 覆盖时删掉滑窗人名）
-      ...((entity as any).slideDetected ? { slideDetected: true } : {}),
     }));
 
     return { entity_genes: entityGenes };
-  }
-
-  /**
-   * 🆕 编码健康修复: 人名滑窗检测（恢复，原 P2 移除）
-   * 在连续中文片段上滑窗取 2-3 字，isPersonName 判断（姓氏表 + 常见词/后缀过滤）。
-   * 贪心：3 字命中则跳过 2 字（防 "安吉尔"→"安吉" 重叠误报）；命中后跳位减少重复扫描。
-   */
-  private detectPersonNames(text: string): string[] {
-    const names: string[] = [];
-    const seen = new Set<string>();
-    const chineseRuns = text.match(/[\u4e00-\u9fff]+/g) || [];
-    for (const run of chineseRuns) {
-      let i = 0;
-      while (i < run.length) {
-        const c3 = run.substring(i, i + 3);
-        if (c3.length === 3 && isPersonName(c3)) {
-          if (!seen.has(c3)) { seen.add(c3); names.push(c3); }
-          i += 3;
-          continue;
-        }
-        const c2 = run.substring(i, i + 2);
-        if (c2.length === 2 && isPersonName(c2)) {
-          if (!seen.has(c2)) { seen.add(c2); names.push(c2); }
-          i += 2;
-        } else {
-          i += 1;
-        }
-      }
-    }
-    return names;
   }
 
   /**

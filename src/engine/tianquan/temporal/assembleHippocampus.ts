@@ -93,15 +93,6 @@ function createInductionTasks(indSched: InductionScheduler): RhythmComponent {
           return 1;
         },
       },
-      {
-        name: 'induction.buildEntityRelations',
-        rhythm: HippocampusRhythm.DELTA,
-        intervalMs: 60 * 60_000,
-        execute: async () => {
-          indSched.triggerEntityRelations();
-          return 1;
-        },
-      },
     ],
   };
 }
@@ -264,7 +255,8 @@ function createAssessorTasks(assessor: MemoryAssessor): RhythmComponent {
  * V2.0: coordinator 统一心跳完全替代以下旧定时器：
  *   - startM7Interval(m7)       → m7.processIdle + m7.processDreamAnalysis
  *   - consolidationQueue.start() → cq.runConsolidation
- *   - inductionScheduler.start() → indSched.runInduction + triggerEntityRelations
+ *   - inductionScheduler.start() → indSched.runInduction
+ *   （原 triggerEntityRelations 任务已随滑窗生成器退役，2026-11-07 批1）
  *   - DailyMaintenanceScheduler  → SleepTimeConsolidator + Forgetting cleanup
  *
  * 旧定时器在 server.ts 中不再启动。

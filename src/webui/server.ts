@@ -2379,9 +2379,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       res.end(JSON.stringify({ status: 'ok', ...result }));
     }
 
-    // ── 触发实体关系图构建 ──
+    // ── 实体关系图查询（只读；共现建实体的触发已随滑窗生成器一并退役，见任务书批1）──
     if (req.method === 'POST' && url.pathname === '/api/maintenance/relations') {
-      inductionScheduler?.triggerEntityRelations();
       const relations = storage.getEntityRelationSummary();
       // persistence handled in server-observability-routes.ts
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

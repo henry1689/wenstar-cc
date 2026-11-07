@@ -12,8 +12,6 @@ import { fileURLToPath } from 'node:url';
 import type { FusionStorageAdapter } from '../m2/FusionStorageAdapter.js';
 import type { DreamQueue } from './DreamQueue.js';
 import { ConfigService } from '../config/ConfigService.js';
-// 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门(共现归纳建 object 前过滤垃圾)
-import { checkEntityWrite } from '../m4/household/EntityWriteGate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -110,8 +108,9 @@ export class InductionScheduler {
       // 无新内容也推进游标（防每次 24h 重扫空转），下次从本次起算
       if (recent.length === 0) { this._saveLastRun(sqlite, nowMs); return; }
 
-      // 结构归纳：更新实体关系图
-      this.buildEntityRelations();
+      // 🔴 批1（2026-11-07）：共现建实体（buildEntityRelations）已物理删除。
+      //   它从 entity_genes（滑窗/无证据提取链）两两共现直接 INSERT entities/entity_relations，
+      //   是「补关系边实体名全错」的次垃圾源。实体关系统一由 FG → entity_relations 启动同步承担。
 
       // 提取高频实体和重要时刻
       const entityCount = new Map<string, number>();
@@ -288,78 +287,8 @@ export class InductionScheduler {
     return '平静中性';
   }
 
-  /** 手动触发实体关系图构建 */
-  triggerEntityRelations(): void {
-    this.buildEntityRelations();
-  }
-
-  /**
-   * 结构归纳：增量更新实体共现关系。
-   * 只处理上次运行后新增的记忆，避免每小时全量 O(n²)。
-   */
-  private lastEntityPos = 0;
-  private buildEntityRelations(): void {
-    try {
-      const sqlite = this.storage.getSQLite();
-      const allMemories = sqlite.findBySeqPosRange(this.lastEntityPos, 999_999_999, 200);
-      if (allMemories.length === 0) return;
-
-      const cooccurrence = new Map<string, { count: number; totalCalcium: number }>();
-
-      for (const mem of allMemories) {
-        // 更新追踪位置
-        if (mem.seq_pos > this.lastEntityPos) this.lastEntityPos = mem.seq_pos;
-        const names = mem.entity_genes.map(g => g.name).filter(Boolean);
-        if (names.length < 2) continue;
-        for (let i = 0; i < names.length; i++) {
-          for (let j = i + 1; j < names.length; j++) {
-            const key = [names[i], names[j]].sort().join('::');
-            const exist = cooccurrence.get(key) ?? { count: 0, totalCalcium: 0 };
-            exist.count++;
-            exist.totalCalcium += mem.calcium_score;
-            cooccurrence.set(key, exist);
-          }
-        }
-      }
-
-      let written = 0;
-      const now = new Date().toISOString();
-      for (const [key, data] of cooccurrence) {
-        if (data.count < 2) continue;
-        const [entityA, entityB] = key.split('::');
-        // 🔴 FG-P0(2026-09-09): 写前统一闸门 — 句子片段/泛词/对话残留/超长的共现对不再建 object 实体
-        //   (垃圾根治: 此前任意词对 count>=2 即 INSERT object, 是次垃圾源)
-        const _gateA = checkEntityWrite(entityA);
-        const _gateB = checkEntityWrite(entityB);
-        if (!_gateA.allowed || !_gateB.allowed) {
-          console.log(`[InductionGate] 拦截共现对建实体: "${entityA}"(${_gateA.reason}) × "${entityB}"(${_gateB.reason})`);
-          continue;
-        }
-        const avgCalcium = data.totalCalcium / data.count;
-        const relation = avgCalcium > 0.4 ? 'strongly_related_to' : 'related_to';
-        const strength = Math.min(1, data.count / 10 + avgCalcium);
-        try {
-          // S3-4: 先确保实体存在，避免 NOT NULL 约束违规
-          sqlite.writeRaw('INSERT OR IGNORE INTO entities (name, type) VALUES (?, \'object\')', [entityA]);
-          sqlite.writeRaw('INSERT OR IGNORE INTO entities (name, type) VALUES (?, \'object\')', [entityB]);
-          sqlite.writeRaw(
-            `INSERT INTO entity_relations (entity_a_id, entity_b_id, relation, strength, updated_at) VALUES (
-               (SELECT id FROM entities WHERE name=? LIMIT 1),
-               (SELECT id FROM entities WHERE name=? LIMIT 1),
-               ?, ?, ?
-             ) ON CONFLICT(entity_a_id, entity_b_id, relation) DO UPDATE SET strength = MIN(5.0, excluded.strength + 0.1), updated_at = excluded.updated_at`,
-            entityA, entityB, relation, strength, now,
-          );
-          written++;
-        } catch (err) { console.warn("[Induction] 跳过:", err); }
-      }
-      if (written > 0) {
-        console.log(`[Induction] 实体关系图: ${written} 条`);
-      }
-    } catch (err) {
-      console.warn('[Induction] 实体关系分析失败:', err);
-    }
-  }
+  // 🔴 批1（2026-11-07）：triggerEntityRelations / buildEntityRelations 已物理删除。
+  //   实体关系不再从 entity_genes 共现生成，改由 FG → entity_relations 启动同步承担。
 
   getInductions(): InductionRecord[] {
     if (!existsSync(this.inductionPath)) return [];

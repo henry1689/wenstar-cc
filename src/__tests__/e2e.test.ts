@@ -195,6 +195,12 @@ describe('E2E: 完整流水线 M1→M2→M3→M4→M5', () => {
   it('Case 8: 重复家族事实应沿 M4 链路晋升为正式档案字段', async () => {
     for (let i = 0; i < 3; i++) {
       const dna = encoder.encodeSingle('我姐姐叫霁月，她在深圳上班。');
+      // 🔴 批1（2026-11-07）：M1 滑窗人名生成器已退役 —— 未登记人名不再从裸文本产生。
+      //   本用例验证的是 M4「重复提及 → 晋升档案」链路，故由准入层提供已取证的实体
+      //   （真实准入在主回复调用内完成，见 docs/实体提取架构收口方案-V1.md §4）。
+      dna.entity_genes.push({
+        name: '霁月', type: 'person', allele: '霁月', phenotype: 'neutral', knowledge_type: 'family',
+      } as any);
       await storage.write(dna, neutralPerception());
       const decision = m3.decide(dna);
       await m4.orchestrate(decision);

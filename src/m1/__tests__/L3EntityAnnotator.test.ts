@@ -23,30 +23,28 @@ describe('L3EntityAnnotator — 实体提取', () => {
     expect(momEntity?.knowledge_type).toBe('family');
   });
 
-  // 🔴 V27批11: 3 字滑窗「后两字常见词」补强 —— 对称补齐原「仅查前两字」的缺口
-  //   实测 FG 残留过这些碎片：「家死心」(死心)、「米人死」(人死)、「公室白」(室白)
-  // ⚠️ V27批11 诚实标注：本判据只对「后两字恰在 COMMON_WORDS_PERSON 表内」的碎片生效。
-  //   实测现存 FG 垃圾（谢想法/家死心/米人死/公室白）的后两字（想法/死心/人死/室白）
-  //   **都不在词表** → 对存量实际收益≈0。它是**对称补全 + 预防性**改动，
-  //   真正的根治需要词频/分词资源（另立项）。此处只锁定"表内词确实生效"这一事实。
-  it('后两字命中常见词表时，3 字滑窗碎片必须被拦（V27批11，表内词有效性）', () => {
+  // 🔴 批1（2026-11-07）：滑窗人名生成器已物理删除。
+  //   历史缺陷：2~3 字 n-gram × 姓氏表，无证据要求，把「阿珍一/水乳交/全芬倒」等跨词碎片
+  //   与真实姓名一并产出；下游只能靠黑名单军备竞赛善后。新准入由主回复「原文证据」承担（批2）。
+  it('滑窗碎片不再产出 person 实体（生成器已退役）', () => {
     const annotator = new L3EntityAnnotator();
-    // 用表内词（应该/时候/但是）构造"X+词"形态，验证后两字检查确实生效
-    for (const bad of ['他应该', '是时候', '我但是']) {
-      const r = annotator.annotate('他说' + bad + '这件事', '', DEFAULT_SELF);
-      const hit = r.entity_genes.find((e) => e.name === bad);
-      expect(hit, '碎片「' + bad + '」的后两字在词表内，不应被识别人名').toBeUndefined();
+    for (const bad of ['全芬倒在地上', '水乳交融的夜晚', '阿珍继继续聊了下去', '东坑那边很远', '毕竟所以要走了']) {
+      const r = annotator.annotate(bad, '', DEFAULT_SELF);
+      const persons = r.entity_genes.filter((e) => e.type === 'person').map((e) => e.name);
+      expect(persons, '碎片消息不应产出任何 person 实体: ' + bad).toEqual([]);
     }
   });
 
-  it('真人名不得因「后两字」判据被误伤（V27批11 零误伤）', () => {
+  it('墓碑断言：detectPersonNames 已不存在', () => {
     const annotator = new L3EntityAnnotator();
-    const real = ['熊梓铭', '王全芬', '林土锋', '徐诗雨', '宁清华', '陈雪花', '张小龙', '罗权斌'];
-    for (const n of real) {
-      const r = annotator.annotate('今天' + n + '来找我', '', DEFAULT_SELF);
-      const hit = r.entity_genes.find((e) => e.name === n);
-      expect(hit, '真人名「' + n + '」必须被识别').toBeDefined();
-    }
+    expect((annotator as any).detectPersonNames).toBeUndefined();
+  });
+
+  it('未登记的新人名不再由 M1 产生（改由准入层负责）', () => {
+    const annotator = new L3EntityAnnotator();
+    const r = annotator.annotate('今天熊梓铭来找我', '', DEFAULT_SELF);
+    const persons = r.entity_genes.filter((e) => e.type === 'person').map((e) => e.name);
+    expect(persons, 'M1 不再从裸文本猜测未登记人名').toEqual([]);
   });
 
   it('应提取出自我实体', () => {
@@ -141,42 +139,15 @@ describe('L3EntityAnnotator — 边界测试', () => {
     }
   });
 
-  it('滑窗检测: 简称"全芬"应识别为人名且不含虚词杂质', () => {
+  it('滑窗退役后：任何裸文本人名片段都不再产出 person', () => {
     const annotator = new L3EntityAnnotator();
-    const r1 = annotator.annotate('全芬在哪里', '', DEFAULT_SELF);
-    const names1 = r1.entity_genes.filter(e => e.type === 'person').map(e => e.name);
-    // "在"是虚词尾字，不应粘进人名
-    expect(names1.some(n => n === '全芬')).toBe(true);
-    expect(names1.some(n => n === '全芬在')).toBe(false);
-
-    const r2 = annotator.annotate('好久没见全芬了', '', DEFAULT_SELF);
-    const names2 = r2.entity_genes.filter(e => e.type === 'person').map(e => e.name);
-    expect(names2.some(n => n === '全芬')).toBe(true);
-    expect(names2.some(n => n === '全芬了')).toBe(false);
+    for (const text of ['全芬在哪里', '好久没见全芬了', '鸿艺和全芬是什么关系', '全芬现在做什么']) {
+      const names = annotator.annotate(text, '', DEFAULT_SELF)
+        .entity_genes.filter(e => e.type === 'person').map(e => e.name);
+      expect(names, '滑窗已删除，不应再从裸文本切出人名: ' + text).toEqual([]);
+    }
   });
 
-  it('滑窗检测: 虚词开头/常见词不应误报为人名', () => {
-    const annotator = new L3EntityAnnotator();
-    // "关系"首字"关"是姓氏但整体是常见词，不应识别为人名
-    const r1 = annotator.annotate('鸿艺和全芬是什么关系', '', DEFAULT_SELF);
-    const names1 = r1.entity_genes.filter(e => e.type === 'person').map(e => e.name);
-    expect(names1.some(n => n === '关系')).toBe(false);
-    // "和全芬"首字"和"是虚词，不应作为人名开头
-    expect(names1.some(n => n === '和全芬')).toBe(false);
-    // 但"全芬"本身应被识别
-    expect(names1.some(n => n === '全芬')).toBe(true);
-
-    const r2 = annotator.annotate('全芬现在做什么', '', DEFAULT_SELF);
-    const names2 = r2.entity_genes.filter(e => e.type === 'person').map(e => e.name);
-    expect(names2.some(n => n === '全芬现')).toBe(false);
-  });
-
-  it('FG 交叉验证: 滑窗识别的简称应规范化为 FG 全名', () => {
-    const annotator = new L3EntityAnnotator();
-    // 若 FG 中存在"王全芬"，滑窗识别的"全芬"应被规范化为"王全芬"
-    const r = annotator.annotate('全芬最近怎么样', '', DEFAULT_SELF);
-    const names = r.entity_genes.filter(e => e.type === 'person').map(e => e.name);
-    // 至少包含一个可命中"全芬"记忆的人名（全芬或王全芬）
-    expect(names.some(n => n.includes('全芬'))).toBe(true);
-  });
+  // （原「FG 交叉验证：简称规范化为 FG 全名」用例随滑窗输入一并退役。
+  //   保留的 FG 匹配只读路径需要 async initFg() + 真实数据库，另行在集成测试覆盖。）
 });

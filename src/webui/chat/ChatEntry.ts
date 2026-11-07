@@ -9,9 +9,6 @@
 import type { ChatContext } from '../chat.js';
 import { getRetrievalFusionConfig } from '../../config/retrieval-fusion-config.js';
 import { ENABLE_TEMPORAL_RULE_ENGINE, worldRuleMode } from '../../engine/temporal/TemporalConfig.js';
-// 🔴 修复3-A(2026-10-08): 滑窗直通前必须过写入闸门。
-//   同款接入已有先例：src/webui/chat/post-process.ts:12 引入同一个 checkPersonEntity。
-import { checkPersonEntity } from '../../m4/household/EntityWriteGate.js';
 import { fetchWeatherNow, fetchForecast3d, cityLookup, isApiAvailable } from '../../engine/temporal/weather_qweather_client.js';
 
 /** 入口管线可变状态 */
@@ -147,26 +144,11 @@ export async function runChatEntry(
       : (() => { const fb = regexFallback(message); console.log('[LLMEntity] 条件化跳过LLM(无实体信号), 正则兜底: ' + (fb as any[]).map((e: any) => e.name).join(',') || '∅'); return fb; })();
     if (llmEntities.length > 0) {
       const llmNames = new Set(llmEntities.map((e: any) => e.name));
-      // 🆕 编码健康修复: 保留 L3 滑窗识别的可靠人名（slideDetected）——LLM 提取常遗漏新姓名
-      //   （如"登记安琪"仅返回关系词"女朋友"），若被覆盖则安琪永远进不了 PAE 档案采集
-      // 🔴 修复3-A(2026-10-08): **直通必须叠加闸门校验**。
-      //   原 `(g as any).slideDetected` 是**无条件直通** —— 而滑窗是 2-3 字 n-gram 切分，
-      //   `东坑这` / `公明这` / `明凤凰` / `公明` 这类**地名片段同样带 slideDetected 标记**，
-      //   经此分支绕过下游全部闸门（FG 侧的 GarbageEntityGuard 实测也拦不住：`CHAT_RESIDUE`
-      //   在该文件出现 0 次，`东坑这`/`公明这` 被判 L3 放行）。
-      //   实测后果：这些片段以 type='person' 进入 FG 并占用 TXS-ID
-      //   （实查 TXS-000000976~985 连续编号 = 「水吧/都进去/徐渭博/居然/后看起/能学/
-      //     公明这/公明/明凤凰/东坑这」十个地名/短语）。
-      //   改为「slideDetected **且** 通过写入闸门」双条件：
-      //     · 保住原意 —— 安琪/陈都灵这类真新人名能过 gradeEntity（姓氏校验通过）；
-      //     · 拦住地名虚词片段 —— CHAT_RESIDUE 命中「这」「那」等即拒；
-      //     · 闸门异常按 fail-closed 返回 false（不因守卫故障放行）。
-      const _slideGateOk = (n: string): boolean => {
-        try { return checkPersonEntity(n).allowed; } catch { return false; }
-      };
+      // 🔴 批1（2026-11-07）：slideDetected 直通已物理删除 —— 滑窗生成器退役后不再存在该标记。
+      //   历史上该分支是「绕过全部闸门的第二来源」，已实测把地名/虚词片段写入 FG。
+      //   当前仅保留 LLM 提取结果；批2 将把提取整体并入主回复并加原文证据校验。
       const keptRules = dna.entity_genes.filter((g: any) =>
-        g.type !== 'person' || g.name === '我' || llmNames.has(g.name) ||
-        ((g as any).slideDetected && _slideGateOk(String(g.name)))
+        g.type !== 'person' || g.name === '我' || llmNames.has(g.name)
       );
       const existingNames = new Set(keptRules.map((e: any) => e.name));
       for (const le of llmEntities) {
