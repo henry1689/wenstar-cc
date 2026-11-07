@@ -3231,7 +3231,7 @@ if (_meetingExited) {
       //   路由层用它做标签，保证「标签 == 正文自称」。
       _genSpeakerName = _identity.speakerName ?? null;
       console.log('[Identity] ' + _identity.role + ' meeting=' + _identity.isMeeting + ' speaker=' + (_identity.speakerName ?? '玉瑶'));
-      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity);
+      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity, { reasoningEffortOverride: memoryGate.mode === 'casual' && !_identity.isMeeting ? 'low' : undefined });
     }
 }
 

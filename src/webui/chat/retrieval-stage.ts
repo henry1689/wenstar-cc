@@ -7,6 +7,8 @@
  */
 import type { ScoredMemory, SimilarityMode } from '../../m2/types/index.js';
 import type { DNA } from '../../m1/types/dna.js';
+// 🔴 2026-11-07 闲聊快路径：把已存在但生产未接入的 MemoryGate 判定真正接上
+import { decideMode, buildGuard } from '../../app/conversation/MemoryGate.js';
 import type { PerceptionState24 } from '../../m3/types/perception.js';
 import { rerank } from '../../m4/Reranker.js';
 import { decompose, mergeDecomposedResults } from '../../m4/QueryDecomposer.js';
@@ -1259,6 +1261,45 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   // 🔴 V7.0: 记忆每轮检索 — isTopicShift 控制深度而非开关
   const isTopicShift = hasNewEntity || isFollowUp || (!isFollowUp && !hasContinuationMarkers && !isCasualChat);
   const isLimitedRetrieval = isFollowUp && !hasNewEntity;
+
+  // 🔴 2026-11-07 闲聊快路径（业主确认）：MemoryGate.decideMode 此前在生产链路无调用方
+  //   （buildGuards 无消费者），memoryGate 恒为默认 casual 但检索不读它 ⇒ 每轮全量 v11。
+  //   此处接上判定：casual 且非会晤 → 跳过 v11/Foundation 网络检索，只保留本轮已注入的
+  //   fragments 与最近对话；知识查询 / 回忆 / 会晤继续走完整链路。
+  {
+    let _modeDecision: ReturnType<typeof decideMode> | null = null;
+    try {
+      _modeDecision = decideMode({
+        message,
+        recentHistory: enrichedHistory.slice(-6) as any,
+        isFollowUp,
+        hasNewEntity,
+        hasContinuationMarkers,
+        calciumLevel: Number((dna as any)?.calcium_level ?? 0),
+        messageLength: message.length,
+        perception: p,
+      });
+    } catch (_modeErr) {
+      console.warn('[Latency] 模式判定失败，回退完整链路:', (_modeErr as Error)?.message);
+    }
+    memoryGate = buildGuard(_modeDecision?.mode ?? 'casual', false, false);
+    if (_modeDecision?.mode === 'casual' && !_meetingEntityName) {
+      console.log(`[Latency] fast_path=1 mode=casual retrieval_ms=${Date.now() - _trT0}（跳过 v11/Foundation）`);
+      return {
+        isTopicShift,
+        isFollowUp,
+        hasContinuationMarkers,
+        isCasualChat,
+        isLimitedRetrieval,
+        hasNewEntity,
+        hasPersonEntity,
+        emotionalMemories: [],
+        memoryGate,
+        memoryGateFillerUsed: false,
+      };
+    }
+  }
+
   // V10.4: 话题切换深度检索(10-15条)，日常闲聊常用检索(5-8条)
   const _memLimit = isTopicShift ? 15 : 8;
   const _memFinalLimit = isTopicShift ? 8 : 5;

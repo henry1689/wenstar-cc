@@ -38,7 +38,7 @@ export class M5Orchestrator {
    * @param knowledgeBase 知识库内容
    * @param userMessage 用户当前消息（用于场景记忆更新）
    */
-  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, legacyMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }, identity?: ResolvedIdentity): Promise<string> {
+  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, legacyMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }, identity?: ResolvedIdentity, opts?: { reasoningEffortOverride?: string }): Promise<string> {
     // 🔴 T013 Phase2-0（ADR-013 §2.1）: 身份由上游 resolveIdentity 单一决定。
     //   未传 identity 时完全沿用旧参数（legacyMeeting/currentRole）—— 保证
     //   cli/sandbox.ts:93 与 m1/DualCorePipeline.ts:143 两个既有调用方行为不变。
@@ -93,7 +93,7 @@ export class M5Orchestrator {
     let usedMockFallback = false;
     try {
       const currentTime = new Date().toISOString();
-      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, onToken: streamOpts?.onToken });
+      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, onToken: streamOpts?.onToken, reasoningEffortOverride: opts?.reasoningEffortOverride });
       draft = result.text;
     } catch (err) {
       console.error('[M5] LLM生成失败:', err);
