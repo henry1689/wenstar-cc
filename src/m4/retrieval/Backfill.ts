@@ -21,8 +21,9 @@
  *      曾被 `slice(0, topK)` 切掉而误判未命中（与同日修复的 §7.1 同源）。
  *   4. 🔴 **无归属的对话无法形成 UUID 白名单** ⇒ 不得放行（红线 14）。
  *      这类行单独计入 `no_uuid_scope` 并写入 notes，**不计为命中也不静默丢弃**。
- *   5. 🔴 **只读打开数据库**：sql.js 载入内存后**从不 export / 落盘**，
- *      否则会与运行中的服务抢写（sql.js 每次 save() 都是整库重写）。
+ *   5. 🔴 **只读打开数据库**：用 better-sqlite3 的 `readonly: true` 连接（SqlJsCompat），
+ *      本模块没有任何写路径。2026-11-07 起不再用 sql.js —— 它读的是**文件快照**，
+ *      WAL 模式下看不到 -wal 里尚未 checkpoint 的最新写入；只读原生连接走 WAL，读到的是一致的当前状态。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -104,25 +105,78 @@ export interface BackfillOptions {
  * 把 sql.js 的 `exec` 适配成 `queryAll`。
  * **只读**：适配层不含任何写方法，物理上无法 save()（红线 5）。
  */
-export function asQueryAll(raw: {
-  exec: (sql: string, params?: unknown[]) => Array<{ columns: string[]; values: unknown[][] }>;
-}): BackfillDb {
+/** 适配层只需要这两种能力；带参查询要求 prepare（缺了就必须报错，不能静默丢参） */
+interface QueryRawCapability {
+  exec: (sql: string) => Array<{ columns: string[]; values: unknown[][] }>;
+  prepare?: (sql: string) => {
+    bind(params?: unknown[]): void;
+    step(): boolean;
+    getAsObject(): Record<string, unknown> | undefined;
+    free(): void;
+  };
+}
+
+/**
+ * 🔴 形状归一（2026-10-28 · S3-B6 回捞恒 0% 的根因修复）
+ *   本文件里存在**两种**调用约定，而适配层原先只认其中一种：
+ *     · `fetchGapRows` → `queryAll(sql, first, last)`      传**标量**
+ *     · `recallByStructured` → `queryAll(sql, params)`     传**数组**（生产签名见 StructuredRecallDb）
+ *   可变参数会把数组多包一层 → 绑定失效 → 围栏恒返回 0 行。
+ *   实测：同一库同一查询，正确绑定 hits=1649/2237/3016/88/2946，双层包裹全为 0，
+ *   于是 B6 报 0/421 —— **判据没坏，是适配层把参数喂错了**。
+ *   两种形状都无歧义（SQLite 参数位只放标量，不会出现「单个参数本身是数组」），
+ *   故在此归一，让两侧调用方都拿到正确绑定。
+ */
+function normalizeQueryParams(params: unknown[]): unknown[] {
+  return params.length === 1 && Array.isArray(params[0]) ? (params[0] as unknown[]) : params;
+}
+
+/** 把语句壳跑完，一次取回全部行（行数由查询自身的 LIMIT 约束） */
+function collectStatementRows(stmt: {
+  step(): boolean;
+  getAsObject(): Record<string, unknown> | undefined;
+}): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  while (stmt.step()) out.push(stmt.getAsObject() ?? {});
+  return out;
+}
+
+/**
+ * 带参查询：🔴 2026-11-07 存储底座收尾（ADR-017）—— 必须走 prepare/bind。
+ *   sql.js 的 `exec(sql, params)` 支持绑定，而 better-sqlite3 / SqlJsCompat 的 exec
+ *   **只接受单参数**，直接 `exec(sql, flat)` 会把参数静默丢弃，
+ *   与 2026-10-28「回捞恒 0%」是同一类事故（判据没坏，是参数没喂进去）。
+ */
+function queryWithParams(
+  raw: QueryRawCapability,
+  sql: string,
+  flat: unknown[],
+): Array<Record<string, unknown>> {
+  if (typeof raw.prepare !== 'function') {
+    throw new Error('asQueryAll: 带参数的查询需要 prepare/bind 能力');
+  }
+  const stmt = raw.prepare(sql);
+  try {
+    stmt.bind(flat);
+    return collectStatementRows(stmt);
+  } finally {
+    stmt.free();
+  }
+}
+
+/** 无参查询：exec 的单结果集形态 → 对象数组 */
+function queryWithoutParams(raw: QueryRawCapability, sql: string): Array<Record<string, unknown>> {
+  const res = raw.exec(sql);
+  if (!res?.length || !res[0]?.columns || !res[0]?.values) return [];
+  const cols = res[0].columns;
+  return res[0].values.map((vals) => Object.fromEntries(cols.map((c, i) => [c, vals[i]])));
+}
+
+export function asQueryAll(raw: QueryRawCapability): BackfillDb {
   return {
     queryAll(sql: string, ...params: unknown[]) {
-      // 🔴 形状归一（2026-10-28 · S3-B6 回捞恒 0% 的根因修复）
-      //   本文件里存在**两种**调用约定，而适配层原先只认其中一种：
-      //     · `fetchGapRows` → `queryAll(sql, first, last)`      传**标量**
-      //     · `recallByStructured` → `queryAll(sql, params)`     传**数组**（生产签名见 StructuredRecallDb）
-      //   可变参数会把数组多包一层 → `exec(sql, [[…]])` → 绑定失效 → 围栏恒返回 0 行。
-      //   实测：同一库同一查询，正确绑定 hits=1649/2237/3016/88/2946，双层包裹全为 0，
-      //   于是 B6 报 0/421 —— **判据没坏，是适配层把参数喂错了**。
-      //   两种形状都无歧义（SQLite 参数位只放标量，不会出现「单个参数本身是数组」），
-      //   故在此归一，让两侧调用方都拿到正确绑定。
-      const flat = params.length === 1 && Array.isArray(params[0]) ? (params[0] as unknown[]) : params;
-      const res = raw.exec(sql, flat);
-      if (!res?.length || !res[0]?.columns || !res[0]?.values) return [];
-      const cols = res[0].columns;
-      return res[0].values.map((vals) => Object.fromEntries(cols.map((c, i) => [c, vals[i]])));
+      const flat = normalizeQueryParams(params);
+      return flat.length > 0 ? queryWithParams(raw, sql, flat) : queryWithoutParams(raw, sql);
     },
   };
 }
@@ -304,10 +358,11 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const { default: initSqlJs } = await import('sql.js');
-  const SQL = await initSqlJs();
-  // 🔴 只读：载入内存后从不 export
-  const raw = new SQL.Database(readFileSync(dbPath));
+  // 🔴 2026-11-07 存储底座收尾（ADR-017）：只读连接改 better-sqlite3（SqlJsCompat）。
+  //   原 sql.js 读的是**文件快照**，WAL 模式下看不到最新写入（-wal 尚未 checkpoint 的部分）；
+  //   原生只读连接走 WAL，读到的是一致的当前状态，且依然无任何写路径。
+  const { SqlJsCompat } = await import('../../m2/SqlJsCompat.js');
+  const raw = new SqlJsCompat(dbPath, { readonly: true, fileMustExist: true });
   const db = asQueryAll(raw);
 
   const report = await runBackfill(db, {

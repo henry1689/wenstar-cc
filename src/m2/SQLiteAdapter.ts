@@ -1975,10 +1975,19 @@ export class SQLiteAdapter {
     this.runSql(sql, bind.length > 0 ? bind : undefined);
   }
 
-  /** P8: 类型安全查询 — 默认返回 Record<string, unknown>，可显式泛型约束 */
-  queryAll<T = Record<string, unknown>>(sql: string, params?: any[]): T[] {
+  /**
+   * P8: 类型安全查询 — 默认返回 Record<string, unknown>，可显式泛型约束。
+   * 🔴 2026-11-07：参数约定与 `writeRaw` 对齐 —— 同时接受 `queryAll(sql, a, b)` 与
+   *   `queryAll(sql, [a, b])`。原签名只接一个 params 数组，按 writeRaw 惯例写成的多标量
+   *   调用点第 2 个及以后参数被**静默丢弃**，params 退化为单个字符串 ⇒ 多占位符只绑到 1 个值。
+   *   sql.js 时代不抛错（查询静默返回空），换 better-sqlite3 后严格报
+   *   `Too few parameter values were provided` 才暴露（实测 Dream 情感雷达）。
+   */
+  queryAll<T = Record<string, unknown>>(sql: string, ...params: any[]): T[] {
     this.ensureReady();
-    const result = this.execSql(sql, params);
+    // 形状归一：单个数组参数 = 数组风格；多个标量参数 = 展开风格（与 writeRaw 完全一致）
+    const bind = (params.length === 1 && Array.isArray(params[0])) ? params[0] : params;
+    const result = this.execSql(sql, bind.length > 0 ? bind : undefined);
     if (result.length === 0) return [];
     const { columns, values } = result[0];
     return values.map((row: any[]) => {

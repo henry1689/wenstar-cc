@@ -16,10 +16,14 @@
  *   - 基于 seq_pos+created_at 生成, 幂等可重跑
  *   - 不删除任何数据, 仅填充 NULL 字段
  *   - location_fingerprint 设为 32位全0 (瑶光空白期)
+ *
+ * 🔴 2026-11-07 存储底座收尾（ADR-017）：
+ *   原实现 sql.js 整库载入 + `db.export()` 覆盖写回 —— 服务在跑时执行会把快照整库
+ *   覆盖，与 WAL 重放叠加损坏库。现改 SqlJsCompat（better-sqlite3）页级落盘，
+ *   不再有整库导出这一步。
  */
 
-import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { SqlJsCompat } from './SqlJsCompat.js';
 import { createHash } from 'node:crypto';
 
 const DB_PATH = 'data/webui/fusion_memory.db';
@@ -28,14 +32,12 @@ console.log('═'.repeat(60));
 console.log('  GlobalUID 存量回填迁移');
 console.log('═'.repeat(60));
 
-const buffer = readFileSync(DB_PATH);
-const SQL = await initSqlJs();
-const db = new SQL.Database(buffer);
+const db = new SqlJsCompat(DB_PATH);
 
 // 1. 统计存量
 const total = db.exec('SELECT COUNT(*) FROM memories')[0].values[0][0] as number;
 // 🔴 修复(2026-09-11): 原写法 `global_uid = ""` 依赖 SQLite 的「双引号退化当字符串」**非标准行为**：
-//   - DQS 宽松模式（本文件用 sql.js）实测不报错，把 `""` 当空串 → 碰巧得到预期结果；
+//   - DQS 宽松模式（当时该脚本用 sql.js）实测不报错，把 `""` 当空串 → 碰巧得到预期结果；
 //   - 但严格模式（SQLITE_DQS=0，如 better-sqlite3）下必抛错：
 //     no such column: "" - should this be a string literal in single-quotes?
 // 即语义依赖编译选项 —— 换运行库/升级即静默改变行为，属隐患。统一改用标准单引号字面量。
@@ -95,9 +97,7 @@ if (convMissing > 0) {
   console.log(`  ✅ conversations 回填完成: ${convFilled} 条`);
 }
 
-// 4. 保存
-const data = db.export();
-writeFileSync(DB_PATH, Buffer.from(data));
+// 4. 收尾：不再整库导出，close() 内含 wal_checkpoint(TRUNCATE)
 db.close();
 
 console.log('\n' + '═'.repeat(60));

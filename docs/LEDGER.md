@@ -353,11 +353,50 @@ v10 迁移的整段替换根本没有落盘。
 **铁律：同一个库同一时刻只允许一种引擎写入。**
 
 **已知债务**：
-- 离线工具（`migrate-entity-relations.ts` / `scan-knowledge-intimate.ts` / `MigrationManager` 离线分支）
-  仍用 sql.js，**必须在服务停止时运行**（迁移前既有约束，未扩大）。
+- ~~离线工具（`migrate-entity-relations.ts` / `scan-knowledge-intimate.ts` / `MigrationManager` 离线分支）
+  仍用 sql.js，**必须在服务停止时运行**~~ → 已于同日收口，见 §6.10。
 - `server-memarch-bridge-routes.ts` 历史注释待顺手更新。
 
-**计划处理**：离线工具在下次触碰时迁移；其余无待办。
+**计划处理**：离线工具已迁移（§6.10）；其余无待办。
+
+---
+
+### §6.10 2026-11-07 存储底座收尾：清除全部 sql.js 残留 + 修复备份漏 WAL
+
+**问题**（§6.9 遗留 + 新发现）：
+1. **三个工具仍整库 export 覆盖生产库**：`migrate-entity-relations.ts`（3 处覆盖 FG 库）、
+   `scan-knowledge-intimate.ts`（`--clean` 时覆盖）、`m2/BackfillGlobalUID.ts`（覆盖主库）。
+   服务在跑时执行 = 用「载入那一刻的快照」整库回滚 + WAL 重放 ⇒ **库损坏**（§6.9 已真实发生一次）。
+2. **两处只读载入用 sql.js 读文件快照**（`m2/MigrationManager.ts` 两处、`m4/retrieval/Backfill.ts`）：
+   WAL 模式下看不到 `-wal` 中尚未 checkpoint 的写入 ⇒ 可能读到过期人名库/语料。
+3. 🔴 **统一备份漏数据且自检不可见**：`server.ts` 的 `runUnifiedBackup` 用 `copyFileSync` 只拷 `.db`，
+   不含 `-wal`；而校验读的就是这份旧副本，**永远全绿**。
+
+**处置**：全部改用 `SqlJsCompat`（better-sqlite3）；备份改 `VACUUM INTO` 一致性快照 +
+原生只读连接校验。删掉全部 `export()` + `writeFileSync` 整库覆盖路径。
+
+**关键实施事实（供后续排查）**：
+1. 🔴 **`SqlJsCompat.exec()` 只接受单参数**，而 sql.js 的 `exec(sql, params)` 支持绑定。
+   `m4/retrieval/Backfill.ts` 的适配层原来直接 `exec(sql, flat)` ⇒ 在兼容层会**静默丢弃参数**，
+   与 2026-10-28「回捞恒 0%」是同一类事故。已改为带参走 `prepare/bind/step`。
+2. **冷拷贝到底有多糟（沙箱实测）**：WAL 未 checkpoint 时，只拷 `.db` 得到的副本
+   **连表都读不到**（`no such table`）；`VACUUM INTO` 快照 100/100 行完整。
+   生产中 `wal_autocheckpoint=1000` 会定期 checkpoint，故通常表现为「少最后一段」而非全空。
+3. **VACUUM 会压缩空闲页** ⇒ 备份不再与源文件比大小（原「偏差 <10%」判据已失效），
+   改为「快照非空 + 只读连接能读出核心表行数」。
+4. 脚本型工具（CLI）没有 M 层管线节点，不需 `module_entry/module_exit` 埋点。
+
+**验证**：
+- `npx tsc --noEmit` 零错误；
+- `npx tsx src/cli/scan-knowledge-intimate.ts` 实跑：扫描 307 条、命中 1 条（只读，未删除）；
+- `npx tsx src/cli/migrate-entity-relations.ts --dry-run` 实跑：正常产出迁移报告；
+- 沙箱探针（D:/tmp，已删）：旧冷拷贝不可读 / VACUUM INTO 100 行完整。
+
+**影响面**：全部为 CLI 与备份路径，不参与对话主链路；无 schema、无数据迁移。
+**回退**：单文件 `git revert`；数据格式不变。
+
+**剩余债务**：`sql.js` 仅被 11 个测试文件用于构建**内存测试库**（不接触生产文件），
+可另行摘除依赖；本次不动。
 
 ---
 

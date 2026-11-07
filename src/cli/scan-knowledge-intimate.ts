@@ -8,11 +8,17 @@
  *   npx tsx src/cli/scan-knowledge-intimate.ts           # 只扫描，不删除
  *   npx tsx src/cli/scan-knowledge-intimate.ts --clean    # 扫描并清理
  *   npx tsx src/cli/scan-knowledge-intimate.ts --report   # 输出 JSON 报告
+ *
+ * 🔴 2026-11-07 存储底座收尾（ADR-017）：
+ *   原实现用 sql.js 整库载入 + `db.export()` 覆盖写 DB_PATH —— 服务在跑时执行
+ *   会把「载入那一刻的快照」整库覆盖回去，配合服务端的 WAL 重放直接损坏库。
+ *   现改 SqlJsCompat（better-sqlite3）：页级落盘，删除即时生效，不再有整库覆盖。
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { INGESTION_GUARD } from '../config/ingestion-guard.js';
+import { SqlJsCompat } from '../m2/SqlJsCompat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -34,9 +40,7 @@ async function main() {
     process.exit(1);
   }
 
-  const initSqlJs = (await import('sql.js')).default;
-  const SQL = await initSqlJs();
-  const db = new SQL.Database(readFileSync(DB_PATH));
+  const db = new SqlJsCompat(DB_PATH);
 
   // 检查表是否存在
   const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'");
@@ -110,9 +114,7 @@ async function main() {
           console.warn(`  删除失败: ${f.item.id}`, e);
         }
       }
-      // 保存数据库
-      const data = db.export();
-      writeFileSync(DB_PATH, Buffer.from(data));
+      // 🔴 不再整库导出：删除已由页级写入即时落盘（close 内含 wal_checkpoint）
       console.log(`✅ 已清理 ${cleaned} 条知识库条目`);
     } else {
       console.log('🟡 未执行清理（添加 --clean 参数执行删除）');

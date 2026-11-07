@@ -14,7 +14,7 @@
  *   --verify      全量校验
  *   --all         四步全部执行
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -145,12 +145,14 @@ function isRealPersonInFG(name: string, fgPersons: Set<string>): boolean {
   return fgPersons.has(name) && !RELATION_WORDS.has(name) && !NOISE_PERSON_NAMES.has(name);
 }
 
-async function loadSQLite(path: string): Promise<any> {
+async function loadSQLite(path: string, readonly = false): Promise<any> {
   if (!existsSync(path)) return null;
-  const initSqlJs = (await import('sql.js')).default;
-  const SQL = await initSqlJs();
-  const buffer = readFileSync(path);
-  return new SQL.Database(buffer);
+  // 🔴 2026-11-07 存储底座收尾（ADR-017）：sql.js 文件快照 → better-sqlite3（WAL 感知）。
+  //   影子库与校验只读传 readonly=true；FG 主库需要写入，保持可写。
+  const { SqlJsCompat } = await import('../m2/SqlJsCompat.js');
+  return readonly
+    ? new SqlJsCompat(path, { readonly: true, fileMustExist: true })
+    : new SqlJsCompat(path);
 }
 
 function fgQuery(db: any, sql: string, params?: unknown[]): any[] {
@@ -532,7 +534,7 @@ async function main() {
   console.log(`  影子库: ${FM_DB_PATH}`);
   console.log(`  主库:   ${FG_DB_PATH}`);
 
-  const fmDb = await loadSQLite(FM_DB_PATH);
+  const fmDb = await loadSQLite(FM_DB_PATH, true);   // 影子库只读：本工具只从它取数
   if (!fmDb) { console.error('🔴 无法加载影子库'); process.exit(1); }
 
   // 如果主库不存在，先创建
@@ -541,9 +543,10 @@ async function main() {
     fgDb = await loadSQLite(FG_DB_PATH);
   } else {
     console.log('🟡 主库不存在，将创建新库');
-    const initSqlJs = (await import('sql.js')).default;
-    const SQL = await initSqlJs();
-    fgDb = new SQL.Database();
+    // 🔴 2026-11-07 存储底座收尾（ADR-017）：SqlJsCompat 直接在磁盘建库，无整库导出；
+    //   兼容层会先清理同名 -wal/-shm 孤儿文件，避免旧 WAL 被重放进新建的空库。
+    const { SqlJsCompat } = await import('../m2/SqlJsCompat.js');
+    fgDb = new SqlJsCompat(FG_DB_PATH);
     // 创建表结构
     fgRun(fgDb, `CREATE TABLE IF NOT EXISTS nodes (
       id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
@@ -613,10 +616,11 @@ async function main() {
         aliasesAdded: formalResult.aliasesAdded,
         errors: formalResult.errors,
       };
-      // 保存主库
-      const data = fgDb.export();
-      writeFileSync(FG_DB_PATH, Buffer.from(data));
-      console.log(`\n  💾 主库已保存: ${FG_DB_PATH}`);
+      // 🔴 2026-11-07 存储底座收尾（ADR-017）：删除整库 export + writeFileSync 覆盖。
+      //   SqlJsCompat（better-sqlite3）页级落盘，runMigration 的每次写入已即时持久化；
+      //   原实现「导出 → 覆盖 → 清噪音 → 再导出 → 再覆盖」在服务运行时等于用**载入那一刻的快照**
+      //   整库回滚，与服务的 WAL 重放叠加会直接损坏库（迁移期已发生一次）。
+      console.log(`\n  💾 主库写入已由页级落盘完成: ${FG_DB_PATH}`);
 
       // 清理 FG 噪音节点（关系词被误作人名）
       console.log('\n🧹 清理 FamilyGraph 噪音节点...');
@@ -631,9 +635,7 @@ async function main() {
         }
       }
       if (cleaned > 0) {
-        const cleanData = fgDb.export();
-        writeFileSync(FG_DB_PATH, Buffer.from(cleanData));
-        console.log(`  ✅ 清理 ${cleaned} 个噪音节点`);
+        console.log(`  ✅ 清理 ${cleaned} 个噪音节点（删除已页级落盘）`);
       } else {
         console.log('  无需清理');
       }
@@ -641,13 +643,10 @@ async function main() {
 
     // 步骤④: 校验
     if (steps.verify) {
-      // 重新加载主库（如果有写入）
-      if (steps.run && fgDb) {
-        const data = fgDb.export();
-        writeFileSync(FG_DB_PATH, Buffer.from(data));
-      }
+      // 🔴 校验前先 checkpoint，保证磁盘 .db 是自包含的完整单文件（不再有整库导出）
+      try { fgDb?.exec?.('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* 非 WAL 或连接已关 */ }
       if (existsSync(FG_DB_PATH)) {
-        const verifyFgDb = await loadSQLite(FG_DB_PATH);
+        const verifyFgDb = await loadSQLite(FG_DB_PATH, true);   // 校验只读：不与写入连接抢锁
         if (verifyFgDb) {
           report.verification = await verifyMigration(fmDb, verifyFgDb);
           verifyFgDb.close();

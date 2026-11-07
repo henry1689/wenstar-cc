@@ -1267,9 +1267,10 @@ export async function loadFgPersonEntries(
   const out: Array<{ key: string; uuid: string; primary: string }> = [];
   if (!fgDbPath || !existsSync(fgDbPath)) return out;
   try {
-    const initSqlJs = (await import('sql.js')).default;
-    const SQL = await initSqlJs();
-    const fgDb = new SQL.Database(readFileSync(fgDbPath));
+    // 🔴 2026-11-07 存储底座收尾（ADR-017）：只读连接改 better-sqlite3（WAL 感知）。
+    //   原 sql.js 读文件快照，看不到 -wal 中尚未 checkpoint 的最新写入 ⇒ 可能读到过期人名库。
+    const { SqlJsCompat } = await import('./SqlJsCompat.js');
+    const fgDb = new SqlJsCompat(fgDbPath, { readonly: true, fileMustExist: true });
     const rows = fgDb.exec(
       "SELECT name, uuid, aliases FROM nodes WHERE type = 'person' AND status != 'void' AND uuid IS NOT NULL AND uuid LIKE 'TXS-%'",
     );
@@ -1521,12 +1522,12 @@ export async function detectOrphanEntityUUIDs(db: any, fgDbPath?: string): Promi
 }> {
   const result = { memories: 0, vaultLog: 0, conversations: 0, blackDiamond: 0, knowledgeBase: 0, fgPersonCount: 0 };
   try {
-    const { existsSync, readFileSync } = await import('node:fs');
+    const { existsSync } = await import('node:fs');
     const fgPath = fgDbPath || join(dirname(dirname(__dirname)), 'data', 'webui', 'knowledge', 'family_graph.db');
     if (!existsSync(fgPath)) { console.warn('[OrphanDetect] FG DB 不存在，跳过'); return result; }
-    const initSqlJs = (await import('sql.js')).default;
-    const SQL = await initSqlJs();
-    const fgDb = new SQL.Database(readFileSync(fgPath));
+    // 🔴 2026-11-07 存储底座收尾（ADR-017）：只读连接改 better-sqlite3（WAL 感知）。
+    const { SqlJsCompat } = await import('./SqlJsCompat.js');
+    const fgDb = new SqlJsCompat(fgPath, { readonly: true, fileMustExist: true });
     const validUuids = new Set<string>();
     const fgRows = fgDb.exec("SELECT uuid FROM nodes WHERE type = 'person' AND uuid IS NOT NULL");
     if (fgRows.length > 0 && fgRows[0].values) {

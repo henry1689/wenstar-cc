@@ -1121,8 +1121,13 @@ async function initPipeline(): Promise<void> {
   if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
 
   async function runUnifiedBackup(): Promise<void> {
-    const { copyFileSync, statSync, readFileSync, unlinkSync, readdirSync } = await import('node:fs');
-    const initSqlJs = (await import('sql.js')).default;
+    const { statSync, unlinkSync, readdirSync } = await import('node:fs');
+    // 🔴 2026-11-07 存储底座收尾（ADR-017）：备份改 native 驱动 + VACUUM INTO。
+    //   原实现 copyFileSync 只拷 .db，**不含 -wal**：WAL 模式下最新写入可能还在 -wal 里
+    //   （wal_autocheckpoint=1000 页 ≈4MB 一批），备份于是静默地停在「上一次 checkpoint」。
+    //   更要命的是后续校验读的就是这份旧快照，**永远全绿** —— 失效不可见。
+    //   VACUUM INTO 由 SQLite 在同一读事务内导出，天然包含 -wal 中已提交的写入，且是单文件。
+    const BetterSqlite = (await import('better-sqlite3')).default;
     backupStats.totalAttempts++;
     const dateStr = new Date().toISOString().replace(/[:.]/g, "-");
     let successCount = 0;
@@ -1143,37 +1148,44 @@ async function initPipeline(): Promise<void> {
     for (const { src, prefix } of sources) {
       const bkPath = path.join(BACKUP_DIR, `${prefix}_${dateStr}.db`);
       try {
-        copyFileSync(src, bkPath);
+        // ① 生成一致性快照（VACUUM INTO 要求目标文件不存在）
+        try { unlinkSync(bkPath); } catch { /* 目标不存在 */ }
+        const liveDb = new BetterSqlite(src, { fileMustExist: true });
+        try {
+          liveDb.pragma('busy_timeout = 5000');
+          const escaped = bkPath.replace(/\\/g, '/').replace(/'/g, "''");
+          liveDb.exec(`VACUUM INTO '${escaped}'`);
+        } finally {
+          liveDb.close();
+        }
 
-        // 完整性校验 ①: 文件大小偏差 < 10%
-        const srcSize = statSync(src).size;
+        // ② 快照非空（VACUUM 会压缩空闲页，故不再与源文件比大小）
         const bkSize = statSync(bkPath).size;
-        if (srcSize > 0 && Math.abs(bkSize - srcSize) / srcSize > 0.1) {
-          console.warn(`[Backup] ❌ ${prefix} 文件大小异常: 源=${srcSize}, 备份=${bkSize}`);
+        if (bkSize <= 0) {
+          console.warn(`[Backup] ❌ ${prefix} 快照为空文件`);
           try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
           continue;
         }
 
-        // 完整性校验 ②: 可读性校验（查询核心表）
-        const SQL = await initSqlJs();
-        const testDb = new SQL.Database(readFileSync(bkPath));
-        if (prefix === 'family_graph') {
-          const nodes = testDb.exec('SELECT COUNT(*) as cnt FROM nodes');
-          const edges = testDb.exec('SELECT COUNT(*) as cnt FROM edges');
-          const nodeCnt = nodes[0]?.values[0]?.[0] || 0;
-          if (nodeCnt === 0) {
-            console.warn(`[Backup] ❌ ${prefix} 可读性校验失败（nodes 为空）`);
-            try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
-            testDb.close();
-            continue;
+        // ③ 可读性校验：用只读原生连接查核心表
+        const testDb = new BetterSqlite(bkPath, { readonly: true, fileMustExist: true });
+        try {
+          if (prefix === 'family_graph') {
+            const nodeCnt = Number((testDb.prepare('SELECT COUNT(*) AS cnt FROM nodes').get() as { cnt?: number })?.cnt ?? 0);
+            const edgeCnt = Number((testDb.prepare('SELECT COUNT(*) AS cnt FROM edges').get() as { cnt?: number })?.cnt ?? 0);
+            if (nodeCnt === 0) {
+              console.warn(`[Backup] ❌ ${prefix} 可读性校验失败（nodes 为空）`);
+              try { unlinkSync(bkPath); } catch (e: any) { console.error('[server] error:', e?.message); }
+              continue;
+            }
+            console.log(`[Backup] ✅ ${prefix} 备份完整: ${nodeCnt} 节点, ${edgeCnt} 边 (${Math.round(bkSize / 1048576)}MB)`);
+          } else {
+            const memCnt = Number((testDb.prepare('SELECT COUNT(*) AS cnt FROM memories').get() as { cnt?: number })?.cnt ?? 0);
+            console.log(`[Backup] ✅ ${prefix} 备份完成 (${memCnt} memories, ${Math.round(bkSize / 1048576)}MB)`);
           }
-          console.log(`[Backup] ✅ ${prefix} 备份完整: ${nodeCnt} 节点, ${edges[0]?.values[0]?.[0] || 0} 边`);
-        } else {
-          const mems = testDb.exec('SELECT COUNT(*) as cnt FROM memories');
+        } finally {
           testDb.close();
-          console.log(`[Backup] ✅ ${prefix} 备份完成 (${mems[0]?.values[0]?.[0] || 0} memories)`);
         }
-        testDb.close();
         successCount++;
       } catch (err) {
         console.warn(`[Backup] ❌ ${prefix} 备份失败:`, err);
