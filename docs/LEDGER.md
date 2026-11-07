@@ -535,7 +535,7 @@ E2E Case 2 在全文件并发下 10.3s 超时、单跑 7.5s 通过（负载相�
 
 **新发现（既有缺陷，非本批引入）**：会晤退出后 `group_session_state` 停留
 `active=true + participants=[]`，`_soloMode` 短路全部回复，且 strict 模式阻止再次唤醒 ⇒ 会话死锁。
-本轮通过清除该键恢复（备份 `D:/tmp/group_session_state_backup.json`）。
+本轮通过清除该键恢复（一次性状态，已用完即清，无需长期备份）。
 **计划处理：2026-11-09**（单独批次，不混入实体收口）。
 
 **下一步**：批2 —— 取证并入主回复调用 + `verifyAdmission` + 删除 `LLMEntityExtractor.ts`。
