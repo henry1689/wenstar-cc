@@ -155,6 +155,10 @@ export interface LayerParam {
  *
  * ✅ **relation τ = 120 分钟已获业主批准（2026-11-05）**。
  * 白皮书 §2.4 无 Ⅴ 关系层，该值由业主裁定；批准依据与 τ 敏感度实测见下条注释。
+ *
+ * 🔴 **批准出处**（B-3 任务 10-1：不能只写「已批准」而无处可查）：
+ * `tests/oracle/oracle-change-log.md` §三 · `APR-001`。
+ * 该表同时登记了本文件的历次变更（序 2 / 序 4），两者须能互相对上。
  * τ 直接决定无观测期的回归速度，数值变更须重跑
  * `__tests__/tau-sensitivity.test.ts` 并重新走批准流程。
  */
@@ -164,6 +168,7 @@ export const LAYER_PARAMS: Readonly<Record<LayerName, LayerParam>> = Object.free
   appraisal: Object.freeze({ lambda: 0.4, tauMin: 10 }),
   motive: Object.freeze({ lambda: 0.4, tauMin: 30 }),
   // relation τ = 120 分钟。**业主已批准（2026-11-05）**。
+  // 批准记录：`tests/oracle/oracle-change-log.md` §三 · APR-001（可查，不是口头批准）。
   // 白皮书 §2.4 的 τ 表无 Ⅴ 关系层，此值由业主裁定。
   // 批准依据：① λ 与 dyad 同为 0.15，属同一慢度类别；
   //          ② τ 序列中应慢于 body(60)、不快于 dyad(120)；
@@ -257,6 +262,54 @@ assertLayerParams(LAYER_PARAMS);
 // ============ 维度级开关（E-14 细化 / E-10） ============
 
 /**
+ * 只读集合视图（B-3 任务 2）。
+ *
+ * 🔴 **为什么不能用 `Object.freeze(new Set(...))`**：`Object.freeze` 只冻结
+ * **属性**，不冻结 `Set` 的内部槽位。冻结后的 `Set` 仍然可以 `.add()` / `.delete()`，
+ * 而 `Object.isFrozen()` 却返回 `true` —— **假冻结**，守卫测试全绿但约束无效。
+ * 这是本项目第二次踩同一个坑（第一次是 `Object.isFrozen(undefined) === true`）。
+ *
+ * 🔴 **也不能用「在 Set 实例上覆盖方法」**：
+ * ```js
+ * Object.defineProperties(set, { delete: { value: deny } })   // 挡不住
+ * Set.prototype.delete.call(OBSERVE_ONLY_DIMS, 'D29')         // 走原型，直接绕过
+ * ```
+ *
+ * 因此这里**不用 Set 实例**：返回一个**不继承 Set 的普通对象视图**，
+ * 内部 `Set` 由闭包持有、外部拿不到。`Set.prototype.delete.call(view, …)`
+ * 会因 brand check 失败而抛 `TypeError`——绕过路径被彻底堵死。
+ *
+ * 🔴 **第三条绕过路径：`forEach` 的回调参数**。`Set.prototype.forEach` 会把
+ * 「真身」作为第三个实参递给回调——若原样透传，调用方在回调里就拿到了内部
+ * `Set`，一行 `(s as Set<T>).delete(x)` 即可解除只读约束，连视图这层外衣都不需要：
+ * ```js
+ * OBSERVE_ONLY_DIMS.forEach((v, k, s) => (s as Set<DimId>).delete('D29'));  // 泄漏版
+ * ```
+ * 故第三个实参**必须换成本视图 `view`**，且 Set 的 key 恒等于 value，
+ * 因此前两个实参按 `(v, v)` 传，保持 `ReadonlySet` 的语义。
+ * 这条是统筹者复核时发现的——只测 `delete` 与 `Set.prototype.delete.call`
+ * 两条路径不够，**回调参数是独立的第三条**，必须单测。
+ *
+ * 类型上仍可赋给 `ReadonlySet<T>`（`size` / `has` / `forEach` / 迭代器齐全）。
+ */
+export function readonlySet<T>(items: readonly T[]): ReadonlySet<T> {
+  const inner = new Set(items);
+  const view: ReadonlySet<T> = {
+    get size() {
+      return inner.size;
+    },
+    has: (v) => inner.has(v),
+    // 第三参传 view 而非 inner 的第三个回调实参（见上方「第三条绕过路径」）
+    forEach: (cb, thisArg) => inner.forEach((v) => cb.call(thisArg, v, v, view)),
+    entries: () => inner.entries(),
+    keys: () => inner.keys(),
+    values: () => inner.values(),
+    [Symbol.iterator]: () => inner.values(),
+  };
+  return Object.freeze(view);
+}
+
+/**
  * 不走 OU–Kalman 的维度。
  *
  * - `D27`：同频，由 dyad 的 Y1 回填，主体块不独立滤波（E-10）
@@ -265,18 +318,17 @@ assertLayerParams(LAYER_PARAMS);
  * 与「层没有 τ」不是一回事：`relation` 层**有** τ（除 D27 外都走 Kalman），
  * `scene` 层是**整层**不走。两者不得混为一谈。
  */
-export const NO_KALMAN_DIMS: ReadonlySet<DimId> = Object.freeze(
-  new Set<DimId>(['D27', ...DIMS_BY_LAYER.scene]),
-);
+export const NO_KALMAN_DIMS: ReadonlySet<DimId> = readonlySet<DimId>([
+  'D27',
+  ...DIMS_BY_LAYER.scene,
+]);
 
 /**
  * E-14 现行口径：**只观测、共鸣权重恒为 0** 的维度（D29 / D30）。
  *
  * 依赖指标不得作为任何优化目标（S-067 消融不变性），否则系统会主动放大依赖。
  */
-export const OBSERVE_ONLY_DIMS: ReadonlySet<DimId> = Object.freeze(
-  new Set<DimId>(['D29', 'D30']),
-);
+export const OBSERVE_ONLY_DIMS: ReadonlySet<DimId> = readonlySet<DimId>(['D29', 'D30']);
 
 /**
  * 仅私密模式参与的维度（D20 欲求）。
@@ -292,9 +344,7 @@ export const OBSERVE_ONLY_DIMS: ReadonlySet<DimId> = Object.freeze(
  * 非私密模式启用 D20 属 L3 事项（需业主审批 + 快照 + 账本）。
  * 判定依据见 `ADR-002-私密模式定义与边界`。
  */
-export const PRIVATE_ONLY_DIMS: ReadonlySet<DimId> = Object.freeze(
-  new Set<DimId>(['D20']),
-);
+export const PRIVATE_ONLY_DIMS: ReadonlySet<DimId> = readonlySet<DimId>(['D20']);
 
 // ============ 层参数查询（纯函数，无模块级可变状态） ============
 
@@ -380,9 +430,14 @@ export const DEFAULT_MASKS = Object.freeze({
 /**
  * 测试专用：导出需与 oracle 逐项对拍的常量快照（补包 B 第 5 项）。
  *
- * 产出 `tests/oracle/layer-constants-ts.json`，由 oracle 侧读取后与
- * `oracle_spacestate.py` 的同名常量**逐项比对**——10⁵ 差分跑不到层参数，
- * 对常量零保护力，这层对拍是常量的唯一交叉验证。
+ * 快照落于 `src/spacestate/__tests__/config-snapshot.json`，由两道测试保护：
+ * - TS 侧：`config-snapshot.test.ts`（精确快照 + 变异必红）
+ * - Python 侧：`oracle_spacestate.py::test_ts_layer_constants_crosscheck`
+ *
+ * 中间**没有第三份副本**（B-3 任务 3 删掉了此前那份人工维护的第三份拷贝，
+ * 它是「忘更新则双绿但假」的来源）。
+ * 10⁵ 差分跑不到层参数，对常量零保护力，这层对拍是常量的唯一交叉验证。
+ * 🔴 **任何测试都不得写入 `config-snapshot.json`**——写了就是对拍恒真。
  *
  * 全部返回**拷贝**，不暴露内部引用（`DIMS_BY_LAYER` / `LAYER_PARAMS` 是冻结常量，
  * 直接返回会让调用方拿到可被 `Object.freeze` 之外方式误用的引用）。

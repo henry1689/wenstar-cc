@@ -1,11 +1,19 @@
 {
   "mode": "quick",
-  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "oracle_sha256_before": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "level": "non-release",
+  "oracle_sha256": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
+  "oracle_sha256_before": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
   "oracle_sha256_last_report": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "last_approved_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "baseline_note": "与上次放行基线一致，全部检查通过",
-  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
+  "last_approved_hash": null,
+  "baseline_note": "无有效基线（记录不存在或缺内容寻址字段）——当次**不得作为放行依据**，仅建立基线供后续比对",
+  "baseline_written": "未写入：R-2：quick 档永不写 last-approved.json（报告标 non-release）",
+  "ts_content_hash": "13b813c78e894f3e4c2caefaede64ed1a93a4544d4e173f871b1d56ab02b42ad",
+  "ts_commit": "3bd2df3642786b7530578efeda81b87933a8534b",
+  "ts_dirty": true,
+  "script_hash": "f8e2503ab4b8ddeac13dc49f8c7357a6a43e0406e78b9705ea23d6ab0bdc5b67",
+  "registration_ref": null,
+  "registration_valid": false,
+  "registration_reason": "无有效基线（记录不存在或缺内容寻址字段）",
   "seed": 20261104,
   "samples": 10000,
   "checked": 117900,
@@ -15,26 +23,28 @@
   "branch_stats": {
     "total": 10000,
     "values_sampled": 47900,
-    "wild_values": 14389,
-    "wild_ratio": 0.3004,
+    "wild_values": 14370,
+    "wild_ratio": 0.3,
+    "wild_quota_target": 14370,
+    "wild_quota_exact": true,
     "flags": {
-      "nan": 378,
-      "pos_inf": 401,
-      "negative": 1497,
-      "bad_value": 1294,
-      "range_clamped": 2539,
-      "none": 3891
+      "nan": 352,
+      "pos_inf": 372,
+      "negative": 1547,
+      "bad_value": 1282,
+      "range_clamped": 2514,
+      "none": 3933
     },
     "branches": {
-      "dim_evidence.piQ_le_0": 3841,
-      "dim_evidence.sigmaQ2_ge_tau2": 785,
-      "dim_evidence.piX_le_0": 2126,
-      "dim_evidence.clip_hit": 1909,
-      "dim_evidence.finite_ok": 1339,
+      "dim_evidence.piQ_le_0": 3824,
+      "dim_evidence.sigmaQ2_ge_tau2": 798,
+      "dim_evidence.piX_le_0": 2062,
+      "dim_evidence.clip_hit": 1942,
+      "dim_evidence.finite_ok": 1374,
       "phase.non_finite": 817,
       "phase.normal": 9183,
-      "sanitize.clamped": 2539,
-      "encode.pi_zero": 3394
+      "sanitize.clamped": 2514,
+      "encode.pi_zero": 3402
     }
   },
   "unhit_branches": [],
@@ -46,9 +56,10 @@
   },
   "coverage_scope": "差分只覆盖 ℓ、量化、编码、清洗、相位、精度戳记；不覆盖层参数、Kalman、聚合",
   "self_check_offset": "0",
-  "verdict": "PASS",
+  "verdict": "BASELINE_ESTABLISHED",
   "elapsed_s": {
-    "generate": 0.15,
-    "ts": 0.56
+    "generate": 0.16,
+    "ts": 0.83,
+    "total": 0.99
   }
 }

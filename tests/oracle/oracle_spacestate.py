@@ -226,15 +226,22 @@ def test_relation_tau():
     assert layer_of("Y8") == "dyad" and layer_lambda("Y8") == 0.15
 
 def test_ts_layer_constants_crosscheck():
-    """补包 B 第 5 项：TS 侧常量 vs oracle 常量逐项对拍。
+    """TS 侧常量 vs oracle 常量逐项对拍（对拍源：config-snapshot.json，**唯一镜像**）。
 
     10⁵ 差分跑不到层参数（它只覆盖 ℓ / 量化 / 编码），
     常量的唯一交叉验证就是这份对拍。
-    产出文件由 TS 侧 exportLayerConstants() 生成，随代码入库。
+
+    B-3 任务 3：此前读的是 `tests/oracle/` 下的人工维护副本（第三份），
+    忘更新就会「双绿但假」。现改为读 TS 侧的**唯一快照**，链条从三份降到两份：
+      config.ts ↔ config-snapshot.json   由 config-snapshot.test.ts 保护
+      config-snapshot.json ↔ oracle 常量  由本函数保护
+
+    🔴 任何测试都不得写入该快照 —— 写了就是对拍恒真。
     """
     import json, os
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "layer-constants-ts.json")
+    path = os.path.normpath(os.path.join(
+        here, "..", "..", "src", "spacestate", "__tests__", "config-snapshot.json"))
     with open(path, encoding="utf-8") as f:
         ts = json.load(f)
 

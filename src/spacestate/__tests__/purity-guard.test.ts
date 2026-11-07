@@ -1,9 +1,9 @@
 /**
  * 工程约束静态守卫（任务书「四、工程约束」违反即阻断合并）
  *
- * - 约束 2：core/ 全部纯函数 —— 禁止 import fs/db、Date.now、Math.random、环境变量读取
- *   （禁止项的字面量只允许出现在本文件的正则里，注释与用例名一律用中文描述，
- *    以免裸 rg 扫描时把说明文字误判为违规）
+ * - 约束 2：core/ 全部纯函数 —— 禁止 import fs/db、Date.now、Math.random、process.env
+ *   （本用例**先剥注释与字符串再扫代码**，故说明文字里出现这些字面量不构成违规。
+ *    不用裸文本匹配——那会逼文档去迎合 grep，B-3 任务 6 已撤销此类判据）
  * - 约束 3：全部 float64，禁止 Float32Array
  * - 约束 4：参数集中在配置源，core 中除 0/1/2/0.5 外不出现数值字面量
  *
@@ -53,7 +53,7 @@ describe('约束 2 · core 纯函数', () => {
     }
   });
 
-  it('不调用 Date.now / Math.random / 环境变量读取', () => {
+  it('不调用 Date.now / Math.random / process.env', () => {
     const forbiddenCall = /\b(?:Date\.now|Math\.random|process\.env)\b/;
     for (const { name, raw } of sources) {
       // 剥注释：dial.ts 的文档注释里写了「core 禁止 Date.now」，那是说明不是调用
@@ -174,6 +174,30 @@ describe('约束 4 · 参数集中配置源', () => {
     assertFrozenObject(config.NO_KALMAN_DIMS, 'NO_KALMAN_DIMS');
     assertFrozenObject(config.OBSERVE_ONLY_DIMS, 'OBSERVE_ONLY_DIMS');
     assertFrozenObject(config.PRIVATE_ONLY_DIMS, 'PRIVATE_ONLY_DIMS');
+  });
+
+  it('core/ 内禁止 Object.freeze(new Set / new Map（假冻结）', () => {
+    // B-3 任务 2。
+    // 理由：Object.freeze 不冻结 Set/Map 的内部槽位，只冻结属性 ——
+    // 冻结后 .add()/.delete() 照样能用，而 Object.isFrozen() 返回 true，
+    // 守卫全绿但约束无效。这是本项目第二次踩同一个坑
+    // （第一次是 Object.isFrozen(undefined) === true 的永真断言）。
+    const PATTERN = /Object\.freeze\(\s*new\s+(?:Set|Map)\b/;
+
+    const offenders = sources
+      .filter(({ raw }) => PATTERN.test(stripNonCode(raw)))
+      .map(({ name }) => name);
+    expect(offenders).toEqual([]);
+
+    // ★ 正向对照：证明该模式确实能命中，否则本用例是永真的。
+    // （等价于任务书要求的「故意写一行验证它会红」——用合成样例代替真改源码，
+    //  避免在并行会话共享的工作树上制造瞬时脏状态）
+    expect(PATTERN.test('const s = Object.freeze(new Set([1]));')).toBe(true);
+    expect(PATTERN.test('const m = Object.freeze(new Map());')).toBe(true);
+    expect(PATTERN.test('const s = readonlySet([1]);')).toBe(false);
+    // 注释里的示例不算违规（先剥注释再扫）
+    expect(PATTERN.test(stripNonCode('// 例：Object.freeze(new Set())'))).toBe(false);
+    expect(PATTERN.test(stripNonCode('const s = Object.freeze(new Set());'))).toBe(true);
   });
 
   it('本文件无残留的可选属性类型断言（会掩盖已删除属性）', async () => {

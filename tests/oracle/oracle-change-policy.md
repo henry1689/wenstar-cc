@@ -5,7 +5,8 @@
 
 - 起草日期：2026-11-05
 - 适用对象：`tests/oracle/` 下全部文件（`oracle_spacestate.py`、`diff_spacestate.py`、
-  `layer-constants-ts.json`、本文件）
+  `oracle-change-log.md`、`test_diff_verdict.py`、`run_oracle_tests.py`、
+  `reports/**`、本文件）
 - 关联：基线 MD5 `0A693DE23E1937353631526AE565A9D3`
 
 ---

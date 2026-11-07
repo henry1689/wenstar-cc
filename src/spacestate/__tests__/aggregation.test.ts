@@ -16,6 +16,7 @@ import {
   layerAdmitted,
   meetsMinLayers,
   totalEvidence,
+  type WeightContext,
   type WeightedTerm,
 } from '../core/aggregation.js';
 import { posteriorVariance } from '../core/evidence.js';
@@ -191,6 +192,93 @@ describe('effectiveWeight · 唯一打分入口', () => {
       (ctx as { privateMode: boolean }).privateMode = false;
     }).not.toThrow(); // JS 层拦不住，但每次调用都重新读 ctx，结果不被缓存
     expect(effectiveWeight('D20', 1, 1, 'A', { privateMode: false }, 0.3)).toBe(0);
+  });
+});
+
+// ============ B-3 任务 1 · 权重输入校验测试矩阵（7 行全覆盖） ============
+
+describe('effectiveWeight · 输入校验矩阵（B-3 任务 1）', () => {
+  const OFF_C: WeightContext = { privateMode: false };
+
+  it('行1｜D20（关）· baseI = Infinity / NaN / -1 → RangeError', () => {
+    for (const bad of [Infinity, NaN, -1]) {
+      expect(
+        () => effectiveWeight('D20', bad, 1, 'A', OFF_C, 0),
+        `baseI=${bad}`,
+      ).toThrow(RangeError);
+    }
+  });
+
+  it('行2｜D20（关）· 合法输入 → 严格 +0（Object.is 判定，含符号）', () => {
+    const w = effectiveWeight('D20', 2, 1, 'A', OFF_C, 0);
+    // Object.is(-0, 0) === false：若不抹 -0，这条会因符号翻车
+    expect(Object.is(w, 0)).toBe(true);
+    expect(Object.is(w, -0)).toBe(false);
+    expect(w).toBe(0);
+  });
+
+  it('行3｜D29（任何模式）· 合法输入 → 严格 +0', () => {
+    for (const ctx of [OFF_C, { privateMode: true }]) {
+      const w = effectiveWeight('D29', 1, 1, 'A', ctx, 0.3);
+      expect(Object.is(w, 0), `privateMode=${ctx.privateMode}`).toBe(true);
+    }
+  });
+
+  it('行4｜D01 · baseI = Infinity / NaN / -Infinity → RangeError', () => {
+    for (const bad of [Infinity, NaN, -Infinity]) {
+      expect(() => effectiveWeight('D01', bad, 1, 'A', OFF_C, 0), `baseI=${bad}`).toThrow(
+        RangeError,
+      );
+    }
+    // 负数同样拒绝（baseI < 0）
+    expect(() => effectiveWeight('D01', -1, 1, 'A', OFF_C, 0)).toThrow(RangeError);
+  });
+
+  it('行5｜D01 · delta = NaN → RangeError', () => {
+    expect(() => effectiveWeight('D01', 1, 1, 'A', OFF_C, NaN)).toThrow(RangeError);
+    expect(() => effectiveWeight('D01', 1, 1, 'A', OFF_C, NaN)).toThrow(/delta 不得为 NaN/);
+  });
+
+  it('行6｜D01 · delta = ±Infinity → 不抛错，按 S-017 钳到 ±0.3', () => {
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF_C, Infinity)).toBeCloseTo(1.3, 12);
+    expect(effectiveWeight('D01', 1, 1, 'A', OFF_C, -Infinity)).toBeCloseTo(0.7, 12);
+    expect(Number.isFinite(effectiveWeight('D01', 1, 1, 'A', OFF_C, Infinity))).toBe(true);
+  });
+
+  it("行7｜未知维度 'D99' → RangeError（任意输入）", () => {
+    const bogus = 'D99' as unknown as Parameters<typeof effectiveWeight>[0];
+    expect(() => effectiveWeight(bogus, 1, 1, 'A', OFF_C, 0)).toThrow();
+    expect(() => effectiveWeight(bogus, 0, 0, 'C', { privateMode: true }, 0)).toThrow();
+    // 错误信息应指向维度未知
+    expect(() => effectiveWeight(bogus, 1, 1, 'A', OFF_C, 0)).toThrow(/未知维度/);
+  });
+
+  it('校验在掩码之前：D20 关闭时非法输入同样报错（不出现「关了就静默通过」）', () => {
+    expect(() => effectiveWeight('D20', Infinity, 1, 'A', OFF_C, 0)).toThrow(RangeError);
+    expect(() => effectiveWeight('D20', 1, NaN, 'A', OFF_C, 0)).toThrow(RangeError);
+  });
+
+  it('icc 非有限 → RangeError；icc 为负但有限 → 允许（S-017 未禁止，r_ICC 会被钳）', () => {
+    expect(() => effectiveWeight('D01', 1, Infinity, 'A', OFF_C, 0)).toThrow(RangeError);
+    expect(() => effectiveWeight('D01', 1, NaN, 'A', OFF_C, 0)).toThrow(RangeError);
+    // baseI / icc **不得**用 Math.min/max 钳制（S-017 只授权 δ 钳制）
+    expect(Number.isFinite(effectiveWeight('D01', 1, -5, 'B', OFF_C, 0))).toBe(true);
+    expect(effectiveWeight('D01', 1, -5, 'B', OFF_C, 0)).toBe(0); // r_ICC 钳到 0
+  });
+
+  it('非有限输入不再进求和：此前 Infinity 会污染整层证据', () => {
+    // 修复前：baseI=Infinity 直接算出 Infinity，进 layerEvidence 后整层 E_L = Infinity，
+    // 且下游只在很远处表现成异常。现在在入口就抛，取不到那个 Infinity。
+    const poison = [Infinity, NaN, -Infinity];
+    for (const p of poison) {
+      expect(() => effectiveWeight('D01', p, 1, 'A', OFF_C, 0), `baseI=${p}`).toThrow(RangeError);
+    }
+    const good = [1, 2, 3].map((b) => effectiveWeight('D01', b, 1, 'A', OFF_C, 0));
+    expect(good.every((w) => Number.isFinite(w))).toBe(true);
+    // 求和结果也必须有限
+    expect(Number.isFinite(layerEvidence(good.map((w, i) => ({ index: i, w, ell: 1 }))))).toBe(
+      true,
+    );
   });
 });
 

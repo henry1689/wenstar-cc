@@ -178,3 +178,92 @@ describe('resonanceMask · E-14 细化', () => {
     }
   });
 });
+
+// ============ B-3 任务 2 · 只读集合视图（真冻结） ============
+
+describe('只读集合视图 · 四条负向测试（B-3 任务 2）', () => {
+  it("① 视图没有 delete 方法（'delete' in view === false）", () => {
+    expect('delete' in OBSERVE_ONLY_DIMS).toBe(false);
+    expect('add' in OBSERVE_ONLY_DIMS).toBe(false);
+    expect('clear' in OBSERVE_ONLY_DIMS).toBe(false);
+    expect('NO_KALMAN' in NO_KALMAN_DIMS ? true : 'add' in NO_KALMAN_DIMS).toBe(false);
+  });
+
+  it('② 直接调用 delete → TypeError（视图上没有该方法）', () => {
+    expect(() => (OBSERVE_ONLY_DIMS as unknown as { delete: (v: string) => void }).delete('D29'))
+      .toThrow(TypeError);
+  });
+
+  it('③ ★ 绕过路径：Set.prototype.delete.call(view) → TypeError', () => {
+    // 决定性用例：若内部仍是 Set 实例，这一步会成功并真的删掉 D29。
+    // 抛 TypeError 说明 brand check 失败 = 不是 Set 实例 = 原型链绕过被堵死。
+    expect(() => Set.prototype.delete.call(OBSERVE_ONLY_DIMS, 'D29')).toThrow(TypeError);
+    expect(() => Set.prototype.add.call(NO_KALMAN_DIMS, 'D01')).toThrow(TypeError);
+    expect(() => Set.prototype.clear.call(PRIVATE_ONLY_DIMS)).toThrow(TypeError);
+  });
+
+  it('④ 内容未被改动（前三条之后仍可正常读取）', () => {
+    expect(OBSERVE_ONLY_DIMS.has('D29')).toBe(true);
+    expect(OBSERVE_ONLY_DIMS.has('D30')).toBe(true);
+    expect(OBSERVE_ONLY_DIMS.size).toBe(2);
+    expect(NO_KALMAN_DIMS.has('D27')).toBe(true);
+    expect(PRIVATE_ONLY_DIMS.has('D20')).toBe(true);
+  });
+
+  // ============ B-3 退回单 §2.1 · forEach 是第三条绕过路径 ============
+  // 前四条只堵了「直接调 delete」与「Set.prototype 走原型」两条。
+  // 第三条：Set.prototype.forEach 的**第三个回调实参就是真身**——
+  // 若原样透传 inner，调用方在回调里就能拿到内部 Set：
+  //   OBSERVE_ONLY_DIMS.forEach((v, k, s) => (s as Set<DimId>).delete('D29'));
+  // 统筹者复核实测该路径可删掉 D29，故单列用例。
+
+  it('⑤ forEach 回调的第三个实参必须是视图本身，不是内部 Set', () => {
+    let third: unknown;
+    OBSERVE_ONLY_DIMS.forEach((_v, _k, s) => {
+      third = s;
+    });
+    // 判据一：传的是 view（真身的第三个实参会是另一个对象）
+    expect(third).toBe(OBSERVE_ONLY_DIMS);
+    // 判据二：视图上没有 delete；真身 Set 上有 —— 这条区分了「传的是谁」
+    expect(typeof third).toBe('object');
+    expect('delete' in (third as object)).toBe(false);
+    // 判据三：即便退一步按真身用法调原型方法，也照样删不动
+    expect(() => Set.prototype.delete.call(third, 'D29')).toThrow(TypeError);
+    // 判据四：内容确实没被改动
+    expect(OBSERVE_ONLY_DIMS.has('D29')).toBe(true);
+    expect(OBSERVE_ONLY_DIMS.size).toBe(2);
+  });
+
+  it('⑥ 三个集合的 forEach 第三参都是各自视图（逐个核，不止 OBSERVE_ONLY）', () => {
+    for (const view of [OBSERVE_ONLY_DIMS, NO_KALMAN_DIMS, PRIVATE_ONLY_DIMS]) {
+      let third: unknown;
+      view.forEach((_v, _k, s) => {
+        third = s;
+      });
+      expect(third, '第三参应为视图自身').toBe(view);
+      expect('delete' in (third as object), '视图不得带 delete').toBe(false);
+    }
+    // 回调的前两参：Set 语义下 key 恒等于 value，不得传成别的
+    const pairs: [unknown, unknown][] = [];
+    OBSERVE_ONLY_DIMS.forEach((v, k) => pairs.push([v, k]));
+    expect(pairs).toEqual([
+      ['D29', 'D29'],
+      ['D30', 'D30'],
+    ]);
+  });
+
+  it('视图仍是合法的 ReadonlySet：可迭代、可 forEach、size 正确', () => {
+    expect([...OBSERVE_ONLY_DIMS].sort()).toEqual(['D29', 'D30']);
+    const seen: string[] = [];
+    NO_KALMAN_DIMS.forEach((v) => seen.push(v));
+    expect(seen).toHaveLength(NO_KALMAN_DIMS.size);
+    expect(NO_KALMAN_DIMS.size).toBe(10);
+    expect(typeof OBSERVE_ONLY_DIMS[Symbol.iterator]).toBe('function');
+  });
+
+  it('视图被 Object.freeze（属性层也不可改）', () => {
+    for (const s of [OBSERVE_ONLY_DIMS, NO_KALMAN_DIMS, PRIVATE_ONLY_DIMS]) {
+      expect(Object.isFrozen(s)).toBe(true);
+    }
+  });
+});

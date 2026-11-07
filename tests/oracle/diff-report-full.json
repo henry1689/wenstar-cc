@@ -1,11 +1,19 @@
 {
   "mode": "full",
-  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "oracle_sha256_before": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "oracle_sha256_last_report": "e0aaf76eb146cd7655502a2608b799b73136531e82905ad376d8a0ae65856e62",
-  "last_approved_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "baseline_note": "与上次放行基线一致，全部检查通过",
-  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
+  "level": "non-release",
+  "oracle_sha256": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
+  "oracle_sha256_before": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
+  "oracle_sha256_last_report": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "last_approved_hash": null,
+  "baseline_note": "R-1 拒写：完整档要求工作区干净（`git status --porcelain -- src/spacestate tests/oracle` 为空），实际改动：\nM src/spacestate/__tests__/adr-002-contract.test.ts\n M src/spacestate/__tests__/aggregation.test.ts\n M src/spacestate/__tests__/layer-map.test.ts\n M src/spacestate/__tests__/layer-params.test.ts\n M src/spacestate/__tests__/purity-guard.test.ts\n M src/spacestate/core/aggregation.ts\n M src/spacestate/core/config.ts\n M src/spacestate/core/layout.ts\n M tests/oracle/diff-report-quick.json\n M tests/oracle/diff-report-selfcheck.json\n M tests/oracle/diff_spacestate.py\n D tests/oracle/layer-constants-ts.json\n M tests/oracle/oracle-change-policy.md\n M tests/oracle/oracle_spacestate.py\n?? tests/oracle/.gitignore\n?? tests/oracle/oracle-change-log.md\n?? tests/oracle/run_oracle_tests.py\n?? tests/oracle/test_diff_verdict.py",
+  "baseline_written": "R-1 拒写（本次未建立基线）",
+  "ts_content_hash": "13b813c78e894f3e4c2caefaede64ed1a93a4544d4e173f871b1d56ab02b42ad",
+  "ts_commit": "3bd2df3642786b7530578efeda81b87933a8534b",
+  "ts_dirty": true,
+  "script_hash": "f8e2503ab4b8ddeac13dc49f8c7357a6a43e0406e78b9705ea23d6ab0bdc5b67",
+  "registration_ref": null,
+  "registration_valid": false,
+  "registration_reason": "无有效基线（记录不存在或缺内容寻址字段）",
   "seed": 20261104,
   "samples": 100000,
   "checked": 1179000,
@@ -15,26 +23,28 @@
   "branch_stats": {
     "total": 100000,
     "values_sampled": 479000,
-    "wild_values": 143524,
-    "wild_ratio": 0.2996,
+    "wild_values": 143700,
+    "wild_ratio": 0.3,
+    "wild_quota_target": 143700,
+    "wild_quota_exact": true,
     "flags": {
-      "nan": 3796,
-      "pos_inf": 3723,
-      "negative": 14723,
-      "bad_value": 12774,
-      "range_clamped": 25591,
-      "none": 39393
+      "nan": 3752,
+      "pos_inf": 3739,
+      "negative": 14766,
+      "bad_value": 12763,
+      "range_clamped": 25680,
+      "none": 39300
     },
     "branches": {
-      "dim_evidence.piQ_le_0": 38146,
-      "dim_evidence.sigmaQ2_ge_tau2": 7980,
-      "dim_evidence.piX_le_0": 20779,
-      "dim_evidence.clip_hit": 19508,
-      "dim_evidence.finite_ok": 13587,
-      "phase.non_finite": 8147,
-      "phase.normal": 91853,
-      "sanitize.clamped": 25591,
-      "encode.pi_zero": 33901
+      "dim_evidence.piQ_le_0": 38189,
+      "dim_evidence.sigmaQ2_ge_tau2": 8078,
+      "dim_evidence.piX_le_0": 20677,
+      "dim_evidence.clip_hit": 19400,
+      "dim_evidence.finite_ok": 13656,
+      "phase.non_finite": 7972,
+      "phase.normal": 92028,
+      "sanitize.clamped": 25680,
+      "encode.pi_zero": 33925
     }
   },
   "unhit_branches": [],
@@ -46,9 +56,10 @@
   },
   "coverage_scope": "差分只覆盖 ℓ、量化、编码、清洗、相位、精度戳记；不覆盖层参数、Kalman、聚合",
   "self_check_offset": "0",
-  "verdict": "PASS",
+  "verdict": "REVIEW_REQUIRED",
   "elapsed_s": {
-    "generate": 2.65,
-    "ts": 1.37
+    "generate": 1.71,
+    "ts": 1.59,
+    "total": 3.3
   }
 }

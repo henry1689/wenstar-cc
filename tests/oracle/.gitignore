@@ -1,0 +1,6 @@
+# Python 字节码。**必须忽略**：diff_spacestate.py 的 R-1 闸门用
+# `git status --porcelain -- src/spacestate tests/oracle` 判工作区是否干净，
+# 若 __pycache__/ 未忽略，任何一次 python 运行都会让该范围永久处于「脏」，
+# 完整档将永远无法写入放行基线（R-1 形同虚设）。
+__pycache__/
+*.pyc

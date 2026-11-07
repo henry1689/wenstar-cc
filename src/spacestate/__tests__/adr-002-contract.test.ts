@@ -134,3 +134,22 @@ describe('ADR-002 §3.6 第 3 条 · trace 掩码约束已记录', () => {
     expect(raw).toMatch(/契约测试/);
   });
 });
+
+// ============ B-3 任务 10-3 / 10-6 · 待落地的约束（it.todo 占位） ============
+// 现在无法实现（S-075 与账本尚未落地），但**必须留痕**，
+// 否则约束会在切片推进中被遗忘。落地时把 it.todo 改成真实断言。
+
+describe('ADR-002 · 后续切片验收占位', () => {
+  it.todo('S-075 落地后：私密模式下 trace 不含 D20 值/精度/贡献量（§3.6 第 3 条）');
+  it.todo(
+    'S-075/账本落地后：私密事件记录不含会话 ID、记忆 ID、用户可识别标识（§3.7 第 4 条）',
+  );
+
+  it('占位项确实被登记（防止被无声删除）', () => {
+    // it.todo 的数量即待落地约束数；改名/删除会导致本断言失败
+    const raw = readFileSync(join(spacestateDir, '__tests__', 'adr-002-contract.test.ts'), 'utf8');
+    expect(raw.match(/it\.todo\(/g) ?? []).toHaveLength(2);
+    expect(raw).toMatch(/§3\.6 第 3 条/);
+    expect(raw).toMatch(/§3\.7 第 4 条/);
+  });
+});

@@ -150,9 +150,10 @@ describe('E-10 · 准入下标（layerIndices 取 admission）', () => {
     expect(adm('relation')).toHaveLength(14);
   });
 
-  it('覆盖率上限不再被 D27 压低：16 项 vs 14 项的差异正是 E-10 要避免的', () => {
-    // 16 项里有 2 项恒 0 覆盖率 → 关系层上限 14/16 = 0.875，
-    // 叠加其它未产出维度极易跌破 COVERAGE_MIN，导致关系层永难准入
+  it('准入下标只剔 D27：口径正确，不是为了让层更容易准入', () => {
+    // D27 在主体块的存储精度恒为 0（只在 dyad 块计证据）。把两个恒 0 项计入
+    // 层平均，算出来的就不是「关系层覆盖率」而是「含两个恒零项的覆盖率」——定义不同。
+    // 🔴 不写任何比例数字：0.875 → 0.3 的余量并不小，「极易跌破」的算术不成立。
     const ratio = adm('relation').length / sum('relation').length;
     expect(ratio).toBeCloseTo(14 / 16, 12);
     expect(ratio).toBeLessThan(1);

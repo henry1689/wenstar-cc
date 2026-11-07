@@ -21,6 +21,7 @@ import {
   ICC_B_SPAN,
   OBSERVE_ONLY_DIMS,
   TAU_MIN,
+  layerOf,
   resonanceMask,
 } from './config.js';
 import { posteriorVariance } from './evidence.js';
@@ -83,12 +84,13 @@ function rawDimWeight(
  * 🔴 **会话级作用域，绝不持久化（ADR-002 §4.3）**：`privateMode` **只能**由
  * 调用方在每次调用时传入。本仓库内**禁止**出现以下任一形态：
  * ```
- * // ❌ 模块级可变状态   模块里声明可变的 privateMode 变量，或导出 setPrivateMode 之类的全局写入器
- * // ❌ 配置/环境读取     从进程环境变量或配置文件里读取私密标志
- * // ❌ 从内容推断        用正则/关键词/话题敏感度去判定
+ * // ❌ 全局状态        let privateMode = false;  export function setPrivateMode(v)
+ * // ❌ 配置/环境读取    process.env.PRIVATE_MODE
+ * // ❌ 从内容推断      /敏感词/.test(text)
  * ```
- * 验收：`src/spacestate/` 内不得出现环境变量读取、模块级 privateMode 声明、
- * 全局写入器（见 `__tests__/adr-002-contract.test.ts`）。
+ * 判据以 `__tests__/adr-002-contract.test.ts` 的**行为检查**为准
+ * （先剥注释与字符串再扫代码）。**不使用文本匹配**——那会逼着文档去迎合 grep，
+ * 本项目已因此踩过一次坑（B-3 任务 6 撤销该判据）。
  *
  * 🔴 **来源限制（ADR-002 §3.1）**：只允许来自显式来源（用户显式指令 /
  * 事先授权的会话标定）。禁止从内容检测、话题敏感度、语调、关键词推断——
@@ -99,10 +101,54 @@ export interface WeightContext {
 }
 
 /**
- * 🔴 **维度权重的唯一打分入口**（补包 B 第 1 项）。
+ * 打分入口的输入校验（B-3 任务 1，Sonnet Q1 乙方案）。
+ *
+ * 🔴 **为什么必须在入口挡**：`effectiveWeight` 此前无非有限守卫，实测
+ * `D01 + Infinity → Infinity` 会**直接进求和**，把整层证据污染成 Infinity
+ * 而下游只会在很远处表现成异常。非有限配置值必须在入口**中断**，
+ * **不静默钳制**（钳制会把配置错误伪装成合法输入）。
+ *
+ * 三条判定顺序（不可调换）：
+ * 1. **先校验、后掩码**：D20 关闭时输入有问题**也要报错**。
+ *    否则会出现「关了就静默通过」——同一个错误输入，开与关两种行为，
+ *    无法预测也无法复现。
+ * 2. 未知维度（`layerOf` 抛错）同样在最前面：拼错的维度不能被当成
+ *    「不参与」而静默归零。
+ * 3. `delta` 只拦 NaN：**±Infinity 允许**，由下游按 S-017 钳到 ±0.3
+ *    （S-017 只授权 δ 钳制；`baseI` / `icc` **不得**用 `Math.min/max` 钳）。
+ *
+ * @throws {RangeError} 维度未知、`baseI` 非非负有限、`icc` 非有限、`delta` 为 NaN
+ */
+function assertWeightInputs(dim: DimId, baseI: number, icc: number, delta: number): void {
+  layerOf(dim); // 未知维度抛错（Q1-②）
+  if (!Number.isFinite(baseI) || baseI < 0) {
+    throw new RangeError(`baseI 必须为非负有限数：${baseI}`);
+  }
+  if (!Number.isFinite(icc)) {
+    throw new RangeError(`icc 必须为有限数：${icc}`);
+  }
+  if (Number.isNaN(delta)) {
+    throw new RangeError('delta 不得为 NaN');
+  }
+}
+
+/**
+ * 🔴 **维度权重的唯一打分入口**（补包 B 第 1 项；B-3 任务 1 补输入守卫）。
+ *
+ * 三步顺序（**不可调换**）：
+ * ① `assertWeightInputs` 校验 → ② `resonanceMask` 掩码，为 0 时返回**字面量 0**
+ * → ③ `rawDimWeight` 计算后 `+ 0`
+ *
+ * **设计要点与理由**：
+ * - **校验在掩码之前**：保证 D20 关闭时输入有问题也报错，开/关两种行为一致，
+ *   不出现「关了就静默通过」。
+ * - **掩码为 0 时 `return 0`（字面量）**：若走 `x * 0`，`Infinity * 0 = NaN`、
+ *   `-1 * 0 = -0`，都会污染下游求和（NaN 会让整层证据失效，且极难定位）。
+ * - **末尾 `+ 0`**：把任何 `-0` 归一为 `+0`，使 `Object.is(w, 0)` 恒真——
+ *   `Object.is(-0, 0)` 为 false，会让「权重为 0」的断言在符号上翻车。
  *
  * `rawDimWeight` 只算 base × r_ICC × (1+δ)，**不处理私密模式**；
- * D20 是否参与必须在这里乘上 `resonanceMask`。之所以不把开关拆给调用方：
+ * D20 是否参与必须在这里乘 `resonanceMask`。之所以不把开关拆给调用方：
  * 漏乘即 D20 静默进打分，而这是**放行方向**的风险——拦截会报 0 看得见，
  * 放行看不出任何异常。唯一入口让漏乘在类型层就不可能发生。
  *
@@ -122,6 +168,9 @@ export interface WeightContext {
  * 只能标注「已参与」。S-075 的 trace 产出落地时必须实现该约束，
  * 此处以契约测试锁定（`__tests__/adr-002-contract.test.ts`），
  * 防止约束在后续切片遗失。
+ *
+ * ⚠️ 本函数**不是** S-017 所说的「配置校验器」——那东西目前**不存在**，
+ * 见未决项。这里只拦输入，不校验配置表。
  */
 export function effectiveWeight(
   dim: DimId,
@@ -131,7 +180,9 @@ export function effectiveWeight(
   ctx: Readonly<WeightContext>,
   delta = 0,
 ): number {
-  return rawDimWeight(dim, baseI, icc, grade, delta) * resonanceMask(dim, ctx.privateMode === true);
+  assertWeightInputs(dim, baseI, icc, delta); // ① 先校验
+  if (resonanceMask(dim, ctx.privateMode === true) === 0) return 0; // ② 再掩码，字面量 0
+  return rawDimWeight(dim, baseI, icc, grade, delta) + 0; // ③ 最后计算，+0 抹掉 -0
 }
 
 // ============ S-016 · 层内聚合 ============
@@ -184,8 +235,8 @@ export function coverage(piX: number, tau: number): number {
  *
  * 空层返回 0——没有维度就没有覆盖，不能默认为满覆盖。
  *
- * 调用方应传入 `layerIndices(layer, 'admission')` 对应的 π 数组（剔除 D27），
- * 否则两项恒 0 覆盖率会把关系层上限压到 0.875。
+ * 调用方应传入 `layerIndices(layer, 'admission')` 对应的 π 数组（剔除 D27）。
+ * 理由是**口径**：两个恒 0 项计入层平均后，得到的已不是「关系层覆盖率」。
  */
 export function layerCoverage(piXs: readonly number[], tau: number): number {
   if (piXs.length === 0) return 0;
