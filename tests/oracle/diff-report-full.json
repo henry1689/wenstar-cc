@@ -1,15 +1,15 @@
 {
   "mode": "full",
-  "level": "non-release",
+  "level": "release",
   "oracle_sha256": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
   "oracle_sha256_before": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
-  "oracle_sha256_last_report": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
+  "oracle_sha256_last_report": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
   "last_approved_hash": null,
-  "baseline_note": "R-1 拒写：完整档要求工作区干净（`git status --porcelain -- src/spacestate tests/oracle` 为空），实际改动：\nM src/spacestate/__tests__/adr-002-contract.test.ts\n M src/spacestate/__tests__/aggregation.test.ts\n M src/spacestate/__tests__/layer-map.test.ts\n M src/spacestate/__tests__/layer-params.test.ts\n M src/spacestate/__tests__/purity-guard.test.ts\n M src/spacestate/core/aggregation.ts\n M src/spacestate/core/config.ts\n M src/spacestate/core/layout.ts\n M tests/oracle/diff-report-quick.json\n M tests/oracle/diff-report-selfcheck.json\n M tests/oracle/diff_spacestate.py\n D tests/oracle/layer-constants-ts.json\n M tests/oracle/oracle-change-policy.md\n M tests/oracle/oracle_spacestate.py\n?? tests/oracle/.gitignore\n?? tests/oracle/oracle-change-log.md\n?? tests/oracle/run_oracle_tests.py\n?? tests/oracle/test_diff_verdict.py",
-  "baseline_written": "R-1 拒写（本次未建立基线）",
+  "baseline_note": "无有效基线（记录不存在或缺内容寻址字段）——当次**不得作为放行依据**，仅建立基线供后续比对",
+  "baseline_written": "已写入 D:\\tools\\wenstar-cc\\tests\\oracle\\reports\\last-approved.json",
   "ts_content_hash": "13b813c78e894f3e4c2caefaede64ed1a93a4544d4e173f871b1d56ab02b42ad",
-  "ts_commit": "3bd2df3642786b7530578efeda81b87933a8534b",
-  "ts_dirty": true,
+  "ts_commit": "b977bce2189e03ff99f07959d4804681917e0f95",
+  "ts_dirty": false,
   "script_hash": "f8e2503ab4b8ddeac13dc49f8c7357a6a43e0406e78b9705ea23d6ab0bdc5b67",
   "registration_ref": null,
   "registration_valid": false,
@@ -56,10 +56,10 @@
   },
   "coverage_scope": "差分只覆盖 ℓ、量化、编码、清洗、相位、精度戳记；不覆盖层参数、Kalman、聚合",
   "self_check_offset": "0",
-  "verdict": "REVIEW_REQUIRED",
+  "verdict": "BASELINE_ESTABLISHED",
   "elapsed_s": {
-    "generate": 1.71,
-    "ts": 1.59,
-    "total": 3.3
+    "generate": 2.56,
+    "ts": 1.47,
+    "total": 4.02
   }
 }

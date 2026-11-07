@@ -1,7 +1,11 @@
 {
-  "oracle_sha256": "64c4fb4f8ef33f69681b40743e87a2466f91224ab4aad582262ebe208a5a1998",
-  "ts_commit": "fb8f889064e65c763f412dba995719197cc17859",
-  "mode": "quick",
-  "approved_at": "2026-11-05T19:43:24",
-  "note": "首次运行建立的基线；此后每次差分须与此哈希比对"
+  "oracle_hash": "803e401577321ca45e302deb81ec100fc6e55075a9213aa7f51c9cec7d04e56a",
+  "ts_content_hash": "13b813c78e894f3e4c2caefaede64ed1a93a4544d4e173f871b1d56ab02b42ad",
+  "ts_commit": "b977bce2189e03ff99f07959d4804681917e0f95",
+  "ts_dirty": false,
+  "script_hash": "f8e2503ab4b8ddeac13dc49f8c7357a6a43e0406e78b9705ea23d6ab0bdc5b67",
+  "mode": "full",
+  "registration_ref": "OCL-20261106-01",
+  "approved_at": "2026-11-07T14:38:54",
+  "note": "内容寻址基线（B-3 任务 4）：更新本文件的 commit message 必须引用 registration_ref（R-4）"
 }
