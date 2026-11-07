@@ -34,6 +34,7 @@ import fs, { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setGlobal } from '../common/GlobalRegistry.js';
+import { pruneBackups, gzipFileAsync } from '../app/backup/BackupRetention.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
@@ -1186,6 +1187,12 @@ async function initPipeline(): Promise<void> {
         } finally {
           testDb.close();
         }
+
+        // ④ 压缩：必须异步流式（gzipSync 会把 135MB 的库同步阻塞主线程数秒），成功后删源
+        const gzPath = `${bkPath}.gz`;
+        try { unlinkSync(gzPath); } catch { /* 目标不存在 */ }
+        const gzSize = await gzipFileAsync(bkPath, gzPath);
+        console.log(`[Backup] 📦 ${prefix} 压缩完成: ${Math.round(bkSize / 1048576)}MB → ${Math.round(gzSize / 1048576)}MB`);
         successCount++;
       } catch (err) {
         console.warn(`[Backup] ❌ ${prefix} 备份失败:`, err);
@@ -1199,64 +1206,18 @@ async function initPipeline(): Promise<void> {
       backupStats.successCount++;
     }
 
-    // 留存清理: 保留最近7天每日 + 最近4周每周
-    let _bkTotalFiles = 0;
-    try {
-      const files = readdirSync(BACKUP_DIR).filter(f => f.endsWith('.db'));
-      _bkTotalFiles = files.length;
-      // 按前缀分组
-      const groups: Record<string, string[]> = {};
-      for (const f of files) {
-        const prefix = f.split('_')[0] || 'other';
-        if (!groups[prefix]) groups[prefix] = [];
-        groups[prefix].push(f);
+    // 留存清理：分层保留（最近 2 个 + 每日 1 个留 3 天 + 每周 1 个留 2 周），三套前缀共用同一策略。
+    // 🔴 2026-11-07 业主决策：原内联实现只按「每日最新一份」留 3~7 天且不压缩——knowledge
+    //   单份 135MB，稳态约 390MB。现统一交给 BackupRetention；压缩后单份约 29MB，
+    //   稳态约 190MB 且恢复窗口从 3 天扩到 2 周。
+    for (const prefix of ['knowledge', 'family_graph', 'vault']) {
+      try {
+        const { kept, deleted } = pruneBackups(BACKUP_DIR, prefix);
+        console.log(`[Backup] ${prefix} 留存 ${kept.length} 个，清理 ${deleted.length} 个旧快照`);
+      } catch (e: any) {
+        console.warn('[Backup] 清理失败:', e?.message);
       }
-
-      for (const [prefix, groupFiles] of Object.entries(groups)) {
-        // 按时间排序（最新的在前）
-        groupFiles.sort().reverse();
-        const kept: string[] = [];
-        const bestForDay = new Map<string, Date>(); // prefix_date -> latest file date
-        const today = new Date();
-
-        for (const f of groupFiles) {
-          // 解析文件名中的日期: prefix_YYYYMMDD-HHmm.db
-          const dateMatch = f.match(/(\d{4})-?(\d{2})-?(\d{2})/);
-          if (!dateMatch) { kept.push(f); continue; }
-
-          const fileDate = new Date(parseInt(dateMatch[1]), parseInt(dateMatch[2]) - 1, parseInt(dateMatch[3]));
-          const daysDiff = Math.floor((today.getTime() - fileDate.getTime()) / 86400000);
-
-          // 按类型分别保留：knowledge 3 天每天最新 1 个，family_graph/vault 7 天每天最新 1 个
-          const isKnowledge = prefix === 'knowledge';
-          const isVault = prefix === 'vault';
-          const keepDays = isKnowledge ? 3 : 7;
-          if (daysDiff <= keepDays) {
-            const dateKey = dateMatch[1] + '-' + dateMatch[2] + '-' + dateMatch[3];
-            const dayKey = prefix + '_' + dateKey;
-            if (!bestForDay.has(dayKey) || fileDate > bestForDay.get(dayKey)!) {
-              if (bestForDay.has(dayKey)) {
-                const oldIdx = kept.findIndex(kf => {
-                  const m = kf.match(/(\d{4})-?(\d{2})-?(\d{2})/);
-                  return m && (prefix + '_' + m[1] + '-' + m[2] + '-' + m[3]) === dayKey;
-                });
-                if (oldIdx >= 0) kept.splice(oldIdx, 1);
-              }
-              bestForDay.set(dayKey, fileDate);
-              kept.push(f);
-            }
-          }
-        }
-
-        // 删除不在保留列表中的文件
-        for (const f of groupFiles) {
-          if (!kept.includes(f)) {
-            try { unlinkSync(path.join(BACKUP_DIR, f)); } catch (e: any) { console.error('[server] error:', e?.message); }
-          }
-        }
-      }
-    } catch (_e) { console.warn('[Backup] 清理失败:', (_e as Error)?.message); }
-    console.log(`[Backup] 清理指令已执行 (${_bkTotalFiles} 个备份文件)`);
+    }
   }
 
   // 🔋 LAZY: 备份在用户问及时通过 __temporalOnDemand 触发

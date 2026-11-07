@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isMetaDiscourse } from '../../config/ingestion-guard.js';
 import { SqlJsCompat } from '../../m2/SqlJsCompat.js';
+import { pruneBackups } from '../backup/BackupRetention.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -171,6 +172,10 @@ export class MemoryVault {
       const escaped = backupPath.replace(/\\/g, '/').replace(/'/g, "''");
       this.db.exec(`VACUUM INTO '${escaped}'`);
       console.log(`[MemoryVault] 备份完成: ${backupPath}`);
+      // 🔴 2026-11-07：本目录此前**没有任何清理**，靠同名当日覆盖勉强不涨。
+      //   纳入统一分层保留（最近 2 + 每日 3 天 + 每周 2 周），与统一备份同一策略。
+      const { deleted } = pruneBackups(BACKUPS_DIR, 'vault');
+      console.log(`[MemoryVault] 备份留存清理: 删除 ${deleted.length} 个旧快照`);
     } catch (err) {
       console.error('[MemoryVault] 备份失败（保留原库）:', (err as Error)?.message);
     }

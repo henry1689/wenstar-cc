@@ -400,6 +400,39 @@ v10 迁移的整段替换根本没有落盘。
 
 ---
 
+### §6.11 2026-11-07 备份保留策略统一：分层保留 + 异步压缩
+
+**问题**：三套备份各自为政，且都没有合理上限——
+1. `server.ts` 的 `runUnifiedBackup` 每 6 小时写 knowledge/family_graph/vault，
+   内联清理只按「每日最新一份」留 3~7 天，**单份 knowledge 135MB 未压缩**，稳态约 390MB；
+2. `MemoryVault.backup()` 每日一份，**完全没有清理逻辑**；
+3. 手工 `.bak` 快照无托管（本次已清理 880MB 历史 FG 快照 + 7.2G 备份目录）。
+
+**决策（业主 2026-11-07，方案 B）**：分层保留 + 压缩。
+最近 2 个 + 每日 1 个留 3 天 + 每周 1 个留 2 周。
+
+> 为何不是「只留最近 2 个」：统一备份 6 小时一次，只留 2 个 = 恢复窗口 12 小时。
+> 若数据问题是隔天才发现的，两份副本可能都已是坏的，备份失去意义。
+> 真正的体积大头是「单份未压缩」，同批真实库实测 gzip 后 21~22%。
+
+**实现**：
+- 新建 `src/app/backup/BackupRetention.ts`：`selectBackupsToKeep` / `pruneBackups` / `gzipFileAsync`
+  - 🔴 保留判定按**文件 mtime**，不解析文件名（历史命名有多种形态，且新旧并存）
+  - 🔴 压缩用 `createGzip + pipeline` **异步流式**；`gzipSync` 会把 135MB 同步阻塞主线程数秒，
+    正是 sql.js 整库导出踩过的坑
+- `src/webui/server.ts`：快照校验通过后压缩为 `.db.gz`，内联清理替换为模块调用
+- `src/app/memory-vault/MemoryVault.ts`：`backup()` 后调用同一策略
+- 单元测试 `backup-retention.test.ts`：7 例覆盖三层窗口边界、mtime 判定、真实目录清理、异步压缩
+
+**预期稳态**：knowledge 约 190MB（原 390MB），恢复窗口从 3 天扩到 2 周；
+family_graph 压缩后约 1MB/份，vault 20KB/份。
+
+**验证**：`npx tsc --noEmit` 零错误；vitest 7/7 通过；重启后 HTTP 200、20/20 模块、健康分 100。
+
+**回退**：单文件 revert；最坏情况只是保留份数变化，不涉及数据格式。
+
+---
+
 ## 相关文档
 
 - [GOVERNANCE.md](../GOVERNANCE.md) — 治理文件效力层级总表（**动手前必读**）
