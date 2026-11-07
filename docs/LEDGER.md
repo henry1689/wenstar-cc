@@ -467,6 +467,41 @@ better-sqlite3 同步调用都在主线程上，并发时互相排队，实际�
 
 ---
 
+### §6.13 2026-11-07 FG 实体治理：守护判据修正 + 实体源头收口 + 存量清理
+
+**问题（业主指出）**：FG 观察区每天新增几十个人名垃圾。实测近 30 天新增 **1820 个**
+`category='G' status='candidate'` 节点，诊断日志单行刷出 1800+ 人名，启动报
+「FG 完整性守护失败 → 系统降级运行」。
+
+**两个独立根因**：
+1. **守护判据漏洞**：检查 ⑩ 硬编码 12 种直系/同辈关系，漏掉 `uncle_of/aunt_of/cousin_of/
+   nibling_of/nephew_of/niece_of` ⇒「熊梓铭 --uncle_of--> 我」被误判缺家族边，系统降级。
+   而项目唯一关系词典 `src/app/fg/RelationshipTypes.ts` 的 FAMILY+KINSHIP 分类本就包含这些。
+2. **写入源头无边**：`integrateFromEntity` 非亲属分支注释明写「所有人名都入库，不丢弃」，
+   M1 滑窗切出的每个字面串都会 `addNode` 建节点 —— 中文人名与滑窗片段**字面不可分**，
+   词汇闸门拦不住。
+
+**处置**：
+- ⑩ / ⑰ 的关系白名单改由 `getRelationsByCategory(FAMILY + KINSHIP)` 生成（30 种）；
+- ⑰ 告警日志改为「前 20 个 + 总数」，不再刷屏；
+- `integrateFromEntity` 新增准入闸门：**未入库人名必须在名字 ±10 字窗口内出现
+  叫/朋友/同事/老师/称谓等显式介绍线索**才建节点，否则跳过（已入库人物行为不变）；
+- 存量清理：VACUUM INTO 备份 → 精确删除 1798 个 `G+candidate` 节点及其 1824 条边。
+
+**结果**：person 节点 1860 → 62（其中 22 个 void），非 void **29 人**；
+告警 1836 → 38（含 void）；「降级运行」0 次；`integrity_check = ok`。
+
+**验证**：tsc 零错误；新增 2 个回归测试 8 例全绿（关系集契约 / 显式介绍判据）；
+重启后 HTTP 200、20/20 模块、健康分 100。
+
+**备份**：`data/backups/family_graph_pre-candidate-cleanup-<ts>.db`（4.4MB，可直接恢复）。
+**回退**：代码 `git revert`；数据用上述备份恢复。
+
+**已知债务**：准入判定仍分散在多处，后续可抽 `EntityAdmission` 统一模块；
+void 状态的 22 个历史垃圾待确认后硬删除。
+
+---
+
 ## 相关文档
 
 - [GOVERNANCE.md](../GOVERNANCE.md) — 治理文件效力层级总表（**动手前必读**）

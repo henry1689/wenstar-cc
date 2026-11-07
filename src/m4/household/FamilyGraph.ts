@@ -37,6 +37,35 @@ import type { EntityGene } from '../../m1/types/dna.js';
 import { validatePersonName, validateRelationType } from '../EntityValidator.js';
 import { dossierRead, dossierWrite } from './shared/DossierPath.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
+// 🔴 2026-11-07 FG 完整性守护修正：家族关系白名单以 RelationshipTypes 为唯一真源，
+//   禁止再在检查里硬编码关系子集（实测漏掉 uncle_of/niece_of 导致熊梓铭被误判缺边）。
+//   RELATION_CATEGORY 与 getRelationsByCategory 统一从下方的 RelationshipTypes 导入。
+
+/** 视为「家族边」的关系全集（直系/姻亲 + 血亲远亲） */
+const FAMILY_EDGE_RELATIONS: string[] = [
+  ...getRelationsByCategory(RELATION_CATEGORY.FAMILY),
+  ...getRelationsByCategory(RELATION_CATEGORY.KINSHIP),
+];
+/** SQL IN (...) 的占位符串（配合 FAMILY_EDGE_RELATIONS 传参，避免拼字面量） */
+const FAMILY_EDGE_SQL_IN = FAMILY_EDGE_RELATIONS.map(() => '?').join(',');
+
+/**
+ * 人名是否带「显式介绍」线索 —— FG 写入准入判据（2026-11-07 源头收口）。
+ *
+ * 🔴 为什么需要它：中文人名与滑窗片段在**字面**上不可分（「全芬倒」「阿珍叫」「东坑差」
+ *   与真实姓名一样都是 2-3 个汉字），词汇闸门 checkPersonEntity 拦不住这类。
+ *   原实现对每个 person 实体无条件建节点 ⇒ 近 30 天 1820 个垃圾进观察区。
+ *   真实的新人物在对话里几乎总伴随介绍线索（叫她诗雨 / 我朋友小明 / X 老师），
+ *   因此用「名字 ±10 字窗口内是否出现称谓或介绍动词」作为准入证据。
+ *
+ * 保守选择：宁可漏建（下次提及或被显式介绍时补录），也不让滑窗噪声入库。
+ */
+export function hasExplicitPersonIntro(text: string, name: string): boolean {
+  const idx = text.indexOf(name);
+  if (idx < 0) return false;
+  const win = text.slice(Math.max(0, idx - 10), Math.min(text.length, idx + name.length + 10));
+  return /叫|名叫|叫做|自称|介绍|朋友|同事|同学|老师|医生|先生|女士|姐姐|妹妹|哥哥|弟弟|阿姨|叔叔|老板|领导|客户/.test(win);
+}
 import { parseSocialGroups, sameSocialGroup, findOutsiders } from './SocialGroupResolver.js';
 import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
 // 🔴 修复3-A(2026-10-08): 写入侧串联第二道 person 判据（纯函数，静态引入不占懒加载路径）。
@@ -357,7 +386,7 @@ interface UpdatePersonProfileOptions {
 //    已删除，改为从 RelationshipTypes.ts 的 RELATION_TYPE_DEFS 派生。
 //    避免多处维护导致词表漂移（2026-08-25 教训）。
 
-import { RELATION_TYPE_DEFS, RELATION_CATEGORY } from '../../app/fg/RelationshipTypes.js';
+import { RELATION_TYPE_DEFS, RELATION_CATEGORY, getRelationsByCategory } from '../../app/fg/RelationshipTypes.js';
 
 /** 亲属称谓关键词表（用于文本提取，非关系元数据） */
 const KINSHIP_KEYWORDS: Record<string, string> = {
@@ -3456,6 +3485,22 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
   }
 
+  /**
+   * 人名是否带「显式介绍」线索（FG 写入准入判据，2026-11-07）。
+   * 实现已抽为模块级纯函数 hasExplicitPersonIntro（可单测），此处仅做委托。
+   *
+   * 🔴 为什么需要它：中文人名与滑窗片段在**字面**上不可分（「全芬倒」「阿珍叫」「东坑差」
+   *   与真实姓名一样都是 2-3 个汉字），词汇闸门 `checkPersonEntity` 拦不住这类。
+   *   原实现对每个 person 实体无条件建节点 ⇒ 近 30 天 1820 个垃圾进观察区。
+   *   真实的新人物在对话里几乎总伴随介绍线索（叫她诗雨 / 我朋友小明 / X 老师），
+   *   因此用「名字 ±10 字窗口内是否出现称谓或介绍动词」作为准入证据。
+   *
+   * 保守选择：宁可漏建（下次提及或被显式介绍时补录），也不让滑窗噪声入库。
+   */
+  private _hasExplicitPersonIntro(text: string, name: string): boolean {
+    return hasExplicitPersonIntro(text, name);
+  }
+
   async integrateFromEntity(entities: EntityGene[], rawInput: string, selfName?: string): Promise<InferenceResult> {
     this._stageTimes = []; // 🔴 A 诊断：每轮重置明细
     const details: string[] = [];
@@ -3625,6 +3670,17 @@ export class FamilyGraph implements FamilyGraphInterface {
         const _ex = this.query("SELECT id FROM nodes WHERE name = ? AND type='person' AND (status IS NULL OR status != 'void')", [person.name]);
         let _pid: string;
         if (_ex.length === 0) {
+          // 🔴 2026-11-07 源头收口：未入库的人名必须带「显式介绍」线索才建节点。
+          //   原实现在此无条件建节点（注释原文「所有人名都入库，不丢弃」）⇒ M1 滑窗切出的
+          //   字面串（「全芬倒」「阿珍叫」「东坑差」…）只过词汇闸门就进 FG；实测近 30 天
+          //   新增 1820 个 category='G' 的 candidate，观察区被淹没、诊断告警刷屏 1800+ 人名。
+          //   现在只认两种证据：① 显式介绍上下文（「她叫诗雨」「我朋友小明」「X 老师」）；
+          //   ② 已入库人物（_ex 非空）——后者走原有分支，行为不变。
+          //   未证实的字面串不再落库；真实新人物仍可经显式介绍录入，不会遗漏。
+          if (!this._hasExplicitPersonIntro(rawInput, person.name)) {
+            details.push('跳过未证实人名: ' + person.name);
+            continue;
+          }
           _pid = uid();
           await this.addNode({ id: _pid, type: 'person', name: person.name });
           nodesCreated++;
@@ -6897,8 +6953,12 @@ export class FamilyGraph implements FamilyGraphInterface {
     if (withoutSocial > 0) errors.push(`${withoutSocial} 个节点 social_group_genes 为空`);
 
     // ⑩ V3.3: A 类节点必须有 family_edge 到'我'
+    // 🔴 2026-11-07：关系白名单改由 RelationshipTypes 的 FAMILY+KINSHIP 生成。
+    //   原硬编码 12 项漏掉 uncle_of/aunt_of/cousin_of/nibling_of/nephew_of/niece_of，
+    //   导致「熊梓铭→我=uncle_of」被误判为缺家族边、系统降级运行。
     const aWithoutEdge = this.query(
-      "SELECT COUNT(*) as cnt FROM nodes n WHERE n.type = 'person' AND n.category = 'A' AND n.name != '我' AND (n.status IS NULL OR n.status != 'void') AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes n2 ON (e.source_id = n2.id OR e.target_id = n2.id) WHERE (e.source_id = n.id OR e.target_id = n.id) AND n2.name = '我' AND e.relation IN ('mother_of','father_of','spouse_of','sibling_of','child_of','parent_of','grandparent_of','grandchild_of','elder_sister_of','younger_sister_of','elder_brother_of','younger_brother_of'))"
+      `SELECT COUNT(*) as cnt FROM nodes n WHERE n.type = 'person' AND n.category = 'A' AND n.name != '我' AND (n.status IS NULL OR n.status != 'void') AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes n2 ON (e.source_id = n2.id OR e.target_id = n2.id) WHERE (e.source_id = n.id OR e.target_id = n.id) AND n2.name = '我' AND e.relation IN (${FAMILY_EDGE_SQL_IN}))`,
+      FAMILY_EDGE_RELATIONS,
     )[0]?.cnt || 0;
     checks.push({
       name: 'A类全部有家族边', passed: aWithoutEdge === 0,
@@ -7013,12 +7073,18 @@ export class FamilyGraph implements FamilyGraphInterface {
     checks.push({ name: '全类型反向边完整', passed: allRevFixed === 0, detail: allRevFixed > 0 ? `自动补全${allRevFixed}条` : '通过' });
 
     // ⑰ V10.0: 家族边完整性检查（仅报告，不自动修复——家族关系不可推断）
+    // 🔴 2026-11-07：同样改用统一关系全集（原列表比 ⑩ 还窄，且未含叔侄/堂表亲）。
+    //   日志改为「总数 + 前 20 个」——实测全量约 1800 个滑窗误切名，单行上万字符刷屏，
+    //   既掩盖其它告警也让日志失去可读性；告警语义与判定结果不变。
     const orphanedPersons = this.query(
-      "SELECT name FROM nodes WHERE type='person' AND name NOT IN ('我','爸爸','妈妈') AND id NOT IN (SELECT DISTINCT source_id FROM edges WHERE relation IN ('child_of','parent_of','mother_of','father_of','spouse_of','elder_sister_of','younger_sister_of','sister_of','brother_of','sibling_of')) AND id NOT IN (SELECT DISTINCT target_id FROM edges WHERE relation IN ('child_of','parent_of','mother_of','father_of','spouse_of','elder_sister_of','younger_sister_of','sister_of','brother_of','sibling_of')) ORDER BY name"
+      `SELECT name FROM nodes WHERE type='person' AND name NOT IN ('我','爸爸','妈妈') AND id NOT IN (SELECT DISTINCT source_id FROM edges WHERE relation IN (${FAMILY_EDGE_SQL_IN})) AND id NOT IN (SELECT DISTINCT target_id FROM edges WHERE relation IN (${FAMILY_EDGE_SQL_IN})) ORDER BY name`,
+      [...FAMILY_EDGE_RELATIONS, ...FAMILY_EDGE_RELATIONS],
     );
     const orphanNames = orphanedPersons.map((r: any) => r.name);
     if (orphanNames.length > 0) {
-      console.warn('[FamilyGraph] ⚠️ 以下人员缺少家族关系边（待人为补充）: ' + orphanNames.join(', '));
+      const preview = orphanNames.slice(0, 20).join(', ');
+      const more = orphanNames.length > 20 ? ` … 等共 ${orphanNames.length} 人` : '';
+      console.warn('[FamilyGraph] ⚠️ 缺少家族关系边（待人为补充）: ' + preview + more);
     }
     checks.push({ name: '全员有家族边', passed: orphanNames.length === 0, detail: orphanNames.length > 0 ? `缺${orphanNames.length}人: ${orphanNames.slice(0,5).join(',')}…` : '通过' });
 
