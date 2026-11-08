@@ -1679,6 +1679,8 @@ export class DeepSeekLLMProvider implements LLMProvider {
     isEntityMeeting?: boolean;
     onToken?: (delta: LLMTokenDelta) => void;
     reasoningEffortOverride?: string;
+    /** 响应契约：只约束输出格式的短指令（见 LLMProvider 类型注释，ADR-020） */
+    responseContract?: string;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }> {
     const rawInput = params.userMessage ?? params.cognition.current.raw_input ?? '';
     const history = params.conversationHistory ?? [];
@@ -1967,13 +1969,27 @@ export class DeepSeekLLMProvider implements LLMProvider {
       }
     }
 
+    // 🔴 2026-11-08 响应契约（ADR-020）：独立 system 消息，紧贴用户轮次。
+    //   实测塞进 knowledgeBase 时模型当参考资料忽略、协议合规率 0/3；独立 system 消息才生效。
+    // 🔴 契约放**用户轮**前缀而非独立 system：实测 13 条 system 消息下，
+    //   独立 system 契约被模型当背景资料忽略（协议合规率 0/3）；用户轮内的显式格式要求
+    //   是当前模型真正会执行的形态。持久化用原始 message，不受此处前缀影响。
+    const _contractPrefix = params.responseContract
+      ? '【输出格式要求 · 必须遵守】\n' + params.responseContract + '\n\n---\n'
+      : '';
+    if (params.responseContract) {
+      // 契约仅在调用方显式传入时生效；不打印内容（含指令文本，避免日志污染）
+      console.log('[ResponseContract] applied len=' + _contractPrefix.length);
+    }
+
     // 当前用户消息
-    const userMsgContent = _isEntityMeeting
+    const userMsgBody = _isEntityMeeting
       // V33.1: 前缀抽为 **单一真源常量**（MEETING_SPEAKER_TAG / MEETING_USER_PREFIX），
       //   与出口的哨兵判据 SELF_INJECTED_MARKERS 同源 —— 原先两处各写一份字面量，
       //   改一处而忘另一处会让出口判据静默失效且测试发现不了（S4 评审 A3）。
       ? `${MEETING_SPEAKER_TAG} ${entities.join('、')} | ⚠️ 你不是玉瑶] ${MEETING_USER_PREFIX}${rawInput}`  // V9.0: 加强身份校验
       : (hasSelfProfile && isSelfIntroQuery ? rawInput : `${contextBlock}\n鸿艺: ${rawInput}`);
+    const userMsgContent = _contractPrefix ? _contractPrefix + userMsgBody : userMsgBody;
     messages.push({ role: 'user', content: userMsgContent });
 
     // 🔴 P-15（PAS v1 / V27批2）: 分层预算埋点 —— 必须反映**实际上送内容**。

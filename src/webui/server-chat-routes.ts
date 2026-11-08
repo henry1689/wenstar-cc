@@ -631,13 +631,24 @@ export async function handleChatRoutes(deps: ChatRouteDeps, req: IncomingMessage
         : null;
       void (async () => {
         try {
+          // 🔴 2026-11-08 实体准入（批2，ADR-020）：取证头（entity: … + ---）绝不能进 SSE / 增量 TTS。
+          //   EvidenceHeaderGate 失败安全：无头消息原样放行；超限/异常也不吞正文。
+          const { EvidenceHeaderGate } = await import('../m1/entity-admission.js');
+          const _evidenceGate = new EvidenceHeaderGate();
+          const _emit = (text: string) => {
+            job.tokens.push(text);
+            deps.pushToSSEClients?.('chat-token', { job_id: jobId, token: text });
+            incrTTS?.feed(text);   // V15: 喂给增量 TTS（文字生成中即触发语音）
+          };
           const result = await processChat(body.message.trim(), body.client_msg_id, body.test_mode === true, (delta) => {
             if (delta?.text) {
-              job.tokens.push(delta.text);
-              deps.pushToSSEClients?.('chat-token', { job_id: jobId, token: delta.text });
-              incrTTS?.feed(delta.text);   // V15: 喂给增量 TTS（文字生成中即触发语音）
+              const safe = _evidenceGate.push(delta.text);
+              if (safe) _emit(safe);
             }
           });
+          // 流结束冲刷：未判定的缓冲原样放行（否则极短回复可能被吞）
+          const _gateTail = _evidenceGate.flush();
+          if (_gateTail) _emit(_gateTail);
           job.result = result;
           // P090 · P096 §2.4：askAll 轮答 —— 首轮已答第一人，这里按剩余队列逐人驱动。
           //   🔴 每段都是一次**完整独立的 processChat**（各自召回/身份/幻觉校验/持久化），

@@ -121,48 +121,11 @@ export async function runChatEntry(
     } catch (_err) { /* 规则引擎不阻塞主流程 */ }
   }
 
-  // P3: LLM 辅助实体提取
-  // 🔴 P1-3 条件化: 无实体信号(纯闲聊)跳过 LLM 调用（省一次 LLM，5s 超时窗口也不占），
-  //   正则兜底保留 emotion/event 召回（行为 == LLM 返回空数组 + regexFallback 降级）。
-  //   会晤(_entityMeeting.isActive) 与有信号消息恒走 LLM，提取精度不降。
-  try {
-    const { extractEntitiesLLM, regexFallback, hasEntitySignal } = await import('../../m1/LLMEntityExtractor.js');
-    const _meetingActive = !!ctx._entityMeeting?.isActive?.();
-    const _reduction = getRetrievalFusionConfig()?.p1_speed?.llm_reduction;
-    const _condEnabled = !!(_reduction?.enabled && _reduction?.entity_conditional);
-    const _useLLM = _meetingActive || !_condEnabled || hasEntitySignal(message);
-    const llmGenerate = async (prompt: string) => {
-      const r = await (ctx.llmProvider).generate({
-        strategy: { strategy_id: 'entity-extraction', params: { tone: 'neutral', depth: 'shallow', max_length: 256 } } as any,
-        cognition: { current: { perception_snapshot: { pleasure: 0, arousal: 0, intimacy: 0 }, raw_input: prompt, calcium: 0 } } as any,
-        userMessage: prompt,
-      });
-      return r.text;
-    };
-    const llmEntities = _useLLM
-      ? await extractEntitiesLLM(message, llmGenerate)
-      : (() => { const fb = regexFallback(message); console.log('[LLMEntity] 条件化跳过LLM(无实体信号), 正则兜底: ' + (fb as any[]).map((e: any) => e.name).join(',') || '∅'); return fb; })();
-    if (llmEntities.length > 0) {
-      const llmNames = new Set(llmEntities.map((e: any) => e.name));
-      // 🔴 批1（2026-11-07）：slideDetected 直通已物理删除 —— 滑窗生成器退役后不再存在该标记。
-      //   历史上该分支是「绕过全部闸门的第二来源」，已实测把地名/虚词片段写入 FG。
-      //   当前仅保留 LLM 提取结果；批2 将把提取整体并入主回复并加原文证据校验。
-      const keptRules = dna.entity_genes.filter((g: any) =>
-        g.type !== 'person' || g.name === '我' || llmNames.has(g.name)
-      );
-      const existingNames = new Set(keptRules.map((e: any) => e.name));
-      for (const le of llmEntities) {
-        if (!existingNames.has((le as any).name)) {
-          existingNames.add((le as any).name);
-          keptRules.push({ name: (le as any).name, type: (le as any).type, allele: (le as any).name, phenotype: 'neutral', knowledge_type: 'private' } as any);
-        }
-      }
-      dna.entity_genes = keptRules;
-      console.log('[LLMEntity] 提取: ' + (llmEntities as any[]).map((e: any) => e.name).join(','));
-    }
-  } catch (_err) {
-    console.warn('[LLMEntity] 提取失败:', (_err as Error).message);
-  }
+  // 🔴 2026-11-08 批2（ADR-020）：独立 LLM 实体提取已**物理退场**。
+  //   取证由主回复调用一次性完成（entity: 名称|类型|证据原文 + 原文证据硬校验），
+  //   准入结果在 chat.ts 回复后写回 dna.entity_genes。
+  //   此处不再有任何「看起来像人名就入库」的来源 —— 唯一的确定性匹配是下面的
+  //   「已登记人名精确匹配」，它只读 FG 名单，不新增实体。
 
   // 家族图谱兜底
   try {

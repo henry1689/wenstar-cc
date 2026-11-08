@@ -2867,6 +2867,10 @@ try {
   } catch { /* 引导缺失不阻塞 */ }
   } catch { /* M6不阻塞 */ }
 
+  // 🔴 2026-11-08 实体取证（批2，ADR-020）：取证指令**不进** assembler / knowledgeBase。
+  //   实测把它当参考资料塞进知识块时，模型只读不执行（协议合规率 0/3）；
+  //   改由 `responseContract` 走独立 system 消息（紧贴用户轮次），见下方 orchestrate 调用。
+
   // 🟡 safety: 事实问答守卫（P0-6: 从旧拼接链迁移）
   if (isFactualRecallQuery && factualRecallGuard) {
     assembler.add(safetyBlock('factual_recall', factualRecallGuard));
@@ -3245,9 +3249,44 @@ if (_meetingExited) {
       //   路由层用它做标签，保证「标签 == 正文自称」。
       _genSpeakerName = _identity.speakerName ?? null;
       console.log('[Identity] ' + _identity.role + ' meeting=' + _identity.isMeeting + ' speaker=' + (_identity.speakerName ?? '玉瑶'));
-      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity, { reasoningEffortOverride: memoryGate.mode === 'casual' && !_identity.isMeeting ? 'low' : undefined });
+      // 🔴 实体取证契约（ADR-020）：独立 system 消息，只约束输出格式，不改变人设。
+      //   取不到常量时退化为 undefined（无头 = 零准入，绝不阻断回复）。
+      let _responseContract: string | undefined;
+      try {
+        _responseContract = (await import('../m1/entity-admission.js')).ENTITY_EVIDENCE_INSTRUCTION;
+      } catch { /* 指令模块不可用 → 无契约 */ }
+      reply = await ctx.m5.orchestrate(ctx_m4, enrichedWithGuard, finalKnowledgeText, message, _identity.role, _identity.isMeeting, streamOpts, _identity, { reasoningEffortOverride: memoryGate.mode === 'casual' && !_identity.isMeeting ? 'low' : undefined, responseContract: _responseContract });
     }
 }
+
+    // 🔴 2026-11-08 实体准入（批2，ADR-020）：主回复头部即取证块 —— 先剥离正文，
+    //   再用「证据必须是用户消息连续子串」硬校验；**只有 admitted 的实体**进入 entity_genes，
+    //   下游持久化 / FG 写入随之只看到准入结果。无头/解析失败 = 零准入，绝不阻断回复。
+    try {
+      const { parseEntityEvidence, verifyAdmissions, recordAdmissionTurn } = await import('../m1/entity-admission.js');
+      const _parsed = parseEntityEvidence(reply);
+      if (_parsed.present) {
+        reply = _parsed.body;
+        const _admissions = verifyAdmissions(_parsed.entities, message);
+        const _admitted = _admissions.filter(a => a.admitted);
+        if (_admitted.length > 0) {
+          const _names = new Set(dna.entity_genes.map((g: any) => g.name));
+          for (const a of _admitted) {
+            if (_names.has(a.name)) continue;
+            _names.add(a.name);
+            dna.entity_genes.push({
+              name: a.name, type: a.type, allele: a.name, phenotype: 'neutral',
+              knowledge_type: 'private', evidence: a.evidence,
+            } as any);
+          }
+        }
+        recordAdmissionTurn(true, _parsed.malformed, _admitted.length, _admissions.length - _admitted.length);
+        console.log('[EntityAdmission] admitted=' + (_admitted.map(a => a.name).join(',') || '∅') +
+          ' rejected=' + (_admissions.length - _admitted.length) + ' malformed=' + _parsed.malformed);
+      } else {
+        recordAdmissionTurn(false, 0, 0, 0);
+      }
+    } catch (_ea) { console.warn('[EntityAdmission] 解析失败（不阻断回复）:', (_ea as Error)?.message); }
 
     // P0-3: 规则幻觉校验 — 提取回复中的人名对照 FamilyGraph
     try {

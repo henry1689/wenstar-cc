@@ -101,6 +101,14 @@ export interface LLMProvider {
      * 降 effort 才能让模型把最终稿落进 content，从源头消除"从 reasoning 里猜答案"的需求。
      */
     reasoningEffortOverride?: string;
+    /**
+     * 🔴 2026-11-08（ADR-020）：**响应契约** —— 只约束输出格式的短指令块。
+     *
+     * 与 `knowledgeBase` 的区别（实测教训）：塞进 knowledgeBase 时模型会把它当"参考资料"
+     * 阅读但不执行（实体取证头协议首轮实测合规率 0/3）；独立 system 消息更靠近用户轮次、
+     * 注意力更强，才真正生效。调用方负责保证内容不改变人设与事实边界。
+     */
+    responseContract?: string;
   }): Promise<{ text: string; usage?: { prompt: number; completion: number } }>;
 
   /** 切换角色 (可选实现) */

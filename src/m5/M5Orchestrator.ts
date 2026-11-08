@@ -38,7 +38,7 @@ export class M5Orchestrator {
    * @param knowledgeBase 知识库内容
    * @param userMessage 用户当前消息（用于场景记忆更新）
    */
-  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, legacyMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }, identity?: ResolvedIdentity, opts?: { reasoningEffortOverride?: string }): Promise<string> {
+  async orchestrate(m4ctx: M4Context, conversationHistory?: ConversationTurn[], knowledgeBase?: string, userMessage?: string, currentRole?: RoleType, legacyMeeting?: boolean, streamOpts?: { onToken?: (delta: LLMTokenDelta) => void }, identity?: ResolvedIdentity, opts?: { reasoningEffortOverride?: string; responseContract?: string }): Promise<string> {
     // 🔴 T013 Phase2-0（ADR-013 §2.1）: 身份由上游 resolveIdentity 单一决定。
     //   未传 identity 时完全沿用旧参数（legacyMeeting/currentRole）—— 保证
     //   cli/sandbox.ts:93 与 m1/DualCorePipeline.ts:143 两个既有调用方行为不变。
@@ -93,7 +93,7 @@ export class M5Orchestrator {
     let usedMockFallback = false;
     try {
       const currentTime = new Date().toISOString();
-      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, onToken: streamOpts?.onToken, reasoningEffortOverride: opts?.reasoningEffortOverride });
+      const result = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime, userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, onToken: streamOpts?.onToken, reasoningEffortOverride: opts?.reasoningEffortOverride, responseContract: opts?.responseContract });
       draft = result.text;
     } catch (err) {
       console.error('[M5] LLM生成失败:', err);
@@ -111,7 +111,7 @@ export class M5Orchestrator {
     if (!draft) {
       console.warn('[M5] 首次生成无可解析答案 → 降级重试(low reasoning_effort)');
       try {
-        const _retry = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime: new Date().toISOString(), userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, reasoningEffortOverride: 'low' });
+        const _retry = await this.llm.generate({ strategy, cognition, conversationHistory, knowledgeBase: combinedKnowledge, currentTime: new Date().toISOString(), userMessage, role: this._currentRole, isEntityMeeting: _isMeeting, reasoningEffortOverride: 'low', responseContract: opts?.responseContract });
         draft = _retry && _retry.text ? _retry.text : '';
         if (draft) console.warn('[M5] 重试成功，已拿到可用回复');
       } catch (_rErr) {

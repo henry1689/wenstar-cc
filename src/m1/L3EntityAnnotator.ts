@@ -128,7 +128,7 @@ class ChineseSegmenter {
 // 情感极性词表（从 emotion_lexicon.json 统一加载）
 // ──────────────────────────────────────────────
 import { loadSet, loadEntityRules } from './LexiconLoader.js';
-import { extractEntitiesLLM } from './LLMEntityExtractor.js';
+// 🔴 2026-11-08 批2（ADR-020）：LLMEntityExtractor 已退场 —— 实体取证并入主回复调用。
 
 /**
  * 情感极性词表，用于 phenotype 标注
@@ -368,28 +368,12 @@ export class L3EntityAnnotator {
     text: string,
     context: string,
     selfModel: SelfModelV1,
-    llmGenerate?: (prompt: string) => Promise<string>
+    _llmGenerate?: (prompt: string) => Promise<string>,
   ): Promise<L3AnnotationResult> {
-    const result = this.annotate(text, context, selfModel);
-    if (llmGenerate) {
-      const { extractEntitiesLLM } = await import("./LLMEntityExtractor.js");
-      const llmEntities = await extractEntitiesLLM(text, llmGenerate);
-      if (llmEntities.length > 0) {
-        const existingNames = new Set(result.entity_genes.map(e => e.name));
-        for (const le of llmEntities) {
-          if (!existingNames.has(le.name)) {
-            existingNames.add(le.name);
-            result.entity_genes.push({
-              name: le.name,
-              type: le.type,
-              allele: le.name,
-              phenotype: this.determinePhenotype(le.name, le.type, text, selfModel),
-              knowledge_type: this.determineKnowledgeType(le.type, le.name),
-            });
-          }
-        }
-      }
-    }
-    return result;
+    // 🔴 2026-11-08 批2（ADR-020）：独立 LLM 实体提取已物理退场 —— 取证并入主回复调用，
+    //   由 m1/entity-admission 用「证据必须是原文连续子串」做硬校验。
+    //   本方法保留签名（零调用方改动），但**不再接受第二个提取来源**：
+    //   只返回确定性规则结果，杜绝"看起来像人名就入库"的旁路。
+    return this.annotate(text, context, selfModel);
   }
 }
