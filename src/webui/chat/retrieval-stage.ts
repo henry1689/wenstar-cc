@@ -1262,10 +1262,14 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   const isTopicShift = hasNewEntity || isFollowUp || (!isFollowUp && !hasContinuationMarkers && !isCasualChat);
   const isLimitedRetrieval = isFollowUp && !hasNewEntity;
 
-  // 🔴 2026-11-07 闲聊快路径（业主确认）：MemoryGate.decideMode 此前在生产链路无调用方
-  //   （buildGuards 无消费者），memoryGate 恒为默认 casual 但检索不读它 ⇒ 每轮全量 v11。
-  //   此处接上判定：casual 且非会晤 → 跳过 v11/Foundation 网络检索，只保留本轮已注入的
-  //   fragments 与最近对话；知识查询 / 回忆 / 会晤继续走完整链路。
+  // 🔴 2026-11-07 闲聊快路径 → 2026-11-08 **档位化**（ADR-019）：
+  //   MemoryGate.decideMode 此前在生产链路无调用方（buildGuards 无消费者），接上后
+  //   casual 被实现成**二值开关** —— 跳过 v11/v2/Foundation 的同时，把本地毫秒级的
+  //   `findByEmotionalSimilarity` 也一起砍掉了。
+  //   实测（玉瑶私聊 927 条真实消息）：判 casual 97.7% ⇒ 闲聊几乎全部失去主动回忆，
+  //   与 MemSym 宪法信条 7（主动模式义务非可选）直接冲突。
+  //   现按**档位**执行：casual = 轻档（本地单次召回 2~3 条 + 近期窗口），
+  //   只跳过 v11/v2/Foundation/LLM 重排；知识查询 / 回忆 / 会晤仍走全档。
   {
     let _modeDecision: ReturnType<typeof decideMode> | null = null;
     try {
@@ -1284,7 +1288,28 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     }
     memoryGate = buildGuard(_modeDecision?.mode ?? 'casual', false, false);
     if (_modeDecision?.mode === 'casual' && !_meetingEntityName) {
-      console.log(`[Latency] fast_path=1 mode=casual retrieval_ms=${Date.now() - _trT0}（跳过 v11/Foundation）`);
+      // 轻档：本地单次召回（模块内**永不抛出**，失败即零记忆，闲聊不因检索中断）
+      let _floor: { memories: ScoredMemory[]; ms: number } = { memories: [], ms: 0 };
+      try {
+        const { collectCasualFloorMemories } = await import('../../m4/retrieval/casual-floor.js');
+        _floor = collectCasualFloorMemories({
+          storage: ctx.storage,
+          perception: p,
+          entityUuids: _activeEntityUuids,
+          branchId: dna.branch_id,
+        });
+      } catch (_floorErr) {
+        console.warn('[Latency] 轻档检索模块加载失败，按零记忆降级:', (_floorErr as Error)?.message);
+      }
+      // 片段格式与全档 fallback **同源**（「用户曾提到」+ 不记得就说不太记得了），
+      // 避免同一语义出现两种提示形态。
+      for (const _fm of _floor.memories) {
+        const _said = String(_fm.record?.raw_input || '').substring(0, 60);
+        if (_said) {
+          memoryFragments.push(memFragWithTime('用户曾提到', '"' + _said + '"——这是用户以前说的，不记得就说"不太记得了"', (_fm.record as any).created_at));
+        }
+      }
+      console.log(`[Latency] fast_path=1 mode=casual tier=floor floor_mem=${_floor.memories.length} floor_ms=${_floor.ms} retrieval_ms=${Date.now() - _trT0}（轻档：跳过 v11/v2/Foundation/LLM重排）`);
       return {
         isTopicShift,
         isFollowUp,
@@ -1293,7 +1318,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         isLimitedRetrieval,
         hasNewEntity,
         hasPersonEntity,
-        emotionalMemories: [],
+        emotionalMemories: _floor.memories,
         memoryGate,
         memoryGateFillerUsed: false,
       };
