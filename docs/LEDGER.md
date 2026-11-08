@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **闲聊快路径档位化（casual 轻档检索）** —— 原快路径是二值开关，97.7% 私聊轮次零记忆，冲突 MemSym 信条7；改为轻档（本地情感相似 ≤3 条）+ 全档两级，档位契约入 ADR-019。详见 §6.15 | 新增 `casual-floor.ts` + 6 例测试；`tsc`=0；实机 `tier=floor floor_mem=3 floor_ms=39~96`；验证数据已清、`integrity_check=ok` |
 | 2026-11-08 | **独处态回程边（状态机结构修复）** —— 散会后 `alone` 不可逆、玉瑶永久静默的根因是状态机缺边（`everHadSeats` 只置真），非漏调用。修法：`RETURN_YUYAO` 唯一回程边 + `MessageIntent.toYuyao` 同源去向 + `reset()` 兑现语义 + 删 `clearSession()`；独处首轮文案追加回归提示。详见 §6.14 与 ADR-018 | `cd7bdbe` + `ee59492`；`tsc`=0；测试 105 例全绿（新增 8 例）；实机四步全过（会晤回玉瑶/散会文案/独处喊玉瑶/重启持久）；验证数据 22 对话 + 11 记忆 + 4 组已按精确 id 清除、`integrity_check=ok` |
 | 2026-11-08 | **闲聊延迟基线 + 独处态根因定位 + 测试数据清理** —— ① 20 条普通闲聊实测（全部命中快路径）：首字 p50 **2037ms** / p90 3082ms，装配 p50 **440ms**、端点网络 70~160ms，剩余 ~1.6s 全在模型出首字；业主裁决「反应时效不再讨论」→ 不再推进 ≤1s。② 会晤退出后玉瑶永久静默的**精确根因**已补入 §6.14。③ 清理本次基准测试写入：`conversations` 82 行、`memories` 74 条（27 个纯测试组 72 条 + 混合组按精确 id 删 2 条，**用户真实对话与其 ANCHOR 未动**）、`dialog_groups` 27 组 | 停服窗口执行；`integrity_check=ok`；残留 test 行 **0**；重启后 HTTP 200、`sessionMode=yuyao`；备份 `D:\tmp\bench-cleanup-backup-20261108.json`（删除行全量）+ `D:\tmp\group-session-backup-20261108-0550.json`（会话状态原值） |
 | 2026-11-03 | **全仓测试基线收口至 0 失败（LEDGER #9 关闭）** —— 29 → 13 → **0**。**逐条定位真因后改，没有一条靠放宽断言或加豁免**：① `sql-schema-consistency` 是**守卫预言机盲区**：`MigrationManager` 的相关子查询 `dialog_groups.dialog_group_id` 被**孤立 prepare**（UPDATE 整体含 `${}` 被规则3跳过，只剩纯字符串片段）⇒ 新增 `correlatedContextPrepares()` 用**真实外层上下文**包裹后重试；判据三条齐全（限定引用 + 表真实存在且不在本片段 FROM + 包裹后成功），**列名真错时包裹后依然失败 ⇒ 不掩盖缺陷**，优于逐条白名单登记。② `provider-selection-smoke`(4) + `no-api-smoke`(1) **require `dist/` 编译产物**而 `dist` 根本不存在、生产走 tsx —— 属 **V27批3「移除 dist 测试别名」的漏改遗留**（`vitest.config.ts` 头注释即该裁决），改读 **src 真源**；`no-api` 保持子进程语义，改用 `node ./node_modules/tsx/dist/cli.mjs -e`。③ `smoke` 两条**都是测试过时、生产无缺陷**：探针 `source_type:'text'` **已进 `FILE_SOURCE_TYPES`**（`SourceTypePolicy:18`）⇒ 测了个合法值，改用 `__illegal_probe__` 让探针重新生效；`[201,409]` 同步 **2026-09-20 契约**（`server-knowledge-routes.ts:97-99`：重复提交 409→**200 更新既有条目**）。④ `e2e` Case4/8 是 **`afterEach` 的 ENOTEMPTY 清理失败、不是断言错**（`TEST_DIR` 模块级共用，一次 rm 失败残留流进下个 case）⇒ 用 `fs.rm` 内建 `maxRetries/retryDelay`（专为 EBUSY/ENOTEMPTY/EPERM 而设）。⑤ `candidate-zone` P0-1 实测 **16.8s**（`integrateFromEntity→addEdge` 全组档案重建），全量并发 30s 必超时 ⇒ `{timeout:120000}`，断言未动。⑥ **`memarch-v2`**（今日新建子项目）：3 个 `.test.js` 实为 **TS 语法**（`let db: Database.Database`）⇒ Rollup 在 collect 阶段就炸、**根本看不到断言**，改名 `.ts` + README 同步；**M05 迁移真缺陷** —— 注释写「旧表若不存在则跳过」但**从未实现**，新库执行必抛 `no such table`（验收报告 `+R ✅` 是在**有旧表的旧库**上跑的）⇒ 补 `CREATE TABLE IF NOT EXISTS black_diamond` 兜底：旧库真表存在不建（行为零变化）、新库建 0 行空表使 `INSERT SELECT` 命中 0 行即幂等跳过；纯 SQL **无法**条件访问不存在的表（`WHERE EXISTS(sqlite_master)` 救不了 —— `FROM` 仍在 prepare 期被解析）。改后 **`attrib +R` 已恢复**（验收加固清单 7.1，20 个核心文件） | `tsc --noEmit` exit 0；`Test Files 322/322 · Tests 3841 passed / **0 failed**`（另 15 skipped + 2 todo）；分批实测 28/72/18/14 例分批全绿 |
@@ -569,6 +570,31 @@ E2E Case 2 在全文件并发下 10.3s 超时、单跑 7.5s 通过（负载相�
 以 ADR-018 为准；改名需独立批次（会波及 4 处引用）。
 
 **下一步**：批2 —— 取证并入主回复调用 + `verifyAdmission` + 删除 `LLMEntityExtractor.ts`。
+
+---
+
+### §6.15 2026-11-08 闲聊快路径档位化（casual 轻档检索，ADR-019）
+
+**问题（实测定位）**：2026-11-07 的快路径把 casual 实现成**二值开关** —— 跳过 v11/v2/Foundation 的同时，
+把本地毫秒级的 `findByEmotionalSimilarity` 一起砍掉。离线重放（玉瑶私聊 **927 条**真实消息，
+用生产同一 `decideMode`）：**97.7% 判 casual**（906 条），casual 中带指代词 129 条（14.2%）。
+
+**性质**：与 MemSym 宪法信条 7「**主动**调用回忆丰富话题，义务非可选」直接冲突；业主批准的是
+「闲聊跳过**完整知识检索**」，不是「闲聊不查记忆」。
+
+**处置（档位化，非补丁）**：新增 `src/m4/retrieval/casual-floor.ts`（单次本地召回、阈值收口、
+**永不抛出**）；`retrieval-stage` 的 casual 分支改为调用轻档并注入「用户曾提到」片段（与全档 fallback 同源格式）；
+全档（v11/v2/Foundation/LLM 重排）原样不动。档位契约写入 ADR-019：
+**轻档 = 本地情感相似 ≤3 条 + 近期窗口；全档 = 现状**。
+
+**验证**：`tsc --noEmit` = 0；新模块 6 例测试全绿（阈值/limit/排除当前分支/entityUuids 透传/异常降级）；
+实机日志 `[Latency] fast_path=1 mode=casual tier=floor floor_mem=3 floor_ms=39~96 retrieval_ms=42~109`
+（改前零检索 1~5ms，全档 500~1500ms），闲聊重新拥有记忆注入。
+验证写入 20 对话 + 13 记忆 + 4 组已按精确 id 清除、`integrity_check=ok`。
+
+**顺带查实的可观测性缺陷（待修，独立批次）**：`POST /api/memarch-bridge/retrieve` 在灰度比 0 时
+被 `OldRetrievalAdapter` 路由到 legacy 且未注入实例 ⇒ 直接 500；与 `[memarch-bridge:route] LEGACY`
+误导日志同一根因（`forcePathway` 未透传到运维端点）。
 
 ---
 
