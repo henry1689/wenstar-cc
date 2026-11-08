@@ -1,10 +1,12 @@
 /**
- * 批13 · 状态机统一 + applyJudgments 的【集成】测试（评审 F6 补强）
+ * 生命周期状态机 · 集成测试（批3 退役改造）
  *
- * 评审指出：status-machine-unified.test.ts 只测纯函数 computeTargetStatus，
- * 而 runDailyHouseholdMaintenance 的 SQL 循环、status 过滤、void 删边副作用
- * 以及 applyJudgments 的「只动 candidate」不变式**一行都没覆盖**。
- * 本文件用真实库副本做集成验证（沿用 candidate-zone.test.ts 的手法）。
+ * 原文件验证「candidate 超期回收 + applyJudgments」；批3（2026-11-08，ADR-021）
+ * 已物理删除观察区与离线终审，本文件改为验证：
+ *   ① 新写入的 person 直接 active（不再进观察区）
+ *   ② active → dormant 的长周期流转不受影响
+ *   ③ 历史库残留的 candidate 行不再被状态机自动 void（由批5 按业主确认处置）
+ *   ④ applyJudgments / collectCandidateItems 已不存在（防死灰复燃）
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { existsSync, mkdtempSync, copyFileSync, rmSync } from 'node:fs';
@@ -20,15 +22,15 @@ const FG_SRC = join(REPO, 'data', 'webui', 'knowledge', 'family_graph.db');
 const DAY = 86400_000;
 const iso = (daysAgo: number) => new Date(Date.now() - daysAgo * DAY).toISOString();
 
-describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
+describe('生命周期状态机 · 集成（批3 退役改造）', () => {
   let tmpDir = '';
   let fg: any = null;
 
   beforeAll(async () => {
     if (!existsSync(FG_SRC)) {
-      throw new Error('[批13测试] 缺少真实 FG 库，无法验证生命周期集成：' + FG_SRC);
+      throw new Error('[生命周期测试] 缺少真实 FG 库：' + FG_SRC);
     }
-    tmpDir = mkdtempSync(join(tmpdir(), 'v27b13-lifecycle-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'b3-lifecycle-'));
     const copy = join(tmpDir, 'family_graph.db');
     copyFileSync(FG_SRC, copy);
     const { FamilyGraph } = await import(FG_PATH_MOD);
@@ -49,10 +51,6 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
     const r = fg.query("SELECT id FROM nodes WHERE type='person' AND name = ?", [name]);
     return r.length ? (r[0] as any).id : null;
   };
-  const edgeCountOf = (id: string): number => {
-    const r = fg.query('SELECT COUNT(*) as c FROM edges WHERE source_id = ? OR target_id = ?', [id, id]);
-    return (r[0] as any).c as number;
-  };
   const setMentionedDaysAgo = (name: string, days: number) => {
     const id = idOf(name)!;
     const r = fg.query('SELECT properties FROM nodes WHERE id = ?', [id]);
@@ -61,46 +59,19 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
     fg.run('UPDATE nodes SET properties = ? WHERE id = ?', [JSON.stringify(props), id]);
   };
 
-  // ── ① candidate 超期回收（含删边副作用）──
-  it('candidate + 40 天无提及 → void 且关联边被清理', async () => {
+  it('① 新写入 person 直接 active（不再进观察区）', async () => {
     if (!fg) return;
-    await fg.addNode({ id: 'v27b13-cand-1', type: 'person', name: '生命周期甲' });
-    expect(statusOf('生命周期甲')).toBe('candidate');
-    const id = idOf('生命周期甲')!;
-    // 造一条边（用 addEdge —— edges 表 created_at/updated_at 为 NOT NULL，裸 INSERT 会失败）
-    await fg.addEdge({
-      id: 'v27b13-edge-1',
-      source_id: fg.userNodeId || idOf('我') || id,
-      target_id: id,
-      relation: 'acquaintance_of',
-    } as any);
-    const before = edgeCountOf(id);
-    expect(before).toBeGreaterThan(0);
-
-    setMentionedDaysAgo('生命周期甲', 40);
-    fg.runDailyHouseholdMaintenance();
-
-    expect(statusOf('生命周期甲')).toBe('void');
-    expect(edgeCountOf(id), 'void 必须清理关联边（否则 health-check fatal）').toBe(0);
+    await fg.addNode({ id: 'b3-act-new', type: 'person', name: '生命周期甲' });
+    expect(statusOf('生命周期甲')).toBe('active');
   });
 
-  // ── ② 未超期不动 ──
-  it('candidate + 10 天 → 保持观察（不误回收）', async () => {
+  it('② active + 91 天 → dormant；active + 89 天 → 不变', async () => {
     if (!fg) return;
-    await fg.addNode({ id: 'v27b13-cand-2', type: 'person', name: '生命周期乙' });
-    setMentionedDaysAgo('生命周期乙', 10);
-    fg.runDailyHouseholdMaintenance();
-    expect(statusOf('生命周期乙')).toBe('candidate');
-  });
-
-  // ── ③ active 的长周期流转（回归批13 部分1 的等价性）──
-  it('active + 91 天 → dormant；active + 89 天 → 不变', async () => {
-    if (!fg) return;
-    await fg.addNode({ id: 'v27b13-act-1', type: 'person', name: '生命周期丙' });
+    await fg.addNode({ id: 'b3-act-1', type: 'person', name: '生命周期丙' });
     fg.run("UPDATE nodes SET status='active' WHERE name='生命周期丙'");
     setMentionedDaysAgo('生命周期丙', 91);
 
-    await fg.addNode({ id: 'v27b13-act-2', type: 'person', name: '生命周期丁' });
+    await fg.addNode({ id: 'b3-act-2', type: 'person', name: '生命周期丁' });
     fg.run("UPDATE nodes SET status='active' WHERE name='生命周期丁'");
     setMentionedDaysAgo('生命周期丁', 89);
 
@@ -110,157 +81,17 @@ describe('批13 · 状态机统一 + applyJudgments 集成（F6）', () => {
     expect(statusOf('生命周期丁')).toBe('active');
   });
 
-  // ── ④ applyJudgments 的「只动 candidate」不变式（评审要求）──
-  it('🔴 applyJudgments 只改 candidate —— active/dormant/void 的 status 与 properties 不变', async () => {
+  it('③ 遗留 candidate 行不再被状态机自动 void（交批5）', async () => {
     if (!fg) return;
-    // 准备三种非 candidate 状态
-    await fg.addNode({ id: 'v27b13-safe-1', type: 'person', name: '不变式甲' });
-    fg.run("UPDATE nodes SET status='active' WHERE name='不变式甲'");
-    await fg.addNode({ id: 'v27b13-safe-2', type: 'person', name: '不变式乙' });
-    fg.run("UPDATE nodes SET status='dormant' WHERE name='不变式乙'");
-    await fg.addNode({ id: 'v27b13-safe-3', type: 'person', name: '不变式丙' });
-    fg.run("UPDATE nodes SET status='void' WHERE name='不变式丙'");
-
-    const snap = (name: string) => {
-      const r = fg.query('SELECT status, properties FROM nodes WHERE name = ?', [name]);
-      return JSON.stringify(r[0]);
-    };
-    const before = ['不变式甲', '不变式乙', '不变式丙'].map(snap);
-
-    // 强行对非 candidate 发起「提升」
-    fg.applyJudgments({ promote: ['不变式甲', '不变式乙', '不变式丙'], annotate: [] }, 'test');
-
-    const after = ['不变式甲', '不变式乙', '不变式丙'].map(snap);
-    expect(after).toEqual(before);
-  });
-
-  // ── ⑤ applyJudgments 提升 candidate + 审计 ──
-  it('applyJudgments 提升 candidate 并写入 _changeHistory 审计', async () => {
-    if (!fg) return;
-    await fg.addNode({ id: 'v27b13-cand-3', type: 'person', name: '终审提升甲' });
-    expect(statusOf('终审提升甲')).toBe('candidate');
-
-    const r = fg.applyJudgments({ promote: ['终审提升甲'], annotate: [] }, 'dream-judge');
-    expect(r.promoted).toBe(1);
-    expect(statusOf('终审提升甲')).toBe('active');
-
-    const row = fg.query("SELECT properties FROM nodes WHERE name='终审提升甲'");
-    const props = JSON.parse((row[0] as any).properties || '{}');
-    expect(Array.isArray(props._changeHistory)).toBe(true);
-    const last = props._changeHistory[props._changeHistory.length - 1];
-    expect(last.field).toBe('status');
-    expect(last.newValue).toBe('active');
-    expect(props._judge?.verdict).toBe('person');
-  });
-
-  // ── ⑥ noise 只标注、不改 status（保守边界）──
-  it('🔴 低置信(conf<0.95) noise 标注后 status 仍为 candidate（2026-09-20 决策保留档）', async () => {
-    if (!fg) return;
-    await fg.addNode({ id: 'v27b13-cand-4', type: 'person', name: '终审噪声甲' });
-    // ⚠️ confidence=0.9（< V50 安全阀阈值 0.95）—— 本条守护的是 2026-09-20 决策的
-    //    **低置信保护档**：「真人被误 void 的代价远大于噪声多留一阵，故低置信只写标记」。
-    //    高置信(conf>=0.95)会自动回收，见下方 V50 E2 新增用例。
-    const r = fg.applyJudgments(
-      { promote: [], annotate: [{ name: '终审噪声甲', confidence: 0.9, reason: '滑窗片段' }] },
-      'dream-judge',
-    );
-    expect(r.annotated).toBe(1);
-    expect(statusOf('终审噪声甲'), '低置信标注不得改变状态').toBe('candidate');
-    const row = fg.query("SELECT properties FROM nodes WHERE name='终审噪声甲'");
-    const props = JSON.parse((row[0] as any).properties || '{}');
-    expect(props._judge?.verdict).toBe('noise');
-    expect(props._judge?.autoReclaimed).toBe(false);
-  });
-
-  // ── V50 E2 安全阀（业主 2026-10-12 裁决，覆盖 9-20「一律只写标记」的高置信档）──
-  it('🔴 V50 E2: conf=0.95 的 noise → candidate 自动回收 void + 审计 + 清边', async () => {
-    if (!fg) return;
-    const id = 'v50-reclaim-95';
-    await fg.addNode({ id, type: 'person', name: '安全阀甲' });
-    expect(statusOf('安全阀甲')).toBe('candidate');
-    const edgeBefore = edgeCountOf(id);
-
-    const r = fg.applyJudgments(
-      { promote: [], annotate: [{ name: '安全阀甲', confidence: 0.95, reason: '跨词边界碎片，非人名' }] },
-      'dream-judge',
-    );
-    expect(r.annotated).toBe(1);
-    expect(statusOf('安全阀甲'), 'conf>=0.95 且 candidate → 应回收 void').toBe('void');
-    expect(edgeCountOf(id), 'void 必须清理关联边（否则 health-check fatal）').toBe(0);
-
-    const row = fg.query("SELECT properties FROM nodes WHERE name='安全阀甲'");
-    const props = JSON.parse((row[0] as any).properties || '{}');
-    expect(props._judge?.verdict).toBe('noise');
-    expect(props._judge?.autoReclaimed, '高置信已自动回收').toBe(true);
-    expect(props._judge?.reclaimReason).toContain('V50 noise 安全阀');
-    // status 变更必须留痕（_changeHistory 末条指向 void）
-    const hist = props._changeHistory || [];
-    const last = hist[hist.length - 1];
-    expect(last, '_changeHistory 必须留痕（void 是状态变更，可追溯是保留它的前提）').toBeTruthy();
-    // ⚠️ 两种写入方格式不同，都在 _changeHistory 里：
-    //   setEntityStatus（本路径）→ operation / before / after
-    //   applyJudgments promote   → field / oldValue / newValue
-    expect(last.operation || last.field, '审计条目须标识变更类型').toBeTruthy();
-    expect(last.after ?? last.newValue).toBe('void');
-    expect(edgeBefore).toBeGreaterThanOrEqual(0);
-  });
-
-  it('🔴 V50 E2: conf=0.98 同样回收；非 candidate（active）不受影响', async () => {
-    if (!fg) return;
-    await fg.addNode({ id: 'v50-reclaim-98', type: 'person', name: '安全阀乙' });
-    fg.applyJudgments(
-      { promote: [], annotate: [{ name: '安全阀乙', confidence: 0.98, reason: '跨词边界片段，非人名' }] },
-      'dream-judge',
-    );
-    expect(statusOf('安全阀乙')).toBe('void');
-
-    // 真人档：active 节点本就查不到（applyJudgments 只 SELECT candidate），状态必须原样
-    await fg.addNode({ id: 'v50-active-safe', type: 'person', name: '真人保护甲' });
-    fg.run("UPDATE nodes SET status='active' WHERE name='真人保护甲'");
-    const before = statusOf('真人保护甲');
-    fg.applyJudgments(
-      { promote: [], annotate: [{ name: '真人保护甲', confidence: 0.99, reason: '误判也无所谓' }] },
-      'dream-judge',
-    );
-    expect(statusOf('真人保护甲'), 'active 真人绝不进回收分支').toBe(before);
-    expect(before).toBe('active');
-  });
-
-  // ── ⑦ collectCandidateItems 排除已标注 noise（F5 回归）──
-  it('collectCandidateItems 不再返回已判 noise 的候选（防重复计费）', async () => {
-    if (!fg) return;
-    const names = fg.collectCandidateItems(200).map((x: any) => x.name);
-    expect(names).not.toContain('终审噪声甲');
-  });
-
-  // ── ⑧ F2/A 回归：已判 noise 的 candidate 豁免超期回收 ──
-  it("🔴 已判 noise 的【低置信】candidate 即使 40 天无提及也不被回收（用户决策 A 保留档）", async () => {
-    if (!fg) return;
-    await fg.addNode({ id: "v27b13-exempt-1", type: "person", name: "豁免甲" });
-    expect(statusOf("豁免甲")).toBe("candidate");
-    // 先标注为 noise（模拟离线终审）
-    // ⚠️ confidence=0.9（< V50 安全阀阈值 0.95）—— 本条守护 2026-09-20「用户决策 A」的
-    //    低置信保护档；高置信自动回收见下方 V50 E2 新增用例。阈值真源：
-    //    FamilyGraph.ts 的 NOISE_RECLAIM_MIN_CONFIDENCE。
-    fg.applyJudgments({ promote: [], annotate: [{ name: "豁免甲", confidence: 0.9, reason: "滑窗片段" }] }, "dream-judge");
-    // 再设为 40 天前
-    setMentionedDaysAgo("豁免甲", 40);
+    await fg.addNode({ id: 'b3-legacy-cand', type: 'person', name: '生命周期戊' });
+    fg.run("UPDATE nodes SET status='candidate' WHERE name='生命周期戊'");
+    setMentionedDaysAgo('生命周期戊', 40);
     fg.runDailyHouseholdMaintenance();
-    expect(statusOf("豁免甲"), "低置信已判 noise → 豁免自动回收，留批14 人工清单").toBe("candidate");
+    expect(statusOf('生命周期戊')).toBe('candidate');
   });
 
-  // ── ⑨ F2 基准：candidate 用 evidence.lastSeen 而非 last_mentioned ──
-  it("🔴 evidence.lastSeen 较新时 → 不按过期的 last_mentioned 回收", async () => {
-    if (!fg) return;
-    await fg.addNode({ id: "v27b13-base-1", type: "person", name: "基准甲" });
-    const id = idOf("基准甲")!;
-    const r = fg.query("SELECT properties FROM nodes WHERE id = ?", [id]);
-    const props = JSON.parse(r[0].properties || "{}");
-    props.last_mentioned = iso(40);                 // 旧的旧字段
-    props.evidence = { count: 1, lastSeen: iso(2) }; // 真实的近期活动
-    fg.run("UPDATE nodes SET properties = ? WHERE id = ?", [JSON.stringify(props), id]);
-
-    fg.runDailyHouseholdMaintenance();
-    expect(statusOf("基准甲"), "应按 evidence.lastSeen(2天) 判定 → 不回收").toBe("candidate");
+  it('④ applyJudgments / collectCandidateItems 已物理删除', () => {
+    expect(fg.applyJudgments).toBeUndefined();
+    expect(fg.collectCandidateItems).toBeUndefined();
   });
 });

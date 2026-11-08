@@ -55,26 +55,8 @@ describe('批13 · 状态机统一：既有行为等价性（回归防线）', (
   it('阈值常量未被改动（统一状态机的前提）', () => {
     expect(D.DORMANT_AFTER_DAYS).toBe(90);
     expect(D.ARCHIVE_AFTER_DAYS).toBe(365);
-    expect((D as any).CANDIDATE_EXPIRE_DAYS).toBe(30);
-  });
-});
-
-describe('批13 · candidate 专属生命周期（本批新增能力）', () => {
-  it('candidate + 超 30 天 → void（观察区超期回收）', () => {
-    const r = computeTargetStatus('candidate', D.CANDIDATE_EXPIRE_DAYS + 1);
-    expect(r.changed).toBe(true);
-    if (r.changed) { expect(r.to).toBe('void'); expect(r.from).toBe('candidate'); }
-  });
-
-  it('candidate + 30 天内 → 不变（给证据累积/梦境判定留时间）', () => {
-    expect(computeTargetStatus('candidate', 5).changed).toBe(false);
-    expect(computeTargetStatus('candidate', D.CANDIDATE_EXPIRE_DAYS).changed).toBe(false);
-  });
-
-  it('candidate 不走 dormant/archived（即使天数很大）', () => {
-    const r = computeTargetStatus('candidate', 500);
-    expect(r.changed).toBe(true);
-    if (r.changed) expect(r.to).toBe('void');
+    // 🔴 批3（ADR-021）：CANDIDATE_EXPIRE_DAYS 随观察区拆除一并删除
+    expect((D as any).CANDIDATE_EXPIRE_DAYS).toBeUndefined();
   });
 });
 

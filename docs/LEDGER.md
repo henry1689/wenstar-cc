@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **批3 拆观察区（物理删除 candidate 机制）** —— 观察区是「先写入、后判定」的补偿装置：判定所需信息在写入端已丢失。批1 已删产生端、批2b 已把准入前移到写入前，本批物理删除观察区本身：证据累积/晋升、`collectCandidateItems`/`applyJudgments`、candidate 初始化与超期规则、`EntityTriageService`/`EntityQualityJudge` 两个模块及其装配调度。新 person 直接 active；不再有每日离线终审 LLM 调用。生产 candidate 行 = 0，不改存量。详见 §6.17 与 ADR-021 | `tsc`=0；m4/app-entity 测试全绿；`candidate-zone.test` 改退役断言；重启日志无「实体离线终审已装配」；FG 19 active / 12 dormant 不变 |
 | 2026-11-08 | **实体准入结构收口（批2b 确定性取证）** —— LLM 取证头实测 0/4（四种注入全试过）⇒ 改为确定性取证：`findIntroEvidence` 单一判据 + `verifyAdmission` 单一闸门，L3 产出 / `integrateFromEntity` / `integrateSocialRelation` / `storeRelations` 四个写入点共用；新实体本轮即进入 `entity_genes`，参与 M4/FG/记忆检索。纯提及不再建档（已入库人物不受影响）。详见 §6.16 与 ADR-020 §6 | `tsc`=0；50 例相关测试全绿（新增确定性取证/证据子串/「我叫X」/亲属称谓用例）；CK-02 基线补记至 2623（上一提交遗留） |
 | 2026-11-08 | **闲聊快路径档位化（casual 轻档检索）** —— 原快路径是二值开关，97.7% 私聊轮次零记忆，冲突 MemSym 信条7；改为轻档（本地情感相似 ≤3 条）+ 全档两级，档位契约入 ADR-019。详见 §6.15 | 新增 `casual-floor.ts` + 6 例测试；`tsc`=0；实机 `tier=floor floor_mem=3 floor_ms=39~96`；验证数据已清、`integrity_check=ok` |
 | 2026-11-08 | **独处态回程边（状态机结构修复）** —— 散会后 `alone` 不可逆、玉瑶永久静默的根因是状态机缺边（`everHadSeats` 只置真），非漏调用。修法：`RETURN_YUYAO` 唯一回程边 + `MessageIntent.toYuyao` 同源去向 + `reset()` 兑现语义 + 删 `clearSession()`；独处首轮文案追加回归提示。详见 §6.14 与 ADR-018 | `cd7bdbe` + `ee59492`；`tsc`=0；测试 105 例全绿（新增 8 例）；实机四步全过（会晤回玉瑶/散会文案/独处喊玉瑶/重启持久）；验证数据 22 对话 + 11 记忆 + 4 组已按精确 id 清除、`integrity_check=ok` |
@@ -625,6 +626,35 @@ LLM 头保留为**可选增强**（`admitModelFromReply`，被动解析），不
 （新增确定性取证真假用例、证据必为子串、「我叫X」不建新实体、亲属称谓放行）。
 
 **回滚**：无 DDL、无数据迁移；新增字段均为可选，单提交整体 revert 即可。
+
+---
+
+### §6.17 2026-11-08 批3 拆观察区（物理删除 candidate 机制，ADR-021）
+
+**背景**：原链路是「滑窗生成人名 → FG 观察区(status='candidate') → 累积证据晋升 → 离线 LLM 终审」。
+判定所需的信息（怎么被介绍的、原句长什么样）在写入端就已丢失，事后只能靠计数与 LLM 猜。
+批1 删除产生端、批2b 把准入前移到写入前之后，观察区已无存在理由。
+
+**删除（物理）**：
+- `FamilyGraph`：`_accumulateCandidateEvidence` 及其调用、`collectCandidateItems`、`applyJudgments`、
+  `_hasNameTitleContext` / `_hasNameStrongContext`、`CANDIDATE_PROMOTE_SCORE`、
+  `NOISE_RECLAIM_MIN_CONFIDENCE` 与 `NAME_*` 四个词表、`addNode` 的 grade-3 → candidate、
+  启动归一 `UPDATE … status='candidate'`。
+- `StatusRules`：`CANDIDATE_EXPIRE_DAYS` 与 candidate→void 分支。
+- `EntityTriageService.ts` / `EntityQualityJudge.ts` 两个模块及其测试（物理删除）。
+- `maintenance`：`setEntityTriage` / `runEntityTriage` / 定时器 / 首轮触发 / stop 清理 / 配置字段与常量。
+- `server`：EntityTriageService 装配块。
+
+**保留**：`status` 枚举的 `'candidate'` 与读取侧排除过滤（历史库防御，无产生点）；
+`isExemptFromExpiry`（历史候选行防御）；`_isPrefixSlice`（`updatePersonProfile` 仍在用）。
+
+**行为变化**：新 person 直接 active；不再有每日离线终审 LLM 调用；存量 0 candidate，不改数据。
+
+**验证**：`tsc --noEmit`=0；`candidate-zone.test` 改退役断言（方法不存在、无 candidate 写入、
+状态机无超期规则）；m4/app-entity 测试全绿；重启日志不再出现「实体离线终审已装配」；
+FG 人物数不变（19 active / 12 dormant）。
+
+**回滚**：单提交 revert + 恢复两个被删模块；无 DDL、无数据迁移。
 
 ---
 

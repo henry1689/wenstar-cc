@@ -724,64 +724,8 @@ function capChangeHistoryEntry(entry: any): any {
   }
 }
 
-/**
- * 批12(P2-6 二轮): 观察区晋升的证据分阈值。
- * 分制替代单一维度硬阈值，避免「首次提及 + 仅弱上下文 + 不再出现」被不可逆 void：
- *   强上下文（介绍句/关系词）×3  弱上下文（紧邻称谓动词）×1  每次提及 ×1
- *   3 次提及=3 ✓ 1 次强上下文=4 ✓ 1 次弱+1 次再提及=3 ✓ 纯噪声单次=1 ✗
- *
- * ⚠️ 修复3 期间曾把阈值改为 6，**随即被 candidate-zone.test.ts 的 5 个断言否决而回滚**：
- *   - `:162` 首次提及带介绍句 → 必须立即 active
- *   - `:198` 「candidate 被提及 3 次 → 晋升 active」—— **测试直接固化了 count=3 即晋升**
- *   - `:213` 2 次弱上下文应晋升 / `:223` 强上下文 1 次晋升 / `:231` 关系词上下文应晋升
- *   说明 3→6 与 P2-6 的设计意图直接冲突，不是可调的旋钮。
- *
- *   **根因诊断随后修正**：垃圾（`经常` `明白` `文档` 均 count=3）之所以能晋升，
- *   不是门槛偏低，而是**它们本就不该进观察区** —— 缺陷在**准入**（滑窗产物经
- *   ChatEntry 的 `slideDetected` 无条件直通，绕过全部闸门），不在晋升。
- *   故本批改准入（A）与 status 语义（C），**保留本阈值与计分公式不动**；
- *   存量中已晋升的垃圾另行走 status='void' 软清理。
- *
- *   顺带记录一个未解决的事实（供后续批次）：真人名的 `evidence` 字段普遍为空
- *   （徐诗雨/玉瑶/熊梓铭/王全芬 均无），因为她们走直接建档路径、不经过
- *   candidate→active 流水线 —— 这条流水线实际只服务滑窗候选。
- */
-const CANDIDATE_PROMOTE_SCORE = 3;
-
-/**
- * V50 E2 噪音安全阀阈值 —— 仅 `verdict='noise' && confidence >= 本值 && status==='candidate'`
- * 时由 `applyJudgments` 自动转 void（业主 2026-10-12 裁决）。
- *
- * 选 0.95 的依据（2026-10-12 实测 45 个 candidate 的 noise 判定）：
- *   confidence avg=0.956 / max=0.99 / min=0.85；≥0.95 有 **40 个**，≥0.98 有 16 个。
- *   这 40 个中 **36 个**同时命中 V50 词表（字面 + LLM 语义两条独立证据链），
- *   另 4 个（关于经/居然连/周末终/于能休）conf=0.98、reason 明确为「跨词边界片段」。
- *   而 conf<0.95 的 5 个（成真/国美/高潮/安全/安静）继续按 2026-09-20 决策只写标记 ——
- *   「真人被误 void 的代价远大于噪声多留一阵」这条保护意图在低置信档完整保留。
- *
- * 与 `CANDIDATE_PROMOTE_SCORE` 同为观察区状态机的单一阈值真源，勿在别处重复写 0.95。
- */
-const NOISE_RECLAIM_MIN_CONFIDENCE = 0.95;
-
- /**
- * 批12(P2-6): 称谓动词（弱上下文）—— 需累积 2 次才晋升。
- * 已剔除高频歧义字（和/看/给/让/带/跟/来/走/笑）：候选片段是 rawInput 的连续子串，
- * 其前后邻字本可能就是任意高频字，单次命中不能证明是真人。
- */
-const NAME_TITLE_BEFORE = ['找', '叫', '问'];
-const NAME_TITLE_AFTER = ['说', '道', '答', '告诉', '喊', '讲'];
-/** 批12: 关系词 —— 名字前出现（"我朋友张小龙"）⇒ 介绍性上下文 */
-const NAME_RELATION_BEFORE = ['朋友', '同事', '同学', '老板', '老师', '领导', '亲戚', '家人', '老乡', '对象', '男朋友', '女朋友'];
-/** 批12: 介绍句式 —— 名字前紧邻（"这是张小龙"/"我叫张小龙"）*/
-// 🔴 乙1-B(2026-10-09): 删去单字 '是' —— 它是强判据的误报源。
-//   判定为 `beforeWin.endsWith(w)`（名字前 6 字窗口的**结尾**匹配），单字 '是' 过于宽泛：
-//   实测 `公明`（地名）的语境「以前**是**公明，现在叫光明」命中 endsWith('是')
-//   ⇒ strongHits=1 ⇒ 证据分 4/3 ⇒ **转正 active**。`公明` 的转正直接来自这个误报。
-//   '是' 的合法介绍用法（「这是张小龙」）已被上一项 '这是' 覆盖，剩余场景全是误报。
-//   '叫' 予以保留：它是介绍句的核心动词，且 '我叫/他叫/她叫/名叫/叫做' 已覆盖多数形态。
-const NAME_INTRO_BEFORE = ['这是', '叫做', '名叫', '我叫', '他叫', '她叫', '叫'];
-/** 批12: 介绍句式 —— 名字后紧邻（"张小龙是我同事"）*/
-const NAME_INTRO_AFTER = ['是我', '叫'];
+// 🔴 批3（2026-11-08，ADR-021）：观察区晋升阈值、噪音安全阀阈值与四个上下文词表
+//   随 _accumulateCandidateEvidence / applyJudgments 一并物理删除。
 
 export class FamilyGraph implements FamilyGraphInterface {
   private db: any | null = null;
@@ -1199,15 +1143,9 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
 
     // Step 3: status 存量补齐
-    // 🔴 修复3-C(2026-10-08): 由 `active` 改为 `candidate`。
-    //   原语义是「没判过 status 的节点 = 已确认真人」—— 等于**从没走过任何判定就直接落 active**。
-    //   实测后果：`程序`/`周末`/`许多`/`都还`/`容易`/`方式`/`颜色`/`高兴` 等垃圾节点的
-    //   `properties.evidence` **完全为空**（从未进入观察区、从未累积证据），却是 `active` ——
-    //   正是这批空 status 存量被本行 UPDATE 批量转正的。
-    //   改为 `candidate` 后：语义回到「未判定 = 观察区」，由证据分决定是否晋升。
-    //   ⚠️ 行为影响有限（`getAllPersonNames()` 过滤的是 `status != 'void'`，candidate 与
-    //   active 同样参与召回），本行是 **status 标记语义的诚实性修复**，不是召回修复。
-    this.run("UPDATE nodes SET status = 'candidate' WHERE type = 'person' AND (status IS NULL OR status = '')");
+    // 🔴 批3（2026-11-08，ADR-021）：原 UPDATE（NULL → 'candidate'）随观察区拆除一并删除。
+    //   实测生产库 status 为空的行 = 0，本行为空操作；历史/他库若存在空 status 行，
+    //   由批5 按业主确认统一处置，不在启动时批量打标记。
 
     // Step 4: legacy_ids 存量补齐
     this.run("UPDATE nodes SET legacy_ids = '[]' WHERE type = 'person' AND legacy_ids IS NULL");
@@ -2222,20 +2160,9 @@ export class FamilyGraph implements FamilyGraphInterface {
           return;
         }
 
-        // 🔵 批12修正: 全部 L3（grade 3）进观察区，靠行为证据晋升。
-        // 原方案「有姓氏=强证据」实测失效：13/15 个 3 字噪声（明伶俐/后找男/谢想法…）首字
-        // 恰为罕见姓氏字（明/后/谢/国/家/米/盖/麻/方/计/水/安）→ 全被判 strong。
-        // 根因：中文人名与滑窗片段在字面特征上不可分 → 唯有用行为/上下文判定。
-        // ⚠️ 修复3-B 曾拟把晋升阈值由 3 提至 6，实测与 candidate-zone.test.ts:198
-        //   「candidate 被提及 3 次 → 晋升 active」的 P2-6 设计意图直接冲突
-        //   （连同 :162/:213/:223/:231 共 5 个断言挂），已回滚 ——
-        //   当前 CANDIDATE_PROMOTE_SCORE = 3（见 :633）。**勿按 6 推断行为。**
-        //   ⇒ 因此「字面分不清的」**无法**靠阈值拦住，改由乙1 的【转正闸门】拦：
-        //   _accumulateCandidateEvidence 内晋升前复用 checkPersonEntity（详见该处）。
-        if (result.grade === 3) {
-          initialStatus = 'candidate';
-          console.log('[FG Candidate] L3 进观察区: "' + node.name + '" (累积证据后晋升)');
-        }
+        // 🔴 批3（2026-11-08，ADR-021）：观察区已物理拆除。
+        //   写入前已由准入闸门完成取证（ADR-020 §6），grade 3 与其它等级一样直接 active ——
+        //   不再存在「先建档、攒证据、再晋升」的池子。
       } catch (_guardErr) {
         // 🔴 修复3-A(2026-10-08): 由「静默放行」改为 **fail-closed 拦截 + 告警**。
         //   原 `catch { /* guard不可用不阻塞 */ }` 意味着闸门一旦抛错（查询失败/懒加载失败/
@@ -3067,23 +2994,6 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   /**
-   * 批12: 观察区(candidate)证据累积与晋升。
-   *
-   * 背景：L3 弱证据实体（无姓氏、仅长度达标的 3 字以上）先入观察区，
-   * 避免 3 字滑窗噪声直接建档。本方法在每次提及后累积证据：
-   *   - count: 累计被提及次数（真人会反复出现）
-   *   - titleHits: 出现在称谓上下文中的次数（"张小龙说"/"找张小龙"）
-   * 晋升条件（任一满足，零 LLM）：
-   *   - count >= CANDIDATE_PROMOTE_COUNT
-   *   - titleHits >= 1（有称谓上下文 = 强证据，不等累积）
-   *
-   * 安全边界：**只处理 status='candidate' 的节点**，绝不触碰 active/dormant/
-   * archived/void —— 因此对现有真人档案零影响。
-   *
-   * @param names    本轮识别出的 person 名
-   * @param rawInput 本轮原文（用于称谓上下文检测）
-   */
-  /**
    * B1(2026-11-05): 前缀切片判定 —— 写入端计数冻结的判据（单一真源）。
    *
    * 切片 = 已登记 active/dormant 人名或别名 + 1~2 字的扩展（阿珍→阿珍一），且自身无真实档案。
@@ -3095,8 +3005,7 @@ export class FamilyGraph implements FamilyGraphInterface {
    * PAE 提取/用户确认关系后计数立即恢复正常。
    *
    * 同实体豁免：name 自身已登记且与 base 归属同一主名（自身别名链）→ 非切片。
-   * 性能：先查档案（绝大多数真人命中即返回零查询），仅无档案者才查名库；
-   *       nameMap 可选参数供循环内复用（_accumulateCandidateEvidence 逐名调用时避免重复查询）。
+   * 性能：先查档案（绝大多数真人命中即返回零查询），仅无档案者才查名库。
    */
   private _isPrefixSlice(
     name: string,
@@ -3114,356 +3023,6 @@ export class FamilyGraph implements FamilyGraphInterface {
       const baseMain = map.get(base);
       // base 已登记为另一实体 → 切片；同实体（自身别名链）豁免
       if (baseMain !== undefined && baseMain !== ownMain) return true;
-    }
-    return false;
-  }
-
-  private async _accumulateCandidateEvidence(names: string[], rawInput: string): Promise<void> {
-    if (names.length === 0) return;
-    const now = new Date().toISOString();
-    // B1: 名库循环内复用（active/dormant 主名+别名），避免逐名重复查询
-    const nameMap = this.getAllPersonNamesWithAliases();
-    for (const name of names) {
-      try {
-        const rows = this.query(
-          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
-          [name],
-        ) as Array<{ id: string; properties: string }>;
-        if (rows.length === 0) continue;
-
-        const row = rows[0];
-        let props: Record<string, any> = {};
-        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-
-        // B1(2026-11-05): 前缀切片冻结 —— 跳过全部证据累积(count/title/strong/contexts)。
-        //   切片的『证据』全部源自真名语境，累积只会喂养晋升正反馈；
-        //   获得真实档案即自动解冻（本判据实时评估）。跳过后靠 30 天超期与 B5 自检处置。
-        if (this._isPrefixSlice(name, props, nameMap)) continue;
-
-        const ev = (props.evidence && typeof props.evidence === 'object') ? props.evidence : {};
-        ev.count = (typeof ev.count === 'number' ? ev.count : 0) + 1;
-        ev.firstSeen = ev.firstSeen || now;
-        ev.lastSeen = now;
-
-        // 🔵 批12(P2-6): 上下文分两级 —— 强上下文(介绍句/关系词) 1 次即晋升；
-        // 弱上下文(紧邻称谓动词) 需 2 次，避免片段单次误命中被"洗白"成 active。
-        const hasStrong = this._hasNameStrongContext(rawInput, name);
-        if (hasStrong) ev.strongHits = (typeof ev.strongHits === 'number' ? ev.strongHits : 0) + 1;
-        const hasTitle = this._hasNameTitleContext(rawInput, name);
-        if (hasTitle) ev.titleHits = (typeof ev.titleHits === 'number' ? ev.titleHits : 0) + 1;
-
-        // 🔵 批13: 记录语境片段 —— 梦境 LLM 终审需要「这个名字在原句里长什么样」。
-        // 批12 只存了计数，导致离线无法判断（这是证据链的结构性缺口，非补丁）。
-        // 只保留最近 3 条、每条 ≤120 字，避免节点 properties 膨胀。
-        if (rawInput && typeof rawInput === 'string') {
-          // 🔴 批13 评审 F1 修复: 必须取【名字附近的窗口】，而非消息头部。
-          // 原实现取 rawInput 前 120 字 —— 长消息里所有候选会存同一段与名字无关的前缀，
-          // 导致离线 LLM 拿到错误语境（最坏：噪声被判 person 并提升，绕过整个观察区）。
-          // 与同类相邻的 _hasNameTitleContext/_hasNameStrongContext 保持同一手法（indexOf 定位）。
-          const rawIdx = rawInput.indexOf(name);
-          const windowed = rawIdx >= 0
-            ? rawInput.slice(Math.max(0, rawIdx - 60), rawIdx + name.length + 60)
-            : rawInput;
-          const snippet = windowed.replace(/\s+/g, ' ').trim().slice(0, 120);
-          if (snippet) {
-            const ctxs: string[] = Array.isArray(ev.contexts) ? ev.contexts : [];
-            if (ctxs[ctxs.length - 1] !== snippet) ctxs.push(snippet);
-            ev.contexts = ctxs.slice(-3);
-          }
-        }
-        props.evidence = ev;
-
-        // 🔵 批12(P2-6 二轮): 累计证据分制 —— strong(介绍句/关系词)=3, 弱上下文=1, 每次提及=1。
-        // 消除"弱上下文硬阈值 2 次"造成的不可逆遗漏：1 次弱上下文 + 1 次再提及即可晋升。
-        const evidenceScore = (ev.strongHits || 0) * 3 + (ev.titleHits || 0) * 1 + ev.count * 1;
-        // 🔴 乙1(2026-10-08): 转正前补挂【准入同源】闸门 —— 进门查过，转正也要查。
-        //   原 promoted 只看 evidenceScore（纯计数），只问「被提过几次」不问「这名字是人吗」。
-        //   而 checkPersonEntity 此前仅在进门时调用（_addNodeInner:2018 / ChatEntry:165），
-        //   转正时不再复用 ⇒ 存量地名碎片靠「提及满 3 次」自我加冕。
-        //   实测反证：[FG Candidate] 晋升 active: "明凤凰" (证据分3, 提及3次)
-        //   —— 其语境是「以前是公明，现在叫光明…光明凤凰街道东坑这里」，纯地名。
-        //   改为与准入共用同一实现（不新增第二份判据副本）；闸门异常按 fail-closed
-        //   不晋升并告警，与 _addNodeInner 的闸门异常处置保持一致（守卫故障必须暴露）。
-        //   实测覆盖面：闸门判拒的 43 个 candidate（东坑这/公明这/麻批这/宿舍这…）将失去
-        //   晋升资格，留在观察区由 STATUS_THRESHOLDS.CANDIDATE_EXPIRE_DAYS(30天) 超期转 void。
-        let _promoteGateOk = false;
-        try {
-          _promoteGateOk = checkPersonEntity(name).allowed;
-        } catch (_ge) {
-          console.warn('[FG Candidate] 转正闸门异常 — 按 fail-closed 不晋升 "' + name + '":',
-            (_ge as Error)?.message);
-        }
-        // 🔴 乙1-B(2026-10-09): 晋升须有【真实上下文】—— 裸提及次数不再单独构成晋升依据。
-        //   实测依据（V43 §一.2）：观察区 candidate 498 个中 **497 个是纯裸提及**
-        //   （strongHits=0 且 titleHits=0），区内业主确认真人 **0 个**；而 active 97 个里
-        //   **72 个（74%）** 正是此路径产出的垃圾（关于/经历/强烈/高潮/游泳…）。
-        //   根因：evidenceScore 的 count 项可**独立凑满阈值 3** —— 任何高频词在日常对话里
-        //   都会被提到 3 次 ⇒ 观察区退化为「高频词计数器」，只问「被提过几次」不问「被认识吗」。
-        //   现在要求名字出现在【关系词/介绍句/称谓动词】的语法结构中才算「被认识」。
-        //   阈值 CANDIDATE_PROMOTE_SCORE(=3) 与两个判据函数本身**均不变**
-        //   （_hasNameStrongContext / _hasNameTitleContext 零改动，保持单一实现）。
-        //   兜底：无上下文但确实存在的新人由**梦境 LLM 终审**认定（applyJudgments, :2932），
-        //   该通道能读 evidence.contexts 做语义判断，本批不动它。
-        const _hasRealContext = (ev.strongHits || 0) >= 1 || (ev.titleHits || 0) >= 1;
-        const promoted = evidenceScore >= CANDIDATE_PROMOTE_SCORE && _hasRealContext && _promoteGateOk;
-        if (promoted) {
-          this.run(
-            "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",
-            [JSON.stringify(props), now, row.id],
-          );
-          console.log(
-            '[FG Candidate] 晋升 active: "' + name + '" (证据分' + evidenceScore + ', 提及' + ev.count + '次' +
-            ((ev.strongHits || 0) >= 1 ? ' + 强上下文×' + ev.strongHits : '') +
-            ((ev.titleHits || 0) >= 1 ? ' + 称谓动词×' + ev.titleHits : '') + ')',
-          );
-        } else {
-          this.run(
-            'UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?',
-            [JSON.stringify(props), now, row.id],
-          );
-        }
-      } catch (e: any) {
-        // 观察区故障不得影响主链路
-        console.warn('[FG Candidate] 证据累积失败(非阻塞): "' + name + '" — ' + (e?.message || e));
-      }
-    }
-    // 🔵 批12(P2-8): 循环结束后统一落盘一次，避免每个候选名一次整库写
-    this.invalidateCaches();
-  }
-
-  /**
-   * 批12: 判定名字是否出现在「称谓上下文」中 —— 名字前后紧邻出现称谓动词。
-   * 例："张小龙说" → after='说' 命中；"找张小龙" → before='找' 命中。
-   * 这是真人出现在对话语法结构中的证据（滑窗片段不会如此出现）。
-   */
-  /**
-   * 批13: 收集观察区(candidate)待判条目 —— 数据层，**不依赖 LLM**。
-   *
-   * 分层理由：FamilyGraph 只负责「把 FG 里的证据组装成待判条目」；
-   * 真正的 LLM 调用放在上层编排（M7 梦境 / 维护任务）。这样数据层保持纯净，
-   * 判定器（app/entity/EntityQualityJudge）保持纯函数可测。
-   *
-   * @param limit 单批上限（控制 LLM 批量体积）
-   */
-  collectCandidateItems(limit = 50): Array<{ name: string; mentionCount?: number; contexts?: string[]; relations?: string[] }> {
-    const out: Array<{ name: string; mentionCount?: number; contexts?: string[]; relations?: string[] }> = [];
-    try {
-      // 🔵 批13 评审 F5: 取候选时多取一批，供 JS 层过滤「已被标注为 noise」的行 ——
-      // 否则 annotate 会刷 updated_at 把它们重新顶回队首，导致同一批噪声每天被重复送 LLM
-      // （约 30 次重复计费），且真正的新候选可能挤不进 limit。
-      const rows = this.query(
-        "SELECT id, name, properties FROM nodes WHERE type = 'person' AND status = 'candidate' LIMIT ?",
-        [limit * 3],
-      ) as Array<{ id: string; name: string; properties: string }>;
-
-      const parsed: Array<{ id: string; name: string; props: Record<string, any>; ev: Record<string, any> }> = [];
-      for (const row of rows) {
-        let props: Record<string, any> = {};
-        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-        const ev = (props.evidence && typeof props.evidence === 'object') ? props.evidence : {};
-        // 已判为 noise 的不再重复送审（人工清单由批14 统一出）
-        if (props._judge && props._judge.verdict === 'noise') continue;
-        parsed.push({ id: row.id, name: row.name, props, ev });
-      }
-
-      // 按「证据最后出现时间」升序 —— 最久没动静的先判（时间语义与过期基准一致）
-      parsed.sort((a, b) => {
-        const ta = Date.parse((a.ev.lastSeen as string) || '') || 0;
-        const tb = Date.parse((b.ev.lastSeen as string) || '') || 0;
-        return ta - tb;
-      });
-
-      for (const item of parsed.slice(0, limit)) {
-        const row = { id: item.id, name: item.name };
-        const ev = item.ev;
-
-        const relRows = this.query(
-          'SELECT relation FROM edges WHERE source_id = ? OR target_id = ? LIMIT 6',
-          [row.id, row.id],
-        ) as Array<{ relation: string }>;
-
-        out.push({
-          name: row.name,
-          mentionCount: typeof ev.count === 'number' ? ev.count : undefined,
-          contexts: Array.isArray(ev.contexts) ? ev.contexts.filter((c: any) => typeof c === 'string') : [],
-          relations: [...new Set(relRows.map((r) => r.relation).filter(Boolean))],
-        });
-      }
-    } catch (e: any) {
-      console.warn('[FG Judge] collectCandidateItems 失败(非阻塞): ' + (e?.message || e));
-    }
-    return out;
-  }
-
-  /**
-   * 批13: 应用离线判定结果 —— **保守**：只提升 + 只标注，永不回收。
-   *
-   * 用户决策（2026-09-20）：真人被误 void 的代价远大于噪声多留一阵，
-   * 故 noise 一律只写标记（供批14 出人工清单），不在此处改 status。
-   * 所有变更写入 _changeHistory（可追溯是"很重要"的前提）。
-   */
-  applyJudgments(
-    outcome: { promote: string[]; annotate: Array<{ name: string; confidence: number; reason?: string }> },
-    source = 'dream-judge',
-  ): { promoted: number; annotated: number } {
-    const nowIso = new Date().toISOString();
-    let promoted = 0;
-    let annotated = 0;
-
-    // ① 提升：candidate → active（本次唯一的 status 变更）
-    for (const name of outcome.promote ?? []) {
-      try {
-        const rows = this.query(
-          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
-          [name],
-        ) as Array<{ id: string; properties: string }>;
-        if (rows.length === 0) continue;
-
-        // 🔴 V50 E1：终审提升补闸门 —— 本分支原先只做 SELECT + UPDATE，**零闸门**，
-        //   而计数晋升路径 `_accumulateCandidateEvidence`（本文件约 :2831）有
-        //   `checkPersonEntity(name)`。同一业务规则两处实现、一处有闸门一处没有（不变量 #7），
-        //   LLM 一旦把噪音名列入 promote 就能直转 active。改为复用**同一实现**，
-        //   闸门异常按 fail-closed 不晋升并告警（与 :2827-2832 的既有处置一致）。
-        let _promoteGateOk = false;
-        try {
-          _promoteGateOk = checkPersonEntity(name).allowed;
-        } catch (_ge) {
-          console.warn('[FG Judge] 提升闸门异常 — 按 fail-closed 不晋升 "' + name + '":', (_ge as Error)?.message);
-        }
-        if (!_promoteGateOk) {
-          console.warn('[FG Judge] 提升被闸门拒绝（L0 禁止词 / 非人名）: "' + name + '"');
-          continue;
-        }
-
-        const row = rows[0];
-        let props: Record<string, any> = {};
-        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-
-        // 审计（B2 统一入口：单条字节封顶 + 条数上限）
-        this._appendChangeHistory(props, {
-          field: 'status',
-          oldValue: 'candidate',
-          newValue: 'active',
-          timestamp: nowIso,
-          reason: '离线终审判定为真人（来源:' + source + '）',
-        });
-        if (!props._judge) props._judge = {};
-        props._judge = { ...props._judge, verdict: 'person', source, at: nowIso };
-
-        this.run(
-          "UPDATE nodes SET status = 'active', properties = ?, updated_at = ? WHERE id = ?",
-          [JSON.stringify(props), nowIso, row.id],
-        );
-        promoted++;
-        console.log('[FG Judge] 提升 active: "' + name + '" (来源:' + source + ')');
-      } catch (e: any) {
-        console.warn('[FG Judge] 提升失败(非阻塞): "' + name + '" — ' + (e?.message || e));
-      }
-    }
-
-    // ② 标注：noise 分两档 —— 高置信自动回收，低置信只写标记
-    //
-    // 🔴 V50 E2 安全阀（业主 2026-10-12 亲口裁决，覆盖 2026-09-20 的「一律只写标记」）：
-    //    判据 = verdict==='noise' && confidence>=0.95 && 该节点当前 status==='candidate'（本查询
-    //    已限定 candidate，故进得此分支即满足第三条）→ 调 setEntityStatus 转 void。
-    //    **两条保护意图完整保留**：低置信(conf<0.95)仍只写标记不改状态；非 candidate
-    //    （active/dormant 真人）本查询就查不到，一律不动。
-    //    依据：45 个 candidate 中 noise 判定 avg confidence 0.956、≥0.95 有 40 个，
-    //    其中 36 个与 V50 词表**字面+语义双重确认**、另 4 个 conf=0.98 且 reason 明确为
-    //    跨词边界片段；而 _judge.verdict='person' 的 3 个真人全部已是 active，不滞留 candidate。
-    //    走 setEntityStatus 而非直接 UPDATE —— 复用既有 candidate→void 超期回收同一条管线
-    //    （自带 pruneVoidEdges 清边 + _changeHistory 审计 + markDirty 落盘），**不删行**。
-    for (const a of outcome.annotate ?? []) {
-      try {
-        const rows = this.query(
-          "SELECT id, properties FROM nodes WHERE type='person' AND status='candidate' AND name = ?",
-          [a.name],
-        ) as Array<{ id: string; properties: string }>;
-        if (rows.length === 0) continue;
-        const row = rows[0];
-        let props: Record<string, any> = {};
-        try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-        const _reclaimable =
-          typeof a.confidence === 'number' && a.confidence >= NOISE_RECLAIM_MIN_CONFIDENCE;
-        props._judge = {
-          verdict: 'noise',
-          confidence: a.confidence,
-          reason: a.reason,
-          source,
-          at: nowIso,
-          // 高置信本次已回收；低置信维持 2026-09-20 决策，只写标记供批14 人工清单
-          autoReclaimed: _reclaimable,
-          ...(_reclaimable
-            ? { reclaimReason: `V50 noise 安全阀: confidence>=${NOISE_RECLAIM_MIN_CONFIDENCE} && status=candidate` }
-            : {}),
-        };
-        this.run('UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?', [JSON.stringify(props), nowIso, row.id]);
-        annotated++;
-
-        if (_reclaimable) {
-          try {
-            const rec = this.setEntityStatus(
-              a.name,
-              'void',
-              `V50 noise 安全阀: confidence=${a.confidence} >= ${NOISE_RECLAIM_MIN_CONFIDENCE}，终审判定「${a.reason || '非人名'}」（来源:${source}）`,
-            );
-            if (!rec.success) {
-              console.warn('[FG Judge] noise 回收失败(非阻塞): "' + a.name + '" —', rec.error || '未给出原因');
-            } else {
-              console.log('[FG Judge] noise 自动回收 → void: "' + a.name + '" (confidence=' + a.confidence + ')');
-            }
-          } catch (ve) {
-            console.warn('[FG Judge] noise 回收异常(非阻塞): "' + a.name + '" —', (ve as Error)?.message);
-          }
-        }
-      } catch (e: any) {
-        console.warn('[FG Judge] 标注失败(非阻塞): "' + a.name + '" — ' + (e?.message || e));
-      }
-    }
-
-    if (promoted || annotated) this.invalidateCaches();
-    return { promoted, annotated };
-  }
-
-  /**
-   * 批12(P2-6): 弱上下文 —— 仅名字紧邻称谓动词（"张小龙说" / "找张小龙"）。
-   * 单次命中不足以判定真人（片段前后邻字可能是任意高频字），需累积 2 次。
-   */
-  private _hasNameTitleContext(text: string, name: string): boolean {
-    if (!text || !name) return false;
-    let idx = text.indexOf(name);
-    while (idx >= 0) {
-      const before = idx > 0 ? text[idx - 1] : '';
-      const after = text[idx + name.length] || '';
-      if (NAME_TITLE_BEFORE.includes(before) || NAME_TITLE_AFTER.includes(after)) return true;
-      idx = text.indexOf(name, idx + 1);
-    }
-    return false;
-  }
-
-  /**
-   * 批12(P2-6): 强上下文 —— 关系词或介绍句式。命中 1 次即晋升。
-   * 这些句式几乎只出现在「介绍某人」的真实语境中，误报率极低。
-   *   ② 关系词（前 6 字窗口："我朋友张小龙" / "我同事张小龙"）
-   *   ③ 介绍句式（前窗口紧邻尾部："这是张小龙" / "我叫张小龙"）
-   *   ④ 介绍句式（后窗口开头："张小龙是我同事"）
-   */
-  private _hasNameStrongContext(text: string, name: string): boolean {
-    if (!text || !name) return false;
-    let idx = text.indexOf(name);
-    while (idx >= 0) {
-      const beforeWin = text.slice(Math.max(0, idx - 6), idx);
-      if (NAME_RELATION_BEFORE.some((w) => beforeWin.includes(w))) return true;
-      if (NAME_INTRO_BEFORE.some((w) => beforeWin.endsWith(w))) {
-        // 🔴 结构加固(2026-10-23 用户确认)：裸"叫"介绍句 + 名后紧跟"吧" = 起名建议句
-        //   （"就叫阿珍带吧"/"叫阿珍妈吧"——给未来孩子/宠物起名），非真人身份介绍。
-        //   真实身份介绍（"我叫张三"/"她叫小美"/"名叫X"）不会以"吧"紧跟名字收尾。
-        //   命中起名句式则不算强上下文，转而继续扫描该名字的其他出现位置（下方 idx 递推）。
-        if ((text[idx + name.length] || '') !== '吧') return true;
-      }
-      const afterWin = text.slice(idx + name.length, idx + name.length + 6);
-      if (NAME_INTRO_AFTER.some((w) => afterWin.startsWith(w))) return true;
-      idx = text.indexOf(name, idx + 1);
     }
     return false;
   }
@@ -3709,13 +3268,8 @@ export class FamilyGraph implements FamilyGraphInterface {
       }
     }
 
-    // 🔵 批12(P0-1修复): 观察区证据累积必须在 persons 循环【之后】调用。
-    // 原因：本轮新人名的节点是在循环内 addNode 创建的；若在循环【前】累积，
-    // 该名字首次出现时 SELECT status='candidate' 必然查不到行 → 首次证据
-    // （尤其是介绍句"我姐姐叫XX"/"这是我朋友XX"）永久丢失 → 真人只能等
-    // 30 天后被误 void（不可逆），或永不被记录。
-    // 移至循环后，本轮新建的 candidate 也能在本轮获得首次证据。
-    await this._timed('accumulateCandidateEvidence', () => this._accumulateCandidateEvidence(persons.map((p) => p.name), rawInput));
+    // 🔴 批3（2026-11-08，ADR-021）：观察区证据累积已物理删除。
+    //   准入在写入前完成取证（ADR-020 §6），不再需要「先建档、后攒证据晋升」的补偿装置。
 
     // 地点关联：如果提到家庭成员 + 地点 → 自动创建 lives_in
     if (persons.length > 0 && places.length > 0) {

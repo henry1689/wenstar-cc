@@ -188,9 +188,11 @@ describe('[V30] 垃圾实体守卫：判定逻辑必须逐字保留', () => {
     expect(fgSrc).toMatch(/checkEntity\s*\(/);
   });
 
-  it('🔴 grade 3 进观察区的分支仍在（不得因改加载方式而丢失）', () => {
-    expect(fgSrc).toMatch(/result\.grade\s*===\s*3/);
-    expect(fgSrc).toMatch(/initialStatus\s*=\s*'candidate'/);
+  it('🔴 grade 3 分支已随观察区拆除（批3，ADR-021）—— 不再有 candidate 初始化', () => {
+    expect(fgSrc).not.toMatch(/result\.grade\s*===\s*3\s*\)\s*\{/);
+    expect(fgSrc).not.toMatch(/initialStatus\s*=\s*'candidate'\s*;/);
+    // 守卫本身仍在（只删观察区分支，不删垃圾拦截）
+    expect(fgSrc).toMatch(/checkEntity\s*\(/);
   });
 
   it('🔴 拦截日志仍在（可见性不降级）', () => {

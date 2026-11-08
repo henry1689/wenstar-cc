@@ -748,29 +748,8 @@ async function initPipeline(): Promise<void> {
   if (activePersona && llmProvider instanceof DeepSeekLLMProvider) llmProvider.setPersona(activePersona);
   m5 = new M5Orchestrator(llmProvider);
 
-  // ── 批13: 实体质量离线终审装配（消费 FG 观察区 candidate 队列）──
-  // 分层：FamilyGraph(数据) ← EntityTriageService(编排) → EntityQualityJudge(纯函数)
-  // LLM 注入复用 PAE 的既有模式；无 rawCall 时抛错 → 终审服务「不动任何数据」。
-  try {
-    const { EntityTriageService } = await import('../app/entity/EntityTriageService.js');
-    // 🔵 批13 评审 F4: **只建一次** —— 原先每次调度都 new，导致 service 内部的
-    // running 防重入标记形同虚设（跨实例不互斥），叠加定时器残留可造成并发双跑。
-    const entityTriageSvc = new EntityTriageService({
-      familyGraph,
-      rawCall: async (messages, maxTokens, temperature, opts) => {
-        // 🔴 丙1(2026-10-09): **必须透传第 4 参** —— 原实现只声明 3 参，
-        //   实体终审传入的 `{ reasoning_effort: 'low' }` 会在此被静默丢弃，
-        //   等于入口没打通。其余 rawCall 调用方（server.ts:743/362 等）不传第 4 参，
-        //   行为不变。
-        if (llmProvider?.rawCall) return llmProvider.rawCall(messages as any, maxTokens, temperature, opts);
-        throw new Error('rawCall 不可用（LLM 未就绪）');
-      },
-    });
-    maintenance.setEntityTriage(() => entityTriageSvc.runOnce());
-    console.log('  实体离线终审 (EntityTriage) 已装配 ✓  (保守策略：只提升，噪声仅标注)');
-  } catch (e: any) {
-    console.warn('  ⚠️ 实体终审装配失败（不影响主链路）:', e?.message || e);
-  }
+  // 🔴 批3（2026-11-08，ADR-021）：FG 观察区与实体离线终审已物理删除，此处不再装配。
+  //   准入在写入前完成取证（ADR-020 §6），不存在「先建档后判定」的池子。
 
   // ── V3.2 档案自动采集引擎初始化 ──
   try {

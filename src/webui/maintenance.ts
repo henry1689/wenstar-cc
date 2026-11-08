@@ -57,19 +57,7 @@ export interface HealthReport {
 export interface MaintenanceConfig {
   /** 批13: 实体离线终审间隔（默认 24h；建档不频繁，低频即可） */
   entityTriageInterval?: number;
-  /**
-   * V50 终审吞吐(2026-10-12): 每个 24h 周期内连跑几轮终审。默认 14 轮 × 单批 15 = 210。
-   *
-   * 🔴 每日吞吐由**轮数**承担，单批 15 **不可加大** —— 这是实证结论，不是保守取值：
-   *    pm2 日志 75 次实测，单批 22/23/24/26/30 **全部**落在 `观察N`（整轮未判定），
-   *    成功轮次一律 `观察0`；`EntityTriageService.ts:90` 亦注明 DEFAULT_TRIAGE_BATCH
-   *    与 JUDGE_MAX_TOKENS 是一组、**勿单独调其一**（30→15 正是为修此故障调下来的）。
-   *    2026-10-12 实测单批 22/23/24/26/30 **整轮白跑**（现象，**机制未归因**——勿套用
-   *    V45 已证伪的「输出被截断」说，那条已由剥离器修复 fb7e924 解决）。
-   * 业主 2026-10-12 目标「每天 200 个」，故 14 轮（210 ≥ 200）。
-   * **后续调整吞吐只改这一个数。**
-   */
-  entityTriageRounds?: number;
+  // 🔴 批3（2026-11-08，ADR-021）：entityTriageRounds 随观察区/离线终审拆除一并删除。
   /** 对话压缩间隔 (ms) — 默认 5 分钟 */
   compactionInterval: number;
   /** 存储 GC 间隔 (ms) — 默认 30 分钟 */
@@ -126,14 +114,6 @@ interface ConversationTurn {
 const COMPACTION_SUMMARY_TIMEOUT_MS = 50_000;
 
 /**
- * V50 终审吞吐(2026-10-12): 默认轮数 = 14（14 × 单批 15 = 210 ≥ 业主目标 200/天）。
- * 单批 15 的上限依据见 `MaintenanceConfig.entityTriageRounds` 注释，勿改单批。
- */
-const TRIAGE_ROUNDS_DEFAULT = 14;
-/** V50: 终审轮间延迟（毫秒）—— 14 轮串行直打 LLM，留间隔避免连发 */
-const TRIAGE_ROUND_GAP_MS = 2_000;
-
-/**
  * 🔴 B：把 LLM 输出规范成“单段摘要”（纯函数，便于单测）
  * - 去换行/多余空白；去可能的 `【对话摘要】`/`【历史对话】` 前缀（防嵌套）；
  * - 限长 maxLen（超长截断加省略号）；空/仅空白 ⇒ 返回空串（调用方回退机械压缩）。
@@ -176,10 +156,7 @@ export class MaintenanceService {
   private compactionTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private decayTimer: ReturnType<typeof setInterval> | null = null;
-  private entityTriageTimer: ReturnType<typeof setInterval> | null = null;
   private slidingJunkCheckTimer: ReturnType<typeof setInterval> | null = null;
-  /** 批13: 实体离线终审执行器（注入式 —— Maintenance 不感知 LLM 与 FamilyGraph） */
-  private entityTriageRunner: (() => Promise<{ scanned: number; promoted: number; annotated: number; kept: number; skipped: boolean; error?: string }>) | null = null;
 
   // 外部依赖（由 server.ts 注入）
   private conversationHistory: ConversationTurn[] = [];
@@ -187,71 +164,6 @@ export class MaintenanceService {
   private setConversationHistory: (h: ConversationTurn[]) => void = () => {};
   private saveConversationHistory: () => void = () => {};
   private storage: AnyStorage | null = null;
-  /**
-   * 批13: 注入实体离线终审执行器。
-   * 注入式设计 —— MaintenanceService 只负责「何时跑」，不关心「怎么判」，
-   * 因此不依赖 LLM provider 与 FamilyGraph（保持本类可独立测试）。
-   */
-  setEntityTriage(runner: typeof this.entityTriageRunner): void {
-    this.entityTriageRunner = runner;
-  }
-
-  /**
-   * 批13 → V50 终审吞吐(2026-10-12): 执行一个 24h 周期内的**多轮**实体离线终审。
-   * 无候选时 runner 内部直接跳过（零 LLM 调用）。失败只记录，绝不影响其他维护任务。
-   *
-   * 为什么是多轮而不是把单批改大：见 `MaintenanceConfig.entityTriageRounds` 注释 ——
-   * 单批 15 是实证安全上限，每日吞吐只能由轮数承担。
-   *
-   * fail-fast 判据 = **本轮零进展**（promoted + annotated === 0）：
-   *   `applyJudgments` 的入参只有 promote/annotate 两组，`keepObserving` **不传进去**
-   *   ⇒ 判成 unknown 的节点不写任何 `_judge` 标记 ⇒ 下一轮 `collectCandidateItems`
-   *   会原样再取到同一批。零进展后继续跑等于空转重复计费（历史 `扫描30 观察30`×11 即此形态）。
-   */
-  private async runEntityTriage(): Promise<void> {
-    if (!this.entityTriageRunner) return;
-    const rounds = this.config.entityTriageRounds ?? TRIAGE_ROUNDS_DEFAULT;
-    const sum = { scanned: 0, promoted: 0, annotated: 0, kept: 0 };
-    let completed = 0;
-    let stopped: string | null = null;
-
-    for (let i = 0; i < rounds; i++) {
-      let r: { scanned: number; promoted: number; annotated: number; kept: number; skipped: boolean; error?: string };
-      try {
-        r = await this.entityTriageRunner();
-      } catch (e: any) {
-        stopped = '第' + (i + 1) + '轮异常: ' + (e?.message || e);
-        break;
-      }
-      // skipped 含「无候选」与「已有终审在进行中」两种，二者都不应继续消耗剩余轮次
-      if (r.skipped) { stopped = r.error || '无候选可判'; break; }
-      if (r.error) { console.warn('[Maintenance] 实体终审失败(非阻塞): ' + r.error); stopped = r.error; break; }
-
-      sum.scanned += r.scanned; sum.promoted += r.promoted;
-      sum.annotated += r.annotated; sum.kept += r.kept;
-      completed++;
-
-      if (r.promoted + r.annotated === 0) {
-        stopped = '第' + (i + 1) + '轮零进展（观察' + r.kept + '）— 队列未前进，停止以免空转';
-        break;
-      }
-      // 轮间小延迟，避免连续直打 LLM；最后一轮不等
-      if (i < rounds - 1) await new Promise((res) => setTimeout(res, TRIAGE_ROUND_GAP_MS));
-    }
-
-    // 完全无候选 → 沿用原语义静默（不刷日志）；其余情况必须可见（含部分完成）
-    if (completed === 0) {
-      if (stopped && stopped !== '无候选可判') console.warn('[Maintenance] 实体终审未开跑: ' + stopped);
-      return;
-    }
-    console.log(
-      '[Maintenance] 实体终审: ' + completed + '/' + rounds + '轮' +
-      ' 扫描' + sum.scanned + ' 提升' + sum.promoted +
-      ' 标注' + sum.annotated + ' 观察' + sum.kept +
-      (stopped ? ' | 停止: ' + stopped : ''),
-    );
-  }
-
   /**
    * 滑窗垃圾实体自检（2026-10-23，长期兑底预警）
    * 复用 FGHealthCheck.detectSlidingWindowJunk（判据单一真源）。
@@ -309,7 +221,7 @@ export class MaintenanceService {
     familyGraph?: any;
     /**
      * 🔴 B（2026-09-22）：把一段对话压缩成**真实摘要**（由 server.ts 注入 LLM 实现）。
-     *   保持本类“不感知 LLM”的既有设计（与 runDecay / entityTriageRunner 同风格）；
+     *   保持本类“不感知 LLM”的既有设计（与 runDecay 同风格）；
      *   未注入或抛错/超时 ⇒ 回退机械压缩（原行为），**不阻塞压缩流程**。
      */
     summarizeTurns?: (turns: Array<{ role: string; content: string }>) => Promise<string>;
@@ -398,21 +310,7 @@ export class MaintenanceService {
       }
     }, this.config.decayInterval);
 
-    // 🔵 批13: 实体离线终审 —— 消费 FG 观察区(candidate)队列，用 LLM 批量判定。
-    // 低频（每日一次触发）即可：建档不频繁、不特急，但很重要（用户 2026-09-20）。
-    // 保守策略：只提升真人 + 标注噪声；置信度阈值见 FamilyGraph.applyJudgments。
-    //   ⚠️ 原注释写「噪声仅标注（永不自动回收）」—— 已过时。V50 E2（业主 2026-10-12 裁决）
-    //      起，noise 且 confidence≥0.95 且 status=candidate 会**自动回收 void**（带审计与清边）；
-    //      低置信仍只写标记（保留 2026-09-20 保护档）。单次触发内连跑多轮，见 runEntityTriage。
-    this.entityTriageTimer = setInterval(async () => {
-      // 🔴 2026-09-20：补齐 catch —— 否则实体离线终审失败只会落 unhandledRejection（静默不执行），
-      //   与 M9 巩固链路同类问题（见 docs/data-storage-reference.md「④ 批处理失败可见性」）。
-      try {
-        await this.runEntityTriage();
-      } catch (e: any) {
-        console.error('[Maintenance] 实体离线终审失败(非阻塞，下轮重试):', e?.message || e);
-      }
-    }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
+    // 🔴 批3（2026-11-08，ADR-021）：FG 观察区与实体离线终审已物理删除，定时器随之移除。
 
     // 🔵 滑窗垃圾实体自检（2026-10-23）：每日一次，只预警不自动清除（判据见 FGHealthCheck.detectSlidingWindowJunk）
     this.slidingJunkCheckTimer = setInterval(() => {
@@ -435,11 +333,6 @@ export class MaintenanceService {
     // 🔴 2026-09-20：原先两处 `.catch(() => {})` 静默吞错 ⇒ 改为告警（失败可见）
     setTimeout(() => this.runCompaction().catch((e: any) => console.warn('[Maintenance] 首轮压缩失败(非阻塞):', e?.message || e)), 30_000);
     setTimeout(() => this.runGC().catch((e: any) => console.warn('[Maintenance] 首轮 GC 失败(非阻塞):', e?.message || e)), 60_000);
-    // 🔵 批13: 首轮实体终审延迟 5 分钟（等检索/FG 稳定后再跑，避免和启动期任务抢资源）
-    // 🔴 2026-09-20：`void` 浮空 promise 必须挂 catch —— 否则失败落 unhandledRejection（静默不执行）
-    setTimeout(() => {
-      this.runEntityTriage().catch((e: any) => console.error('[Maintenance] 首轮实体终审失败(非阻塞):', e?.message || e));
-    }, 5 * 60_000);
     // 🔵 批15(P1-2): void 边自愈【首轮】—— 原实现只在 24h interval 内，
     // 进程存活不足 24h（或被 /api/reset 重置计时）时永不执行。
     // 与其它首轮任务并列（30s/60s/5min），启动后 10 分钟跑一次。
@@ -463,9 +356,7 @@ export class MaintenanceService {
     if (this.compactionTimer) clearInterval(this.compactionTimer);
     if (this.gcTimer) clearInterval(this.gcTimer);
     if (this.decayTimer) clearInterval(this.decayTimer);
-    // 🔴 批13 评审 F3: 必须清理 —— 否则 /api/reset → initPipeline → start() 后
-    // 旧 interval 残留 + 新建 = 每重置一次多跑一份每日终审（重复 LLM 计费）。
-    if (this.entityTriageTimer) clearInterval(this.entityTriageTimer);
+    // 🔴 批3（ADR-021）：实体离线终审定时器已随观察区拆除，无需清理。
     if (this.slidingJunkCheckTimer) clearInterval(this.slidingJunkCheckTimer);
     if (this.knowledgeGcTimer) clearInterval(this.knowledgeGcTimer);
     console.log('[Maintenance] 维护引擎已停止');

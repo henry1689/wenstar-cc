@@ -82,13 +82,8 @@ describe('B 阶段 · FamilyGraph 写入端根治', () => {
       expect(readProps('切片基名乙XY').mention_count || 0).toBe(before);
     });
 
-    it('正样本：切片在观察区 — 证据全部不累积（count/title/strong/contexts）', async () => {
-      insertNode('切片基名丙', 'active', { description: '基座真人' });
-      insertNode('切片基名丙一', 'candidate', {});
-      await (fg as any)._accumulateCandidateEvidence(['切片基名丙一'], '叫切片基名丙一说说');
-      const ev = readProps('切片基名丙一').evidence;
-      expect(ev).toBeUndefined();
-    });
+    // 🔴 批3（ADR-021）：观察区证据累积方法已物理删除，原「切片在观察区不累积证据」
+    //   用例随之退役（该路径已不存在）。
 
     it('逃生口：同名切片获得真实档案后 — 计数立即恢复', async () => {
       insertNode('切片基名丁', 'active', { description: '基座真人' });

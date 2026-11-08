@@ -4,8 +4,7 @@
  * FamilyGraph._checkStatusDowngrade 和 LifecycleManager.runDaily 各自硬编码了
  * 相同的 90天→dormant、365天→archived 阈值。本模块提供唯一常量和方法。
  *
- * 批12 新增：candidate(观察区) —— 弱证据实体先入观察区，累积证据后晋升 active，
- * 超期无提及则转 void。见 FamilyGraph._accumulateCandidateEvidence。
+ * 🔴 批3（2026-11-08，ADR-021）：观察区(candidate)已物理拆除，其存活期规则一并删除。
  *
  * 使用方：
  *   - FamilyGraph._checkStatusDowngrade → transitionStatus()
@@ -18,11 +17,6 @@ export const STATUS_THRESHOLDS = {
   DORMANT_AFTER_DAYS: 90,
   /** 连续多少天无交互 → 转入封存 (archived) */
   ARCHIVE_AFTER_DAYS: 365,
-  /**
-   * 批12: 观察区(candidate)存活期 —— 弱证据实体超过这些天仍无新提及，
-   * 判定为非真人实体（滑窗片段），自动清除为 void。
-   */
-  CANDIDATE_EXPIRE_DAYS: 30,
 } as const;
 
 /**
@@ -83,16 +77,8 @@ export function computeTargetStatus(
   if (currentStatus === 'archived') return { changed: false };
   if (currentStatus === 'void') return { changed: false };
 
-  // 批12: candidate(观察区) → void（长期无新提及 ⇒ 判定为非真人实体）
-  // 放在 active/dormant 规则之前，且 candidate 不走 dormant/archived 路径。
-  if (currentStatus === 'candidate' && daysSinceLastMention > STATUS_THRESHOLDS.CANDIDATE_EXPIRE_DAYS) {
-    return {
-      changed: true,
-      from: 'candidate',
-      to: 'void',
-      reason: `观察区超过${daysSinceLastMention}天无新提及，判定为非真人实体`,
-    };
-  }
+  // 🔴 批3（2026-11-08，ADR-021）：观察区已物理拆除，不再产生 candidate，其超期回收规则一并删除。
+  //   历史库若残留 candidate 行，由批5 按业主确认统一处置（不在此自动 void）。
 
   // active → dormant (>90天)
   if (currentStatus === 'active' && daysSinceLastMention > STATUS_THRESHOLDS.DORMANT_AFTER_DAYS) {
