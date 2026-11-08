@@ -82,6 +82,14 @@ export interface MessageIntent {
   kind: MessageIntentKind;
   /** wake: 目标实体列表（多人）；switch/addParticipant: 目标实体；exit/normal: 空 */
   targets: string[];
+  /**
+   * 🔴 2026-11-08：exit 意图的**去向** —— true = 明确回玉瑶私聊，false/缺省 = 单纯结束。
+   *
+   * 为什么需要它：`exit` 在过去承载了两种不同的去向（散会留在独处 / 唤回玉瑶回私聊），
+   * 上层无法区分，只能用各写一份正则的办法猜 —— 与不变量 #7「同一规则禁多处实现」冲突。
+   * 判据必须与 detectIntent 的退出判定**同源**（同一组玉瑶专属句式），由本函数给出。
+   */
+  toYuyao?: boolean;
 }
 
 /**

@@ -80,13 +80,6 @@ export function loadSession(sqlite: EngineStoreSqlite | null | undefined, sessio
   }
 }
 
-/**
- * 清除会话快照（仅在**会话确定结束/需丢弃**时调用；不删任何其他键）。
- * 单写者原则：只有本键的写者（本类）可清它。
- */
-export function clearSession(sqlite: EngineStoreSqlite | null | undefined): void {
-  if (!sqlite || typeof sqlite.writeRaw !== 'function') return;
-  try {
-    sqlite.writeRaw('DELETE FROM engine_store WHERE key = ?', [GROUP_SESSION_STORE_KEY]);
-  } catch { /* 非关键 */ }
-}
+// 🔴 2026-11-08：此处原有 `clearSession()`（整键删除会话快照），全仓零生产调用 ——
+//   它会把「独处相位」与「会晤现场」一起抹掉，是第二条与本模块单写者语义并存的清除通道。
+//   独处态的合法离开边是 `RETURN_YUYAO`（状态机内、可审计、不丢现场），故删除该函数。

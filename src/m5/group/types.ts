@@ -172,6 +172,18 @@ export type Action =
     }
   | { type: 'LEAVE'; target?: string; now?: number }
   /**
+   * 回玉瑶私聊（2026-11-08）——独处态的**唯一合法离开边**。
+   *
+   * 🔴 为什么必须有这条边：`sessionMode()` 用 `everHadSeats` 区分「散会后独处」与
+   *   「从未会晤」，而该字段原先只被 WAKE 置真、没有任何复位路径 ⇒ 第一次散会之后
+   *   玉瑶在结构上永远回不来（重启无效：快照原样恢复）。这是状态机缺边，不是忘记调用。
+   * 🔴 生效条件：**空场**（participants.length === 0）且处于独处相位。
+   *   会晤中要回玉瑶，调用层必须先 LEAVE 再 RETURN（顺序由调用层保证，本分支不代劳）。
+   * 🔴 语义边界：本 action 只复位「独处相位」，不动玉瑶现场（contextStack 原样保留，
+   *   现场恢复由 LEAVE 的 restoreSlot effect 负责）。
+   */
+  | { type: 'RETURN_YUYAO'; now?: number }
+  /**
    * 独处态过渡提示已发出（2026-11-01）。
    *
    * 单独成 Action 而非手改 state：ADR-013 硬约束② —— 状态只有 `reduce` 一处写。

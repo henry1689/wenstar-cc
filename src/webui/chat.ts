@@ -1191,6 +1191,13 @@ export async function processChat(
             }
           }
         } else if (intent.kind === 'normal' || intent.kind === 'exit') {
+          // 🔴 2026-11-08 独处态回程：业主明确唤回玉瑶（intent.toYuyao）⇒ 离开独处相位，
+          //   本轮由玉瑶正常应答。通用结束语（散会/再见）不触发 —— 独处态本来就没人，
+          //   结束语没有对象，留在独处是正确行为（白皮书 §2.5）。
+          if (intent.kind === 'exit' && intent.toYuyao && _gs?.mode === 'alone') {
+            _gs.dispatch({ type: 'RETURN_YUYAO', now: Date.now() });
+            console.log('[GroupSession] 回玉瑶私聊（离开独处态）');
+          }
           // 🔴 S2-G1: 重启后自动恢复上次会晤实体（用户上次在会晤中，重启后继续以该实体身份回应）
           // 仅当用户消息没有明确"切回玉瑶/退出会晤"意图时才恢复——否则尊重用户当前意图。
           // 🔴 转场彻底隔离(2026-08-23): 消息提及"玉瑶/瑶瑶/瑶儿" = 明确和玉瑶（默认本体）说话，

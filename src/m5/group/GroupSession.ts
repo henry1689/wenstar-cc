@@ -167,8 +167,17 @@ export class GroupSession {
     return true;
   }
 
-  /** 清空（回到玉瑶态）。**不归零现场** —— 玉瑶现场仍留在 contextStack 由监听者恢复 */
-  reset(now?: number): SessionState { return this.dispatch({ type: 'LEAVE', now: now ?? this._now() }); }
+  /**
+   * 回到玉瑶私聊。**不归零现场** —— 玉瑶现场仍留在 contextStack 由监听者恢复。
+   * 🔴 2026-11-08：原实现只 dispatch LEAVE —— 空场时 `LEAVE` 直接返回原状态（no-op），
+   *   注释声称的「回到玉瑶态」根本不会发生。现按语义分两步：会晤中先 LEAVE 结束会晤，
+   *   再 RETURN_YUYAO 离开独处相位（该 action 在空场才生效）。
+   */
+  reset(now?: number): SessionState {
+    const t = now ?? this._now();
+    if (this._state.participants.length > 0) this.dispatch({ type: 'LEAVE', now: t });
+    return this.dispatch({ type: 'RETURN_YUYAO', now: t });
+  }
 }
 
 export default GroupSession;

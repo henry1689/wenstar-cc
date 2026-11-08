@@ -245,6 +245,21 @@ export function reduce(prev: SessionState, action: Action): SessionState {
       };
     }
 
+    // ── 回玉瑶私聊（2026-11-08）：独处态的唯一离开边 ──
+    case 'RETURN_YUYAO': {
+      // 会晤中不允许直接回玉瑶：调用层必须先 LEAVE 再 RETURN（状态机不为调用顺序兜底）
+      if (prev.participants.length > 0) return prev;
+      // 玉瑶态（从未散会 / 已经回来过）→ 幂等不操作
+      if (prev.everHadSeats !== true) return prev;
+      return {
+        ...prev,
+        everHadSeats: false,     // 独处相位结束 ⇒ sessionMode 派生回 'yuyao'
+        aloneNotified: false,    // 下次散会重新给一次过渡文案
+        lastActivityAt: now,
+        transientSpeakerFrom: null,
+      };
+    }
+
     // ── 独处态过渡提示已发出（2026-11-01）──
     case 'ALONE_ACK': {
       if (prev.aloneNotified === true) return prev;      // 幂等
