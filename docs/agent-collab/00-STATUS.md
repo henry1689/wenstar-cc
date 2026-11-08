@@ -119,6 +119,13 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-08 **✅ P149 批3 拆观察区（Claude Code）**：
+  观察区(candidate)与离线 LLM 终审**物理删除**——证据累积/晋升、终审数据层、candidate 初始化与超期规则、
+  `EntityTriageService`/`EntityQualityJudge` 两个模块及其维护调度全部移除。新 person 直接 active；
+  不再有每日离线终审 LLM 调用。生产 candidate 行 = 0，不改存量。
+  tsc=0；411 passed / 1 failed（`grader-non-name-tail` 为既有失败）；重启后无「实体离线终审已装配」；
+  FG 19 active / 12 dormant 不变。详见 `active/P149` 与 ADR-021。
+
 - 2026-11-08 **✅ P148 实体准入批2b：确定性取证（Claude Code）— `74c6282`**：
   LLM 取证头实测 0/4（四种注入全试过）⇒ 改为确定性取证：`findIntroEvidence` 单一判据 +
   `verifyAdmission` 单一闸门，L3 / `integrateFromEntity` / `integrateSocialRelation` / `storeRelations`
