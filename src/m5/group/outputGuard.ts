@@ -19,17 +19,11 @@ import type { SessionState } from './types.js';
 /** 结构化头的字段名（单一真源，勿在别处硬编码字符串） */
 export const SPEAKER_HEADER_KEY = 'speaker';
 
-/** 头块与正文的分隔行（任一命中即视为头结束） */
-const HEADER_SEPARATORS = ['---', '===', '——', '－－', '____'];
-
-/**
- * 正文疑似纯 JSON —— 整体跳过结构化头处理。
- * 判据：首个非空白字符是 `{` 或 `[`。**宁可漏处理，不可削正文**（不对称取舍）。
- */
-export function looksLikeRawJson(text: string): boolean {
-  const t = (text || '').trimStart();
-  return t.startsWith('{') || t.startsWith('[');
-}
+// 🔴 2026-11-08（ADR-020）：分隔行与纯 JSON 判据已下沉到 `common/utils/output-header` ——
+//   它们属于「输出协议」，被 m1 的实体取证头与 m5 的发言人头共用；留在 m5 会造成 m1→m5
+//   反向依赖（CK-01）。此处 re-export 保持既有 API，调用方零改动。
+import { HEADER_SEPARATORS, looksLikeRawJson } from '../../common/utils/output-header.js';
+export { HEADER_SEPARATORS, looksLikeRawJson } from '../../common/utils/output-header.js';
 
 export interface ParsedHeader {
   /** 头里声明的发言人（未声明或未命中字段时 null） */
