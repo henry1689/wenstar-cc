@@ -119,6 +119,14 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-08 **✅ P150 批4 清判据（Claude Code）**：
+  `addNode` 的两道 person 闸门合并为一道（`EntityWriteGate.checkPersonEntity` 是严格超集），
+  物理删除 `GarbageEntityGuard.ts`、4 个零调用导出、滑窗垃圾自检及其定时器。
+  **保留 `gradeEntity` 与 object 通道**（与任务书偏差，理由见 ADR-022 §2）。
+  附带修正 fail-closed 日志输出真名的红线问题。
+  tsc=0；1154 passed / 1 failed（`grader-non-name-tail` 既有失败）；重启无 `[FG SelfCheck]`。
+  详见 `active/P150`。
+
 - 2026-11-08 **✅ P149 批3 拆观察区（Claude Code）**：
   观察区(candidate)与离线 LLM 终审**物理删除**——证据累积/晋升、终审数据层、candidate 初始化与超期规则、
   `EntityTriageService`/`EntityQualityJudge` 两个模块及其维护调度全部移除。新 person 直接 active；
