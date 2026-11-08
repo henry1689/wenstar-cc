@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **Harness hook 覆盖缺口修复 + 判据测试收口** —— ① 查实：项目级 hooks 只在会话 cwd 属于 `D:\tools\wenstar-cc` 时加载；本会话 cwd=`C:\Users\henry` ⇒ 整个会话 pre/post 检查未运行（令牌 6 次写入仍未消费、0 条 BYPASS）。新增 `hooks/harness-hook-dispatch.cjs` 挂到用户级 settings，带「非本项目放行 / 项目内 cwd 不双跑」守卫，实测三例通过。② `grader-non-name-tail` 的「垃圾候选拦截率」为数据驱动信息性断言，批5 清零后分母语义失效（24.3% 是群体变化，非能力退化）⇒ 改为固定样本断言，测试套件 **1155 passed / 0 failed**。详见 §6.21 与 `docs/HARNESS-hook-覆盖缺口-20261108.md` | `tsc`=0；m4/app/m1 1155 passed；dispatcher 三例实测；`harness_evolution_analyze` 报 10 条 critical（无令牌批量写入=本缺口症状） |
 | 2026-11-08 | **批6 归档（实体提取架构收口全系列完成）** —— 文档同步：任务书加「执行状态」表（批1–批6 + 两处偏差）、`FG-结构规范-V1.0` §3.1 更新为「写入前取证、无观察区」、`data-storage-reference` 三处历史口径加删除注记、方案文档状态改为已实施。批1–批6 合计：5 类旁路 + 观察区/离线终审 + 双闸门冗余 + 1271 行存量全部清除；新增确定性取证准入（ADR-020 §6）。详见 §6.20 | 任务书/规范/参考/方案四份文档；全系列 ADR-020/021/022；LEDGER §6.14–§6.20 |
 | 2026-11-08 | **批5 清存量（数据操作，业主确认后执行）** —— 按任务书 §9.2 三条件 + 额外安全项（FG 名单/别名/uuid、`memory_entities`、`memories.entity_genes`、`temporal_events`、`atom_address_timeline`、`black_diamond`/`vault_log`/`memsym_elements`/`conversations.belong_entity_uuid`、`conversations.entity_names`）盘点 `entities` 存量。业主选择「全删」：删除 **1271** 行（person 1069 + object 202）与 **2013** 条 `entity_relations`；`entities` 4129→2858、`entity_relations` 13722→11709，`integrity_check=ok`，重启 HTTP 200。**未动任何 memories / conversations / FG**。详见 §6.19 | 停服窗口执行；整库备份 `D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`；删除行全量备份 `D:\tmp\批5-删除行备份-20261108.json`；盘点清单 `D:\tmp\批5-存量候选-20261108.json` |
 | 2026-11-08 | **批4 清判据（合并双闸门 + 删死导出 + 删滑窗自检）** —— S1 实测：`addNode` 串联的两道 person 闸门中，`EntityWriteGate.checkPersonEntity` 是 `GarbageEntityGuard.checkEntity` 的严格超集（同黑名单/称谓表 + 长度 + 对话残留 + 同 gradeEntity），后者无独有判据 ⇒ 合并为一道并物理删除模块。同时删除 4 个零调用导出与 `detectSlidingWindowJunk` 滑窗自检（判据前提已随滑窗消失，且会误报新准入的合法实体）。**保留 gradeEntity 与 object 通道**（与任务书偏差，理由见 ADR-022 §2）。附带修正 fail-closed 日志输出真名的红线问题。详见 §6.18 与 ADR-022 | `tsc`=0；m4/app/m1 **1154 passed / 1 failed**（grader-non-name-tail 为既有失败）；42 个 V50 噪音词仍逐条被拒；重启后无 `[FG SelfCheck]` 滑窗自检 |
@@ -732,6 +733,33 @@ FG 人物数不变（19 active / 12 dormant）。
 
 **最终形态**：实体准入 = **写入前确定性取证**（显式介绍线索 + 原文证据子串校验）；
 无观察区、无离线终审、无滑窗生成器、无重复闸门。
+
+---
+
+### §6.21 2026-11-08 Harness hook 覆盖缺口修复 + 判据测试收口
+
+**缺口**：Harness 的 PreToolUse/PostToolUse 只配置在**项目级** settings。
+当 Claude Code 会话 cwd 不是 `D:\tools\wenstar-cc`（如从 `C:\Users\henry` 启动）时，
+项目级 hooks 不加载 ⇒ 令牌校验/消费、BYPASS 检测、写入审计**全部静默失效**。
+
+**证据**：同一 run 内对 `maintenance.ts` 连续写入 6 次，令牌始终 `consumed=false`；
+当日 BYPASS 审计 0 条；历史 `*.consumed`（2026-11-05，绝对路径记录）证明 hook 在项目内会话正常。
+
+**影响（如实记录）**：本系列批1–批6 的代码改动在 **hook 层写入闸门未生效**的状态下完成
+（MCP 的 S1–S7 流水线本身仍执行）。
+
+**修复**：`hooks/harness-hook-dispatch.cjs` + 用户级 settings.json 挂载：
+非本项目路径放行｜会话已在项目内则让位于项目级 hooks（防双跑误判 TOKEN REUSED）｜
+项目外 cwd 的项目内文件原样转交｜转交失败 fail-closed。
+实测三例通过；**用户级 hooks 需重启会话生效**。
+
+**判据测试收口**：`grader-non-name-tail` 的「已知垃圾候选集拦截率」是数据驱动信息性断言，
+批5 清零后 `uuid 为空的 person 行`已不再是垃圾集 ⇒ 24.3% 是**群体变化**而非拦截能力退化
+（与性/亲密内容无关，纯名字碎片判据）。改为固定样本断言（习累/秋节快/马上/满足/喜欢/幸福/舒服/压力/考试/学习），
+套件回到 **1155 passed / 0 failed**。
+
+**Harness 自进化建议（未自动应用）**：把「hook 是否真的加载」纳入启动自检
+（探针写入 + `.consumed` 记录核验），否则同类静默失效会重复发生。
 
 ---
 

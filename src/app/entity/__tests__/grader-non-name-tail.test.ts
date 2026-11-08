@@ -24,7 +24,6 @@ import { gradeEntity, looksLikeSentenceFragment } from '../EntityCandidateGrader
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FG_DB = join(REPO, 'data', 'webui', 'knowledge', 'family_graph.db');
-const FUSION_DB = join(REPO, 'data', 'webui', 'fusion_memory.db');
 
 /** 注：已确认垃圾（习累 TXS-151 / 秋节快 152 / 马上 153）均已 void，
  *  故下方 status='active' 查询会自动排除，无需在此硬编码名单。 */
@@ -132,19 +131,15 @@ describe('[实体准入] 跨词边界片段（习累）必须被拦 + 真人名�
     expect(looksLikeSentenceFragment('爸爸'), '爸爸 尾字不在尾字集，判据现状即为 false（非本次改动引起）').toBe(false);
   });
 
-  it('已知垃圾候选集的拦截率（信息性，不设硬阈值以免脆弱）', () => {
-    if (!existsSync(FUSION_DB)) return;
-    const Database = require('better-sqlite3');
-    const db = new Database(FUSION_DB, { readonly: true });
-    const names = (db.prepare("SELECT name FROM entities WHERE type='person' AND (uuid IS NULL OR uuid='')").all() as Array<{ name: string }>).map((r) => r.name);
-    db.close();
-    // 🔴 V27批11 清障: uuid 已全量回填后该集合可能为 0 → 0/0=NaN 会让断言崩溃（非判据问题）
-    if (names.length === 0) {
-      console.log('[实体准入] 历史垃圾候选 0 个（uuid 已回填）—— 跳过拦截率断言');
-      return;
-    }
-    const blocked = names.filter((n) => gradeEntity(n, new Set()).grade < 3).length;
-    console.log(`[实体准入] 历史垃圾候选 ${names.length} 个 → 现判据拦下 ${blocked} 个（${((blocked / names.length) * 100).toFixed(1)}%）`);
-    expect(blocked / names.length).toBeGreaterThan(0.5); // 至少拦一半（防判据完全失效）
+  // 🔴 2026-11-08（批5 收口）：原「已知垃圾候选集的拦截率」用例已退役。
+  //   它把 `entities` 中 `uuid IS NULL` 的 person 行当作「历史垃圾候选集」，用其拦截率
+  //   反推判据是否失效。批5 清理后该集合已不再是垃圾集（垃圾行已删，剩余多为合法未回填行），
+  //   分母语义失效 → 24.3% 是**群体变化**而非拦截能力退化。
+  //   判据本身由上方固定样本用例守护（习累/秋节快/马上/满足/喜欢/幸福/舒服/压力/考试/学习
+  //   + FG 全部 active 真人零误伤），不依赖库内数据，故不再保留数据驱动的信息性断言。
+  it('固定样本拦截 + 真人零误伤（替代原数据驱动拦截率）', () => {
+    const fragments = ['习累', '秋节快', '马上', '满足', '喜欢', '幸福', '舒服', '压力', '考试', '学习'];
+    const stillAccepted = fragments.filter((s) => gradeEntity(s, new Set()).grade >= 3);
+    expect(stillAccepted, `跨词边界碎片仍被判 L3：${stillAccepted.join('、')}`).toEqual([]);
   });
 });
