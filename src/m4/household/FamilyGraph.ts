@@ -34,6 +34,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EntityGene } from '../../m1/types/dna.js';
+import { findIntroEvidence } from '../../m1/entity-admission.js';
 import { validatePersonName, validateRelationType } from '../EntityValidator.js';
 import { dossierRead, dossierWrite } from './shared/DossierPath.js';
 import { getRelationLabel } from './shared/RelationLabels.js';
@@ -61,10 +62,10 @@ const FAMILY_EDGE_SQL_IN = FAMILY_EDGE_RELATIONS.map(() => '?').join(',');
  * 保守选择：宁可漏建（下次提及或被显式介绍时补录），也不让滑窗噪声入库。
  */
 export function hasExplicitPersonIntro(text: string, name: string): boolean {
-  const idx = text.indexOf(name);
-  if (idx < 0) return false;
-  const win = text.slice(Math.max(0, idx - 10), Math.min(text.length, idx + name.length + 10));
-  return /叫|名叫|叫做|自称|介绍|朋友|同事|同学|老师|医生|先生|女士|姐姐|妹妹|哥哥|弟弟|阿姨|叔叔|老板|领导|客户/.test(win);
+  // 🔴 批2b（ADR-020 修订）：判据单一真源 —— 委托 m1/entity-admission.findIntroEvidence。
+  //   原实现在此重复维护了一份窗口关键词表（且缺亲属称谓、只查首次出现），
+  //   与 L3 确定性取证、storeRelations 闸门各自漂移；现四处共用同一实现。
+  return findIntroEvidence(text, name) !== null;
 }
 import { parseSocialGroups, sameSocialGroup, findOutsiders } from './SocialGroupResolver.js';
 import { computeTargetStatus, resolveLastActivityAt, isExemptFromExpiry } from './shared/StatusRules.js';
@@ -3870,6 +3871,13 @@ export class FamilyGraph implements FamilyGraphInterface {
     const existing = this.query('SELECT id FROM nodes WHERE name = ?', [personName]);
     let personId: string;
     if (existing.length === 0) {
+      // 🔴 批2b（ADR-020 修订）：新建 person 必须带「显式介绍」证据 —— 与 integrateFromEntity
+      //   共用同一判据（本方法的 rawInput 参数正是为此存在）。既有人物走下方原分支，行为不变。
+      //   原实现此处无任何判据，`extractRelations` 的纯提及模式（「和张中山开会」）即可建档。
+      if (!this._hasExplicitPersonIntro(rawInput, personName)) {
+        details.push(`跳过未证实人名: ${personName}`);
+        return { nodes_created: 0, edges_created: 0, details };
+      }
       personId = uid();
       await this.addNode({ id: personId, type: 'person', name: personName });
       nodesCreated++;

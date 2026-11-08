@@ -14,6 +14,10 @@ import {
   verifyAdmissions,
   EvidenceHeaderGate,
   ENTITY_EVIDENCE_INSTRUCTION,
+  findIntroEvidence,
+  extractIntroducedPersons,
+  admitDeterministic,
+  admitModelFromReply,
 } from '../entity-admission.js';
 
 describe('parseEntityEvidence · 字段边界解析', () => {
@@ -136,5 +140,87 @@ describe('协议指令', () => {
     expect(ENTITY_EVIDENCE_INSTRUCTION).toContain('entity: 名称|类型|证据原文');
     expect(ENTITY_EVIDENCE_INSTRUCTION).toContain('---');
     expect(ENTITY_EVIDENCE_INSTRUCTION).toContain('不得改写');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// 批2b（ADR-020 修订）：确定性取证 —— 判据单一真源
+// ════════════════════════════════════════════════════════════════════
+describe('findIntroEvidence · 给定名字找原文证据', () => {
+  it('显式介绍 → 返回窗口原文（消息的连续子串）', () => {
+    const msg = '我朋友小明，在深圳上班';
+    const ev = findIntroEvidence(msg, '小明');
+    expect(ev).not.toBeNull();
+    expect(msg.includes(ev!)).toBe(true);
+    expect(ev!).toContain('小明');
+  });
+
+  it('亲属称谓也是介绍线索（妈妈今天累了）', () => {
+    expect(findIntroEvidence('妈妈今天累了', '妈妈')).not.toBeNull();
+  });
+
+  it('无任何线索的滑窗碎片 → null', () => {
+    expect(findIntroEvidence('全芬倒在地上', '全芬倒')).toBeNull();
+    expect(findIntroEvidence('水乳交融的夜晚', '水乳交')).toBeNull();
+  });
+
+  it('首次出现无线索、后续出现有线索 → 仍返回证据（遍历全部出现位置）', () => {
+    const msg = '全芬倒在地上。对了，我朋友全芬倒其实是同事';
+    expect(findIntroEvidence(msg, '全芬倒')).not.toBeNull();
+  });
+});
+
+describe('extractIntroducedPersons · 确定性发现', () => {
+  it('她叫林小雅 → 名字与证据', () => {
+    const [e] = extractIntroducedPersons('她叫林小雅');
+    expect(e.name).toBe('林小雅');
+    expect(e.evidence).toBe('叫林小雅');
+    expect(e.type).toBe('person');
+  });
+
+  it('这是我同事罗珍思 / 林小雅是我的同事 / 张老师', () => {
+    expect(extractIntroducedPersons('这是我同事罗珍思').map(e => e.name)).toEqual(['罗珍思']);
+    expect(extractIntroducedPersons('林小雅是我的同事').map(e => e.name)).toEqual(['林小雅']);
+    expect(extractIntroducedPersons('张老师今天没来').map(e => e.name)).toEqual(['张老师']);
+  });
+
+  it('非姓氏名也放行（她叫诗雨）', () => {
+    expect(extractIntroducedPersons('她叫诗雨').map(e => e.name)).toEqual(['诗雨']);
+  });
+
+  it('我叫X 是说话人自述，不产生新实体', () => {
+    expect(extractIntroducedPersons('我叫林小雅')).toEqual([]);
+  });
+
+  it('普通句子不误判（今天是我的生日 / 全芬倒在地上）', () => {
+    expect(extractIntroducedPersons('今天是我的生日')).toEqual([]);
+    expect(extractIntroducedPersons('全芬倒在地上')).toEqual([]);
+  });
+
+  it('所有发现的证据都通过同一道硬闸门（证据=原文子串）', () => {
+    const msg = '她叫林小雅，这是我同事罗珍思';
+    const list = admitDeterministic(msg);
+    expect(list.length).toBeGreaterThanOrEqual(2);
+    for (const a of list) {
+      expect(a.admitted).toBe(true);
+      expect(msg.includes(a.evidence)).toBe(true);
+    }
+  });
+});
+
+describe('admitModelFromReply · 主回复头块（可选增强）', () => {
+  it('带头 → 剥离正文并按原文证据准入', () => {
+    const reply = 'entity: 安琪|person|她叫安琪\n---\n好啊。';
+    const r = admitModelFromReply(reply, '她叫安琪');
+    expect(r.present).toBe(true);
+    expect(r.body).toBe('好啊。');
+    expect(r.admitted.map(a => a.name)).toEqual(['安琪']);
+  });
+
+  it('无头 → 正文原样返回、零准入', () => {
+    const r = admitModelFromReply('今天天气不错。', '她叫安琪');
+    expect(r.present).toBe(false);
+    expect(r.body).toBe('今天天气不错。');
+    expect(r.admitted).toEqual([]);
   });
 });

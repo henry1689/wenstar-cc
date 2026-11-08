@@ -9,6 +9,7 @@
  *   - 后续对话提到同一个人时，不断追加补充。
  */
 import { FAMILY_GRAPH_MIGRATION } from '../../config/family-graph-migration.js';
+import { findIntroEvidence } from '../../m1/entity-admission.js';
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
 
 /** 家庭关系词（精确映射）— 非家庭的统统归为"认识的人" */
@@ -334,6 +335,13 @@ export function storeRelations(sqlite: any, relations: DetectedRelationship[], s
         continue; // 跳过下方的"我"边——relatedTo 优先为人物之间建立关系
       }
 
+      // 🔴 批2b（ADR-020 修订）：未证实的新人名不建档 —— 与 FamilyGraph 写入闸门共用
+      //   findIntroEvidence 同一判据。已入库人物照常更新关系；只有「从未入库且无显式介绍
+      //   证据」的名字被跳过（原实现对纯提及也建档，与批1「未证实不入库」原则不一致）。
+      const _known = sqlite.queryAll('SELECT id FROM entities WHERE name = ? AND type = ?', [rel.personName, 'person']);
+      if (_known.length === 0 && findIntroEvidence(sourceMessage, rel.personName) === null) {
+        continue;
+      }
       // 保证实体存在
               // (FG-迁移) 双写主库
         if (familyGraph && FAMILY_GRAPH_MIGRATION.writeMode !== 'shadow') {

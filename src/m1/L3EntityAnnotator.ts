@@ -15,6 +15,7 @@ import type {
   L3AnnotationResult,
   SelfModelV1,
 } from './types/dna.js';
+import { extractIntroducedPersons } from './entity-admission.js';
 
 // ──────────────────────────────────────────────
 // 实体规则
@@ -350,13 +351,29 @@ export class L3EntityAnnotator {
     }
     const fullContext = `${text} ${context}`;
 
-    const entityGenes: EntityGene[] = entities.map((entity) => ({
-      name: entity.name,
-      type: entity.type,
-      allele: entity.allele,
-      phenotype: this.determinePhenotype(entity.name, entity.type, fullContext, selfModel),
-      knowledge_type: this.determineKnowledgeType(entity.type, entity.name),
-    }));
+    // 🔴 批2b（ADR-020 修订）：确定性取证 —— 被显式介绍的人进入 entity_genes，
+    //   本轮的角色判定 / M4 / FG 写入 / 记忆检索即可见（原实现这里只有 FMM 词典 + FG 已知名单）。
+    //   证据随基因一起携带：下游 FG 闸门与审计追溯共用同一个原文子串。
+    const _intro = extractIntroducedPersons(text);
+    const _introEvidence = new Map(_intro.map(e => [e.name, e.evidence]));
+    const _knownNames = new Set(entities.map(e => e.name));
+    for (const e of _intro) {
+      if (_knownNames.has(e.name)) continue;
+      _knownNames.add(e.name);
+      entities.push({ name: e.name, type: 'person', allele: e.name } as any);
+    }
+
+    const entityGenes: EntityGene[] = entities.map((entity) => {
+      const _ev = _introEvidence.get(entity.name);
+      return {
+        name: entity.name,
+        type: entity.type,
+        allele: entity.allele,
+        phenotype: this.determinePhenotype(entity.name, entity.type, fullContext, selfModel),
+        knowledge_type: this.determineKnowledgeType(entity.type, entity.name),
+        ...(_ev ? { evidence: _ev, admission: 'deterministic' as const } : {}),
+      };
+    });
 
     return { entity_genes: entityGenes };
   }

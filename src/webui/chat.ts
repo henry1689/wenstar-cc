@@ -3259,30 +3259,26 @@ if (_meetingExited) {
     }
 }
 
-    // 🔴 2026-11-08 实体准入（批2，ADR-020）：主回复头部即取证块 —— 先剥离正文，
-    //   再用「证据必须是用户消息连续子串」硬校验；**只有 admitted 的实体**进入 entity_genes，
-    //   下游持久化 / FG 写入随之只看到准入结果。无头/解析失败 = 零准入，绝不阻断回复。
+    // 🔴 2026-11-08 实体准入（批2b，ADR-020 修订）：主回复头块 = **可选增强**（实测合规率 0/4）；
+    //   确定性取证已在 L3 阶段完成。这里只保留被动支持：若回复带头则剥离正文 + 同一道硬闸门校验。
+    //   无头/解析失败 = 零准入，绝不阻断回复。
     try {
-      const { parseEntityEvidence, verifyAdmissions, recordAdmissionTurn } = await import('../m1/entity-admission.js');
-      const _parsed = parseEntityEvidence(reply);
-      if (_parsed.present) {
-        reply = _parsed.body;
-        const _admissions = verifyAdmissions(_parsed.entities, message);
-        const _admitted = _admissions.filter(a => a.admitted);
-        if (_admitted.length > 0) {
-          const _names = new Set(dna.entity_genes.map((g: any) => g.name));
-          for (const a of _admitted) {
-            if (_names.has(a.name)) continue;
-            _names.add(a.name);
-            dna.entity_genes.push({
-              name: a.name, type: a.type, allele: a.name, phenotype: 'neutral',
-              knowledge_type: 'private', evidence: a.evidence,
-            } as any);
-          }
+      const { admitModelFromReply, recordAdmissionTurn } = await import('../m1/entity-admission.js');
+      const _adm = admitModelFromReply(reply, message);
+      if (_adm.present) {
+        reply = _adm.body;
+        const _names = new Set(dna.entity_genes.map((g: any) => g.name));
+        for (const a of _adm.admitted) {
+          if (_names.has(a.name)) continue;
+          _names.add(a.name);
+          dna.entity_genes.push({
+            name: a.name, type: a.type, allele: a.name, phenotype: 'neutral',
+            knowledge_type: 'private', evidence: a.evidence, admission: 'model',
+          } as any);
         }
-        recordAdmissionTurn(true, _parsed.malformed, _admitted.length, _admissions.length - _admitted.length);
-        console.log('[EntityAdmission] admitted=' + (_admitted.map(a => a.name).join(',') || '∅') +
-          ' rejected=' + (_admissions.length - _admitted.length) + ' malformed=' + _parsed.malformed);
+        recordAdmissionTurn(true, _adm.malformed, _adm.admitted.length, _adm.rejected);
+        console.log('[EntityAdmission] admitted=' + (_adm.admitted.map(a => a.name).join(',') || '∅') +
+          ' rejected=' + _adm.rejected + ' malformed=' + _adm.malformed);
       } else {
         recordAdmissionTurn(false, 0, 0, 0);
       }

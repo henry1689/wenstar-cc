@@ -152,6 +152,144 @@ export function verifyAdmissions(entities: RawEntity[], message: string): Entity
   });
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 确定性取证（2026-11-08 批2b / ADR-020 修订）
+// ════════════════════════════════════════════════════════════════════
+// 背景：模型对取证头协议的实测合规率 0/4（assembler 任务块 / 独立 system 消息 /
+//   用户轮前缀三种注入方式全部无效）。合法新实体的准入不能依赖模型的格式服从性，
+//   因此把「显式介绍」这一确定性信号作为**主准入来源**：
+//   · 发现：extractIntroducedPersons —— 规则命中处就是证据，证据恒为原文连续子串；
+//   · 校验：仍走 verifyAdmissions 同一道硬闸门（单一闸门，不新增第二套判据）；
+//   · 给定名字找证据：findIntroEvidence —— FG 写入判据与发现侧共用它。
+
+/** 介绍线索（单一真源）：介绍动词 + 社会角色 + 亲属称谓 */
+export const INTRO_CUES: readonly string[] = [
+  '叫', '名叫', '叫做', '自称', '介绍', '这是',
+  '朋友', '同事', '同学', '老师', '医生', '先生', '女士',
+  '老板', '领导', '客户', '下属', '部下', '合伙人', '邻居', '室友', '顾问', '秘书', '助理',
+  '妈妈', '母亲', '爸爸', '父亲', '爷爷', '奶奶', '外公', '外婆',
+  '哥哥', '弟弟', '姐姐', '妹妹', '阿姨', '叔叔', '舅舅', '姑姑',
+  '老公', '老婆', '丈夫', '妻子', '儿子', '女儿',
+];
+
+/** 证据窗口半径：线索必须落在名字 ±10 字内（与批1 FG 闸门口径一致） */
+const INTRO_WINDOW = 10;
+
+/**
+ * 给定名字，返回其「显式介绍」证据窗口原文；无证据返回 null。
+ *
+ * 遍历全部出现位置（原实现只查首次出现，首次无线索而后续有线索时会漏判）。
+ * 返回的窗口是消息的连续子串，可直接作为 verifyAdmission 的证据。
+ */
+export function findIntroEvidence(text: string, name: string): string | null {
+  const t = text ?? '';
+  const n = (name ?? '').trim();
+  if (!t || !n) return null;
+  let from = 0;
+  for (;;) {
+    const idx = t.indexOf(n, from);
+    if (idx < 0) return null;
+    const win = t.slice(Math.max(0, idx - INTRO_WINDOW), Math.min(t.length, idx + n.length + INTRO_WINDOW));
+    if (INTRO_CUES.some(c => win.includes(c))) return win;
+    from = idx + n.length;
+  }
+}
+
+/** 非人名/泛指词（结构判据：代词、指代、纯关系词不可能是一个人的名字） */
+const NON_PERSON_WORDS = new Set([
+  '我', '你', '您', '他', '她', '它', '我们', '你们', '他们', '她们', '大家', '有人', '某人', '自己',
+  '什么', '这个', '那个', '这里', '那里', '现在', '今天', '明天', '昨天', '刚才', '那边', '这边',
+  '朋友', '同事', '同学', '老师', '医生', '先生', '女士', '老板', '领导', '客户', '下属', '部下',
+  '合伙人', '邻居', '室友', '顾问', '秘书', '助理',
+  '妈妈', '爸爸', '父亲', '母亲', '儿子', '女儿', '孩子', '老婆', '老公', '丈夫', '妻子',
+  '哥哥', '弟弟', '姐姐', '妹妹', '阿姨', '叔叔', '舅舅', '姑姑', '爷爷', '奶奶', '外公', '外婆',
+]);
+
+/** 名字的基本合法性（结构判据，不是词表枚举） */
+function isLikelyPersonName(name: string): boolean {
+  if (!name || name.length < 2 || name.length > 4) return false;
+  if (!/^[一-龥]+$/.test(name)) return false;
+  if (NON_PERSON_WORDS.has(name)) return false;
+  if ('他她它你您我'.includes(name[0])) return false;
+  if (name.endsWith('们')) return false;
+  return true;
+}
+
+/**
+ * 发现侧规则：每条正则的 group 是被介绍的人名，整体匹配 m[0] 就是证据。
+ * 顺序无依赖；同一名字只取首次命中。
+ */
+const INTRO_PATTERNS: ReadonlyArray<{ re: RegExp; group: number; whole?: boolean }> = [
+  // 她叫林小雅 / 有个女孩叫诗雨（排除「我叫X」——那是说话人自述，不是新实体）
+  { re: /(?<!我)(?:叫|名叫|叫做)([一-龥]{2,4})/g, group: 1 },
+  // 林小雅是我的同事 / 老王是我朋友（关系词必须是已知称谓，防「今天是我的生日」）
+  { re: /([一-龥]{2,3})是我的?([一-龥]{2,4})/g, group: 1 },
+  // 这是我同事罗珍思
+  { re: /这是(?:我的?)?(?:朋友|同事|同学|老师|老板|领导|客户|下属|部下|合伙人|邻居|医生|先生|女士|室友)([一-龥]{2,4})/g, group: 1 },
+  // 张老师 / 李医生 / 王阿姨（姓氏+称谓，整段即名字）
+  { re: /([一-龥])(?:老师|医生|先生|女士|阿姨|叔叔|师傅)/g, group: 0, whole: true },
+];
+
+/** 关系词（用于校验「X 是我的 Y」中的 Y 确实是称谓） */
+const RELATION_CUES = new Set(INTRO_CUES.filter(c => c.length >= 2 || c === '叫'));
+
+/**
+ * 从用户消息中提取**被显式介绍的人**（确定性，零 LLM）。
+ * evidence 一律取正则整体匹配 m[0] —— 由构造保证是消息的连续子串。
+ */
+export function extractIntroducedPersons(text: string): RawEntity[] {
+  const t = text ?? '';
+  if (!t) return [];
+  const out: RawEntity[] = [];
+  const seen = new Set<string>();
+  for (const p of INTRO_PATTERNS) {
+    // 第三条规则要额外确认第二组是称谓词
+    p.re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = p.re.exec(t)) !== null) {
+      let name: string;
+      if (p.whole) {
+        name = m[0];
+      } else {
+        name = m[p.group] ?? '';
+        // 「X 是我的 Y」：Y 必须是称谓，否则是普通句子（今天是我的生日）
+        if (p.re.source.includes('是我的') && !RELATION_CUES.has(m[2] ?? '')) continue;
+      }
+      name = name.trim();
+      if (!name || seen.has(name) || !isLikelyPersonName(name)) continue;
+      seen.add(name);
+      out.push({ name, type: 'person', evidence: m[0].trim() });
+    }
+  }
+  return out;
+}
+
+/** 确定性准入：发现 → 同一道硬闸门校验 */
+export function admitDeterministic(text: string): EntityAdmission[] {
+  return verifyAdmissions(extractIntroducedPersons(text), text ?? '');
+}
+
+/** 主回复取证头的准入结果（正文 + 准入/拒绝统计） */
+export interface ReplyAdmission {
+  body: string;
+  present: boolean;
+  malformed: number;
+  admitted: EntityAdmission[];
+  rejected: number;
+}
+
+/**
+ * 解析并校验主回复头块 —— chat.ts 的唯一调用口。
+ * 无头 / 解析失败 ⇒ present=false、正文原样返回（绝不阻断回复）。
+ */
+export function admitModelFromReply(reply: string, message: string): ReplyAdmission {
+  const parsed = parseEntityEvidence(reply ?? '');
+  if (!parsed.present) return { body: reply ?? '', present: false, malformed: 0, admitted: [], rejected: 0 };
+  const all = verifyAdmissions(parsed.entities, message ?? '');
+  const admitted = all.filter(a => a.admitted);
+  return { body: parsed.body, present: true, malformed: parsed.malformed, admitted, rejected: all.length - admitted.length };
+}
+
 /** 协议质量计数（零依赖、进程内累计；供日志/运维观察协议缺失率） */
 export const admissionStats = {
   turns: 0,

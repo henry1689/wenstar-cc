@@ -47,6 +47,23 @@ describe('L3EntityAnnotator — 实体提取', () => {
     expect(persons, 'M1 不再从裸文本猜测未登记人名').toEqual([]);
   });
 
+  // 🔴 批2b（ADR-020 修订）：显式介绍出来的人由确定性取证放行，且证据随基因入库。
+  it('显式介绍的新人名进入 entity_genes 并携带原文证据', () => {
+    const annotator = new L3EntityAnnotator();
+    const r = annotator.annotate('她叫林小雅，是我以前同事', '', DEFAULT_SELF);
+    const gene = r.entity_genes.find((e) => e.name === '林小雅');
+    expect(gene).toBeDefined();
+    expect(gene?.type).toBe('person');
+    expect(gene?.admission).toBe('deterministic');
+    expect(gene?.evidence && '她叫林小雅，是我以前同事'.includes(gene.evidence)).toBe(true);
+  });
+
+  it('纯提及仍不建 person 实体（与批1 闸门一致）', () => {
+    const annotator = new L3EntityAnnotator();
+    const r = annotator.annotate('今天熊梓铭来找我', '', DEFAULT_SELF);
+    expect(r.entity_genes.some((e) => e.name === '熊梓铭')).toBe(false);
+  });
+
   it('应提取出自我实体', () => {
     const annotator = new L3EntityAnnotator();
     const result = annotator.annotate('我觉得很难过', '', DEFAULT_SELF);

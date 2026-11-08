@@ -130,6 +130,13 @@ export interface EntityGene {
   phenotype: PhenotypeLabel;
   /** 知识源类型 */
   knowledge_type: 'private' | 'family' | 'world';
+  /**
+   * 🆕 批2b（ADR-020 修订）：准入证据 —— 该实体名在用户消息中的**原文连续子串**。
+   * 只在经准入闸门写入的实体上出现；FG 写入判据与审计追溯共用它。
+   */
+  evidence?: string;
+  /** 🆕 批2b：准入来源 —— deterministic=确定性显式介绍取证 / model=主回复取证头 */
+  admission?: 'deterministic' | 'model';
 }
 
 export type EntityType = 'person' | 'place' | 'event' | 'emotion' | 'object' | 'self';
