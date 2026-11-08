@@ -603,3 +603,60 @@ describe('P1-C-1 · detectInternalConceptEcho 只检测不削字', () => {
     expect(() => auditReplyExit(undefined as unknown as string, 'stream')).not.toThrow();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// 2026-11-08 · 独处态回程边 RETURN_YUYAO（ADR-018）
+//
+// 事故：`everHadSeats` 只被 WAKE 置真、全仓无复位路径 ⇒ 第一次散会后玉瑶永久静默，
+// 重启也无效。本组测试锁定「状态机必须存在离开边」，而不只是「某处调用了复位」。
+// ═══════════════════════════════════════════════════════════════
+describe('RETURN_YUYAO · 独处态可逆', () => {
+  const seed = (): SessionState => createSessionState(1000);
+  const wake = (s: SessionState) =>
+    reduce(s, { type: 'WAKE', targets: [{ uuid: 'u1', name: '徐诗雨', category: 'A' }], now: 2000 });
+
+  it('三态往返：yuyao → meeting → alone → yuyao', () => {
+    let s = seed();
+    expect(sessionMode(s)).toBe('yuyao');
+    s = wake(s);
+    expect(sessionMode(s)).toBe('meeting');
+    s = reduce(s, { type: 'LEAVE', now: 3000 });
+    expect(sessionMode(s)).toBe('alone');
+    s = reduce(s, { type: 'RETURN_YUYAO', now: 4000 });
+    expect(sessionMode(s)).toBe('yuyao');
+    expect(s.everHadSeats).toBe(false);
+    expect(s.aloneNotified).toBe(false);
+  });
+
+  it('非空场拒绝：会晤中直接 RETURN 不生效（必须先 LEAVE）', () => {
+    const meeting = wake(seed());
+    const out = reduce(meeting, { type: 'RETURN_YUYAO', now: 3000 });
+    expect(out).toBe(meeting);            // 同一引用 = 不操作
+  });
+
+  it('玉瑶态幂等：没有独处相位时 RETURN 为 no-op', () => {
+    const s = seed();
+    expect(reduce(s, { type: 'RETURN_YUYAO', now: 2000 })).toBe(s);
+  });
+
+  it('回程后再次散会 ⇒ 重新进入独处并重置提示标记', () => {
+    let s = wake(seed());
+    s = reduce(s, { type: 'LEAVE', now: 3000 });
+    s = reduce(s, { type: 'ALONE_ACK', now: 3100 });
+    expect(s.aloneNotified).toBe(true);
+    s = reduce(s, { type: 'RETURN_YUYAO', now: 4000 });
+    expect(sessionMode(s)).toBe('yuyao');
+    s = wake(s);
+    s = reduce(s, { type: 'LEAVE', now: 5000 });
+    expect(sessionMode(s)).toBe('alone');
+    expect(s.aloneNotified).toBe(false);
+  });
+
+  it('序列化/反序列化后回程结果保持玉瑶态（重启不复活独处）', () => {
+    let s = wake(seed());
+    s = reduce(s, { type: 'LEAVE', now: 3000 });
+    s = reduce(s, { type: 'RETURN_YUYAO', now: 4000 });
+    const back = deserializeState(serializeState(s), 5000)!;
+    expect(sessionMode(back)).toBe('yuyao');
+  });
+});

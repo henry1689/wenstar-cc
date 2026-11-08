@@ -510,12 +510,15 @@ export class EntityMeeting {
       if (_parts.length < 2) return _exitVerb.test(msg) || _toYuyao.test(msg);
       return _parts.some(p => _exitVerb.test(p)) && _parts.some(p => _toYuyao.test(p) || /(?:玉瑶|瑶瑶|瑶儿)/.test(p));
     })();
-    if (
-      _exit1 || _exitTail || _exitWithYuyao
-      || /^(?:切回|回到|换回|变回)\s*(?:玉瑶|瑶瑶|瑶儿)\s*$/.test(msg)
-      || /^(?:和|跟|找|叫|让)?\s*(?:玉瑶|瑶瑶|瑶儿)\s*(?:聊聊|谈谈|说说话|聊一下|聊天)?\s*$/.test(msg)
-    ) {
-      return { kind: 'exit', targets: [] };
+    // 🔴 2026-11-08：exit 的**去向**必须随意图一起给出（ADR-018）。
+    //   原先两条玉瑶专属正则内联在条件里，上层想知道「是不是回玉瑶」只能另写一份，
+    //   违反不变量 #7。现提取为具名常量：同一份判据既决定「是不是 exit」，
+    //   也决定「exit 之后去哪」——判据单源，杜绝两处漂移。
+    const _yuyaoExitBare = /^(?:切回|回到|换回|变回)\s*(?:玉瑶|瑶瑶|瑶儿)\s*$/.test(msg);
+    const _yuyaoExitCall = /^(?:和|跟|找|叫|让)?\s*(?:玉瑶|瑶瑶|瑶儿)\s*(?:聊聊|谈谈|说说话|聊一下|聊天)?\s*$/.test(msg);
+    const _toYuyao = _exitWithYuyao || _yuyaoExitBare || _yuyaoExitCall;
+    if (_exit1 || _exitTail || _toYuyao) {
+      return { kind: 'exit', targets: [], toYuyao: _toYuyao };
     }
 
     if (!_withAliases || _withAliases.length === 0) return { kind: 'normal', targets: [] };

@@ -1261,6 +1261,13 @@ export async function processChat(
         let _exitUuid: string | null;
         _exitUuid = _gs!.getState().speakerUuid;
         _gs!.dispatch({ type: 'LEAVE', now: Date.now() });
+        // 🔴 2026-11-08：明确「回玉瑶」的结束语**不落在独处相位** —— LEAVE 结束会晤后立即回程。
+        //   通用结束语（散会/再见）没有去向，保持独处（白皮书 §2.5）。顺序不可颠倒：
+        //   RETURN_YUYAO 在 participants 非空时拒绝执行，必须等 LEAVE 把席位清空。
+        if (intent.toYuyao) {
+          _gs!.dispatch({ type: 'RETURN_YUYAO', now: Date.now() });
+          console.log('[GroupSession] 回玉瑶私聊（会晤结束，不进入独处态）');
+        }
         await _em.endMeetingSideEffects();   // 纪要生成 + 关门卫 + 清轮次
         console.log('[GroupSession] 会晤结束' + (_exitUuid ? '（主发言 ' + (_gsSpeakerName || _exitUuid) + '）' : ''));
         // 🔴 户籍管理法（第九条 搜索闸门·收口）: 退出会晤时清除会话实体 UUID，
@@ -3205,7 +3212,7 @@ if (_meetingExited) {
       try {
         const _gsState = ctx._groupSession?.getState();
         if (_gsState && _gsState.aloneNotified !== true) {
-          reply = '（人都走了，房间里安静了下来。）';
+          reply = '（人都走了，房间里安静了下来。想找玉瑶，喊她一声。）';
           ctx._groupSession!.dispatch({ type: 'ALONE_ACK', now: Date.now() });
           console.log('[SoloMode] 独处过渡提示已发出（仅首次）');
         } else {

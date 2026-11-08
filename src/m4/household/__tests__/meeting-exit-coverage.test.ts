@@ -97,3 +97,32 @@ describe('[P055 任务2] exit 意图覆盖扩大', () => {
     expect(intent('散会').kind).toBe('exit');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// 2026-11-08 · exit 的「去向」字段 toYuyao（ADR-018）
+//
+// exit 过去同时承载两种去向：散会留在独处 / 唤回玉瑶回私聊。上层无法区分，
+// 只能各写一份正则猜。现在由 detectIntent **同源**给出，本组测试锁死分裂边界。
+// ═══════════════════════════════════════════════════════════════
+describe('[2026-11-08] exit 去向字段 toYuyao', () => {
+  it('🔴 玉瑶专属句式 → exit 且 toYuyao=true', () => {
+    for (const m of ['玉瑶', '回到玉瑶', '找玉瑶', '结束，回玉瑶这边', '和玉瑶聊聊']) {
+      const r = intent(m);
+      expect(r.kind, m).toBe('exit');
+      expect(r.toYuyao, m).toBe(true);
+    }
+  });
+
+  it('🟢 通用结束语 → exit 且不带玉瑶去向（留在独处）', () => {
+    for (const m of ['散会', '再见', '先这样吧', '我先下了', '就聊到这儿']) {
+      const r = intent(m);
+      expect(r.kind, m).toBe('exit');
+      expect(r.toYuyao, m).toBeFalsy();
+    }
+  });
+
+  it('🟢 既有两个陷阱反例仍不判 exit（不因新增去向字段放宽）', () => {
+    expect(intent('今天结束得很晚，玉瑶辛苦了').kind).not.toBe('exit');
+    expect(intent('你结束了吗，玉瑶').kind).not.toBe('exit');
+  });
+});
