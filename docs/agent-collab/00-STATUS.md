@@ -119,6 +119,12 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-08 **✅ P148 实体准入批2b：确定性取证（Claude Code）— `74c6282`**：
+  LLM 取证头实测 0/4（四种注入全试过）⇒ 改为确定性取证：`findIntroEvidence` 单一判据 +
+  `verifyAdmission` 单一闸门，L3 / `integrateFromEntity` / `integrateSocialRelation` / `storeRelations`
+  四个写入点共用；新实体**本轮**即进入 `entity_genes` 并参与 M4/FG/检索。纯提及不再建档（已入库不受影响）。
+  tsc=0；498 例相关测试全绿；实机「她叫祁霜…」→ 基因带证据且同轮建 FG 节点。详见 `active/P148`。
+  待业主处置：FG 观察区两个测试实体「林小雅 / 祁霜」（不自行删除）。
 - 2026-11-06 **🔧 C2：FG自检判据②升级——雷灵叶误报修复（主任务PI）— `8b5e09c` 已推送**：
   - 业主裁定「雷灵叶是对话中已存在实体，没正式录入还预警，系统代码有问题没设计好」——定性设计缺陷成立。
   - 三层根因：①判据②只认顶层description/relation_to_user不认dossier实质档案（雷灵叶completeness=0.46齐全却因顶层未回填被判无档案）；②顶层拿不到=PAE Hook C限流(20次/时)+DeepSeek 402（已付费✅）；③B6对快速晋升结构性误报（evidence晋升即冻结，93≥3×1永久命中）。
