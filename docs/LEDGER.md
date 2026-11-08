@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **批6 归档（实体提取架构收口全系列完成）** —— 文档同步：任务书加「执行状态」表（批1–批6 + 两处偏差）、`FG-结构规范-V1.0` §3.1 更新为「写入前取证、无观察区」、`data-storage-reference` 三处历史口径加删除注记、方案文档状态改为已实施。批1–批6 合计：5 类旁路 + 观察区/离线终审 + 双闸门冗余 + 1271 行存量全部清除；新增确定性取证准入（ADR-020 §6）。详见 §6.20 | 任务书/规范/参考/方案四份文档；全系列 ADR-020/021/022；LEDGER §6.14–§6.20 |
 | 2026-11-08 | **批5 清存量（数据操作，业主确认后执行）** —— 按任务书 §9.2 三条件 + 额外安全项（FG 名单/别名/uuid、`memory_entities`、`memories.entity_genes`、`temporal_events`、`atom_address_timeline`、`black_diamond`/`vault_log`/`memsym_elements`/`conversations.belong_entity_uuid`、`conversations.entity_names`）盘点 `entities` 存量。业主选择「全删」：删除 **1271** 行（person 1069 + object 202）与 **2013** 条 `entity_relations`；`entities` 4129→2858、`entity_relations` 13722→11709，`integrity_check=ok`，重启 HTTP 200。**未动任何 memories / conversations / FG**。详见 §6.19 | 停服窗口执行；整库备份 `D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`；删除行全量备份 `D:\tmp\批5-删除行备份-20261108.json`；盘点清单 `D:\tmp\批5-存量候选-20261108.json` |
 | 2026-11-08 | **批4 清判据（合并双闸门 + 删死导出 + 删滑窗自检）** —— S1 实测：`addNode` 串联的两道 person 闸门中，`EntityWriteGate.checkPersonEntity` 是 `GarbageEntityGuard.checkEntity` 的严格超集（同黑名单/称谓表 + 长度 + 对话残留 + 同 gradeEntity），后者无独有判据 ⇒ 合并为一道并物理删除模块。同时删除 4 个零调用导出与 `detectSlidingWindowJunk` 滑窗自检（判据前提已随滑窗消失，且会误报新准入的合法实体）。**保留 gradeEntity 与 object 通道**（与任务书偏差，理由见 ADR-022 §2）。附带修正 fail-closed 日志输出真名的红线问题。详见 §6.18 与 ADR-022 | `tsc`=0；m4/app/m1 **1154 passed / 1 failed**（grader-non-name-tail 为既有失败）；42 个 V50 噪音词仍逐条被拒；重启后无 `[FG SelfCheck]` 滑窗自检 |
 | 2026-11-08 | **批3 拆观察区（物理删除 candidate 机制）** —— 观察区是「先写入、后判定」的补偿装置：判定所需信息在写入端已丢失。批1 已删产生端、批2b 已把准入前移到写入前，本批物理删除观察区本身：证据累积/晋升、`collectCandidateItems`/`applyJudgments`、candidate 初始化与超期规则、`EntityTriageService`/`EntityQualityJudge` 两个模块及其装配调度。新 person 直接 active；不再有每日离线终审 LLM 调用。生产 candidate 行 = 0，不改存量。详见 §6.17 与 ADR-021 | `tsc`=0；m4/app-entity 测试全绿；`candidate-zone.test` 改退役断言；重启日志无「实体离线终审已装配」；FG 19 active / 12 dormant 不变 |
@@ -708,6 +709,29 @@ FG 人物数不变（19 active / 12 dormant）。
 
 **备份**：`D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`（整库）、
 `D:\tmp\批5-删除行备份-20261108.json`（删除行全量）、`D:\tmp\批5-存量候选-20261108.json`（盘点清单）。
+
+---
+
+### §6.20 2026-11-08 批6 归档（实体提取架构收口 · 全系列完成）
+
+| 批 | 结果 | 提交 |
+|---|---|---|
+| 批1 止源 | 滑窗生成器等 5 类旁路物理删除 | 既有 |
+| 批2 准入 | 取证头契约 + 流式闸门 + 删除 `LLMEntityExtractor` | `0ca77f0` / `4b07f51` |
+| 批2b 时序验证 | **实测偏差**：模型对取证头合规率 0/4 ⇒ 改为确定性取证（ADR-020 §6）；新实体在 L3 进入 `entity_genes` | `74c6282` |
+| 批3 拆观察区 | candidate 机制 + 两个终审模块物理删除 | `b8cf3e5` |
+| 批4 清判据 | 合并双闸门；删 4 个死导出与滑窗自检 | `4977d09` |
+| 批5 清存量 | 业主确认全删：`entities` −1271、`entity_relations` −2013 | `40d974b` |
+| 批6 归档 | 任务书/规范/参考/方案四份文档同步 | 本次 |
+
+**文档同步清单**：
+- `docs/实体提取架构收口任务书-V1.md` — 顶部新增「执行状态」表与两处偏差说明。
+- `docs/FG-结构规范-V1.0.md` §3.1 — 明确观察区已删除、会话内准入改为写入前取证。
+- `docs/data-storage-reference.md` — 三处历史口径（离线终审、滑窗检测、`accumulateCandidateEvidence` 埋点）加删除注记，保留历史记录不篡改。
+- `docs/实体提取架构收口方案-V1.md` — 状态改为「已实施完成」。
+
+**最终形态**：实体准入 = **写入前确定性取证**（显式介绍线索 + 原文证据子串校验）；
+无观察区、无离线终审、无滑窗生成器、无重复闸门。
 
 ---
 

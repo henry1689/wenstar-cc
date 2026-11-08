@@ -476,6 +476,9 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 > 首轮 `void this.runEntityTriage()` 是**浮空 promise**、首轮 compaction/GC 两处 `.catch(() => {})` 静默吞错
 > —— 4 处一并补齐（失败告警 + 非阻塞），与本节不变量一致（失败可见、不静默）。
 >
+> **2026-11-08 批3（ADR-021）**：实体离线终审本身已随 FG 观察区**物理删除** — `runEntityTriage`、
+> 定时器、首轮触发与 `EntityTriageService`/`EntityQualityJudge` 均已移除；本节仅作历史记录。
+>
 > **同批：`DEDUP_SKIP` → 「重复即更新」**（2026-09-20，用户决定；`src/app/knowledge/KnowledgeEngine.ts` + `src/webui/server-knowledge-routes.ts`）：
 > 知识重复提交不再直接拒给（409），而是**更新既有条目**；合并策略采用**追加不覆盖**
 > （纯函数 `mergeDuplicateContent`：新内容为空⇒不变；旧已包含新⇒不重复追加（幂等）；否则旧+分隔线+新）
@@ -533,7 +536,8 @@ rm src/m2/__tests__/write-channel-single-source.test.ts
 `loadFgPersonEntries` 原先把姓氏过滤（防滑窗垃圾）也套在**别名**上 ⇒ 「诗雨」这类无姓氏别名被丢弃
 ⇒ 只写别名的记忆永远匹配不上：实测基因回填只填 **3 条**（修正后应能填 **39 条**）。
 现改为：姓氏过滤只作用于**节点主名**（节点级判断）；别名保留最小防护（非空 / ≠主名 / 长度≥2）。
-⚠️ 姓氏过滤本身抓不到“周末（周是姓氏）”“宿舍（宿也是姓氏）”这类垃圾 —— 那由上游滑窗检测负责（测试注释已说明）。
+⚠️ 姓氏过滤本身抓不到“周末（周是姓氏）”“宿舍（宿也是姓氏）”这类垃圾 —— 原由上游滑窗检测负责
+（滑窗已在批1 物理删除、滑窗自检已在批4 删除；现由写入前取证闸门 + `checkPersonEntity` 承担）。
 
 ### **⑧ roleplay 记忆也回填基因**（2026-09-22，用户决定 A）
 
@@ -724,6 +728,8 @@ fgSummary=341 **batchProfile=0** …` ⇒ 两项缓存均生效；M4 总量从 1
 5. **时间地板**：60s 内只允许一次全量导出（env `FG_FLUSH_MIN_INTERVAL_MS` 可调）；未到间隔则安排延后重试（`deferred` 标记防止 `finally` 误清定时器——此为修复过程中实际引入又修正的 bug）。
 6. **失败保留脏标记**：落盘失败 ⇒ 不清 `_dirty`，下次重试；打错误日志。
 7. **埋点**：`_timed()` 包装 `ensurePersonAliases`/`mergePersonNodes`/`updatePersonProfile`×3/`accumulateCandidateEvidence`；`addNode`/`addEdge` 采用「重命名 + 包装器」（对外签名不变）；名字滑窗扫描单独计时；每轮打印 >300ms 明细；落盘耗时打 `[FamilyGraph] 异步落盘 …MB 用时 …ms`。
+   > 🔴 **2026-11-08 批3（ADR-021）**：其中 `accumulateCandidateEvidence` 与名字滑窗扫描已物理删除，
+   > 本段仅保留历史埋点口径。
 
 **实测证据**：`[FamilyGraph] 异步落盘 42.4MB 用时 431/575/887/2314ms`（均为后台 tick，不再出现在请求关键路径）；5 轮对话仅 3 次落盘（原为每变更一次）。
 
