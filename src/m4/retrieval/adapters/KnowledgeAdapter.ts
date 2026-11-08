@@ -1,13 +1,18 @@
 /**
  * KnowledgeAdapter — 知识库存储域适配器（Foundation V1.0）
  * =========================================================
- * 包装 `ctx.knowledgeBase.search`（KnowledgeEngine.search，FTS5 BM25 + Zvec 向量 + RRF）。
+ * 包装 `ctx.knowledgeBase.search`（KnowledgeEngine.search，FTS5 BM25）。
  *
  * 过滤语义（filterMode='allow-common'）：
- *   知识库是"半开"语义（对齐 retrieval-stage L585-590 现有行为）：
+ *   知识库是"半开"语义（对齐 retrieval-stage 现有行为）：
  *     - 无归属（通用知识）→ 放行（用户既定：公用知识可根据聊天内容提取使用）
  *     - 有归属（当事人知识）→ 必须在白名单内（UUID 法 deny-by-default）
  *   兜底在 runAdapter 由 policeFilterHits('allow-common') 统一执行。
+ *
+ * 🔴 MEM-UNIFY-V1 批2B：
+ *   1. 必须把当前会话实体 UUID 传给引擎 —— 旧实现只传 query/limit，实体过滤全靠兜底；
+ *   2. 签名对齐 M2 `KnowledgeBase.search(keyword, limit, emotionalContext, belongEntityUuid)`。
+ *      旧接口声明成引擎的五参形态，若按该形态传 UUID 会错位落到 interactionType 参数上。
  */
 
 import type { RetrievalAdapter } from '../adapter.js';
@@ -22,13 +27,12 @@ export interface KnowledgeItemLike {
   belong_entity_uuid?: string | null;
 }
 
-/** 知识库数据源接口（兼容 KnowledgeBase.search 签名） */
+/** 知识库数据源接口 —— 与 M2 KnowledgeBase.search 的四参形态一致 */
 export interface KnowledgeSource {
   search(
     keyword: string,
     limit?: number,
     emotionalContext?: { pleasure: number; arousal: number; intimacy: number },
-    interactionType?: string,
     belongEntityUuid?: string,
   ): Promise<KnowledgeItemLike[]>;
 }
@@ -50,9 +54,11 @@ export class KnowledgeAdapter implements RetrievalAdapter {
     const query = ctx.query.trim();
     if (query.length < 2) return [];
     try {
-      // 不传 belongEntityUuid → 引擎层返回全部（含通用），实体过滤由 filterMode='allow-common' 兜底
       const limit = ctx.limit ?? 5;
-      const items = await this.deps.knowledgeBase.search(query, limit);
+      // 🔴 批2B：显式传会话实体 UUID（会晤白名单首实体）；无实体时由引擎内部
+      //   回落 getSessionEntityUuid()，不留「无 UUID ⇒ 不过滤」的入口。
+      const entityUuid = ctx.entityUuids?.[0] || undefined;
+      const items = await this.deps.knowledgeBase.search(query, limit, ctx.perception, entityUuid);
       return items.map((item) => ({
         id: String(item.id),
         domain: 'knowledge' as const,

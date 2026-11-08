@@ -119,6 +119,16 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P158 记忆系统统一 · 批2B 知识与档案 + 归属策略（Claude Code）**：
+  `policyFor` 增加 `ownerMode`、`allowUnowned` 降为派生只读；`buildPolicePolicy` / `SQLiteAdapter` /
+  `UnifiedSearchEngine`×2 / `chat.ts` / `retrieval-stage` 五处手写策略全部收口（守卫清单清空）。
+  知识检索：空关键词返回空、会话 UUID 兜底、FTS 回读 `visible_entity_uuids`/`source_type` 并过滤、
+  `SourceTypePolicy.RETRIEVABLE_WHERE_SQL()` 单源、`document` 归入文件类型；`KnowledgeAdapter` 传 UUID 并对齐四参签名。
+  新增证据层收集器 `src/m4/retrieval/evidence-layer.ts`（档案/作品/记事 owned）+ 扩展注册表补 `WorkAdapter`；
+  删除【本地回复】直出（D7）；memarch 命名空间解析失败 fail-closed（不再回落本体）。
+  验证：`tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖）。**未改数据**。
+  详见 `active/P158`；下一步批3 写入与晋升收口。
+
 - 2026-11-09 **✅ P157 记忆系统统一 · 批2A 召回总线（Claude Code）**：
   新增 `src/m4/recall/recall-bus.ts`（casual/standard/deep/proactive 四模式、砂金/金库/黑钻/对话组层保底、
   单一五级闸门降权排序、`applyRecallFeedback` 单点回写）+ `recall_bus` 配置段；

@@ -99,16 +99,20 @@ export type RecordDomain = 'private' | 'shared';
 export function policyFor(
   domain: RecordDomain,
   visibleUuids: Iterable<string>,
-  opts?: { enforce?: boolean; restrictedSharing?: boolean },
+  opts?: { enforce?: boolean; restrictedSharing?: boolean; ownerMode?: boolean },
 ): PolicePolicy {
   const shared = domain === 'shared';
+  // 🔴 MEM-UNIFY-V1 批2B：私有域的「户主钥匙态」也由本函数产生。
+  //   shared 域恒为可见（无归属=共享）；私有域仅在 ownerMode 时放行无归属历史数据。
+  //   调用方不得再自行拼 allowUnowned —— 该字段自此为派生只读值。
+  const unownedVisible = shared || opts?.ownerMode === true;
+  const enforced = opts?.enforce !== false;
   return {
     visibleUuids: new Set(visibleUuids),
-    // 共享域：无归属 = 共享 ⇒ 行级放行
-    // 私有域：无归属 = 未登记 ⇒ 行级拒绝（仅户主钥匙场景由调用方显式另建策略）
-    allowUnowned: shared,
+    // 派生只读：由域 + 户主态决定（保留字段仅为兼容既有读取方，生产者唯一）
+    allowUnowned: unownedVisible,
     // SQL 级必须与行级同源 —— strict 会排除无归属行，两者不一致就是本函数要消灭的错配
-    searchScope: shared ? 'allow-unowned' : 'strict',
+    searchScope: enforced ? (unownedVisible ? 'allow-unowned' : 'strict') : 'full',
     // 🔴 批2：只有声明支持「户籍域内可见」的表才开启（现仅知识库）
     restrictedSharing: opts?.restrictedSharing === true,
     enforce: opts?.enforce,

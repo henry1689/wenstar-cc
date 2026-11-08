@@ -13,7 +13,7 @@ import type { PerceptionState24 } from '../m3/types/perception.js';
 import { decodePerceptionV40, cosineSimilarity40D } from '../m2/PerceptionVector40DCodec.js';
 import { isPerception40DEnabled } from '../config/perception-40d-config.js';
 import { PERCEPTION_40D_KEYS, type PerceptionV40 } from '../m3/types/perception-40d.js';
-import { buildSqlClause, passes as policePasses } from '../governance/police/UUIDPoliceFilter.js';
+import { buildSqlClause, passes as policePasses, policyFor } from '../governance/police/UUIDPoliceFilter.js';
 
 // ── V12.0 新管线模块 ──
 import { weightedRRF, buildIdToItem, DEFAULT_RRF_CONFIG, type RRFConfig } from './RRFFusion.js';
@@ -201,7 +201,7 @@ export function searchV12(
   let enriched: RankedItem[] = fused.map(f => idToItem.get(f.id)).filter(Boolean) as RankedItem[];
   if (entityUuids.length > 0) {
     const uuidSet = new Set(entityUuids);
-    enriched = enriched.filter(item => policePasses(item.entityUuid, { visibleUuids: uuidSet, allowUnowned: false }));
+    enriched = enriched.filter(item => policePasses(item.entityUuid, policyFor('private', uuidSet)));
   }
 
   // ═══════════ L6 · MMR 多样性去重（L4/L5 预留给 Phase 2/3） ═══════════
@@ -518,7 +518,7 @@ export async function searchV13(
   //   违反 UUID 法 deny-by-default。改用 policePasses（无归属仅在 allowUnowned=true 放行）。
   if (entityUuids.length > 0) {
     const uuidSet = new Set(entityUuids);
-    candidates = candidates.filter(c => policePasses(c.entityUuid, { visibleUuids: uuidSet, allowUnowned: false }));
+    candidates = candidates.filter(c => policePasses(c.entityUuid, policyFor('private', uuidSet)));
     _mark('L6_EntityFilter');
   }
 

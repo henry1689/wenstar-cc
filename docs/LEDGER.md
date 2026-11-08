@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **记忆系统统一 · 批2B 知识与档案 + 归属策略** —— `policyFor` 增加 `ownerMode`，`allowUnowned` 降为派生，五处手写策略全部收口（守卫清单清空）；知识检索空关键词返回空 + 会话 UUID 兜底 + FTS 回读可见名单/来源并过滤；`SourceTypePolicy.RETRIEVABLE_WHERE_SQL()` 单源；新增证据层收集器（档案/作品/记事）+ `WorkAdapter` 扩展注册；删除【本地回复】直出（D7）；memarch 命名空间 fail-closed。详见 §6.26 与 `active/P158` | `tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批2A 召回总线** —— 新增 `src/m4/recall/recall-bus.ts`（四模式/层保底/单一五级闸门/单点反馈）+ `recall_bus` 配置；`retrieval-stage` 三出口接入（casual 不再早退）；**V14 下线（D1）**；黑钻整句 LIKE → 分片 LIKE + 40D；反馈统一 `applyRecallFeedback`。详见 §6.25 与 `active/P157` | `tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批1 表达法收口（MEMORY-LAW-V1）** —— 新增单一法源 `src/m5/prompts/memory-expression-law.ts`（三档/三重奏/憧憬自由/双模式义务/守卫禁令）；10 个运行时提示词文件完成接线；**删除 3 处静态正文黑名单**；旧二元限制措辞扫描 **0 命中**；旧文档 3 份加废止标注；新增 23 项法源回归守卫。详见 §6.24 与 `active/P156` | `tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-08 | **记忆系统统一 · 批0 只读基线探针** —— 只读 aggregate 冻结基线：`memories` 18,706（今日 27 条全部完整编码）；无归属 617（`evt_` 459 / `mem_` 64 / note 94）；重复 987 组/3,160 行（16.9%）；晋升两不沾 665（523 无黑钻行 + 142 removed）；知识库 304（278 共享 / 26 私有 / 72 可检索 / `visible_entity_uuids` 全空）；memarch 17,296 最新 11-04，**25/31 FG UUID 不在 registry**；表达侧旧限制 44 处（chat.ts 16）。`perception_40d` 18,706/18,706 可解码。详见 §6.23 与 `active/P155` | 只读探针 `D:\tmp\mem-batch0-probe.cjs`；证据快照 `docs/agent-collab/active/P155-20261108-记忆系统批0基线.json`；未改代码/数据 |
@@ -847,6 +848,26 @@ FG 人物数不变（19 active / 12 dormant）。
 **验收**：`tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（V15 probe 2、memarch 并行 4、WORLD/SCRIPT/SQL 环境 4、E2E 2）。未改数据。
 
 **遗留**：会晤分支 backref 反馈未收集（批2A-3）；`memarch-runtime` namespace fail-closed 归批2B；`MemoryRetriever` 内部不重复挂闸门（最终片段已由出口总线收口）。
+
+---
+
+### §6.26 2026-11-09 记忆系统统一 · 批2B 知识与档案 + 归属策略单一化（P158）
+
+**目标**：把「无归属能不能看」与「哪些来源可检索」各收敛到一个判定源；补齐知识库 FTS 路的受限共享/来源过滤；落地证据层 owned 收集器。
+
+**交付**：
+- `UUIDPoliceFilter.policyFor` 新增 `ownerMode`，`allowUnowned` 降为派生只读；`buildPolicePolicy` / `SQLiteAdapter._entityUuidClause` / `UnifiedSearchEngine`×2 / `chat.ts` 注入边界 / `retrieval-stage` 作品鉴权全部改调 `policyFor`；`uuid-police-visibility` 的 `KNOWN_HANDWRITTEN` 清空。
+- `KnowledgeEngine.search`：有效 UUID = 显式 ?? `getSessionEntityUuid()`；空关键词返回 `[]`；FTS 回读 `visible_entity_uuids`/`source_type` 并行级判定；熔断降级 LIKE 与 FTS 结果补来源过滤；缓存键用有效 UUID。`weightedSearch` 空关键词返回 `[]`。
+- `SourceTypePolicy.RETRIEVABLE_WHERE_SQL()` 单源 SQL 谓词；`document` 归入文件类型；`FtsSearch` 改用统一谓词。
+- `KnowledgeAdapter` 传 `ctx.entityUuids[0]`，签名对齐 M2 `KnowledgeBase.search` 四参形态。
+- 新增 `src/m4/retrieval/evidence-layer.ts`（FG 档案/作品/记事 owned 收集器）；`createExtendedRegistry` 补 `WorkAdapter`（8→9 域，默认注册表不变）。
+- D7：删除 `KnowledgeContextBuilder` `【本地回复】` 直出分支。
+- `memarch-runtime`：`resolveNamespaceFromMap` 纯函数；解析失败返回 `null`（fail-closed），`memarchRetrieve` 接受 null 返回空。
+- 测试：新增 kb-single-path 11 项、evidence-layer 8 项、memarch-namespace 4 项；更新 adapters / adapters-s6 / uuid-police-visibility。
+
+**验收**：`tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖：V15 probe 2、memarch-v2 4、WORLD/SCRIPT/SQL 4、E2E/HTTP 限流波动）。未改数据。
+
+**遗留**：`search`/`weightedSearch` 打分仍两档（守卫与来源已合并）；证据层 `sweepAllStores` 接线属批4；`server-memarch-bridge-routes.ts` 的 schema 失败为存量。
 
 ---
 

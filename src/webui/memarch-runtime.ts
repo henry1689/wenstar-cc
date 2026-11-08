@@ -165,20 +165,29 @@ export async function initMemarchRuntime(dataDir: string): Promise<boolean> {
 }
 
 /**
- * 把一组实体 uuid 解析成 v2 的命名空间。
+ * 把一组实体 uuid 解析成 v2 的命名空间（纯函数，供测试注入映射）。
  *
- * 规则：按传入顺序取**第一个能在 registry 里命中的** uuid（调用方已按相关性排序），
- * 全部未命中时回落到本体 ns_yuyao。绝不能返回 'default' —— 那个 ns 在 v2 里
- * 没有任何数据，等于召回空。
+ * 规则：按传入顺序取**第一个能在 registry 里命中的** uuid（调用方已按相关性排序）。
+ * 🔴 MEM-UNIFY-V1 批2B：非空 UUID 列表**全部解析不到时返回 null（fail-closed）**——
+ *   旧实现回落本体 ns_yuyao，等于把新实体的召回换成玉瑶的记忆，隔离形同虚设。
+ *   空列表（无活跃实体）仍属本体语义，返回 ns_yuyao。
+ *   绝不能返回 'default' —— 那个 ns 在 v2 里没有任何数据，等于召回空。
  */
-export function resolveNamespace(entityUuids: readonly string[] | undefined): string {
+export function resolveNamespaceFromMap(
+  nsByUuid: ReadonlyMap<string, string> | null | undefined,
+  entityUuids: readonly string[] | undefined,
+): string | null {
   if (!entityUuids || entityUuids.length === 0) return DEFAULT_NAMESPACE;
-  if (!_nsByUuid) return DEFAULT_NAMESPACE;
+  if (!nsByUuid) return null;
   for (const u of entityUuids) {
-    const ns = _nsByUuid.get(u);
+    const ns = nsByUuid.get(u);
     if (ns) return ns;
   }
-  return DEFAULT_NAMESPACE;
+  return null;
+}
+
+export function resolveNamespace(entityUuids: readonly string[] | undefined): string | null {
+  return resolveNamespaceFromMap(_nsByUuid, entityUuids);
 }
 
 /**
@@ -190,9 +199,15 @@ export function resolveNamespace(entityUuids: readonly string[] | undefined): st
  */
 export async function memarchRetrieve(
   query: string,
-  namespace: string,
+  namespace: string | null,
   topK?: number,
 ): Promise<MemarchEvidence[]> {
+  // 🔴 MEM-UNIFY-V1 批2B：命名空间解析失败（新实体未登记 / registry 未就绪）⇒ fail-closed，
+  //   不得回落本体 ns_yuyao，也不得静默查空库。调用点据此得到空证据并继续走其它召回。
+  if (!namespace) {
+    console.warn('[MemArchRuntime] 命名空间未解析，跳过 v2 检索（fail-closed）');
+    return [];
+  }
   if (!_bridge) {
     const ok = await initMemarchRuntime(process.env.WENSTAR_DATA_DIR || join(process.cwd(), 'data'));
     if (!ok || !_bridge) throw new Error(`[MemArchRuntime] bridge 未就绪: ${_initError ?? 'unknown'}`);

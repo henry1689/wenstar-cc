@@ -193,13 +193,10 @@ describe('[户籍三元组] 收敛守卫 — 同一规则不得多处实现（�
    * 本断言的作用：把这份欠账**钉成不增长清单** —— 新增一处即失败，
    * 避免"收敛了一个域、又冒出两个新口子"。
    */
-  const KNOWN_HANDWRITTEN = [
-    'src/m2/SQLiteAdapter.ts',
-    'src/m4/retrieval/adapter.ts', // ← buildPolicePolicy：私有域的第二个策略构造器
-    'src/m4/UnifiedSearchEngine.ts',
-    'src/webui/chat.ts',
-    'src/webui/chat/retrieval-stage.ts',
-  ];
+  // 🔴 MEM-UNIFY-V1 批2B：私有域欠账已全部偿还 —— buildPolicePolicy / SQLiteAdapter /
+  //   UnifiedSearchEngine / chat.ts / retrieval-stage 均改调 policyFor，清单清空。
+  //   此后任何新出现的 allowUnowned 手写点都会直接让本用例失败。
+  const KNOWN_HANDWRITTEN: string[] = [];
 
   it('知识库域**之外**的手写 allowUnowned 不得增多（欠账钉死，只减不增）', () => {
     const found: string[] = [];

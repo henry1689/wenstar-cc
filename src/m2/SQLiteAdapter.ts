@@ -13,7 +13,7 @@ import { SqlJsCompat } from './SqlJsCompat.js';
 import { readFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSqlClause } from '../governance/police/UUIDPoliceFilter.js';
+import { buildSqlClause, policyFor } from '../governance/police/UUIDPoliceFilter.js';
 // 2026-09-11: 启动期 fg_entity_names 派生回填需与写入侧共用同一序列化格式
 import { formatNames } from './EntityNameCodec.js';
 // 🔴 V22(2026-09-23) 锚点/碎片重建需派生 40D 时空标签 —— 复用批次4 已统一的唯一实现。
@@ -1355,20 +1355,17 @@ export class SQLiteAdapter {
    * 🔴 P0-A5 修复: 户主钥匙语义 — entityUuids 为空（户主/无活跃实体）时放行全部，
    *   不再 fail-closed 返回 AND 1=0（否则户主本人记忆永远检索不到，主场景功能退化）。 */
   /** 🔴 Foundation V2.0 (2026-09-17): 支持 searchScope 搜索范围限定 */
-  private _entityUuidClause(entityUuids?: string[], allowUnowned = false, searchScope?: 'strict' | 'allow-unowned' | 'full'): { clause: string; params: string[] } {
+  private _entityUuidClause(entityUuids?: string[], ownerMode = false, searchScope?: 'strict' | 'allow-unowned' | 'full'): { clause: string; params: string[] } {
     // 户主钥匙场景：无活跃实体白名单 → 放行所有（户主是全库最高权限）
     if (!entityUuids || entityUuids.length === 0) {
       return { clause: '', params: [] };
     }
-    
-    // 🔴 Foundation V2.0: 搜索范围限定
-    const scope = searchScope ?? (allowUnowned ? 'allow-unowned' : 'strict');
-    
-    return buildSqlClause({
-      visibleUuids: new Set(entityUuids.filter(Boolean)),
-      allowUnowned,
-      searchScope: scope,
-    });
+
+    // 🔴 MEM-UNIFY-V1 批2B：不再手写 allowUnowned —— 统一由 policyFor 产出。
+    //   searchScope 仍允许调用方显式覆盖（历史语义：strict / allow-unowned / full）。
+    const base = policyFor('private', entityUuids.filter(Boolean), { ownerMode });
+    const scope = searchScope ?? base.searchScope;
+    return buildSqlClause({ ...base, searchScope: scope });
   }
 
   // ─── 读取 ───

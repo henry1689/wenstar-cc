@@ -2299,7 +2299,7 @@ try {
   // 不在白名单的他人实体片段剔除（deny-by-default，最终闸门）。
   if (_meetingEntityName && memoryFragments.length > 0) {
     try {
-      const { screenContext: _screenCtx } = await import('../governance/police/UUIDPoliceFilter.js');
+      const { screenContext: _screenCtx, policyFor } = await import('../governance/police/UUIDPoliceFilter.js');
       const _fgPolice = ctx.m4?.getFamilyGraph?.();
       const _meetingUuidPolice = _fgPolice?.getUUIDByName?.(_meetingEntityName) ?? null;
       if (_meetingUuidPolice) {
@@ -2313,10 +2313,8 @@ try {
         //   改为**逐条调用**：每条单进单出，条数只减不增，条内换行原样保留。
         //   刻意不改 screenContext 的签名 —— 那是治理层公共 API（src/governance/police/），
         //   改它要动全部调用方，收益却只在这里。
-        const _policy = {
-          visibleUuids: new Set([_meetingUuidPolice]),
-          allowUnowned: false,
-        };
+        // 🔴 MEM-UNIFY-V1 批2B：会晤私有域策略统一由 policyFor 产出（deny-by-default，无归属拒）
+        const _policy = policyFor('private', [_meetingUuidPolice], { enforce: true });
         const _resolveName = (name: string): string | null => {
           try { return _fgPolice?.getUUIDByName?.(name) ?? null; } catch { return null; }
         };

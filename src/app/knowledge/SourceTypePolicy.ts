@@ -11,6 +11,11 @@
  *   - 只有 FILE + ANALYSIS 能被检索到
  *   - GARBAGE 在所有检索路径中强制排除
  *   - 此文件是全系统唯一权威——改一处，全局生效
+ *
+ * 🔴 MEM-UNIFY-V1 批2B：SQL 谓词也在此单源产出（`RETRIEVABLE_WHERE_SQL`）。
+ *   此前 FtsSearch 用 `NOT IN (GARBAGE)`、weightedSearch 用 `IN (FILE+ANALYSIS)`，
+ *   两套判据对「未知类型」给出相反答案（库内 `document` 行被 FTS 索引却搜不到），
+ *   现统一为「白名单 + NULL/'' 兼容」一条规则。
  */
 
 /** 用户上传的参考文件 */
@@ -19,6 +24,8 @@ export const FILE_SOURCE_TYPES = new Set([
   'jpg','jpeg','png','gif','bmp','webp','svg',
   'mp4','avi','mov','mkv','webm',
   'architecture','protocol','research','person',
+  // 批2B：历史入库使用了 document 类型（库内 1 条），按文件类收敛，避免 FTS/加权两路结论相反
+  'document',
 ]);
 
 /** 系统自动生成的分析报告 */
@@ -55,6 +62,14 @@ export function RETRIEVABLE_SQL_IN(): string {
 /** 生成 SQL NOT IN 子句用的逗号分隔字符串 */
 export function GARBAGE_SQL_NOT_IN(): string {
   return [...GARBAGE_SOURCE_TYPES].map(s => `'${s}'`).join(',');
+}
+
+/**
+ * 可检索来源的完整 SQL 谓词（**唯一来源策略**，FTS 索引与各检索路径共用）。
+ * 兼容 NULL/'' 旧数据；不在白名单内的类型一律视为不可检索（fail-closed）。
+ */
+export function RETRIEVABLE_WHERE_SQL(column = 'source_type'): string {
+  return `(${column} IN (${RETRIEVABLE_SQL_IN()}) OR ${column} IS NULL OR ${column} = '')`;
 }
 
 /** 判断一个 source_type 是否可入库（add()守卫用） */

@@ -130,7 +130,7 @@ describe('MemoryAdapter', () => {
 });
 
 describe('createExtendedRegistry', () => {
-  it('7 域注册（默认 4 + S6 3）— S2-E1 收编后 knowledge/work 由主链覆盖', async () => {
+  it('8 域注册（默认 5 + S6 3 + work 证据层）— knowledge 仍由主链覆盖', async () => {
     const SQL = await initSqlJs();
     const db = new SQL.Database();
     db.exec(`CREATE TABLE black_diamond (id TEXT PRIMARY KEY); CREATE TABLE works (work_id TEXT PRIMARY KEY); CREATE TABLE vault_log (id TEXT PRIMARY KEY); CREATE TABLE memories (id TEXT PRIMARY KEY); CREATE TABLE conversations (id INTEGER PRIMARY KEY);`);
@@ -146,11 +146,12 @@ describe('createExtendedRegistry', () => {
     //   （conversation/family_graph/memory）= 7
     //   🔴 Phase 2.3 E1（T005）：+1 域 high_calcium_group（高钙路独立 domain 注册，与块路共存）= 8；
     //   默认注册表 4→5（含 high_calcium_group）。
+    //   🔴 MEM-UNIFY-V1 批2B：证据层收集器需要作品域，扩展注册表 +1 work = 9（默认注册表不变）。
     //   ⚠️ 本断言是**清单记录**（登记了哪些域），不是行为规格 —— 域集合被有意扩大时，
     //      清单随之更新且**保留精确计数**（不改成 toBeGreaterThan 之类的宽松形式）。
     //      块域真正的行为规格在 retrieval/__tests__/dialog-group-adapter.test.ts；
     //      高钙路共存/降权行为规格在 retrieval/__tests__/orchestration-e1e2.test.ts。
-    expect(reg.all()).toHaveLength(8);
+    expect(reg.all()).toHaveLength(9);
     // 默认注册表不含 S6 三域，且不含 knowledge/work（收编后）；含 E1 新增的 high_calcium_group
     const def = createDefaultRegistry({ sqlite, knowledgeBase: { search: async () => [] } });
     expect(def.all()).toHaveLength(5);

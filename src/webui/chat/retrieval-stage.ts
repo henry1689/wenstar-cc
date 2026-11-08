@@ -17,7 +17,7 @@ import { resolveReferent } from '../../app/works/ReferentResolver.js';
 import { applyMeetingUuidFilter, verifyMeetingHits } from '../../m4/retrieval/meetingIsolation.js';
 // 🔴 T013 Phase 2 批B（B2）：群聊状态优先取检索主体 UUID
 import { WorkRepository } from '../../app/works/WorkRepository.js';
-import { passes as policePasses, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
+import { passes as policePasses, policyFor, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
 //   与 MeetingWallAdapter 共用本模块，杜绝同构漂移（模块零 import，无 M 层反向依赖）。
 import { classifyMemSymPath, boostElementSource } from '../../m4/retrieval/memsym-path-router.js';
@@ -343,10 +343,8 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           // 会晤场景严格按实体隔离（deny-by-default，仅会晤实体作品）。
           const _wkOwner = (_wk as any).belong_entity_uuid ?? null;
           const _allowed = _isMeeting
-            ? policePasses(_wkOwner, {
-                visibleUuids: new Set(_scopeUuids),
-                allowUnowned: false,   // 会晤：仅会晤实体作品，无归属作品 deny
-              })
+            // 🔴 MEM-UNIFY-V1 批2B：会晤私有域策略由 policyFor 单一产出（strict，无归属作品 deny）
+            ? policePasses(_wkOwner, policyFor('private', _scopeUuids, { enforce: true }))
             : true;  // 户主钥匙：户主拥有全部实体，作品皆可见（会晤私密由隔离墙在会话层管理）
           if (!_allowed) {
             console.log(`[WorkReferent] 越权拦截《${_wk.title}》 scope=${_ref.scope}（${_isMeeting ? '会晤' : '户主'}）`);

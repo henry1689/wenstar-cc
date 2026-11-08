@@ -414,15 +414,9 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
             : `📄 ${k.title}\n${cleanContent}`;
         }).join('\n\n');
 
-        const _sensitiveRe = /高潮|做爱|性交|插入|射精|阴道|阴茎|阴蒂|龟头|鸡巴|骚货|母狗|婊子|操我|干我|舔我|湿了|硬了|赤裸|那一夜|要死了|受不了/;
-        const _isSensitive = _sensitiveRe.test(kbContent);
-
-        if (_kbf && _isSensitive) {
-          const firstTitle = knResults[0].title || '';
-          const firstContent = stripFrontmatter(knResults[0].content || '').substring(0, 2000);
-          knowledgeBaseText = '【本地回复】' + firstTitle + '：\n' + firstContent
-            + (knowledgeBaseText ? '\n\n' + knowledgeBaseText : '');
-        } else if (_kbf && (input.detailLevel === 'detail' || input.detailLevel === 'full')) {
+        // 🔴 MEM-UNIFY-V1 批2B（D7）：删除【本地回复】敏感词直出分支 —— 知识一律交给 LLM 表达，
+        //   不再按内容性质走旁路（实体信息资产中性评判立法）。
+        if (_kbf && (input.detailLevel === 'detail' || input.detailLevel === 'full')) {
           // S2-R5 通用化: 非会晤模式用户问详细/一字不漏 → 分级全文注入
           const _sl2 = input.detailLevel === 'full' ? 1 : _topHits.length;
           for (const k of _topHits.slice(0, _sl2)) {

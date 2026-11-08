@@ -15,7 +15,7 @@
  *   const results = fts.search('关键词', 10);
  */
 import type { SQLiteAdapter } from '../../m2/SQLiteAdapter.js';
-import { GARBAGE_SQL_NOT_IN } from './SourceTypePolicy.js';
+import { RETRIEVABLE_WHERE_SQL } from './SourceTypePolicy.js';
 
 export interface FtsSearchOptions {
   /** BM25 k1 参数 — 控制词频饱和度 (默认 1.5, 范围 0.5-3.0) */
@@ -79,7 +79,7 @@ export class FtsSearch {
     if (this._ready) return;
     try {
       const rows = this.sqlite.queryAll(
-        `SELECT id, title, content, classification FROM knowledge_base WHERE source_type NOT IN (${GARBAGE_SQL_NOT_IN()}) OR source_type IS NULL ORDER BY rowid`
+        `SELECT id, title, content, classification FROM knowledge_base WHERE ${RETRIEVABLE_WHERE_SQL()} ORDER BY rowid`
       );
       if (!rows || rows.length === 0) {
         this._ready = true;

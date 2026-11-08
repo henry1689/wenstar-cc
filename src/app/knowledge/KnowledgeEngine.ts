@@ -623,48 +623,59 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
   }
 
   async function search(keyword: string, limit = 10, emotionalContext?: { pleasure: number; arousal: number; intimacy: number }, interactionType?: string, belongEntityUuid?: string): Promise<KnowledgeItem[]> {
+    // 🔴 MEM-UNIFY-V1 批2B：显式 UUID 缺省回落会话策略（会晤期间由 chat.ts setSessionEntityUuid 设置）。
+    //   任何走本函数的调用点都不再存在「无 UUID ⇒ 不过滤」的入口。
+    const _effUuid = belongEntityUuid ?? getSessionEntityUuid() ?? null;
     const ftsSearch = async (kw: string, lim: number) => {
       if (_ftsInitialized) {
         const ftsResults = await _retrieverBreaker.call(
           async () => _ftsSearch.search(kw, lim * 2),
           async () => {
             const like = '%' + kw + '%';
-            return sqlite.queryAll('SELECT id, title, content, classification FROM knowledge_base WHERE content LIKE ? OR title LIKE ? ORDER BY updated_at DESC LIMIT ?', [like, like, lim * 2]).map((r: any) => ({ id: r.id, title: r.title, content: r.content, classification: r.classification, score: 0.5 }));
+            // 🔴 批2B：熔断降级 LIKE 也必须走来源策略（旧写法无 source_type 约束）
+            return sqlite.queryAll(
+              `SELECT id, title, content, classification FROM knowledge_base WHERE (content LIKE ? OR title LIKE ?) AND (source_type IN (${RETRIEVABLE_SQL_IN()}) OR source_type IS NULL OR source_type = '') ORDER BY updated_at DESC LIMIT ?`,
+              [like, like, lim * 2],
+            ).map((r: any) => ({ id: r.id, title: r.title, content: r.content, classification: r.classification, score: 0.5 }));
           }
         );
         if (ftsResults.length > 0) {
-          // V13: 回读 belong_entity_uuid 供 UUID 过滤
+          // V13/批2B: 回读归属 + 可见名单 + 来源类型 —— 行级判定必须与 SQL 同源。
+          //   旧实现只回读 belong_entity_uuid，导致 FTS 命中绕过「受限共享名单」与来源隔离。
           const euidMap = new Map<string, string | null>();
+          const visMap = new Map<string, string | null>();
+          const srcMap = new Map<string, string | null>();
           const kbRows = sqlite.queryAll(
-            `SELECT id, belong_entity_uuid FROM knowledge_base WHERE id IN (${ftsResults.map(() => '?').join(',')})`,
+            `SELECT id, belong_entity_uuid, visible_entity_uuids, source_type FROM knowledge_base WHERE id IN (${ftsResults.map(() => '?').join(',')})`,
             ftsResults.map((r: any) => r.id)
           );
-          for (const row of kbRows) { euidMap.set((row as any).id, (row as any).belong_entity_uuid || null); }
-          return ftsResults.map((r: any) => ({
+          for (const row of kbRows) {
+            const rr = row as any;
+            euidMap.set(rr.id, rr.belong_entity_uuid || null);
+            visMap.set(rr.id, rr.visible_entity_uuids || null);
+            srcMap.set(rr.id, rr.source_type || null);
+          }
+          const mapped = ftsResults.map((r: any) => ({
             id: r.id, title: r.title, content: r.content,
-            source_type: '', source_name: null, file_size: 0,
+            source_type: srcMap.get(r.id) ?? '', source_name: null, file_size: 0,
             tags: [], created_at: '', updated_at: '',
             locked: false, classification: r.classification || undefined,
             belong_entity_uuid: euidMap.get(r.id) ?? null,
+            visible_entity_uuids: visMap.get(r.id) ?? null,
           } as KnowledgeItem));
+          // 🔴 批2B：行级来源过滤 —— 旧内存索引可能残留垃圾类型（重启重建前的防御）
+          return mapped.filter((r: any) => !r.source_type || _fileSourceWhitelist.has(String(r.source_type).toLowerCase()));
         }
       }
       // FTS5 降级 → LIKE (🛡️ V4.0: 过滤非文件来源)
-      const srcWhitelist = [..._fileSourceWhitelist].map(s => `'${s}'`).join(',');
-      let sql = `SELECT * FROM knowledge_base WHERE (content LIKE ? OR title LIKE ?) AND (source_type IN (${srcWhitelist}) OR source_type IS NULL OR source_type = '')`;
+      // 🔴 批2B: 来源谓词统一由 SourceTypePolicy 产出（RETRIEVABLE_SQL_IN 是同一集合的 SQL 形态）
+      let sql = `SELECT * FROM knowledge_base WHERE (content LIKE ? OR title LIKE ?) AND (source_type IN (${RETRIEVABLE_SQL_IN()}) OR source_type IS NULL OR source_type = '')`;
       const params: any[] = [`%${kw}%`, `%${kw}%`];
       if (interactionType) { sql += ` AND interaction_type = ?`; params.push(interactionType); }
       // V13: entityUuid 过滤 — 精准隔离人物知识
-      // V12.7(批3): allow-common 语义（belong = 该实体 OR 公共无归属）—— "自己的 + 公共"。
-      //
-      // 🔴 户籍三元组(2026-10-07) 批1 收口：原先此处手写 `allowUnowned: true`，但
-      //   `buildSqlClause` **只认 `searchScope`、不认 `allowUnowned`**，于是实际走 strict
-      //   ⇒ `AND belong_entity_uuid IN (?)` ⇒ **无归属的公共知识被整个排除**，
-      //   与下方 L~690 post-filter 的 allow-common 语义自相矛盾（上游已滤掉，下游救不回）。
-      //   改由 `policyFor('shared', …)` 单一决定点同源产出 allowUnowned + searchScope。
-      if (belongEntityUuid) {
-        // 批2：知识库开启受限共享三态（visible_entity_uuids 非空 ⇒ 名单内可见）
-        const _police = buildSqlClause(policyFor('shared', [belongEntityUuid], { restrictedSharing: true }));
+      // 🔴 批2B: 有效 UUID = 显式参数 ?? 会话实体（会晤），SQL 与行级判定同源。
+      if (_effUuid) {
+        const _police = buildSqlClause(policyFor('shared', [_effUuid], { restrictedSharing: true }));
         sql += _police.clause;
         params.push(..._police.params);
       }
@@ -673,13 +684,11 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     };
 
     const trimmed = keyword.trim();
-    if (!trimmed) {
-      const rows = sqlite.queryAll(`SELECT * FROM knowledge_base ORDER BY updated_at DESC LIMIT ?`, [limit]);
-      return rows.map(rowToEntry);
-    }
+    // 🔴 批2B: 空关键词不得全表返回（旧实现直接 SELECT *，绕过 UUID 与来源两道闸）
+    if (!trimmed) return [];
 
-    // 🔴 P2-A11 修复: cacheKey 追加 belongEntityUuid，防跨会晤缓存串扰
-    const cacheKey = trimmed + '_' + (interactionType || '') + '_' + limit + '_' + (belongEntityUuid || 'all');
+    // 🔴 P2-A11 修复: cacheKey 追加有效 UUID，防跨会晤缓存串扰
+    const cacheKey = trimmed + '_' + (interactionType || '') + '_' + limit + '_' + (_effUuid || 'all');
     const cached = await searchCache.get(cacheKey);
     if (cached) { return cached; }
 
@@ -744,9 +753,10 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     //   —— 与 FTS 降级路径的 SQL 子句**并行实现同一条规则**，违反不变量 #7
     //   「禁止同一业务规则在多个地方重复实现」。改为调用唯一判定源的 `passes()`，
     //   语义由 `policyFor('shared', …)` 供给（该域下无归属 = 共享 ⇒ 放行）。
-    if (belongEntityUuid && results.length > 0) {
-      // 批2：第三参数传行的可见集 —— 行级判定与 SQL 子句必须同源，否则「户籍域内可见」会漏
-      const _postPolicy = policyFor('shared', [belongEntityUuid], { restrictedSharing: true });
+    if (_effUuid && results.length > 0) {
+      // 批2B：有效 UUID（显式 ?? 会话实体）与 SQL 子句同源；
+      //   第三参数传行的可见集 —— 否则「户籍域内可见」在 FTS 路会漏。
+      const _postPolicy = policyFor('shared', [_effUuid], { restrictedSharing: true });
       results = results.filter((r: any) =>
         policePasses(r.belong_entity_uuid ?? null, _postPolicy, r.visible_entity_uuids ?? null),
       );
@@ -984,6 +994,9 @@ export function createKnowledgeEngine(sqlite: SQLiteAdapter) {
     belongEntityUuid?: string,  // 🆕 V5.0: 按户籍 TXS-ID 过滤
   ): Promise<Array<KnowledgeItem & { matchScore: number; breakdown: { scene: number; emotion: number; text: number } }>> {
     const trimmed = (keyword || '').trim();
+    // 🔴 MEM-UNIFY-V1 批2B：空关键词不得全表扫描返回 —— ngramSet 为空时旧实现仍按
+    //   场景/情感/印象给全库打分，等于把空查询变成全库枚举。
+    if (!trimmed) return [];
 
     // ── 提取所有 2~3 字中文 ngram (滑动窗口) + 2+ 字母 ASCII 词 ──
     const chars: string[] = [];

@@ -71,7 +71,11 @@ describe('KnowledgeAdapter', () => {
     };
     const ad = new KnowledgeAdapter({ knowledgeBase: kb });
     const hits = await ad.search(makeCtx());
-    expect(kb.search).toHaveBeenCalledWith('星落之城', 5);
+    // 批2B：KnowledgeAdapter 现在传 (query, limit, perception, entityUuid)；
+    //   无活跃实体时第 4 参为 undefined，由引擎内部回落会话策略。
+    expect(kb.search.mock.calls[0].slice(0, 2)).toEqual(['星落之城', 5]);
+    await ad.search(makeCtx({ entityUuids: ['uuid-zm'] }));
+    expect((kb.search.mock.calls[1] as unknown[])[3]).toBe('uuid-zm');
     expect(hits).toHaveLength(2);
     expect(hits[0]).toMatchObject({
       id: 'kb1', domain: 'knowledge', route: 'knowledge',

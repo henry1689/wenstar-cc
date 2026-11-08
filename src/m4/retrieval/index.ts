@@ -10,6 +10,8 @@
  *
  * S6 追加注册：memory / conversation / family_graph（MemoryAdapter 复合 6 路，
  *   为保住 V13 主链原样，S6 才接入注册表）。
+ *
+ * 🔴 MEM-UNIFY-V1 批2B：扩展注册表补齐 WorkAdapter（证据层 owned 收集器使用）。
  */
 
 import { AdapterRegistry } from './adapter.js';
@@ -17,6 +19,7 @@ import type { KnowledgeSource } from './adapters/KnowledgeAdapter.js';
 import { BlackDiamondAdapter } from './adapters/BlackDiamondAdapter.js';
 import { VaultAdapter } from './adapters/VaultAdapter.js';
 import { NoteAdapter } from './adapters/NoteAdapter.js';
+import { WorkAdapter } from './adapters/WorkAdapter.js';
 import { ConversationAdapter } from './adapters/ConversationAdapter.js';
 import { FamilyGraphAdapter, type FamilyGraphSource } from './adapters/FamilyGraphAdapter.js';
 import { MemoryAdapter, type MemoryRetrieverSource } from './adapters/MemoryAdapter.js';
@@ -91,14 +94,16 @@ export function createDefaultRegistry(deps: FoundationDeps): AdapterRegistry {
 }
 
 /**
- * 创建扩展适配器注册表（S3 5 域 + S6 3 域 = 8 域）。
- * 🔴 供未来 SearchOrchestrator 显式启用——接入 conversation/memory/family_graph
+ * 创建扩展适配器注册表（S3 5 域 + S6 3 域 = 8 域；批2B 补 work = 9 域）。
+ * 🔴 供未来 SearchOrchestrator / 证据层收集器显式启用——接入 conversation/memory/family_graph
  *    前必须先停用 V13/V11 主链的对应召回，否则重复注入。
  */
 export function createExtendedRegistry(deps: FoundationDeps): AdapterRegistry {
   const reg = createDefaultRegistry(deps);
   if (deps.sqlite) {
     reg.register(new ConversationAdapter(deps.sqlite));
+    // 🔴 MEM-UNIFY-V1 批2B：作品域接入证据层（owned），默认注册表仍不注册以免与 V13 work 路重复注入
+    reg.register(new WorkAdapter(deps.sqlite));
   }
   if (deps.familyGraph) {
     reg.register(new FamilyGraphAdapter(deps.familyGraph));

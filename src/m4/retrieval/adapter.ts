@@ -12,7 +12,7 @@
 
 import type { SearchDomain, RetrievalRoute, RetrievalContext, RouteHitList, SearchHit } from './types.js';
 import type { PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
-import { passes } from '../../governance/police/UUIDPoliceFilter.js';
+import { passes, policyFor } from '../../governance/police/UUIDPoliceFilter.js';
 
 /**
  * 检索适配器 — 每个存储域实现一个。
@@ -151,27 +151,25 @@ export function buildPolicePolicy(src: PoliceSource): PolicePolicy {
   }
   for (const u of src.activeEntityUuids ?? []) if (u) uuids.add(u);
 
-  // 🔴 Foundation V2.0: 搜索范围限定
-  const searchScope = src.meetingMode ? 'strict' : 'allow-unowned';
-
+  // 🔴 MEM-UNIFY-V1 批2B：本函数不再手写 allowUnowned/searchScope —— 三个状态分支
+  //   全部委托 policyFor('private', …) 产出，杜绝「同一问题两个答案」。
+  //   会晤：strict（无归属拒）。
   if (src.meetingMode) {
-    return { visibleUuids: uuids, allowUnowned: false, searchScope };
+    return policyFor('private', uuids, { enforce: true });
   }
 
   // 🔴 2026-09-16 数据卫生: 普通模式（非会晤）排除所有会晤角色的记录。
-  //    原实现无白名单时 enforce:false（完全不限）→ 会晤实体的记忆被普通对话召回。
-  //    现改为：可见集 = 本体白名单（玉瑶 + 用户本人）；无归属记录仍放行（allowUnowned:true，
-  //    避免误伤历史无归属数据）；其余实体（A/B/G/X 等会晤角色）的记录一律拒绝 ——
-  //    与会晤模式的严格隔离互为对称。
+  //    可见集 = 本体白名单（玉瑶 + 用户本人）+ 活跃实体；无归属记录仍放行（ownerMode，
+  //    避免误伤历史无归属数据）；其余会晤角色的记录一律拒绝 —— 与会晤严格隔离互为对称。
   if (src.householdUuids && src.householdUuids.length > 0) {
     const own = new Set<string>(uuids);
     for (const u of src.householdUuids) if (u) own.add(u);
-    return { visibleUuids: own, allowUnowned: true, enforce: true, searchScope: 'allow-unowned' };
+    return policyFor('private', own, { enforce: true, ownerMode: true });
   }
 
-  // 户主钥匙：无任何白名单 → 最高权限（enforce:false，不限制）；有白名单 → allowUnowned=true
+  // 户主钥匙：无任何白名单 → 最高权限（enforce:false，不限制）；有白名单 → 户主态
   if (uuids.size === 0) {
-    return { visibleUuids: uuids, allowUnowned: true, enforce: false, searchScope: 'full' };
+    return policyFor('private', uuids, { enforce: false, ownerMode: true });
   }
-  return { visibleUuids: uuids, allowUnowned: true, searchScope: 'allow-unowned' };
+  return policyFor('private', uuids, { ownerMode: true });
 }
