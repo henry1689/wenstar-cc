@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **独处态回程边（状态机结构修复）** —— 散会后 `alone` 不可逆、玉瑶永久静默的根因是状态机缺边（`everHadSeats` 只置真），非漏调用。修法：`RETURN_YUYAO` 唯一回程边 + `MessageIntent.toYuyao` 同源去向 + `reset()` 兑现语义 + 删 `clearSession()`；独处首轮文案追加回归提示。详见 §6.14 与 ADR-018 | `cd7bdbe` + `ee59492`；`tsc`=0；测试 105 例全绿（新增 8 例）；实机四步全过（会晤回玉瑶/散会文案/独处喊玉瑶/重启持久）；验证数据 22 对话 + 11 记忆 + 4 组已按精确 id 清除、`integrity_check=ok` |
 | 2026-11-08 | **闲聊延迟基线 + 独处态根因定位 + 测试数据清理** —— ① 20 条普通闲聊实测（全部命中快路径）：首字 p50 **2037ms** / p90 3082ms，装配 p50 **440ms**、端点网络 70~160ms，剩余 ~1.6s 全在模型出首字；业主裁决「反应时效不再讨论」→ 不再推进 ≤1s。② 会晤退出后玉瑶永久静默的**精确根因**已补入 §6.14。③ 清理本次基准测试写入：`conversations` 82 行、`memories` 74 条（27 个纯测试组 72 条 + 混合组按精确 id 删 2 条，**用户真实对话与其 ANCHOR 未动**）、`dialog_groups` 27 组 | 停服窗口执行；`integrity_check=ok`；残留 test 行 **0**；重启后 HTTP 200、`sessionMode=yuyao`；备份 `D:\tmp\bench-cleanup-backup-20261108.json`（删除行全量）+ `D:\tmp\group-session-backup-20261108-0550.json`（会话状态原值） |
 | 2026-11-03 | **全仓测试基线收口至 0 失败（LEDGER #9 关闭）** —— 29 → 13 → **0**。**逐条定位真因后改，没有一条靠放宽断言或加豁免**：① `sql-schema-consistency` 是**守卫预言机盲区**：`MigrationManager` 的相关子查询 `dialog_groups.dialog_group_id` 被**孤立 prepare**（UPDATE 整体含 `${}` 被规则3跳过，只剩纯字符串片段）⇒ 新增 `correlatedContextPrepares()` 用**真实外层上下文**包裹后重试；判据三条齐全（限定引用 + 表真实存在且不在本片段 FROM + 包裹后成功），**列名真错时包裹后依然失败 ⇒ 不掩盖缺陷**，优于逐条白名单登记。② `provider-selection-smoke`(4) + `no-api-smoke`(1) **require `dist/` 编译产物**而 `dist` 根本不存在、生产走 tsx —— 属 **V27批3「移除 dist 测试别名」的漏改遗留**（`vitest.config.ts` 头注释即该裁决），改读 **src 真源**；`no-api` 保持子进程语义，改用 `node ./node_modules/tsx/dist/cli.mjs -e`。③ `smoke` 两条**都是测试过时、生产无缺陷**：探针 `source_type:'text'` **已进 `FILE_SOURCE_TYPES`**（`SourceTypePolicy:18`）⇒ 测了个合法值，改用 `__illegal_probe__` 让探针重新生效；`[201,409]` 同步 **2026-09-20 契约**（`server-knowledge-routes.ts:97-99`：重复提交 409→**200 更新既有条目**）。④ `e2e` Case4/8 是 **`afterEach` 的 ENOTEMPTY 清理失败、不是断言错**（`TEST_DIR` 模块级共用，一次 rm 失败残留流进下个 case）⇒ 用 `fs.rm` 内建 `maxRetries/retryDelay`（专为 EBUSY/ENOTEMPTY/EPERM 而设）。⑤ `candidate-zone` P0-1 实测 **16.8s**（`integrateFromEntity→addEdge` 全组档案重建），全量并发 30s 必超时 ⇒ `{timeout:120000}`，断言未动。⑥ **`memarch-v2`**（今日新建子项目）：3 个 `.test.js` 实为 **TS 语法**（`let db: Database.Database`）⇒ Rollup 在 collect 阶段就炸、**根本看不到断言**，改名 `.ts` + README 同步；**M05 迁移真缺陷** —— 注释写「旧表若不存在则跳过」但**从未实现**，新库执行必抛 `no such table`（验收报告 `+R ✅` 是在**有旧表的旧库**上跑的）⇒ 补 `CREATE TABLE IF NOT EXISTS black_diamond` 兜底：旧库真表存在不建（行为零变化）、新库建 0 行空表使 `INSERT SELECT` 命中 0 行即幂等跳过；纯 SQL **无法**条件访问不存在的表（`WHERE EXISTS(sqlite_master)` 救不了 —— `FROM` 仍在 prepare 期被解析）。改后 **`attrib +R` 已恢复**（验收加固清单 7.1，20 个核心文件） | `tsc --noEmit` exit 0；`Test Files 322/322 · Tests 3841 passed / **0 failed**`（另 15 skipped + 2 todo）；分批实测 28/72/18/14 例分批全绿 |
 | 2026-11-02 | **恢复块路原文召回通道（LEDGER #15 已解决）** —— ADR-010 §12.2 要求「候选 = `conversations` 原文命中 ∪ 摘要命中」，v11 改造后 `dialog_group` 域的 `textCol` 定死为 `block_summary` 且 `extraWhere` 强制非空 ⇒ **原文通道整个不存在**。在 `DialogGroupAdapter` 内新增对 `conversations` 按组聚合的分片 LIKE 查询，与摘要候选合并后统一走 `scoreAndRank` 精排与回表 —— **不新增第二个排序点**（不变量 #7），切词复用 `buildKeywordShards` 同源口径，`StructuredRecall` **一行未改**（避开并行检索车道）。**实测：段级命中 15/72=20.8% → 76/120=63.3%；无 `block_summary` 的组 0% → 22/30=73.3%** | `9842df6`；`dialog-group-adapter` 16→19 例（新增双通道 3 例）全绿；tsc=0；重启后 HTTP 200 |
@@ -547,9 +548,25 @@ E2E Case 2 在全文件并发下 10.3s 超时、单跑 7.5s 通过（负载相�
 
 当日临时恢复手法（不改代码）：停服 → 备份该键 → 把 `everHadSeats` 置 `false`
 （`contextStack` 等现场保留）→ 启动；备份 `D:\tmp\group-session-backup-20261108-0550.json`。
-**计划处理：2026-11-09**（单独批次，不混入实体收口）——
-候选方案：① `LEAVE` 后若 `participants` 为空则直接回 `yuyao`；
-② 明确区分「散会后独处」与「回私聊玉瑶」两个语义，别用同一个 `alone` 兜底。
+
+**✅ 已根治（2026-11-08，`cd7bdbe` + `ee59492`，ADR-018）** —— 业主裁决「保留独处态，
+喊玉瑶回归」；按结构解补状态机缺失的回程边，**不是补复位调用**：
+
+| 改动 | 内容 |
+|---|---|
+| 状态机 | `Action` 新增 `RETURN_YUYAO`：仅空场生效、非空场拒绝（会晤中必须先 LEAVE）、玉瑶态幂等 |
+| 意图层 | `MessageIntent.toYuyao` 由 `detectIntent` **同源**判定（两条玉瑶专属正则提为具名常量，不再由上层各写一份） |
+| 调用层 | chat.ts：独处中「玉瑶」→ 回程并本轮正常应答；会晤中「回玉瑶」→ `LEAVE → RETURN_YUYAO`（不落独处）；通用结束语仍留独处 |
+| 收口 | `GroupSession.reset()` 改为 `LEAVE → RETURN_YUYAO`（原实现空场时 no-op，与注释不符）；删除零调用 `clearSession()` |
+| 文案 | 独处首轮追加「想找玉瑶，喊她一声」（业主 2026-11-08 指定） |
+
+**验证**：`tsc --noEmit` = 0；新增 8 例测试（状态机三态往返/非空场拒绝/幂等/重启持久 + exit
+去向分裂）与既有 105 例同文件全绿；**实机四步**：会晤中「回玉瑶」→ 结束且不回独处、
+散会后随便说话 → 新收尾文案、独处中「玉瑶」→ 回程并正常应答、重启后仍为玉瑶态
+（`engine_store` 实测 `everHadSeats=false`）。
+**持久化**：字段不变、`schemaVersion` 不 bump，旧快照直接兼容。
+**遗留**：`everHadSeats` 字段名是历史遗留（现语义=「散会后尚未唤回」，可置真可置假），
+以 ADR-018 为准；改名需独立批次（会波及 4 处引用）。
 
 **下一步**：批2 —— 取证并入主回复调用 + `verifyAdmission` + 删除 `LLMEntityExtractor.ts`。
 
