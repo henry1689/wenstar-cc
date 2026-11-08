@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { checkEntityWrite, checkPersonEntity, checkObjectEntity } from '../EntityWriteGate.js';
+import { checkPersonEntity, checkObjectEntity } from '../EntityWriteGate.js';
 import { ENTITY_BLACKLIST } from '../../../config/app-identity.js';
 import { gradeEntity } from '../../../app/entity/EntityCandidateGrader.js';
-import { checkEntity } from '../GarbageEntityGuard.js';
 
 /**
  * FG-P0 写前统一闸门单测（2026-09-09 乱提取根治）
@@ -27,9 +26,9 @@ describe('checkObjectEntity — object 通道', () => {
     expect(checkObjectEntity('活泼').allowed).toBe(false);
   });
 
-  it('真人进 object 通道不应放行独立 object（统一入口 person 优先分流）', () => {
-    expect(checkEntityWrite('熊梓玥').allowed).toBe(true);   // person 通道放行
-    expect(checkEntityWrite('熊梓玥').mode).toBe('person');  // 分流到 person, 不当 object 建
+  it('真人走 person 通道放行（批4 起由调用方按 type 选路，无隐式分流）', () => {
+    expect(checkPersonEntity('熊梓玥').allowed).toBe(true);
+    expect(checkPersonEntity('熊梓玥').mode).toBe('person');
   });
 
   it('合规 object 名词放行', () => {
@@ -66,12 +65,8 @@ describe('checkPersonEntity / checkEntityWrite — person 通道', () => {
   });
 });
 
-describe('checkEntityWrite — 统一入口', () => {
-  it('真名走 person 放行, 垃圾句子整体拒绝', () => {
-    expect(checkEntityWrite('徐诗雨').allowed).toBe(true);
-    expect(checkEntityWrite('大眼睛又圆又亮').allowed).toBe(false);
-  });
-});
+// 🔴 批4（ADR-022）：统一入口 checkEntityWrite 已物理删除（零生产调用）；
+//   调用方按 node.type 直接选 checkPersonEntity / checkObjectEntity。
 
 /**
  * V50 噪音词表止血（2026-10-12）
@@ -95,11 +90,10 @@ describe('V50 噪音词表 — 42 个观察区噪音词入 ENTITY_BLACKLIST', ()
     expect(new Set(NOISE_WORDS).size).toBe(42);
   });
 
-  it('🔴 person 通道：42 词在三处闸门全部拒绝（加入前 42/42 grade=3 放行）', () => {
+  it('🔴 person 通道：42 词在两处判据全部拒绝（加入前 42/42 grade=3 放行）', () => {
     expect(NOISE_WORDS.filter(w => checkPersonEntity(w).allowed)).toEqual([]);
-    // 另两处引用同一真源的闸门 —— app-identity.ts 注释宣称「三闸门」，此处逐条兑现
+    // 批4 起写前闸门只剩一道（EntityWriteGate.checkPersonEntity）；其下层字面判据同源兑现
     expect(NOISE_WORDS.filter(w => gradeEntity(w).grade !== 0)).toEqual([]);
-    expect(NOISE_WORDS.filter(w => checkEntity(w, new Set()).allowed)).toEqual([]);
   });
 
   it('object 通道不受影响：地点名词仍可作合规 object', () => {
@@ -114,20 +108,9 @@ describe('V50 噪音词表 — 42 个观察区噪音词入 ENTITY_BLACKLIST', ()
     expect(checkObjectEntity('安静').allowed).toBe(false);
   });
 
-  it('✅ 统一入口 checkEntityWrite：person 命中 L0 不回退 object（V50 D 段已修）', () => {
-    // 历史：本条先前断言 `toHaveLength(40)` —— 那是 D 段修复**之前**的行为快照
-    //（42 词里 40 个经 person 被拒后回退 object 而放行，唯一生产调用方
-    // InductionScheduler.ts:332 因此完全收不到词表）。D 段在 person 返回 `l0Block`
-    // 时直接拒绝、不再回退 ⇒ 期望值翻转为 0。
-    // grade 1-2（长度/对话残留/弱证据姓）仍回退 object 的语义，由下方用例单独守护。
-    const allowedAsObject = NOISE_WORDS.filter(w => {
-      const v = checkEntityWrite(w);
-      return v.allowed && v.mode === 'object';
-    });
-    expect(allowedAsObject, 'L0 禁止词不得经统一入口以 object 身份放行').toHaveLength(0);
-    // 逐条确认拒绝原因确实是 L0（而非被别的判据拦下）
+  it('🔴 person 闸门对 42 词逐条拒绝（批4：不再经统一入口回退 object）', () => {
     for (const w of NOISE_WORDS) {
-      expect(checkEntityWrite(w).allowed, w).toBe(false);
+      expect(checkPersonEntity(w).allowed, w).toBe(false);
     }
   });
 

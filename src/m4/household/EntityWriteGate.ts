@@ -105,22 +105,9 @@ export function checkObjectEntity(name: string): GateVerdict {
   return { allowed: true, reason: '合规 object 名词', mode: 'object' };
 }
 
-/** 统一入口(调用方不区分模式时按含姓氏判定走 person/object) */
-export function checkEntityWrite(
-  name: string,
-  existingNames: Set<string> = new Set(),
-): GateVerdict {
-  const n = (name || '').trim();
-  if (!n) return { allowed: false, reason: '空实体名', mode: 'object' };
-  const person = checkPersonEntity(n, existingNames);
-  if (person.allowed) return person;
-  // 🔴 V50 D 段：person 命中 **L0 禁止词**（ENTITY_BLACKLIST / FG_EXTRA_BLOCK / grade 0）
-  //    → 终局拒绝，不再回退 object。原实现无条件回退，实测 42 个噪音词 **40/42** 经此
-  //    放行为 `mode:'object'`，而本函数正是唯一有生产调用方的入口（InductionScheduler.ts:332）
-  //    ⇒ 词表在那条路上完全失效。grade 1-2（长度/对话残留/弱证据姓）仍回退，
-  //    「真名词可作 object」的既有语义不变（见 checkObjectEntity 的 object 注释）。
-  if (person.l0Block) return person;
-  return checkObjectEntity(n);
-}
+// 🔴 批4（2026-11-08，ADR-022）：统一入口 checkEntityWrite 已删除 ——
+//   S1 实测零生产调用（唯一引用在 S4 之前的 InductionScheduler，该路径批1 已移除）。
+//   统一闸门 = checkPersonEntity（person 通道）+ checkObjectEntity（object 通道），
+//   调用方按 node.type 直接选路，不再经过「person 被拒回退 object」的隐式分流。
 
-export default { checkEntityWrite, checkPersonEntity, checkObjectEntity };
+export default { checkPersonEntity, checkObjectEntity };

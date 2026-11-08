@@ -184,19 +184,21 @@ describe('[V30] 扇出已消除（迁移落地后自动激活）', () => {
 // ③ GarbageEntityGuard：乙-1 只改加载时机，不改判定逻辑（红线 #10）
 // ─────────────────────────────────────────────────────────────
 describe('[V30] 垃圾实体守卫：判定逻辑必须逐字保留', () => {
-  it('🔴 checkEntity 调用仍在', () => {
-    expect(fgSrc).toMatch(/checkEntity\s*\(/);
+  it('🔴 唯一写前闸门 checkPersonEntity 调用仍在（批4 合并双闸门）', () => {
+    expect(fgSrc).toMatch(/checkPersonEntity\s*\(/);
+    // 旧 GarbageEntityGuard 已被严格超集取代，不得复活
+    expect(fgSrc).not.toMatch(/_loadGarbageGuard\s*\(/);
   });
 
   it('🔴 grade 3 分支已随观察区拆除（批3，ADR-021）—— 不再有 candidate 初始化', () => {
     expect(fgSrc).not.toMatch(/result\.grade\s*===\s*3\s*\)\s*\{/);
     expect(fgSrc).not.toMatch(/initialStatus\s*=\s*'candidate'\s*;/);
     // 守卫本身仍在（只删观察区分支，不删垃圾拦截）
-    expect(fgSrc).toMatch(/checkEntity\s*\(/);
+    expect(fgSrc).toMatch(/checkPersonEntity\s*\(/);
   });
 
-  it('🔴 拦截日志仍在（可见性不降级）', () => {
-    expect(fgSrc).toMatch(/垃圾实体已拦截/);
+  it('🔴 拦截日志仍在（可见性不降级；批4 统一为「实体写入拦截」）', () => {
+    expect(fgSrc).toMatch(/实体写入拦截|垃圾实体已拦截/);
   });
 
   it('🔴 void 排除条件仍在（红线批12修正）', () => {

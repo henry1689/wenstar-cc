@@ -2068,15 +2068,6 @@ export class FamilyGraph implements FamilyGraphInterface {
     }
   }
 
-  /**
-   * 🔵 V30 乙-2：垃圾实体守卫的懒加载单例（整个进程只 import 一次）。
-   *   保留动态 import 语义以规避循环依赖，但**不在热路径上让出**。
-   */
-  private _garbageGuardP?: Promise<typeof import('./GarbageEntityGuard.js')>;
-  private _loadGarbageGuard(): Promise<typeof import('./GarbageEntityGuard.js')> {
-    return (this._garbageGuardP ??= import('./GarbageEntityGuard.js'));
-  }
-
   /** 🔵 V30 乙-3 预算守卫：同步路径一旦被塞进 O(组)/O(表) 工作，这里当天就炸出来。 */
   private _v30RoundStart = 0;
   private _v30RoundMs = 0;
@@ -2118,58 +2109,27 @@ export class FamilyGraph implements FamilyGraphInterface {
   }
 
   private async _addNodeInner(node: GraphNode): Promise<void> {
-    // 批12: 初始状态由证据强度决定（默认 active，弱证据改 candidate）
     let initialStatus = 'active';
     const aliases = [...new Set((node.aliases ?? []).map((alias) => alias.trim()).filter(Boolean))];
 
-    // P1-7: 垃圾实体守卫 — person 节点写入前做最后一道垃圾过滤
+    // P1-7: 实体写前闸门 —— 批4（ADR-022）合并了原两道重复 person 闸门：
+    //   原 addNode 先调 GarbageEntityGuard.checkEntity（黑名单/称谓 + gradeEntity≥3），
+    //   再调 EntityWriteGate.checkPersonEntity（同一黑名单/称谓表的**超集** + 长度 2-5 +
+    //   对话残留 CHAT_RESIDUE + gradeEntity≥3）。后者严格覆盖前者，现只保留一道。
     if (node.type === 'person') {
       try {
-        // 🔵 V30 乙-1：原为每轮 addNode 都 `await import(...)`。
-        //   `await` 一让出事件循环，排队的其他任务耗时就会被算进 addNode 的 dt ——
-        //   与「落盘 52 秒」**同一个计时污染机制**，故 addNode 的 1.4s 均值含相当比例
-        //   「别人的时间记到它头上」。改为懒加载单例：整个进程只 await 一次，热路径不再让出。
-        const { checkEntity } = await this._loadGarbageGuard();
-        // 🔵 批12(P1-4): 必须排除 void —— 否则已 void 的噪声名再次出现时会命中
-        // existingNames → grade 4 → 直接 active，既绕过观察区又产生同名重复节点。
-        // 注意 getUUIDByName/findPersonNodeByNameOrAlias 本就排除 void（语义一致）。
+        // 必须排除 void —— 否则已 void 的噪声名再次出现时会命中 existingNames 被放行。
         const allNames = new Set((this.query("SELECT name FROM nodes WHERE type='person' AND (status IS NULL OR status != 'void')") as Array<{name: string}>).map(r => r.name));
-        const result = checkEntity(node.name, allNames);
-        if (!result.allowed) {
-          // 🔴 批1返工(2026-10-18) · FG红线 §16.6：console 不得输出真实人名。
-          //   原实现直接拼 node.name。此处只留类别+计数。
-          //   （result.reason 由 GarbageEntityGuard 产出，其自身是否含名需在批1b 统一核查。）
-          //   改用「按 node.name 精确脱敏」而非 split(':')[0]：后者会把
-          //   `L3: 候选姓名(有姓氏)` 这类**不含名**的子类诊断一并削掉（S4 验收指出），
-          //   而前者只抹掉真名、完整保留诊断信息。
-          console.warn(`[FG Guard] 垃圾实体已拦截: ${this._maskName(result.reason, node.name)} (L${result.grade}, len=${node.name.length})`);
+        const _gate = checkPersonEntity(node.name, allNames);
+        if (!_gate.allowed) {
+          // FG红线 §16.6：只抹掉真名，完整保留诊断信息。
+          console.warn(`[FG Guard] 实体写入拦截: ${this._maskName(_gate.reason, node.name)} (len=${node.name.length})`);
           return;
         }
-
-        // 🔴 修复3-A 第二道判据(2026-10-08): 补齐虚词/长度/黑名单拦截。
-        //   实测（GarbageEntityGuard.checkEntity vs EntityWriteGate.checkPersonEntity）：
-        //     `东坑这`/`公明这` 含虚词「这」→ checkPersonEntity **拒**，checkEntity **放行**；
-        //     `那两个` 两者都拒；而 `GarbageEntityGuard` 中 `CHAT_RESIDUE` 出现次数 = **0**。
-        //   ⇒ 同一 person 准入规则两处实现、判据不一致（违反不变量#7），写入侧先串上更强的那道。
-        //   ⚠️ 已登记实体不受影响：checkPersonEntity 对 existingNames 命中直接放行，
-        //   故本判据只拦**新写入**，不会误伤库里已有的真人名；存量由后续清理处置。
-        const _gate2 = checkPersonEntity(node.name, allNames);
-        if (!_gate2.allowed) {
-          // 🔴 批1返工(2026-10-18) · FG红线 §16.6：同上，不输出真名。
-          console.warn(`[FG Guard] 虚词/长度判据拦截: ${this._maskName(_gate2.reason, node.name)} (len=${node.name.length})`);
-          return;
-        }
-
-        // 🔴 批3（2026-11-08，ADR-021）：观察区已物理拆除。
-        //   写入前已由准入闸门完成取证（ADR-020 §6），grade 3 与其它等级一样直接 active ——
-        //   不再存在「先建档、攒证据、再晋升」的池子。
+        // 🔴 批3（2026-11-08，ADR-021）：观察区已物理拆除，写入即 active。
       } catch (_guardErr) {
-        // 🔴 修复3-A(2026-10-08): 由「静默放行」改为 **fail-closed 拦截 + 告警**。
-        //   原 `catch { /* guard不可用不阻塞 */ }` 意味着闸门一旦抛错（查询失败/懒加载失败/
-        //   判据自身 bug），**所有 person 节点都能畅通无阻地写进户籍** —— 守卫形同虚设。
-        //   按户籍管理法「无户口写入拒绝」：闸门不可用 = 无法确认合法，应拒绝本次写入。
-        //   代价是闸门故障期间新实体进不来，但故障会以告警形式暴露，而非静默放行垃圾。
-        console.warn('[FG Guard] 闸门异常 — 按 fail-closed 拒绝写入 "' + node.name + '":', (_guardErr as Error)?.message);
+        // fail-closed：闸门不可用 = 无法确认合法 ⇒ 拒绝写入（守卫故障必须暴露）。
+        console.warn(`[FG Guard] 闸门异常 — fail-closed 拒绝写入 ${this._maskName('', node.name)}:`, (_guardErr as Error)?.message);
         return;
       }
     } else if (node.type === 'object' || node.type === 'place') {

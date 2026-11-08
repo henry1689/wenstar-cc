@@ -6,21 +6,6 @@
  * 清理后必须显式 markDirty(true) 触发落盘，否则重启后还原。
  */
 import type { FamilyGraph } from '../../m4/household/FamilyGraph.js';
-import { NON_NAME_TAIL_CHARS } from '../entity/EntityCandidateGrader.js';
-
-/**
- * C2(2026-11-05): dossier 实质档案完整度阈值 —— 判据②的单一真源。
- *
- * completeness ≥ 本值视为「已正式录入」（即使顶层 description/relation_to_user
- * 尚未回填，如雷灵叶因 PAE Hook C 限流+LLM 失败未回填）。
- * 阈值依据（全库实测，2026-11-05）：
- *   13 个 void 滑窗垃圾 completeness = 0.00~0.37（max 崔莺莺 0.37）
- *   真实实体：雷灵叶 0.46 / 宁清华 0.38 / 罗珍思 0.81 / 安琪 0.69
- *   → 0.40 落在垃圾 max 与真实主体之间，两侧干净分离。
- * ⚠️ 宁清华 0.38 < 0.40 未达阈值，但其无 evidence 字段 → B6/B7 结构上不可能命中，
- *    且尾字不在非名尾集 → 通道A也不命中，实际零影响（已用真实库实跑验证）。
- */
-export const PROFILE_COMPLETENESS_MIN = 0.40;
 
 export interface FGHealthReport {
   totalNodes: number;
@@ -215,124 +200,7 @@ export class FGHealthCheck {
     return before - this.countEdges();
   }
 
-  /**
-   * 滑窗垃圾实体自检（2026-10-23，长期兜底预警）
-   * ============================================================
-   * 背景：尤其/水乳交/阿珍带/阿珍聊/阿珍妈 5 个滑窗片段曾误晋升 active。
-   *   根因 = 滑窗跨词边界切割 + 强上下文判定在情色/角色扮演语境被「叫/是/找」虚触发。
-   *   代码侧已双层堵漏（NON_NAME_TAIL_CHARS 加 5 尾字 + _hasNameStrongContext 起名句降级），
-   *   但语义判定无法穷尽 —— 新语境仍可能产生新变体，故加本自检作**兜底预警**。
-   *
-   * 判据（复用 NON_NAME_TAIL_CHARS 单一真源，不复制判据；只预警不自动 void，
-   *   避免误杀真人 —— 是否清除由人工/离线终审定夺）：
-   *
-   *   ── 通道A（2026-10-23 原判据，零改动）──
-   *   ① type='person' 且 status='active' 且 name != '我'
-   *   ② 无 description 且无 relation_to_user（从未获得真实档案）
-   *   ③ 名尾命中 NON_NAME_TAIL_CHARS（跨词边界滑窗片段的强特征）
-   *   ④ evidence.contexts 显示源自单句（短窗口，非多轮真实交往）
-   *   四条全中 → 疑似滑窗垃圾。
-   *
-   *   ── 通道B（2026-11-05 C 阶段补强，业主批准 A→C→B 顺序）──
-   *   背景：13 个已确认滑窗垃圾 active（阿珍一/毕竟所/相处/师大…）实测**全部漏过**
-   *   通道A —— 尾字集刻意保守（一/叫/所/处/大 不在集，防误伤真人）+ ④ contexts≤1
-   *   过严（后妈 ctx=3 漏）。漏检是系统性的，不是偶发。
-   *   ①② 之后命中以下任一即列入预警：
-   *   ⑤ 前缀扩展：存在另一 active/dormant 人名或别名 base，name 以 base 开头且多 1-2 字
-   *      （阿珍→阿珍一/阿珍叫/阿珍继 —— 滑窗切片最典型结构特征）
-   *   ⑥ 计数倒挂：mention_count≥8 且 evidence.count≥1 且 mention≥3×evidence.count
-   *      （子串误计数正反馈的指纹：「阿珍一个人」每次都被算作阿珍一被提及 176/11）
-   *   ⑦ 单句低证：evidence 字段存在且 count≤2 且 contexts≤2
-   *      🔴 evidence 必须存在才评估 —— 存量真人（陈锋华等 15/16 active）无 evidence
-   *      字段，若按 0 计会全体误报；「低证」语义本就要求有证可评。
-   *   命中结果以 hitChannel 标注（A / B5 / B6 / B7 可叠加）。
-   *
-   * 🔴 C2(2026-11-05 业主裁定「系统代码有问题，没设计好」)：②判据升级 ——
-   *   除顶层 description/relation_to_user 外，**dossier 实质档案**（completeness ≥
-   *   PROFILE_COMPLETENESS_MIN）也视为有档案。原判据只认顶层两字段，把「已正式录入
-   *   但顶层描述未回填」的实体（雷灵叶：dossier 齐全 completeness=0.46 却无顶层
-   *   description，因 PAE Hook C 限流+LLM 失败未回填）误判为无档案而误报。
-   *   阈值 0.40 为全库实测安全边界：13 个 void 垃圾 completeness 0.00~0.37（max
-   *   崔莺莺 0.37），真实实体雷灵叶 0.46/罗珍思 0.81/安琪 0.69 —— 两侧干净分离。
-   *
-   * @returns 疑似垃圾实体清单（空数组 = 健康）
-   */
-  detectSlidingWindowJunk(): Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string; hitChannel: string }> {
-    const suspects: Array<{ name: string; id: string; uuid: string | null; mentions: number; tail: string; hitChannel: string }> = [];
-    let rows: any[] = [];
-    try {
-      rows = this.q("SELECT id, name, uuid, properties FROM nodes WHERE type='person' AND status='active' AND name != '我'");
-    } catch (e: any) {
-      console.warn('[FG SelfCheck] 滑窗自检查询失败(非阻塞):', e?.message || e);
-      return suspects;
-    }
-    // 通道B⑤：active/dormant 人名+别名前缀集（单次构建；查询失败则该子通道降级关闭）
-    const prefixSet = this._buildActiveNamePrefixes();
-    for (const row of rows) {
-      const name = String(row.name || '');
-      if (!name) continue;
-      let props: any = {};
-      try { props = JSON.parse(row.properties || '{}'); } catch { props = {}; }
-      // ①② 无真实档案（两通道共用前提）
-      // C2(2026-11-05): dossier 实质档案（completeness ≥ 阈值）也算有档案 ——
-      //   修复「已录入但顶层描述未回填」实体（雷灵叶 0.46）被误报；
-      //   垃圾实体 completeness ≤ 0.37（全库实测）不受影响仍会被报。
-      const hasProfile = !!(props.description || props.relation_to_user
-        || (typeof props.completeness === 'number' && props.completeness >= PROFILE_COMPLETENESS_MIN));
-      if (hasProfile) continue;
-      const tail = name[name.length - 1];
-      const ev = props.evidence;
-      const evObj = ev && typeof ev === 'object' && !Array.isArray(ev);
-      const ec = evObj && typeof ev.count === 'number' ? ev.count : 0;
-      const ctxCount = evObj && Array.isArray(ev.contexts) ? ev.contexts.length : 0;
-      const mentions = evObj && typeof ev.count === 'number' ? ev.count : (props.mention_count ?? 0);
-      const mc = typeof props.mention_count === 'number' ? props.mention_count : 0;
-
-      const channels: string[] = [];
-      // ── 通道A：③尾字 + ④单句（原四条件语义零改动，含无 evidence 老垃圾 ctxCount=0≤1）──
-      if (NON_NAME_TAIL_CHARS.has(tail) && ctxCount <= 1) channels.push('A');
-      // ── 通道B⑤：前缀扩展 ──
-      if (prefixSet.size > 0) {
-        for (const b of prefixSet) {
-          if (name !== b && name.startsWith(b) && name.length - b.length >= 1 && name.length - b.length <= 2) {
-            channels.push('B5'); break;
-          }
-        }
-      }
-      // ── 通道B⑥：计数倒挂 ──
-      if (mc >= 8 && ec >= 1 && mc >= ec * 3) channels.push('B6');
-      // ── 通道B⑦：单句低证（evidence 必须存在，见方法头 🔴）──
-      if (evObj && ec <= 2 && ctxCount <= 2) channels.push('B7');
-
-      if (channels.length > 0) {
-        suspects.push({ name, id: row.id, uuid: row.uuid || null, mentions, tail, hitChannel: channels.join('+') });
-      }
-    }
-    return suspects;
-  }
-
-  /**
-   * 通道B⑤ 辅助：构建 active/dormant 人名+别名前缀集。
-   * 单次查询 + 别名 JSON 解析；任何失败返回空集（子通道降级关闭，不影响通道A）。
-   */
-  private _buildActiveNamePrefixes(): Set<string> {
-    const set = new Set<string>();
-    try {
-      const rows = this.q("SELECT name, aliases FROM nodes WHERE type='person' AND status IN ('active','dormant')") as Array<{ name: string; aliases: string }>;
-      for (const r of rows) {
-        const n = String(r.name || '');
-        if (n.length >= 2) set.add(n);
-        try {
-          const arr = JSON.parse(r.aliases || '[]');
-          if (Array.isArray(arr)) {
-            for (const a of arr) if (typeof a === 'string' && a.length >= 2) set.add(a);
-          }
-        } catch { /* 单个节点别名损坏不阻断整体 */ }
-      }
-    } catch (e: any) {
-      console.warn('[FG SelfCheck] 前缀集构建失败(通道B⑤降级):', e?.message || e);
-      return new Set();
-    }
-    return set;
-  }
+  // 🔴 批4（2026-11-08，ADR-022）：滑窗垃圾自检（detectSlidingWindowJunk + 前缀集辅助）
+  //   随滑窗产生端一并删除。其判据前提（无档案 + 非名尾字 + 单句低证 = 滑窗片段）在
+  //   当前显式介绍准入下不再成立，反而会误报「刚被介绍、档案未回填」的合法新实体。
 }

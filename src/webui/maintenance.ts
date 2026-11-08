@@ -13,7 +13,6 @@
 // MaintenanceService 接受的存储类型：FusionStorageAdapter 或兼容接口
 type AnyStorage = { getStatus(): Promise<{ totalRecords: number }> | { totalRecords: number } };
 
-import { FGHealthCheck } from '../app/fg/FGHealthCheck.js';
 // 🔴 V23.1(2026-09-13): 压缩/窗口参数唯一事实源 —— 原为本地硬编码，与 MemoryConfig、config.ts
 //   三处漂移（40/20 vs 200/100）。现统一从 MEMORY_CONFIG.compaction 取。
 import { MEMORY_CONFIG } from '../config/MemoryConfig.js';
@@ -55,9 +54,8 @@ export interface HealthReport {
 // ──────────────────────────────────────────────
 
 export interface MaintenanceConfig {
-  /** 批13: 实体离线终审间隔（默认 24h；建档不频繁，低频即可） */
-  entityTriageInterval?: number;
-  // 🔴 批3（2026-11-08，ADR-021）：entityTriageRounds 随观察区/离线终审拆除一并删除。
+  // 🔴 批3/批4（ADR-021/022）：entityTriageInterval 与 entityTriageRounds 随观察区、
+  //   离线终审与滑窗自检全部拆除，配置项已无消费者。
   /** 对话压缩间隔 (ms) — 默认 5 分钟 */
   compactionInterval: number;
   /** 存储 GC 间隔 (ms) — 默认 30 分钟 */
@@ -156,7 +154,6 @@ export class MaintenanceService {
   private compactionTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private decayTimer: ReturnType<typeof setInterval> | null = null;
-  private slidingJunkCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   // 外部依赖（由 server.ts 注入）
   private conversationHistory: ConversationTurn[] = [];
@@ -164,29 +161,8 @@ export class MaintenanceService {
   private setConversationHistory: (h: ConversationTurn[]) => void = () => {};
   private saveConversationHistory: () => void = () => {};
   private storage: AnyStorage | null = null;
-  /**
-   * 滑窗垃圾实体自检（2026-10-23，长期兑底预警）
-   * 复用 FGHealthCheck.detectSlidingWindowJunk（判据单一真源）。
-   * 只预警不自动 void —— 避免误杀真人，是否清除由人工/离线终审定夺。
-   * 发现疑似即 console.warn 高亮，供每日体检/日志回溯。
-   */
-  private runSlidingWindowSelfCheck(): void {
-    const fg = this.familyGraph ?? (this._fgGetter ? this._fgGetter() : null);
-    if (!fg) return;
-    try {
-      const report = new FGHealthCheck(fg);
-      const suspects = report.detectSlidingWindowJunk();
-      if (suspects.length > 0) {
-        const names = suspects.map(s => s.name + '(尾:' + s.tail + ',提及' + s.mentions + ')').join(', ');
-        console.warn('[FG SelfCheck] ⚠️ 疑似滑窗垃圾实体 ' + suspects.length + ' 个，建议人工核实后 void: ' + names);
-      } else {
-        console.log('[FG SelfCheck] 滑窗垃圾自检通过：无疑似实体');
-      }
-    } catch (e: any) {
-      // 自检失败绝不阻塞主链路
-      console.warn('[FG SelfCheck] 自检失败(非阻塞):', e?.message || e);
-    }
-  }
+  // 🔴 批4（ADR-022）：滑窗垃圾自检已随滑窗产生端删除；其日志还会输出真实人名
+  //   （违反 FG 红线 §16.6「console 不得输出真实人名」）。
 
   private runDecay: () => Promise<{ total: number; archived: number }> = async () => ({ total: 0, archived: 0 });
   /** B：注入的 LLM 摘要器（null = 未注入 ⇒ 全程机械压缩） */
@@ -312,22 +288,7 @@ export class MaintenanceService {
 
     // 🔴 批3（2026-11-08，ADR-021）：FG 观察区与实体离线终审已物理删除，定时器随之移除。
 
-    // 🔵 滑窗垃圾实体自检（2026-10-23）：每日一次，只预警不自动清除（判据见 FGHealthCheck.detectSlidingWindowJunk）
-    this.slidingJunkCheckTimer = setInterval(() => {
-      try {
-        this.runSlidingWindowSelfCheck();
-      } catch (e: any) {
-        console.warn('[Maintenance] 滑窗自检失败(非阻塞，下轮重试):', e?.message || e);
-      }
-    }, this.config.entityTriageInterval ?? 24 * 60 * 60 * 1000);
-    // 首轮延迟 15 分钟（等 FG 稳定后再跑，避免启动期误报）
-    setTimeout(() => {
-      try {
-        this.runSlidingWindowSelfCheck();
-      } catch (e: any) {
-        console.warn('[Maintenance] 首轮滑窗自检失败(非阻塞):', e?.message || e);
-      }
-    }, 15 * 60_000);
+    // 🔴 批4（ADR-022）：滑窗垃圾自检定时器已随判据删除。
 
     // 首轮尽快执行
     // 🔴 2026-09-20：原先两处 `.catch(() => {})` 静默吞错 ⇒ 改为告警（失败可见）
@@ -357,7 +318,6 @@ export class MaintenanceService {
     if (this.gcTimer) clearInterval(this.gcTimer);
     if (this.decayTimer) clearInterval(this.decayTimer);
     // 🔴 批3（ADR-021）：实体离线终审定时器已随观察区拆除，无需清理。
-    if (this.slidingJunkCheckTimer) clearInterval(this.slidingJunkCheckTimer);
     if (this.knowledgeGcTimer) clearInterval(this.knowledgeGcTimer);
     console.log('[Maintenance] 维护引擎已停止');
   }

@@ -243,40 +243,7 @@ export function gradeEntity(
   return { name, grade: 2, reason: '无法确定分类，需进一步确认' };
 }
 
-/**
- * 批处理分级
- */
-export function gradeEntities(
-  names: string[],
-  knownNames: Set<string> = new Set(),
-): GradedEntity[] {
-  return names.map(n => gradeEntity(n, knownNames));
-}
-
-/**
- * 过滤 — 只保留 L3+ 的稳定实体
- */
-export function filterStableEntities(graded: GradedEntity[]): GradedEntity[] {
-  return graded.filter(g => g.grade >= 3);
-}
-
-/**
- * 生成分级报告（用于日志输出）
- */
-export function gradeReport(graded: GradedEntity[]): string {
-  const byGrade: Record<number, string[]> = {};
-  for (const g of graded) {
-    if (!byGrade[g.grade]) byGrade[g.grade] = [];
-    byGrade[g.grade].push(g.name);
-  }
-  const lines: string[] = [];
-  for (const [grade, names] of Object.entries(byGrade)) {
-    const labels: Record<string, string> = {
-      '0': 'L0禁止', '1': 'L1称谓', '2': 'L2昵称', '3': 'L3候选', '4': 'L4已知', '5': 'L5确认',
-    };
-    lines.push(`  ${labels[grade] || 'L' + grade}: ${names.join(', ')}`);
-  }
-  return lines.join('\n');
-}
-
-export default { gradeEntity, gradeEntities, filterStableEntities, gradeReport };
+// 🔴 批4（2026-11-08，ADR-022）：gradeEntities / filterStableEntities / gradeReport
+//   与 default export 已删除 —— S1 实测零调用（观察区退役后无批处理分级消费方）。
+//   gradeEntity 保留：它是合并后唯一写前闸门（EntityWriteGate.checkPersonEntity）的
+//   字面判据库，删除会同时拆掉对新准入正则产出的片段名的最后一道防线。

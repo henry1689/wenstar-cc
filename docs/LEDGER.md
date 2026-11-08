@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **批4 清判据（合并双闸门 + 删死导出 + 删滑窗自检）** —— S1 实测：`addNode` 串联的两道 person 闸门中，`EntityWriteGate.checkPersonEntity` 是 `GarbageEntityGuard.checkEntity` 的严格超集（同黑名单/称谓表 + 长度 + 对话残留 + 同 gradeEntity），后者无独有判据 ⇒ 合并为一道并物理删除模块。同时删除 4 个零调用导出与 `detectSlidingWindowJunk` 滑窗自检（判据前提已随滑窗消失，且会误报新准入的合法实体）。**保留 gradeEntity 与 object 通道**（与任务书偏差，理由见 ADR-022 §2）。附带修正 fail-closed 日志输出真名的红线问题。详见 §6.18 与 ADR-022 | `tsc`=0；m4/app/m1 **1154 passed / 1 failed**（grader-non-name-tail 为既有失败）；42 个 V50 噪音词仍逐条被拒；重启后无 `[FG SelfCheck]` 滑窗自检 |
 | 2026-11-08 | **批3 拆观察区（物理删除 candidate 机制）** —— 观察区是「先写入、后判定」的补偿装置：判定所需信息在写入端已丢失。批1 已删产生端、批2b 已把准入前移到写入前，本批物理删除观察区本身：证据累积/晋升、`collectCandidateItems`/`applyJudgments`、candidate 初始化与超期规则、`EntityTriageService`/`EntityQualityJudge` 两个模块及其装配调度。新 person 直接 active；不再有每日离线终审 LLM 调用。生产 candidate 行 = 0，不改存量。详见 §6.17 与 ADR-021 | `tsc`=0；m4/app-entity 测试全绿；`candidate-zone.test` 改退役断言；重启日志无「实体离线终审已装配」；FG 19 active / 12 dormant 不变 |
 | 2026-11-08 | **实体准入结构收口（批2b 确定性取证）** —— LLM 取证头实测 0/4（四种注入全试过）⇒ 改为确定性取证：`findIntroEvidence` 单一判据 + `verifyAdmission` 单一闸门，L3 产出 / `integrateFromEntity` / `integrateSocialRelation` / `storeRelations` 四个写入点共用；新实体本轮即进入 `entity_genes`，参与 M4/FG/记忆检索。纯提及不再建档（已入库人物不受影响）。详见 §6.16 与 ADR-020 §6 | `tsc`=0；50 例相关测试全绿（新增确定性取证/证据子串/「我叫X」/亲属称谓用例）；CK-02 基线补记至 2623（上一提交遗留） |
 | 2026-11-08 | **闲聊快路径档位化（casual 轻档检索）** —— 原快路径是二值开关，97.7% 私聊轮次零记忆，冲突 MemSym 信条7；改为轻档（本地情感相似 ≤3 条）+ 全档两级，档位契约入 ADR-019。详见 §6.15 | 新增 `casual-floor.ts` + 6 例测试；`tsc`=0；实机 `tier=floor floor_mem=3 floor_ms=39~96`；验证数据已清、`integrity_check=ok` |
@@ -655,6 +656,33 @@ LLM 头保留为**可选增强**（`admitModelFromReply`，被动解析），不
 FG 人物数不变（19 active / 12 dormant）。
 
 **回滚**：单提交 revert + 恢复两个被删模块；无 DDL、无数据迁移。
+
+---
+
+### §6.18 2026-11-08 批4 清判据（合并双闸门 / 删死导出 / 删滑窗自检，ADR-022）
+
+**S1 实测**：`FamilyGraph.addNode` 串联了两道 person 闸门 —— `GarbageEntityGuard.checkEntity`
+（黑名单/称谓 + gradeEntity≥3）与 `EntityWriteGate.checkPersonEntity`（同一黑名单/称谓表的**超集**
++ 长度 2-5 + 对话残留 CHAT_RESIDUE + 同 gradeEntity≥3）。后者严格覆盖前者，前者无任何独有判据
+（其 grade-3 分支已在批3 删除）。
+
+**删除**：
+- `GarbageEntityGuard.ts` 整个模块 + `addNode` 中的调用与懒加载单例。
+- 零调用导出：`gradeEntities` / `filterStableEntities` / `gradeReport` / `checkEntityWrite`。
+- `FGHealthCheck.detectSlidingWindowJunk` + `_buildActiveNamePrefixes` + `PROFILE_COMPLETENESS_MIN`；
+  `maintenance` 的滑窗自检定时器/首轮触发/stop 清理与 `entityTriageInterval` 配置。
+
+**保留（与任务书偏差，已记录）**：
+- `gradeEntity` —— 合并后唯一写前闸门的字面判据库；删除会让新准入正则产出的片段名失去防线。
+- object 通道（`checkObjectEntity` + `SQLiteAdapter.ensureEntity`）—— 与 person 准入无关。
+
+**附带修正**：`_addNodeInner` 的 fail-closed 日志原直接输出真名（违反 FG 红线 §16.6），改为脱敏；
+滑窗自检日志同样输出真名，随功能删除消除。
+
+**验证**：`tsc`=0；m4/app/m1 1154 passed / 1 failed（`grader-non-name-tail` 既有失败）；
+42 个 V50 噪音词仍被唯一 person 闸门逐条拒绝；重启后无 `[FG SelfCheck]`。
+
+**回滚**：单提交 revert + 恢复 `GarbageEntityGuard.ts` 与被删测试；无 DDL、无数据变更。
 
 ---
 
