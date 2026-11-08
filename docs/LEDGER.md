@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-08 | **批5 清存量（数据操作，业主确认后执行）** —— 按任务书 §9.2 三条件 + 额外安全项（FG 名单/别名/uuid、`memory_entities`、`memories.entity_genes`、`temporal_events`、`atom_address_timeline`、`black_diamond`/`vault_log`/`memsym_elements`/`conversations.belong_entity_uuid`、`conversations.entity_names`）盘点 `entities` 存量。业主选择「全删」：删除 **1271** 行（person 1069 + object 202）与 **2013** 条 `entity_relations`；`entities` 4129→2858、`entity_relations` 13722→11709，`integrity_check=ok`，重启 HTTP 200。**未动任何 memories / conversations / FG**。详见 §6.19 | 停服窗口执行；整库备份 `D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`；删除行全量备份 `D:\tmp\批5-删除行备份-20261108.json`；盘点清单 `D:\tmp\批5-存量候选-20261108.json` |
 | 2026-11-08 | **批4 清判据（合并双闸门 + 删死导出 + 删滑窗自检）** —— S1 实测：`addNode` 串联的两道 person 闸门中，`EntityWriteGate.checkPersonEntity` 是 `GarbageEntityGuard.checkEntity` 的严格超集（同黑名单/称谓表 + 长度 + 对话残留 + 同 gradeEntity），后者无独有判据 ⇒ 合并为一道并物理删除模块。同时删除 4 个零调用导出与 `detectSlidingWindowJunk` 滑窗自检（判据前提已随滑窗消失，且会误报新准入的合法实体）。**保留 gradeEntity 与 object 通道**（与任务书偏差，理由见 ADR-022 §2）。附带修正 fail-closed 日志输出真名的红线问题。详见 §6.18 与 ADR-022 | `tsc`=0；m4/app/m1 **1154 passed / 1 failed**（grader-non-name-tail 为既有失败）；42 个 V50 噪音词仍逐条被拒；重启后无 `[FG SelfCheck]` 滑窗自检 |
 | 2026-11-08 | **批3 拆观察区（物理删除 candidate 机制）** —— 观察区是「先写入、后判定」的补偿装置：判定所需信息在写入端已丢失。批1 已删产生端、批2b 已把准入前移到写入前，本批物理删除观察区本身：证据累积/晋升、`collectCandidateItems`/`applyJudgments`、candidate 初始化与超期规则、`EntityTriageService`/`EntityQualityJudge` 两个模块及其装配调度。新 person 直接 active；不再有每日离线终审 LLM 调用。生产 candidate 行 = 0，不改存量。详见 §6.17 与 ADR-021 | `tsc`=0；m4/app-entity 测试全绿；`candidate-zone.test` 改退役断言；重启日志无「实体离线终审已装配」；FG 19 active / 12 dormant 不变 |
 | 2026-11-08 | **实体准入结构收口（批2b 确定性取证）** —— LLM 取证头实测 0/4（四种注入全试过）⇒ 改为确定性取证：`findIntroEvidence` 单一判据 + `verifyAdmission` 单一闸门，L3 产出 / `integrateFromEntity` / `integrateSocialRelation` / `storeRelations` 四个写入点共用；新实体本轮即进入 `entity_genes`，参与 M4/FG/记忆检索。纯提及不再建档（已入库人物不受影响）。详见 §6.16 与 ADR-020 §6 | `tsc`=0；50 例相关测试全绿（新增确定性取证/证据子串/「我叫X」/亲属称谓用例）；CK-02 基线补记至 2623（上一提交遗留） |
@@ -683,6 +684,30 @@ FG 人物数不变（19 active / 12 dormant）。
 42 个 V50 噪音词仍被唯一 person 闸门逐条拒绝；重启后无 `[FG SelfCheck]`。
 
 **回滚**：单提交 revert + 恢复 `GarbageEntityGuard.ts` 与被删测试；无 DDL、无数据变更。
+
+---
+
+### §6.19 2026-11-08 批5 清存量（entities / entity_relations）
+
+**口径**（任务书 §9.2 三条件 + 额外安全项）：仅删除同时满足以下条件的行 ——
+① 名称不在 FG `nodes.name/aliases` 且 uuid 不在 FG；
+② 无记忆引用（`memory_entities.entity_id` / `memories.entity_genes[].name`）；
+③ 非系统身份；
+④ 未被 `temporal_events` / `atom_address_timeline` 引用；
+⑤ uuid 未出现在 `black_diamond` / `vault_log` / `memsym_elements` / `conversations.belong_entity_uuid`；
+⑥ 未出现在 `conversations.entity_names`。
+
+**盘点（只读）**：候选 **1271** 行（person 1069 / object 202），涉及 `entity_relations` 2013 条。
+保留原因：FG 命中 72｜系统身份 6｜记忆引用 1485｜仅对话引用 1162｜uuid 引用 133。
+
+**执行（业主 2026-11-08 选择「全删 1271 行」）**：
+- 停服 → WAL checkpoint（`integrity_check=ok`）→ 整库备份 → 预演断言（候选数=1271、与记忆引用零交集）→
+  事务内按精确 id 删除 `entity_relations` 2013 条 + `entities` 1271 行 → `integrity_check=ok` → 重启。
+- 结果：`entities` 4129→**2858**，`entity_relations` 13722→**11709**；HTTP 200。
+- **未动**任何 `memories` / `conversations` / FG 数据。
+
+**备份**：`D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`（整库）、
+`D:\tmp\批5-删除行备份-20261108.json`（删除行全量）、`D:\tmp\批5-存量候选-20261108.json`（盘点清单）。
 
 ---
 

@@ -119,6 +119,12 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-08 **✅ P151 批5 清存量（Claude Code，业主确认「全删」）**：
+  按三条件 + 额外安全项盘点后，删除 `entities` **1271** 行（person 1069 / object 202）
+  与 `entity_relations` **2013** 条；`entities` 4129→2858、关系 13722→11709。
+  未动任何 memories / conversations / FG；`integrity_check=ok`、重启 HTTP 200。
+  整库与删除行均已备份至 `D:\tmp\`。详见 `active/P151` 与 LEDGER §6.19。
+
 - 2026-11-08 **✅ P150 批4 清判据（Claude Code）**：
   `addNode` 的两道 person 闸门合并为一道（`EntityWriteGate.checkPersonEntity` 是严格超集），
   物理删除 `GarbageEntityGuard.ts`、4 个零调用导出、滑窗垃圾自检及其定时器。
