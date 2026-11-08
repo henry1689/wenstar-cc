@@ -119,6 +119,31 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P156 记忆系统统一 · 批1 表达法收口（Claude Code）**：
+  新增单一法源 `src/m5/prompts/memory-expression-law.ts`（MEMORY-LAW-V1：三档 / 三重奏 / 憧憬自由 / 双模式义务 / 守卫禁令）；
+  `core-rules`、`cortex/rules`、`RoleProfiles`、`MemoryGate`、`chat.ts`、`retrieval-stage`、`MemoryInjector`、
+  `long-text-retrieval`、`KnowledgeContextBuilder`、`MeetingWallAdapter`、`KnowledgeTextAssembler`、`DeepSeekLLMProvider` 完成接线；
+  **删除 3 处静态正文黑名单**；旧二元限制措辞扫描 **0 命中**；旧文档 3 份加废止标注。
+  验证：`tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（均既有或环境依赖）。**未改数据**。
+  详见 `active/P156`；下一步批2A 记忆召回总线。
+
+- 2026-11-08 **✅ P155 记忆系统统一 · 批0 只读基线探针（Claude Code）**：
+  只读 aggregate 探针冻结基线：memories 18,706（今日 27，全部完整编码）；无归属 617
+  （**evt_ 459 / mem_ 64 / note 94**）；重复 987 组/3,160 行（16.9%）；晋升两不沾 665；
+  知识库 304（278 共享 / 72 可检索 / visible 0）；memarch 17,296 最新 11-04，
+  **25/31 FG UUID 未映射**；表达侧旧限制 **44 处**（chat.ts 16）。
+  `perception_40d` 18,706/18,706 可解码。报告 `active/P155`，证据 `active/P155-…-baseline.json`。
+  **未改代码/数据**；下一步批1 表达法收口。
+
+- 2026-11-08 **📋 P154 记忆系统统一任务书立项（Claude Code，业主裁决 D1–D10）**：
+  范围 = 写入链路 + 召回总线 + 表达法 + 归属编码，覆盖三库/知识库/FG 档案/作品/记事。
+  关键决议：memarch-v2 移出主链；取消 1:1 复制晋升；`vault_log` 定位审计台账；
+  知识库无归属=共享；语义块补归属（**50 条不可补彻底删除**）；`note_zone` 94 条回填玉瑶；
+  黑钻 28 条随源继承、19 条 removed 保留。
+  只读基线：617 无归属语义块（47 conv / 420 dna / 6 gene / 94 note / 50 不可补）；
+  知识库 304（278 共享 / 72 可检索）；memarch-v2 最新 2026-11-04。
+  任务书：`docs/记忆系统统一任务书-V1.md`；详见 P154 与 LEDGER §6.22。**未改代码/数据**。
+
 - 2026-11-08 **✅ P153 Harness hook 覆盖缺口修复 + 测试收口（Claude Code）**：
   查实项目级 hooks 在会话 cwd 非项目目录时**完全不加载**（令牌 6 次写入未消费、0 BYPASS），
   影响批1–批6 的 hook 层写入闸门。已新增用户级分发器 `hooks/harness-hook-dispatch.cjs`

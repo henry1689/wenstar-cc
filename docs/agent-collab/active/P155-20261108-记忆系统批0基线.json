@@ -1,0 +1,683 @@
+{
+  "generated_at": "2026-11-08T12:22:21.038Z",
+  "note": "read-only aggregate baseline; no content",
+  "main": {
+    "memories": {
+      "total": 18706,
+      "today": 27,
+      "latest": "2026-11-08T07:53:24.289Z",
+      "by_lifecycle": [
+        {
+          "k": "candidate",
+          "c": 9074
+        },
+        {
+          "k": "active",
+          "c": 4816
+        },
+        {
+          "k": "promoted",
+          "c": 4319
+        },
+        {
+          "k": "suppressed",
+          "c": 497
+        }
+      ],
+      "by_kind": [
+        {
+          "k": "roleplay",
+          "c": 8968
+        },
+        {
+          "k": "episodic",
+          "c": 6267
+        },
+        {
+          "k": "normal",
+          "c": 3471
+        }
+      ],
+      "by_namespace": [
+        {
+          "k": "default",
+          "c": 18706
+        }
+      ],
+      "by_leaf_zone": [
+        {
+          "k": "assistant",
+          "c": 7819
+        },
+        {
+          "k": "language_semantic_zone",
+          "c": 5594
+        },
+        {
+          "k": "user",
+          "c": 3204
+        },
+        {
+          "k": "emotion_valence_zone",
+          "c": 988
+        },
+        {
+          "k": "social_schema_zone",
+          "c": 631
+        },
+        {
+          "k": "note_zone",
+          "c": 237
+        },
+        {
+          "k": "spatiotemporal_episode_zone",
+          "c": 233
+        }
+      ],
+      "missing": {
+        "belong": 617,
+        "global_uid": 0,
+        "dna_root": 240,
+        "perception_40d": 0,
+        "entity_genes_empty": 1714,
+        "source_refs": 3985,
+        "test_ns": 0
+      },
+      "missing_rate": {
+        "belong": 3.3,
+        "global_uid": 0,
+        "dna_root": 1.3,
+        "perception_40d": 0,
+        "entity_genes_empty": 9.2,
+        "source_refs": 21.3
+      },
+      "by_zone_encoding": [
+        {
+          "k": "assistant",
+          "c": 7819,
+          "miss_belong": 0,
+          "miss_dna": 0,
+          "miss_40d": 0
+        },
+        {
+          "k": "language_semantic_zone",
+          "c": 5594,
+          "miss_belong": 139,
+          "miss_dna": 2,
+          "miss_40d": 0
+        },
+        {
+          "k": "user",
+          "c": 3204,
+          "miss_belong": 0,
+          "miss_dna": 0,
+          "miss_40d": 0
+        },
+        {
+          "k": "emotion_valence_zone",
+          "c": 988,
+          "miss_belong": 169,
+          "miss_dna": 0,
+          "miss_40d": 0
+        },
+        {
+          "k": "social_schema_zone",
+          "c": 631,
+          "miss_belong": 151,
+          "miss_dna": 0,
+          "miss_40d": 0
+        },
+        {
+          "k": "note_zone",
+          "c": 237,
+          "miss_belong": 94,
+          "miss_dna": 237,
+          "miss_40d": 0
+        },
+        {
+          "k": "spatiotemporal_episode_zone",
+          "c": 233,
+          "miss_belong": 64,
+          "miss_dna": 1,
+          "miss_40d": 0
+        }
+      ],
+      "by_id_prefix": [
+        {
+          "k": "mem_",
+          "c": 11252,
+          "miss_belong": 64,
+          "miss_dna": 1,
+          "miss_40d": 0
+        },
+        {
+          "k": "evt_",
+          "c": 3748,
+          "miss_belong": 459,
+          "miss_dna": 1,
+          "miss_40d": 0
+        },
+        {
+          "k": "other",
+          "c": 3706,
+          "miss_belong": 94,
+          "miss_dna": 238,
+          "miss_40d": 0
+        }
+      ],
+      "p40": {
+        "valid": 18706,
+        "invalid": 0
+      },
+      "duplicates": {
+        "groups": 987,
+        "rows": 3160
+      },
+      "promoted": {
+        "flagged": 1171,
+        "with_active_bd": 506,
+        "with_removed_bd": 142,
+        "with_no_bd": 523
+      }
+    },
+    "conversations": {
+      "total": 21911,
+      "today": 29,
+      "latest": "2026-11-08T10:25:01.790Z",
+      "unowned": 264,
+      "by_role": [
+        {
+          "k": "assistant",
+          "c": 12575
+        },
+        {
+          "k": "user",
+          "c": 9336
+        }
+      ],
+      "is_test": 2967,
+      "is_summary": 3101,
+      "is_promoted": 666,
+      "test_ns": 1890
+    },
+    "black_diamond": {
+      "total": 4092,
+      "active": 894,
+      "removed": 3198,
+      "unowned": 48,
+      "active_unowned": 29,
+      "no_source": 562,
+      "source_orphan": 19,
+      "emotion_vector": 3955,
+      "max_config": 800
+    },
+    "vault_log": {
+      "total": 10789,
+      "unowned": 567,
+      "by_operation": [
+        {
+          "k": "landmark",
+          "c": 5121
+        },
+        {
+          "k": "promote",
+          "c": 5085
+        },
+        {
+          "k": "merge_promote",
+          "c": 335
+        },
+        {
+          "k": "promote_sand",
+          "c": 213
+        },
+        {
+          "k": "auto_induct",
+          "c": 30
+        },
+        {
+          "k": "auto_promote",
+          "c": 5
+        }
+      ],
+      "unowned_by_operation": [
+        {
+          "k": "landmark",
+          "c": 298
+        },
+        {
+          "k": "promote_sand",
+          "c": 213
+        },
+        {
+          "k": "promote",
+          "c": 46
+        },
+        {
+          "k": "auto_promote",
+          "c": 5
+        },
+        {
+          "k": "merge_promote",
+          "c": 5
+        }
+      ],
+      "promote_empty_content": 25
+    },
+    "knowledge_base": {
+      "total": 304,
+      "unowned_shared": 278,
+      "owned": 26,
+      "visible_nonempty": 0,
+      "retrievable": 72,
+      "dream_behavior": 231,
+      "by_source_type": [
+        {
+          "k": "dream_behavior",
+          "c": 231
+        },
+        {
+          "k": "md",
+          "c": 56
+        },
+        {
+          "k": "txt",
+          "c": 7
+        },
+        {
+          "k": "text",
+          "c": 4
+        },
+        {
+          "k": "research",
+          "c": 3
+        },
+        {
+          "k": "person",
+          "c": 2
+        },
+        {
+          "k": "document",
+          "c": 1
+        }
+      ],
+      "today": 1,
+      "no_emotion_vector": 0
+    },
+    "other": {
+      "works": {
+        "total": 239,
+        "unowned": 0
+      },
+      "notes": {
+        "total": 200,
+        "unowned": 59
+      },
+      "dialog_groups": {
+        "total": 3561,
+        "unowned": 0
+      },
+      "memsym_elements": {
+        "total": 96,
+        "null_entity": 0
+      }
+    },
+    "entity_coverage": [
+      {
+        "uuid": "TXS-000000007",
+        "memories": 7313,
+        "with_40d": 7313,
+        "with_dna": 7312
+      },
+      {
+        "uuid": "TXS-000000008",
+        "memories": 4154,
+        "with_40d": 4154,
+        "with_dna": 4154
+      },
+      {
+        "uuid": "TXS-000000001",
+        "memories": 3038,
+        "with_40d": 3038,
+        "with_dna": 2895
+      },
+      {
+        "uuid": "TXS-000000003",
+        "memories": 1705,
+        "with_40d": 1705,
+        "with_dna": 1705
+      },
+      {
+        "uuid": "TXS-000000005",
+        "memories": 847,
+        "with_40d": 847,
+        "with_dna": 847
+      },
+      {
+        "uuid": "TXS-000000011",
+        "memories": 405,
+        "with_40d": 405,
+        "with_dna": 405
+      },
+      {
+        "uuid": "TXS-000000018",
+        "memories": 260,
+        "with_40d": 260,
+        "with_dna": 260
+      },
+      {
+        "uuid": "TXS-000000019",
+        "memories": 76,
+        "with_40d": 76,
+        "with_dna": 75
+      }
+    ]
+  },
+  "v2": {
+    "total": 17296,
+    "latest": 1793781012581,
+    "by_namespace": [
+      {
+        "k": "ns_shiyu",
+        "c": 6585,
+        "latest": 1793781012581
+      },
+      {
+        "k": "ns_a-zhen",
+        "c": 3781,
+        "latest": 1793725020793
+      },
+      {
+        "k": "ns_yuyao",
+        "c": 2841,
+        "latest": 1793778180767
+      },
+      {
+        "k": "ns_xiongziming",
+        "c": 1685,
+        "latest": 1793704329990
+      },
+      {
+        "k": "ns_legacy_unknown",
+        "c": 895,
+        "latest": 1793330308115
+      },
+      {
+        "k": "ns_wangquanfen",
+        "c": 847,
+        "latest": 1793092242379
+      },
+      {
+        "k": "ns_shiyun",
+        "c": 405,
+        "latest": 1792940868333
+      },
+      {
+        "k": "ns_shihan",
+        "c": 257,
+        "latest": 1793685968593
+      }
+    ],
+    "registry": [
+      {
+        "namespace": "ns_yuyao",
+        "role_uuid": "role-yuyao-001"
+      },
+      {
+        "namespace": "ns_xiongziming",
+        "role_uuid": "TXS-000000003"
+      },
+      {
+        "namespace": "ns_wangquanfen",
+        "role_uuid": "TXS-000000005"
+      },
+      {
+        "namespace": "ns_shiyu",
+        "role_uuid": "TXS-000000007"
+      },
+      {
+        "namespace": "ns_a-zhen",
+        "role_uuid": "TXS-000000008"
+      },
+      {
+        "namespace": "ns_shiyun",
+        "role_uuid": "TXS-000000011"
+      },
+      {
+        "namespace": "ns_shihan",
+        "role_uuid": "TXS-000000018"
+      },
+      {
+        "namespace": "ns_legacy_unknown",
+        "role_uuid": "legacy-unknown"
+      }
+    ],
+    "black_diamond_v2": 3454
+  },
+  "fg": {
+    "total_nodes": 42,
+    "uuid_nodes": 31,
+    "not_in_memarch_registry": 25,
+    "not_in_registry_uuids": [
+      {
+        "idx": 1,
+        "uuid": "TXS-000000001"
+      },
+      {
+        "idx": 2,
+        "uuid": "TXS-000000002"
+      },
+      {
+        "idx": 3,
+        "uuid": "TXS-000000004"
+      },
+      {
+        "idx": 4,
+        "uuid": "TXS-000000006"
+      },
+      {
+        "idx": 5,
+        "uuid": "TXS-000000009"
+      },
+      {
+        "idx": 6,
+        "uuid": "TXS-000000010"
+      },
+      {
+        "idx": 7,
+        "uuid": "TXS-000000012"
+      },
+      {
+        "idx": 8,
+        "uuid": "TXS-000000013"
+      },
+      {
+        "idx": 9,
+        "uuid": "TXS-000000014"
+      },
+      {
+        "idx": 10,
+        "uuid": "TXS-000000015"
+      },
+      {
+        "idx": 11,
+        "uuid": "TXS-000000016"
+      },
+      {
+        "idx": 12,
+        "uuid": "TXS-000000017"
+      },
+      {
+        "idx": 13,
+        "uuid": "TXS-000000019"
+      },
+      {
+        "idx": 14,
+        "uuid": "TXS-000000020"
+      },
+      {
+        "idx": 15,
+        "uuid": "TXS-000000021"
+      },
+      {
+        "idx": 16,
+        "uuid": "TXS-000000022"
+      },
+      {
+        "idx": 17,
+        "uuid": "TXS-000000023"
+      },
+      {
+        "idx": 18,
+        "uuid": "TXS-000000025"
+      },
+      {
+        "idx": 19,
+        "uuid": "TXS-000000026"
+      },
+      {
+        "idx": 20,
+        "uuid": "TXS-000000030"
+      }
+    ],
+    "registry_count": 8
+  },
+  "policy": [
+    {
+      "entity": "E1",
+      "uuid": "TXS-000000007",
+      "private_memories_strict": 7313,
+      "private_memories_owner_allow_unowned": 7930,
+      "knowledge_owned": 3,
+      "knowledge_shared": 278,
+      "knowledge_visible_shared_policy": 281,
+      "black_diamond_active": 248,
+      "conversations_strict": 8734
+    },
+    {
+      "entity": "E2",
+      "uuid": "TXS-000000008",
+      "private_memories_strict": 4154,
+      "private_memories_owner_allow_unowned": 4771,
+      "knowledge_owned": 0,
+      "knowledge_shared": 278,
+      "knowledge_visible_shared_policy": 278,
+      "black_diamond_active": 127,
+      "conversations_strict": 4306
+    },
+    {
+      "entity": "E3",
+      "uuid": "TXS-000000001",
+      "private_memories_strict": 3038,
+      "private_memories_owner_allow_unowned": 3655,
+      "knowledge_owned": 15,
+      "knowledge_shared": 278,
+      "knowledge_visible_shared_policy": 293,
+      "black_diamond_active": 41,
+      "conversations_strict": 4127
+    },
+    {
+      "entity": "E4",
+      "uuid": "TXS-000000003",
+      "private_memories_strict": 1705,
+      "private_memories_owner_allow_unowned": 2322,
+      "knowledge_owned": 3,
+      "knowledge_shared": 278,
+      "knowledge_visible_shared_policy": 281,
+      "black_diamond_active": 99,
+      "conversations_strict": 2049
+    },
+    {
+      "entity": "E5",
+      "uuid": "TXS-000000005",
+      "private_memories_strict": 847,
+      "private_memories_owner_allow_unowned": 1464,
+      "knowledge_owned": 2,
+      "knowledge_shared": 278,
+      "knowledge_visible_shared_policy": 280,
+      "black_diamond_active": 17,
+      "conversations_strict": 862
+    }
+  ],
+  "expression": {
+    "files": [
+      {
+        "file": "src/app/role/RoleProfiles.ts",
+        "old_forbid": 2,
+        "old_uncertain": 1,
+        "law_markers": 0
+      },
+      {
+        "file": "src/app/conversation/MemoryGate.ts",
+        "old_forbid": 2,
+        "old_uncertain": 4,
+        "law_markers": 0
+      },
+      {
+        "file": "src/m5/prompts/core-rules.ts",
+        "old_forbid": 2,
+        "old_uncertain": 1,
+        "law_markers": 8
+      },
+      {
+        "file": "src/webui/chat.ts",
+        "old_forbid": 16,
+        "old_uncertain": 0,
+        "law_markers": 1
+      },
+      {
+        "file": "src/webui/chat/retrieval-stage.ts",
+        "old_forbid": 0,
+        "old_uncertain": 3,
+        "law_markers": 9
+      },
+      {
+        "file": "src/m4/MemoryInjector.ts",
+        "old_forbid": 0,
+        "old_uncertain": 1,
+        "law_markers": 1
+      },
+      {
+        "file": "src/webui/chat/long-text-retrieval.ts",
+        "old_forbid": 3,
+        "old_uncertain": 2,
+        "law_markers": 1
+      },
+      {
+        "file": "src/engine/cortex/prompts/rules.ts",
+        "old_forbid": 3,
+        "old_uncertain": 1,
+        "law_markers": 0
+      },
+      {
+        "file": "src/app/knowledge/KnowledgeContextBuilder.ts",
+        "old_forbid": 2,
+        "old_uncertain": 1,
+        "law_markers": 0
+      },
+      {
+        "file": "src/m5/M5Orchestrator.ts",
+        "old_forbid": 0,
+        "old_uncertain": 0,
+        "law_markers": 0
+      },
+      {
+        "file": "src/m4/household/EntityContextBuilder.ts",
+        "old_forbid": 0,
+        "old_uncertain": 0,
+        "law_markers": 0
+      },
+      {
+        "file": "src/m4/retrieval/meeting-recall.ts",
+        "old_forbid": 0,
+        "old_uncertain": 0,
+        "law_markers": 10
+      }
+    ],
+    "totals": {
+      "old_forbid": 30,
+      "old_uncertain": 14,
+      "law_markers": 30
+    }
+  }
+}

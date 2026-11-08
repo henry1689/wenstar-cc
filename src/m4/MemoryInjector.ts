@@ -83,12 +83,10 @@ export function injectMemories(opts: InjectOptions): string {
 
   // ── 来源 1: memoryFragments（砂金+黑钻+作品+长文，来自 retrieval-stage） ──
   for (const frag of memoryFragments) {
-    // S2-T1: 过滤编造/矛盾记忆 — LLM 单方面编造的过去细节(白粥/咸鸭蛋/围裙/丰田) +
-    // 否定真实记录的矛盾记忆(不是十四岁/记混/没敢/看背影)，避免 LLM 采信否认知识库真实14岁记录。
-    const FABRICATION_PATTERNS = /海边|比基尼|营销总监|全职太太|来月经|身体开始变|刻骨铭心|从零到一|泳衣|穿拖鞋|白粥|咸鸭蛋|围裙|丰田|银色|双闪|不是十四岁|记混|没敢|看背影|十五岁|什么都没做|煮了泡面|盖外套|风扇|灰T恤|抹眼泪|阳台上|衣服后面|骑[车]?来|六月末|鸡蛋|生日.*宿舍/;
-    if (/【[^】]*(记忆|对话)[^】]*】/.test(frag) && FABRICATION_PATTERNS.test(frag)) {
-      continue;
-    }
+    // 🔴 MEM-UNIFY-V1 批1：删除按正文关键词的静态黑名单（海边/白粥/丰田等）。
+    //   记忆内容不是垃圾，内容性质不作为过滤依据（实体信息中性评判立法）；
+    //   只保留结构过滤：标签路由、长度下限、相关性精筛、去重。
+
 
     // 🆕 V22 作品召回: 【作品】开头的 fragment 走独立预算（完整作品进上下文）
     if (frag.startsWith('【作品】')) {
@@ -304,7 +302,7 @@ export function injectMemories(opts: InjectOptions): string {
     _notes.push('🔴 共情指南：');
     _notes.push('1）这些记忆片段记录了鸿艺过去的情绪和经历。如果他现在说的事情与某个记忆中的情绪相似（比如都是疲惫、都是焦虑），用那段记忆来理解他此刻的感受——不要只是"引用"，而是"共鸣"。');
     _notes.push('2）表达公式：你当下感受 + 记忆中类似经历 → "是不是又像上次那样……""我懂这种感觉，你之前……的时候也是这样"');
-    _notes.push('3）记忆中没有的细节不要自己编造。');
+    _notes.push('3）细节可以模糊，感受的主线讲饱满；碎片就在已有要素里组织，带一句轻标记即可。');
     parts.push(_entityPrefix + '【相关记忆】\n' + memParts.join('\n') +
       '\n（' + _notes.join(' ') + '）');
   }

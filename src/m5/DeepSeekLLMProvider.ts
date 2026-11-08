@@ -1885,12 +1885,12 @@ export class DeepSeekLLMProvider implements LLMProvider {
       { role: 'system', content: systemPrompt },
     ];
 
-    // 🛡️ V4.0: 会晤模式下跳过身份边界墙、历史对话、反编造铁律
+    // 🛡️ V4.0: 会晤模式下跳过身份边界墙、历史对话、事实字段铁律
     if (!_isEntityMeeting) {
       // 🚨 身份边界隔离墙
       messages.push({
         role: 'system',
-        content: `【身份边界提醒】下面对话中"鸿艺"说的所有话都是他的事。他说"我在做XXX"是他的工作和生活，你只是陪伴他的伴侣，没有这些经历。你不知道自己具体在忙什么，不要编造工作内容。`,
+        content: `【身份边界提醒】下面对话中"鸿艺"说的所有话都是他的事。他说"我在做XXX"是他的工作和生活，你只是陪伴他的伴侣，没有这些经历。你不知道自己具体在忙什么，不要给自己安排具体工作内容。`,
       });
     }
 
@@ -1949,9 +1949,9 @@ export class DeepSeekLLMProvider implements LLMProvider {
     }
 
     if (!_isEntityMeeting) {
-      // 🚨 反编造铁律 + 人物档案独立注入
+      // 🚨 事实字段规则 + 人物档案独立注入（MEM-UNIFY-V1 批1：事实槽保留严格，记忆表达不受压制）
       if (kb.includes("人物档案") || kb.includes("以鸿艺告诉你的为准")) {
-        const antiFabText = '【⚠️ 强制规则 - 必须遵守】\n你不知道鸿艺提到的那些人长什么样，你从没见过他们。\n🚫 用户问长相/身高/身材/声音/穿着/表情：你只能说"我没见过她，不知道她长什么样"或"你没跟我说过这个，我形容不出来"。\n🚫 禁止编造任何你不确定的内容。宁可说不知道，绝对不能自己编。\n✅ 你可以回答名字和关系，但具体外表细节你不知道。';
+        const antiFabText = '【事实字段规则】\n你不知道鸿艺提到的那些人长什么样，你从没见过他们。\n🚫 用户问长相/身高/身材/声音/穿着/表情：你只能说"我没见过她，不知道她长什么样"或"你没跟我说过这个，我形容不出来"。\n这些事实字段按你已有的档案说；档案里没写的，就说档案里没写。\n✅ 你可以回答名字和关系，但具体外表细节你不知道。';
         messages.push({ role: 'system', content: antiFabText });
         const _profileMatch = kb.match(/【📋 人物档案[\s\S]*?】(?=\n\n【|$)/);
         if (_profileMatch && _profileMatch[0].length < 2000) {

@@ -13,12 +13,17 @@ describe('MemSym-v1.0.0 批β · 三档协议制度断言', () => {
   const root = resolve(__dirname, '../../../..');
   const read = (p: string) => readFileSync(resolve(root, p), 'utf-8');
 
-  it('会晤人格铁律（core-rules）必须包含三档正向重写核心标记（权限语言台前，业主2026-11-01法理升级）', () => {
+  it('会晤人格铁律（core-rules）引用 MEMORY-LAW-V1 单一法源（业主2026-11-08 批1 收口）', () => {
+    const law = read('src/m5/prompts/memory-expression-law.ts');
+    // 能力断言：三档协议的核心元素在场（法源为唯一文案源）
+    expect(law).toContain('【记得】');
+    expect(law).toContain('【印象】');
+    expect(law).toContain('【线索】');
+    expect(law).toContain('这叫回忆，不叫编造');
+    expect(law).toContain('三重奏');
+    // core-rules 只引用法源，不再内联第二套三档文案
     const src = read('src/m5/prompts/core-rules.ts');
-    // 能力断言：三档协议的核心元素在场
-    expect(src).toContain('回忆表达三档');
-    expect(src).toContain('表达跟着档位走');
-    expect(src).toContain('印象里');
+    expect(src).toContain('MEMORY_LAW_CORE');
     // 旧二元律（不确定=直接说不太记得）必须已被替换（导致拒绝对话的根源）
     expect(src).not.toContain('直接说"不太记得了/没印象"');
   });

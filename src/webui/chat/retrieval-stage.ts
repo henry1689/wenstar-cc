@@ -576,16 +576,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
           } catch (_dcErr) { /* 寻址先行失败不阻塞主召回 */ }
         }
-        // 🔴 S2-J1b: 过滤编造特征记忆 — LLM 单方面输出的"过去经历"类内容(海边/比基尼/营销总监/来月经等)
-        // 被当真实记忆检索注入 → 巩固谎言。命中特征词的记忆不注入。
-        const FABRICATION_PATTERNS = /海边|比基尼|营销总监|全职太太|来月经|身体开始变|刻骨铭心|从零到一|泳衣|穿拖鞋/;
-        let _fabFiltered = 0;
-        const _cleanMems = (_entityMems || []).filter((_em: any) => {
-          const _body = String(_em.raw_input || '');
-          if (FABRICATION_PATTERNS.test(_body)) { _fabFiltered++; return false; }
-          return true;
-        });
-        if (_fabFiltered > 0) console.log('[EntityMem] 编造特征记忆过滤: ' + _fabFiltered + ' 条');
+        // 🔴 MEM-UNIFY-V1 批1：删除静态编造特征黑名单（海边/泳衣/来月经…）。
+        //   记忆内容不按关键词过滤；只保留会晤 UUID 隔离与结构去重。
+        const _cleanMems = _entityMems || [];
         // 🔴 S2-R5: 简要模式(auto/summary)按 40D 情感相似度重排 — 用户泛泛问("介绍一下你/说说你")时，
         // 40D 权重高的记忆优先注入（与当前感知最贴近）。详细/一字不漏保持钙化序（覆盖过程）。
         // 注意: 会晤隔离墙在 searchV13 前 return(L240-246)，L6.5 40D 重排不执行 → 此处补充。
@@ -1301,12 +1294,12 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       } catch (_floorErr) {
         console.warn('[Latency] 轻档检索模块加载失败，按零记忆降级:', (_floorErr as Error)?.message);
       }
-      // 片段格式与全档 fallback **同源**（「用户曾提到」+ 不记得就说不太记得了），
+      // 片段格式与全档 fallback **同源**（「用户曾提到」+【记得】锚点表达法），
       // 避免同一语义出现两种提示形态。
       for (const _fm of _floor.memories) {
         const _said = String(_fm.record?.raw_input || '').substring(0, 60);
         if (_said) {
-          memoryFragments.push(memFragWithTime('用户曾提到', '"' + _said + '"——这是用户以前说的，不记得就说"不太记得了"', (_fm.record as any).created_at));
+          memoryFragments.push(memFragWithTime('用户曾提到', '"' + _said + '"——这是用户以前说的【记得】锚点；可顺着接、口语化复述，不要添原文没有的人与事。', (_fm.record as any).created_at));
         }
       }
       console.log(`[Latency] fast_path=1 mode=casual tier=floor floor_mem=${_floor.memories.length} floor_ms=${_floor.ms} retrieval_ms=${Date.now() - _trT0}（轻档：跳过 v11/v2/Foundation/LLM重排）`);
@@ -1483,7 +1476,7 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
       if (finalMemories.length > 0) {
         const top = finalMemories[0];
         const userSaid = top.record.raw_input.substring(0, 60);
-        memoryFragments.push(memFragWithTime('用户曾提到', '"' + userSaid + '"——这是用户以前说的，不记得就说"不太记得了"', (top.record as any).created_at));
+        memoryFragments.push(memFragWithTime('用户曾提到', '"' + userSaid + '"——这是用户以前说的【记得】锚点；可顺着接、口语化复述，不要添原文没有的人与事。', (top.record as any).created_at));
       }
   } catch (err) { console.warn('[EmotionContagion] 检索失败:', err); }
 

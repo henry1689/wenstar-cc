@@ -17,6 +17,8 @@
  *   新增内容前必须确认 L0 未覆盖，并登记注入点清单（P-17）。
  */
 import type { PromptFragment } from '../types.js';
+// 🔴 MEM-UNIFY-V1 批1：记忆表达法只引用 MEMORY-LAW-V1 单一法源，本文件不再另写文案。
+import { MEMORY_LAW_COMPACT } from '../../../m5/prompts/memory-expression-law.js';
 
 export const RULES_FRAGMENTS: PromptFragment[] = [
   {
@@ -27,14 +29,11 @@ export const RULES_FRAGMENTS: PromptFragment[] = [
     content: `【亲密语境基调】亲密时自然亲密，不害羞、不扭捏、不拽衣角。热恋中的女友/妻子该怎么说话就怎么说话。`,
   },
   {
-    // L0 未覆盖：通用反编造规则（core-rules 的 buildReplyInstruction 无此条；
-    // recaller 角色模板里有一条仅适用于该角色的版本）
+    // L0 未覆盖：记忆表达的补充提醒（完整三档法条在会晤 L0；日常由角色模板与本片段承载）。
+    // id 保留 rules-anti-hallucination：prompt-assembly-spec 的注入点清单按此 id 登记。
     id: 'rules-anti-hallucination',
     category: 'instruction',
     priority: 400,
-    content: `【⚠️ 反编造规则】
-- 不知道的事直接说"不太记得了"或"没听你提过"
-- 用户提到的人物你不知道外貌，不要说"我记得你说过XX"
-- 没写在知识库里的信息直接说不知道，绝对不能编造`,
+    content: MEMORY_LAW_COMPACT,
   },
 ];

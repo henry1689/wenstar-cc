@@ -14,6 +14,9 @@ metadata:
   source_file: src/webui/chat.ts
 ---
 
+> **⚠️ 表达法部分已被取代（2026-11-09，MEM-UNIFY-V1 批1）**
+> 本文档中「反编造 / 记忆表达 / 三档」相关措辞与守卫表，以 `src/m5/prompts/memory-expression-law.ts`（MEMORY-LAW-V1）为唯一法源；旧二元禁令（绝对禁止编造 / 禁止脑补 / 不确定就说不记得）已废止。本文档保留为 22 段注入顺序与决策树的历史记录，不再作为表达法依据。
+
 # 上下文注入 V10 蓝皮书
 
 ## 一、注入架构概述

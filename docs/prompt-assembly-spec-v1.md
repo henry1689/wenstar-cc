@@ -1,5 +1,10 @@
 # Prompt 拼装规范（PAS v1）— 法律法规草案
 
+> **⚠️ 表达法条款已被取代（2026-11-09，MEM-UNIFY-V1 批1）**
+> 涉及记忆表达 / 反编造的守卫措辞，以 `src/m5/prompts/memory-expression-law.ts`（MEMORY-LAW-V1）为准。
+> P-17 注入点清单中：`inj-05 factual_recall` 已改为事实槽守卫（`FACTUAL_SLOT_LAW`，只约束人物/关系/地点/职业/年龄/外貌）；
+> `inj-03 buildReplyInstruction` 会晤分支改为引用 `MEMORY_LAW_CORE`。其余拼装条款（P-01/P-02/P-10/P-13/P-15/P-18）仍有效。
+>
 > 状态：**草案，待批准**（2026-09-19）
 > 适用范围：本仓库**所有**提交给 LLM 的 prompt 拼装
 > 立法依据：设计目的（§1）+ 2026-09-19 全链路诊断实测证据

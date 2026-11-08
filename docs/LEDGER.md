@@ -130,6 +130,9 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **记忆系统统一 · 批1 表达法收口（MEMORY-LAW-V1）** —— 新增单一法源 `src/m5/prompts/memory-expression-law.ts`（三档/三重奏/憧憬自由/双模式义务/守卫禁令）；10 个运行时提示词文件完成接线；**删除 3 处静态正文黑名单**；旧二元限制措辞扫描 **0 命中**；旧文档 3 份加废止标注；新增 23 项法源回归守卫。详见 §6.24 与 `active/P156` | `tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（均既有或环境依赖）；**未改数据** |
+| 2026-11-08 | **记忆系统统一 · 批0 只读基线探针** —— 只读 aggregate 冻结基线：`memories` 18,706（今日 27 条全部完整编码）；无归属 617（`evt_` 459 / `mem_` 64 / note 94）；重复 987 组/3,160 行（16.9%）；晋升两不沾 665（523 无黑钻行 + 142 removed）；知识库 304（278 共享 / 26 私有 / 72 可检索 / `visible_entity_uuids` 全空）；memarch 17,296 最新 11-04，**25/31 FG UUID 不在 registry**；表达侧旧限制 44 处（chat.ts 16）。`perception_40d` 18,706/18,706 可解码。详见 §6.23 与 `active/P155` | 只读探针 `D:\tmp\mem-batch0-probe.cjs`；证据快照 `docs/agent-collab/active/P155-20261108-记忆系统批0基线.json`；未改代码/数据 |
+| 2026-11-08 | **记忆系统统一任务书立项（记忆总线 / 表达法 / 归属编码）** —— 业主裁决 D1–D10：memarch-v2 移出生产主链、取消 1:1 砂金→金库复制晋升、`vault_log` 定位审计台账、知识库无归属=共享、语义块补归属（不可补 50 条彻底删除）、`note_zone` 94 条回填玉瑶、黑钻 28 条随源继承/19 条 removed 保留。任务书 `docs/记忆系统统一任务书-V1.md` 含批0–批6、编码契约（UUID/DNA/40D）、表达法单一源与验收探针。详见 §6.22 | 只读基线：617 无归属语义块（47 conv / 420 dna / 6 gene / 94 note / 50 不可补）；黑钻 48；知识库 304（278 共享 / 72 可检索）；memarch-v2 最新 2026-11-04 |
 | 2026-11-08 | **Harness hook 覆盖缺口修复 + 判据测试收口** —— ① 查实：项目级 hooks 只在会话 cwd 属于 `D:\tools\wenstar-cc` 时加载；本会话 cwd=`C:\Users\henry` ⇒ 整个会话 pre/post 检查未运行（令牌 6 次写入仍未消费、0 条 BYPASS）。新增 `hooks/harness-hook-dispatch.cjs` 挂到用户级 settings，带「非本项目放行 / 项目内 cwd 不双跑」守卫，实测三例通过。② `grader-non-name-tail` 的「垃圾候选拦截率」为数据驱动信息性断言，批5 清零后分母语义失效（24.3% 是群体变化，非能力退化）⇒ 改为固定样本断言，测试套件 **1155 passed / 0 failed**。详见 §6.21 与 `docs/HARNESS-hook-覆盖缺口-20261108.md` | `tsc`=0；m4/app/m1 1155 passed；dispatcher 三例实测；`harness_evolution_analyze` 报 10 条 critical（无令牌批量写入=本缺口症状） |
 | 2026-11-08 | **批6 归档（实体提取架构收口全系列完成）** —— 文档同步：任务书加「执行状态」表（批1–批6 + 两处偏差）、`FG-结构规范-V1.0` §3.1 更新为「写入前取证、无观察区」、`data-storage-reference` 三处历史口径加删除注记、方案文档状态改为已实施。批1–批6 合计：5 类旁路 + 观察区/离线终审 + 双闸门冗余 + 1271 行存量全部清除；新增确定性取证准入（ADR-020 §6）。详见 §6.20 | 任务书/规范/参考/方案四份文档；全系列 ADR-020/021/022；LEDGER §6.14–§6.20 |
 | 2026-11-08 | **批5 清存量（数据操作，业主确认后执行）** —— 按任务书 §9.2 三条件 + 额外安全项（FG 名单/别名/uuid、`memory_entities`、`memories.entity_genes`、`temporal_events`、`atom_address_timeline`、`black_diamond`/`vault_log`/`memsym_elements`/`conversations.belong_entity_uuid`、`conversations.entity_names`）盘点 `entities` 存量。业主选择「全删」：删除 **1271** 行（person 1069 + object 202）与 **2013** 条 `entity_relations`；`entities` 4129→2858、`entity_relations` 13722→11709，`integrity_check=ok`，重启 HTTP 200。**未动任何 memories / conversations / FG**。详见 §6.19 | 停服窗口执行；整库备份 `D:\tmp\fusion_memory-pre-batch5-20261108-180202.db`；删除行全量备份 `D:\tmp\批5-删除行备份-20261108.json`；盘点清单 `D:\tmp\批5-存量候选-20261108.json` |
@@ -760,6 +763,72 @@ FG 人物数不变（19 active / 12 dormant）。
 
 **Harness 自进化建议（未自动应用）**：把「hook 是否真的加载」纳入启动自检
 （探针写入 + `.consumed` 记录核验），否则同类静默失效会重复发生。
+
+---
+
+### §6.22 2026-11-08 记忆系统统一任务书立项（记忆总线 / 表达法 / 归属编码）
+
+**性质**：设计定稿与任务立项，**未改代码、未改数据**。任务书全文：`docs/记忆系统统一任务书-V1.md`。
+
+**业主裁决 D1–D10（全部确认）**：
+- D1 memarch-v2 立即移出生产主链（快照停在 2026-11-04，主库 11-01 后新增 3,381 条）；
+- D2 取消 1:1 砂金→金库复制晋升，写入一次、晋升只做派生摘要；
+- D3 `vault_log` 定位为审计台账，退出记忆召回；
+- D4 语义块补归属，补不上按垃圾彻底删除；`conversations`/`vault_log` 保留；
+- D5 知识库无归属 = 共享（278 条），全体可见；
+- D6 `dream_behavior` 231 条维持检索隔离；
+- D7 删除知识库敏感词 `【本地回复】` 直出分支；
+- D8 50 条不可补语义块 dry-run 后彻底删除；
+- D9 94 条 `note_zone` 回填玉瑶（写入者身份确定性规则）；
+- D10 黑钻 28 条随源回填、1 条 active 源失效随源处置、19 条 removed 保留。
+
+**只读实测（2026-11-08）**：
+- 无归属语义块 617 = 47（source_conversation_ids）+ 420（同 dna_root 唯一）+ 6（entity_genes）+ 94（note_zone）+ **50 不可补**（emotion 24 / language 16 / social 9 / spatiotemporal 1）；
+- 黑钻无归属 48（28 可继承 / 1 源不可补 / 19 removed）；
+- 知识库 304 = 278 共享 + 26 私有；可检索 72（231 条 `dream_behavior` 隔离）；`visible_entity_uuids` 全空；
+- 其他无归属：conversations 264、vault_log 567、works 0。
+
+**结构根因（详见任务书）**：三库层定义漂移 + 一轮多写 + `promoted_to_diamond` 单向门；V14 陈旧快照抢占 + casual 97.7% 早退 + Foundation topK=3/6 + 黑钻整句 LIKE + 五级闸门只做成员过滤 + 召回反馈仅旧路径；表达侧旧反编造 9+ 处散落；归属策略 strict/allow-unowned/无过滤三种答案。
+
+**目标结构**：一条召回总线（casual/standard/deep/proactive）+ 三层契约 + 证据层（知识/档案/作品/记事）+ 单一表达法源 + 三态归属策略 + UUID/DNA/40D 编码强制契约。
+
+**批次**：批0 基线（只读）→ 批1 表达法 → 批2A 召回总线 → 批2B 知识/档案与归属 → 批3 写入/编码 → 批4 深度整编/主动回忆 → 批5 回归文档 → **批6 数据治理（停服窗口）**。
+
+**验收目标**：有记忆时回避率 0；三重奏/憧憬 ≥80%；三层探针各 ≥1；当日写入当日可召回；新语义块编码完整率 100%；无归属语义块 0；跨实体 0；知识 278 共享全可见。
+
+---
+
+### §6.23 2026-11-08 记忆系统统一 · 批0 只读基线探针（P155）
+
+**方法**：`better-sqlite3` readonly，只做聚合统计；不写库、不改代码、不输出正文。探针 `D:\tmp\mem-batch0-probe.cjs`（保留至批5复跑），证据 `active/P155-…-baseline.json`。
+
+**关键基线**：
+- `memories` 18,706（今日 27，全部 belong+dna+40D 完整）；`conversations` 21,911；`black_diamond` 4,092（active 894）；`vault_log` 10,789；`knowledge_base` 304；`works` 239；notes 200；`dialog_groups` 3,561。
+- 编码完整率：`belong` 缺失 617（3.3%）、`global_uid` 0、`dna_root_id` 240（1.3%）、`perception_40d` **0（18,706 全部可解码）**、`entity_genes` 空 1,714（9.2%）、溯源缺失 3,985（21.3%）。
+- 无归属 617 的来源：`evt_`（M9 工作记忆）**459** / `mem_`（persistence）64 / note 94。**今日新增 27 条全部完整** ⇒ 新写入侧已基本收口，历史 459 条是主来源。
+- 重复：987 组 / 3,160 行（16.9%）。晋升：flagged 1,171；active 506 / removed 142 / **无对应黑钻行 523** ⇒ 两不沾 665。
+- 知识库：278 共享 / 26 私有 / 可检索 72（`dream_behavior` 231 隔离）/ `visible_entity_uuids` 全空 / 无 `emotion_vector` 0。
+- memarch-v2：17,296，最新 2026-11-04（玉瑶 07:43Z / 诗雨 08:30Z）；主库 11-01 后新增 3,381。`namespace_registry` 仅 6 个 FG UUID；**25/31 FG UUID 未映射**（玉瑶按 `role-yuyao-001` 回落 `ns_yuyao` 是预期，其余 24 个属跨实体风险）。
+- 归属策略模拟（前 5 实体）：strict 与 allow-unowned 恒差 617 条；知识共享 278 对所有实体可见。
+- 表达侧静态扫描：旧禁止类 30 + 旧不确定/回避类 14 = **44 处**（chat.ts 16 / MemoryGate 6 / long-text 5 / cortex 4 / core-rules 3 / RoleProfiles 3 / KnowledgeContextBuilder 3 / retrieval-stage 3 / MemoryInjector 1）；新法标记 30 处。
+
+**结论**：基线冻结完成；批1 目标旧限制 44→0；批2A/2B 以"新鲜数据 + 25 个未映射 UUID"为验收点；批3 以 617/987/665 为硬指标；批6 与任务书 §1.3 完全一致。
+
+---
+
+### §6.24 2026-11-09 记忆系统统一 · 批1 表达法收口（P156）
+
+**目标**：把散落在 12 个文件的旧二元限制（绝对禁止编造 / 禁止脑补 / 不确定就说不记得）收口为单一法源 MEMORY-LAW-V1。
+
+**交付**：
+- 新增 `src/m5/prompts/memory-expression-law.ts`：三档【记得】【印象】【线索】、三重奏（回味→叠加→憧憬）、憧憬自由、双模式义务（主动/深度）、守卫禁令、表达优先权、事实槽 `FACTUAL_SLOT_LAW`、线索提示、原文/档案锚点规则。纯常量 + 纯函数。
+- 接线：`core-rules`（会晤 L0 引用 CORE）、`cortex/rules`（COMPACT）、`RoleProfiles`（recaller→记忆陪伴者，四日常角色追加 COMPACT）、`MemoryGate`（三档状态机）、`chat.ts`（hasMemory=实际要素集；memoryGuard/追问/事实槽/重复提示/外貌与图片）、`retrieval-stage`、`long-text-retrieval`、`MemoryInjector`、`MeetingWallAdapter`、`KnowledgeContextBuilder`、`KnowledgeTextAssembler`、`DeepSeekLLMProvider`。
+- **删除静态正文黑名单 3 处**：`MemoryInjector`（白粥/丰田等）、`retrieval-stage`（海边/泳衣等）、`MeetingWallAdapter`（同）；只保留 UUID 隔离、结构去重、条数上限、相关性精筛。
+- 旧文档 3 份加废止标注；新增 `memory-expression-law.test.ts` 23 项守卫；更新 `memsym-tier-guard`、`clue-prompt`、`long-text-retrieval`、`search-orchestrator-meeting` 的旧断言。
+
+**验收**：`tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（memarch 并行会话 4、V15 probe 既有 2、环境/DB 4、E2E 2、API-SMOKE 2；唯一由本批导致的 MeetingWall 断言已改并转绿）。**未改数据**。
+
+**偏差**：`M5Orchestrator.ts` 未改（会晤仍固定 recaller，但 recaller 模板已重写）；两个无生产消费者的 guard-builder 死代码未改，列清理待办；事实槽（外貌/图片/户口）仍严格按档案回答，属 `FACTUAL_SLOT_LAW` 而非记忆压制。
 
 ---
 

@@ -16,8 +16,8 @@ describe('appendCluePrompt（模糊回忆 → LLM 自然追问）', () => {
     const r = appendCluePrompt('');
     expect(r).toContain('【线索提示】');
     expect(r).toContain('鸿艺似乎在回忆某件具体的事');
-    expect(r).toContain('轻轻追问一句');
-    expect(r).toContain('千万不要编造具体的时间、地点、人物或事件细节');
+    expect(r).toContain('帮他起头');
+    expect(r).toContain('不要替他补出具体的时间、地点、人物');
   });
 
   it('已有 knowledgeBaseText：提示追加在末尾，原文保留', () => {
@@ -45,7 +45,7 @@ describe('appendClueRecall（高置信线索命中 → 注入真实记忆）', (
     expect(r).toContain('【线索回忆参考】');
     expect(r).toContain('去年十月加班的那个晚上');
     expect(r).toContain('在办公室等你加班');
-    expect(r).toContain('不确定就说不记得');
+    expect(r).toContain('别用"不记得"挡回去');
   });
 
   it('已有 knowledgeBaseText：回忆参考追加在末尾', () => {
@@ -56,10 +56,10 @@ describe('appendClueRecall（高置信线索命中 → 注入真实记忆）', (
     expect(r).toContain('片段A');
   });
 
-  it('命中记忆按换行分隔，且含反编造提示', () => {
+  it('命中记忆按换行分隔，且含三档锚点提示', () => {
     const r = appendClueRecall('', ['片段A', '片段B']);
     expect(r).toContain('片段A\n片段B');
-    expect(r).toContain('若相关可以自然提起，不确定就说不记得');
+    expect(r).toContain('相关就自然提起、顺着说');
   });
 
   it('空命中列表：返回空文案头部（无崩溃）', () => {

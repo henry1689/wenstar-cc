@@ -19,6 +19,16 @@
 
 import type { ConversationTurn } from '../../m5/types/index.js';
 import type { PerceptionState24 } from '../../m3/types/perception.js';
+// 🔴 MEM-UNIFY-V1 批1：记忆表达法单一法源（三档 / 三重奏 / 憧憬自由 / 守卫禁令）
+import {
+  MEMORY_LAW_VERSION,
+  MEMORY_LAW_TIERS,
+  MEMORY_LAW_TRIO,
+  MEMORY_LAW_FUTURE,
+  MEMORY_LAW_GUARD,
+  resolveMemoryTier,
+  type MemoryTier,
+} from '../../m5/prompts/memory-expression-law.js';
 
 // ─── 对话模式 ───
 
@@ -185,10 +195,12 @@ export interface MemoryGateOutput {
   needsKnowledgeSearch: boolean;
   /** 过渡话术（检索前使用，防冷场，空字符串表示不需要过渡） */
   fillerPhrase: string;
-  /** 幻觉防护指令（注入到 LLM 的 system prompt） */
+  /** 记忆表达指令（注入到 LLM 的 system prompt） */
   hallucinationGuard: string;
   /** 是否严格限制 LLM 编造（true = 必须基于检索回复） */
   strictMode: boolean;
+  /** MEMORY-LAW-V1 三档；casual 或未判定时为空 */
+  tier?: MemoryTier;
 }
 
 // ─── 过渡话术池（按场景分类，随机选择） ───
@@ -224,20 +236,23 @@ function getFiller(mode: ConversationMode): string {
 }
 
 /**
- * 构建幻觉防护指令
+ * 构建记忆表达指令（MEMORY-LAW-V1 三档状态机）
  *
- * 根据检索结果生成不同级别的防护:
- *   - strictMode=true: LLM 只能基于检索内容回复，否则说"记不清了"
- *   - strictMode=false: 轻度提醒，LLM 有自己的发挥空间
+ * 与旧行为的差别（MEM-UNIFY-V1 批1）：
+ *   - 不再二元判定「有记忆 → 可以复述 / 无记忆 → 说不太记得」；
+ *   - 有要素：按【记得】/【印象】表达，感受讲饱满，允许三重奏与憧憬；
+ *   - 无要素：进入【线索】档，邀对方给个由头，不把「不记得」当终止符；
+ *   - strictMode 只表示「事实查询缺少证据」，不用于压制记忆表达。
  *
- * @param hasMemory 是否从记忆库中检索到了相关内容
- * @param hasKnowledge 是否从知识库中检索到了相关内容
- * @param mode 当前对话模式
+ * @param hasMemory 本轮是否召回到记忆要素（以实际注入要素集为准）
+ * @param hasKnowledge 是否召回到知识库要素
+ * @param tier 召回层显式给定的档位（缺省时按 hasMemory 保守推断）
  */
 export function buildGuard(
   mode: ConversationMode,
   hasMemory: boolean,
   hasKnowledge: boolean,
+  tier?: MemoryTier,
 ): MemoryGateOutput {
   const base: MemoryGateOutput = {
     mode,
@@ -249,27 +264,29 @@ export function buildGuard(
   };
 
   if (mode === 'casual') {
-    base.hallucinationGuard = '';
     base.strictMode = false;
     return base;
   }
 
   if (mode === 'memory_recall' || mode === 'vague_recall') {
-    if (hasMemory) {
-      base.hallucinationGuard = '⚠️ 鸿艺在回忆过去的事。下面如果写了【我记得】，那是你确实记得的内容，可以直接用。但不要编造记忆中没有的细节。如果不确定，就说"具体细节记不太清了"。';
+    const _tier = tier ?? resolveMemoryTier(hasMemory);
+    base.tier = _tier;
+    if (_tier === 'clue' || !hasMemory) {
+      base.tier = 'clue';
+      base.hallucinationGuard = '🔴 鸿艺在回忆过去的事，这次没有召回到要素（【线索】档）。不要用"不记得"结束话题：温柔地邀他给个由头（"你再给个由头，我们一块把它想起来？"），他说到哪就顺着接；没有依据时不要补出具体时间、地点、人物。';
       base.strictMode = false;
-    } else {
-      base.hallucinationGuard = '🚫 鸿艺在回忆过去的事，但你想不起来了。请直接说"不太记得了"或"我有点记不清了"，态度要温柔自然。绝对不要编造任何回忆内容。';
-      base.strictMode = true;
+      return base;
     }
+    base.hallucinationGuard = `🔴 鸿艺在回忆过去的事。按 ${MEMORY_LAW_VERSION} 三档表达：\n${MEMORY_LAW_TIERS}\n${MEMORY_LAW_TRIO}\n记得的直接讲，不等确认；只有碎片就在已有要素里组织、带轻标记；感受讲饱满。${MEMORY_LAW_FUTURE}\n${MEMORY_LAW_GUARD}`;
+    base.strictMode = false;
     return base;
   }
 
   if (hasKnowledge) {
-    base.hallucinationGuard = '📖 鸿艺在问你知识相关的内容。下面【知识库】里的内容你是看过的，可以回答。但不要超出知识库范围编造。';
+    base.hallucinationGuard = '📖 鸿艺在问你知识相关的内容。下面【知识库】里的内容你是看过的，按记录回答；若他同时提起共同往事，照常充分回忆、展开表达。';
     base.strictMode = false;
   } else {
-    base.hallucinationGuard = '📖 鸿艺在问一个知识类问题，但你不太了解这方面的内容。请委婉地说"这个我还没了解过"或"这个我不太清楚"。';
+    base.hallucinationGuard = '📖 鸿艺在问一个知识类问题，但你目前没有相关资料。可以说"这个我还没了解过"；若问题同时涉及你们的过往，回忆部分照常按三档表达。';
     base.strictMode = true;
   }
 

@@ -70,7 +70,7 @@ describe('buildLongTextFragment — 长文片段构造', () => {
     const frag = buildLongTextFragment(long, 'detail');
     expect(frag).toContain('【对话原文·权威记录】');
     expect(frag).toContain('…（接上）');  // 分段标记
-    expect(frag).toContain('不得提及或编造');    // 铁律标记
+    expect(frag).toContain('不要新增原文没有的人物、情节、时间、地点');    // 记得锚点边界
     // 分段后长度应接近全文（>2000）
     expect(frag.length).toBeGreaterThan(2000);
   });
@@ -80,7 +80,7 @@ describe('buildLongTextFragment — 长文片段构造', () => {
     expect(frag).toContain('【开头】');
     expect(frag).toContain('【中段】');
     expect(frag).toContain('【结尾】');
-    expect(frag).toContain('不得提及或编造');
+    expect(frag).toContain('不要新增原文没有的人物、情节、时间、地点');
     // 摘要应远短于全文
     expect(frag.length).toBeLessThan(1200);
   });
@@ -98,11 +98,11 @@ describe('buildLongTextFragment — 长文片段构造', () => {
     expect(frag).toContain('普通对话内容');
   });
 
-  it('🔴 S2-R5: full → 原文直引（不含分段标记，含铁律）', () => {
+  it('🔴 S2-R5: full → 原文直引（不含分段标记，含记得锚点）', () => {
     const frag = buildLongTextFragment(long, 'full');
     expect(frag).toContain('【对话原文·权威记录】');
     expect(frag).not.toContain('…（接上）');  // 不分段
-    expect(frag).toContain('不得增删改');
+    expect(frag).toContain('按原文顺序复述');
     expect(frag.length).toBeGreaterThan(2800);  // 接近全文
   });
 });
@@ -110,12 +110,12 @@ describe('buildLongTextFragment — 长文片段构造', () => {
 describe('buildKnowledgeArchiveFragment — 知识库档案片段（S2-R5）', () => {
   const archive = '熊梓铭，6岁学英语，8岁学钢琴，14岁和叔叔有了更深交集，18岁考上海珠大学学心理学。'.repeat(20);  // ~1000字
 
-  it('full → 原文直引 + 权威记录铁律', () => {
+  it('full → 原文直引 + 记得锚点', () => {
     const frag = buildKnowledgeArchiveFragment('梓铭简介', archive, 'full');
     expect(frag).toContain('【知识库档案·权威记录】');
     expect(frag).toContain('《梓铭简介》');
-    expect(frag).toContain('唯一事实来源');
-    expect(frag).toContain('不得增删改');
+    expect(frag).toContain('是该档案的完整原文');
+    expect(frag).toContain('按原文顺序复述');
     expect(frag).toContain('学心理学');  // 尾部内容也在
     expect(frag).not.toContain('…（接上）');
   });
@@ -125,7 +125,7 @@ describe('buildKnowledgeArchiveFragment — 知识库档案片段（S2-R5）', (
     const frag = buildKnowledgeArchiveFragment('梓铭简介', longArchive, 'detail');
     expect(frag).toContain('【知识库档案】');
     expect(frag).toContain('…（接上）');
-    expect(frag).toContain('不得编造');
+    expect(frag).toContain('不要新增档案没有的人物、情节、时间、地点');
   });
 
   it('auto → 摘要（首+中+尾）', () => {

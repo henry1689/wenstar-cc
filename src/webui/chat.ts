@@ -1676,7 +1676,7 @@ export async function processChat(
                 const _hbText = (_top.length
                   ? `【用户正在查询的成员户口】\n${_top.map(_fmt).join('\n')}\n\n`
                   : '') + _rest.map(_fmt).join('\n');
-                _entityContextText += `\n\n【太虚境户口本 · 管理者权限】\n你是太虚境的主人与系统维护者，户口档案由你掌管。以下为太虚境成员户口（户口号为 TXS 编号）：\n${_hbText}\n🔴 回答户口/UUID 相关问题必须直接引用上方户口号（TXS 格式），不得含糊、不得说"未写全"、不得编造。`;
+                _entityContextText += `\n\n【太虚境户口本 · 管理者权限】\n你是太虚境的主人与系统维护者，户口档案由你掌管。以下为太虚境成员户口（户口号为 TXS 编号）：\n${_hbText}\n🔴 回答户口/UUID 相关问题必须直接引用上方户口号（TXS 格式），不得含糊、不得说"未写全"；户口里没有的，按户口本查，不猜。`;
                 console.log('[警幻仙姑] 户口本已注入: ' + _hbRows.length + ' 名成员' + (_top.length ? ` (提及: ${_top.map(r => r.name).join('、')})` : ''));
               }
             } catch (_hbErr) {
@@ -1723,7 +1723,7 @@ export async function processChat(
               continuityParts.push(`${speaker}：${snippet}`);
             }
             if (continuityParts.length > 0) {
-              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应，不要编造你不知道的事。）\n⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';
+              _entityContextText += '\n\n【对话延续·刚才的对话】\n' + continuityParts.join('\n') + '\n（以上是你们的上一轮对话。用户现在接着这个话题说。保持话题连贯，基于你已知道的档案信息回应；涉及共同往事时照常充分回忆，档案里没写的事实字段就说档案里没写。）\n⚠️ 【时间约束铁律】以上是对话历史记录。你当前的时间以系统提示里「现在是」的标注为准，不以历史对话里提到的时间点为准。你现在是什么时段就按什么时段回应，不要套用历史对话里的时间语境。';
             }
           }
         }
@@ -1850,7 +1850,10 @@ export async function processChat(
 
     try {
 
-      const hasMemory = emotionalMemories.length > 0;
+      // 🔴 MEM-UNIFY-V1 批1：hasMemory 以本轮实际注入的要素集为准。
+      //   情感记忆为空、但砂金/金库/黑钻/作品/长文等 fragment 已召回时，仍属「有记忆要素」，
+      //   不能因单一路径为空就退化成「不记得」。
+      const hasMemory = emotionalMemories.length > 0 || memoryFragments.length > 0;
 
       const hasKnowledge = knowledgeBaseText.length > 0;
 
@@ -1965,7 +1968,7 @@ export async function processChat(
           if (typeof p.age === 'number' && p.age >= 0) profileText += '\n      年龄：' + p.age + '岁';
           return profileText;
         }).join('\n')
-        familyConstraint = '【📋 人物档案 — 以鸿艺告诉你的为准】\n' + knownList + '\n\n⚠️ 规则：\n1. 上面写了的信息（外貌、身体、性格等）是鸿艺告诉你的，你可以用来回答。\n2. 没写的信息你不知道——直接说不知道/没说过。\n3. 🔴 绝对禁止编造任何你记忆中不存在的内容。';
+        familyConstraint = '【📋 人物档案 — 以鸿艺告诉你的为准】\n' + knownList + '\n\n⚠️ 规则：\n1. 档案里写明的信息（外貌、身体、性格等）可以直接用来回答。\n2. 没写的信息，就说档案里没写/没说过。\n3. 🔴 档案里没有的人与事，不凭空补；档案里有的，按记录如实讲。';
       }
       // 无实体数据时不注入约束（空规则导致LLM每轮都提"家人"话题）
     } catch (err) { console.warn('[FamilyGuard] 构建失败:', err); }
@@ -1983,7 +1986,7 @@ export async function processChat(
 
       { match: /上传(?:了)?(?:一[张份个])?(?:图片|照片|截图|文件)/, guard: '⚠️ 用户提到"上传"了文件，但实际上没有收到任何文件。不要假装你看到了什么。直接说没看到。' },
 
-      { match: /发(?:了)?(?:一[张份个])?(?:图片|照片|截图)/, guard: '⚠️ 没有收到任何图片或照片。用户说发了但系统没有记录。不要编造你看到了什么。' },
+      { match: /发(?:了)?(?:一[张份个])?(?:图片|照片|截图)/, guard: '⚠️ 没有收到任何图片或照片。用户说发了但系统没有记录。只按实际收到的内容回应。' },
 
       { match: /看(?:到|过)(?:了)?(?:吗|没有|没)/, guard: '⚠️ 如果你没有任何相关的记忆或知识库内容，不要假装知道。直接说你没注意到或没看到。' },
 
@@ -2012,11 +2015,11 @@ export async function processChat(
 
     if (repeatCount >= 3) {
 
-      repeatHint = '（鸿艺反复追问，你直接明确说没有/不知道/不记得就好）';
+      repeatHint = '（鸿艺反复追问：记得的就直接讲；确实没有的就说"没印象"，并邀他给个由头，一起想起来。）';
 
     } else if (repeatCount >= 2) {
 
-      repeatHint = '（鸿艺在追问相同的事，你如果已经说过了不知道，就直接说真的不记得/没看过）';
+      repeatHint = '（鸿艺在追问相同的事：已经讲过的就接着讲；确实没有的就说没印象，别用"不记得"把话题关死。）';
 
     }
 
@@ -2061,9 +2064,10 @@ export async function processChat(
     let factualRecallGuard = '';
 
     if (isFactualRecallQuery) {
-      factualRecallGuard = '【事实问答模式】用户在确认人物、关系、地点、职业、年龄等事实信息。先直接给出事实答案，再补一句自然说明即可。禁止加入身体接触、喘息、贴靠、气味、欲望、调情、撒娇式转移话题。如果事实不确定，就明确说不记得或不知道，绝对不要编造。';
-      intimacyFilter = '【⚠️ 事实优先】当前问题是事实回忆/人物信息确认。回复必须简洁、准确、克制，优先使用秘书式陈述语气。';
-      _currentRole = 'secretary';
+      // 🔴 MEM-UNIFY-V1 批1：事实槽只约束事实字段，不再把整段人格切成秘书口吻。
+      const { FACTUAL_SLOT_LAW } = await import('../m5/prompts/memory-expression-law.js');
+      factualRecallGuard = FACTUAL_SLOT_LAW + '【事实问答模式】先直接给出事实答案，再自然补充；身体接触、喘息、贴靠、气味、欲望、调情留给非事实场景。';
+      intimacyFilter = '【事实优先·仅限事实字段】当前问题包含事实确认。事实部分简洁准确；其余部分照常自然表达，可以带温度，不要整段切成秘书口吻。';
     }
 
     // 🔴 隐私法豁免：亲密语境下不得因历史含工作词误激活"禁止亲密语气"（调情话题保留亲密）
@@ -2089,7 +2093,7 @@ export async function processChat(
 
         ? '⚠️【身份边界险】鸿艺跟你说过他的工作内容（方案/项目等），那些是他的事不是你的事。你不知道自己在忙什么。不要说"我在做..."。温柔回应"想你了"或"没什么特别的"。'
 
-        : '⚠️ 你不知道自己具体在忙什么。不要编造具体的项目、客户、工作内容。可以温柔地说"想你了""没什么特别的"之类的。';
+        : '⚠️ 你不知道自己具体在忙什么。不要给自己安排具体的项目、客户、工作内容。可以温柔地说"想你了""没什么特别的"之类的。';
 
     }
 
@@ -2131,10 +2135,11 @@ export async function processChat(
     //   ② 框架内创造（档案/知识库/记忆里都没有的空白过去）——
     //      允许在符合你的个人背景（生活/家庭/工作/性格/年龄/爱好）框架下合理创造过去。
     //      ⚠️ 但一旦这些创造被记录进记忆，就固化为"共同过去"，之后绝不能再次编造/再创造。
-    const memoryGuard = '🔴【系统铁律·过去的法定分界线=共同过去】过去分两类：\n'
-      + '① 共同过去 = 你和用户真实聊过并存进记忆/数据库的内容 + 知识库已有文档。这些是事实，**只能忠实复述记录中已有的内容**（可摘要/详细/润色语言）。**绝对禁止添加记录中不存在的事件、物品、场景、对话、细节**——比如记录只写了"14岁父亲出差接你去宿舍学习"，就不能编"你开银色丰田来接我/煮了白粥咸鸭蛋"这些记录里没有的。没有的就是没有，诚实说"这个我没有记录/不记得/档案里没写"。\n'
-      + '② 框架内创造 = 档案/知识库/记忆里都没有的空白过去。允许在符合你个人背景（生活/家庭/工作/性格/年龄/爱好）的框架下合理创造。但一旦这些创造被记录进记忆，就固化为"共同过去"，之后**绝不能再次编造或再创造**。\n'
-      + '判断某段过去属于哪类，先看它在不在记忆/数据库/知识库档案里：在 → 共同过去（只复述记录内事实，禁止添加细节）；不在 → 才允许框架内创造。\n'
+    // 🔴 MEM-UNIFY-V1 批1：记忆表达法统一引用 MEMORY-LAW-V1 单一法源（三档/三重奏/憧憬自由/表达优先）。
+    const { MEMORY_LAW_CORE } = await import('../m5/prompts/memory-expression-law.js');
+    const memoryGuard = '🔴【系统铁律·记忆表达法】\n'
+      + MEMORY_LAW_CORE + '\n'
+      + '要素集边界只约束「过往事实断言」：不得凭空添加要素集之外的新人物/新场景/新情节冒充真实过往。\n'
       + '🔴【档案优先复述·S2-R4】当用户问起你的过去/经历/生日/某个具体年份时：**必须先复述上方【关于你的知识库档案】中真实记录的内容**（如出生年/年龄/童年经历/14岁/学历/家庭），逐条说出档案写了什么。不要用"你问过好多遍""不想讲""换个话题"等方式回避——档案里有的，就完整说出来。';
 
     // 知识分类反问（仅在casual/中性场景触发，以guard message形式注入，不追加到reply末尾）
@@ -2171,7 +2176,7 @@ export async function processChat(
     // 仅当存在人物档案数据时才注入外貌规则，日常聊天空时不注入
     const _hasPeopleData = ((ctx_m4?.family_context?.length ?? 0) > 0 || (ctx_m4?.social_context?.length ?? 0) > 0);
     const _appearanceGuard = _hasPeopleData
-      ? '【强制规则·人物外貌】如果有人问你"长什么样""什么样子"，你只能回答上面【人物档案】中写明的外貌和身体特征。没写的细节你一概不知道，直接说不知道。绝对禁止编造。'
+      ? '【强制规则·人物外貌】如果有人问你"长什么样""什么样子"，按上面【人物档案】写明的内容回答；档案里没写的，就说档案里没有记录。'
       : '';
     // 🛡️ 调试开关: WS_NO_CONTENT_FILTER=true 时跳过所有内容限制
     const _noFilter = ConfigService.getBool('WS_NO_CONTENT_FILTER', false);
@@ -2615,7 +2620,7 @@ if (isFactualRecallQuery && !PROMPT_ASSEMBLER_STRICT) {
         //    改为"如果相关可以自然参考，不要强行衔接"——记忆是背景，不是剧本。
         // 🔴 P0-4 瘦身法: memory_context 由 assembler 承载，strict 模式旧链路跳过。
         if (memoryText && !PROMPT_ASSEMBLER_STRICT && !finalKnowledgeText.includes('【相关记忆】')) {
-          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，仍按铁律诚实说"没有记录"，不许编造。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
+          const historyLink = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，可以说"没有记录"，但别用这句话挡住回忆——记得的片段和感受大方讲出来。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
           finalKnowledgeText = historyLink + (finalKnowledgeText ? '\n\n' + finalKnowledgeText : '');
         }
         // 家族/社交铁律注入 — 只在消息提到已知家庭人物时注入
@@ -2627,7 +2632,7 @@ if (isFactualRecallQuery && !PROMPT_ASSEMBLER_STRICT) {
         // 🔴 P0-4 瘦身法: family_constraint 由 assembler 承载，strict 模式旧链路跳过
         if (familyConstraint && (_msgMentionsFamily || isFactualRecallQuery) && !PROMPT_ASSEMBLER_STRICT) {
           finalKnowledgeText = familyConstraint + '\n\n' + finalKnowledgeText;
-          finalKnowledgeText += '【强制】未在档案中的外貌特征(身高/脸型/眼镜/发型等)你不知道，绝对不能编造。';
+          finalKnowledgeText += '【强制】外貌特征（身高/脸型/眼镜/发型等）按档案写明的说；档案里没写的，就说档案里没写。';
         }
 
         // 主人大脑镜像注入 — 🔴 P0-4 瘦身法: master_profile 由 assembler 承载，strict 模式旧链路跳过
@@ -2736,7 +2741,8 @@ if (isFactualRecallQuery && !PROMPT_ASSEMBLER_STRICT) {
       }
     }
     if (_prev && _prev.length > 4 ) {
-      finalKnowledgeText = '【用户上一句】"' + _prev.substring(0, 80) + '"（这是用户刚才说的话，现在他接着这个话题继续说。直接用这个来理解他现在的意思。）\n\n【⚠️ 反编造铁律 — 绝对禁止无中生有】\n用户刚才说：' + _prev.substring(0, 60) + '，现在接着说：' + message.substring(0, 40) + '\n你对此人此事的了解仅限于你知道其名字和基础关系。\n🚫 绝不要编造：\n- 任何具体事件、对话、去过哪里、做过什么\n- 任何人物关系（XX是你老婆/你妈/你亲戚等）\n- 任何职业、经历、喜好、细节\n- 任何"上次你说""上次你们""我记得你提过"之类的具体回忆\n✅ 如果不确定，只说"这个我不太清楚了"或"我记不太清了"\n\n' + (finalKnowledgeText || '');
+      const { MEMORY_LAW_FOLLOWUP } = await import('../m5/prompts/memory-expression-law.js');
+      finalKnowledgeText = '【用户上一句】"' + _prev.substring(0, 80) + '"（这是用户刚才说的话，现在他接着这个话题继续说。直接用这个来理解他现在的意思。）\n\n' + MEMORY_LAW_FOLLOWUP + '\n\n' + (finalKnowledgeText || '');
       console.log('[FollowUp] prev="' + _prev.substring(0,40) + '" msg="' + message + '"');
     }
         // S3 引擎上下文注入（情感标签 + 欲望提示 + 涌现）
@@ -2771,11 +2777,11 @@ try {
 
   // 🔴 hard_rule: 家族铁律 + 反编造
   if (familyConstraint && (_msgMentionsFamily || isFactualRecallQuery)) {
-    assembler.add(hardRule('family_constraint', familyConstraint + '\n【强制】未在档案中的外貌特征你不知道，绝对不能编造。'));
+    assembler.add(hardRule('family_constraint', familyConstraint + '\n【强制】档案里没写的外貌特征，就说档案里没写。'));
   }
   // 🔴 safety: 不知道守卫（P0-2: 用 policy 判断）
   if (_isSelfQ && !_isWorkQ && !knowledgeBaseText && policy.canUseUnknownGuard()) {
-    assembler.add(safetyBlock('unknown_guard', '【不知道】这个问题我确实不知道答案。我不想编造，所以诚实地告诉你我不清楚。'));
+    assembler.add(safetyBlock('unknown_guard', '【不知道】这个问题我确实不知道，不糊弄你。'));
   }
   // 🔴 safety: 亲密过滤
   if (intimacyFilter) {
@@ -2787,7 +2793,7 @@ try {
   }
   // 🟡 memory: 记忆片段
   if (memoryText && !finalKnowledgeText.includes('【相关记忆】')) {
-    const _memBlock = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，仍按铁律诚实说"没有记录"，不许编造。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
+    const _memBlock = '【情感背景·过往记忆】' + memoryText + '\n（以上是你真实经历过、亲口聊过的内容——**它们是事实**。凡是上面写到的：时间、地点、计划、约定、人名，用户问起时都要照实回答，不能说"不记得""没印象""没这回事"。上面**没写到的**，可以说"没有记录"，但别用这句话挡住回忆——记得的片段和感受大方讲出来。另外，这些是**过去发生的事**：不要从记忆里的场景开始说话、不要重演当时的对话——你是正在和对方聊天的活人，用"我记得…"把事讲清楚即可。）';
     // 🔴 S4-B1 修复: 含 entity_meeting —— 会晤模式 strict 下 memoryText 由 assembler 唯一承载
     assembler.add(memoryBlock('memory_context', _memBlock, ['normal', 'entity_meeting']));
   }

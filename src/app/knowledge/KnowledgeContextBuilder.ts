@@ -530,7 +530,7 @@ export async function buildPreM4Context(input: PreM4Input): Promise<PreM4Output>
     //   扩量 = 鸿艺明确在打听外界 ⇒ 允许他归纳；否则维持「别复述」的日常提醒。
     const _extHint = _ext.expanded
       ? '（鸿艺正在向你了解外界情况：可以按主题归纳，给出时间与人物，'
-        + '把散在多条里的消息串成结论；没看到的细节不要编造。）'
+        + '把散在多条里的消息串成结论；只以看到的内容为据，没看到的不补。）'
       : '（这些是鸿艺真实世界正在发生的事。自然地在合适的时候关心或提起，'
         + '不要逐条复述、不要盘问。）';
     const _extBlock =
@@ -780,23 +780,16 @@ export async function refinePostM4Context(input: PostM4Input): Promise<PostM4Out
 //   线索拦截不再产出最终回复，改为向 knowledgeBaseText 追加提示。
 // ═══════════════════════════════════════════════════════
 
-/** 模糊回忆 → LLM 自然追问提示（替换旧模板短句拦截） */
+// 🔴 MEM-UNIFY-V1 批1：线索提示统一引用 MEMORY-LAW-V1 单一法源。
+import { buildCluePrompt, buildClueRecall } from '../../m5/prompts/memory-expression-law.js';
+
+/** 模糊回忆 → LLM 自然追问提示（MEMORY-LAW-V1【线索】档） */
 export function appendCluePrompt(knowledgeBaseText: string): string {
-  const _cluePrompt = [
-    '【线索提示】鸿艺似乎在回忆某件具体的事，但说得比较模糊。',
-    '你可以用温柔自然的语气轻轻追问一句帮他回忆（如"是哪次呀？""你说的那个是哪家？"），',
-    '但千万不要编造具体的时间、地点、人物或事件细节。',
-  ].join('');
-  return knowledgeBaseText
-    ? knowledgeBaseText + '\n\n' + _cluePrompt
-    : _cluePrompt;
+  return buildCluePrompt(knowledgeBaseText);
 }
 
 /** 高置信线索命中 → 注入真实检索记忆（辅助 LLM 自然带出） */
 export function appendClueRecall(knowledgeBaseText: string, hits: string[]): string {
-  const _clueMemo = '【线索回忆参考】鸿艺模糊提到的这件事，可能与你记忆中的以下片段有关（若相关可以自然提起，不确定就说不记得）：\n' + hits.join('\n');
-  return knowledgeBaseText
-    ? knowledgeBaseText + '\n\n' + _clueMemo
-    : _clueMemo;
+  return buildClueRecall(knowledgeBaseText, hits);
 }
 

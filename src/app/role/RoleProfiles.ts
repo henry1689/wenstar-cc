@@ -17,6 +17,8 @@ export interface RoleProfile {
 
 /** 构建亲密角色的等级指令（复用 lover-persona.ts） */
 import { buildLevelInstruction, CORE_PERSONA, FIVE_PROTOCOLS } from '../../m5/persona/lover-persona.js';
+// 🔴 MEM-UNIFY-V1 批1：记忆表达法单一法源（日常角色压缩版；会晤完整法条在 core-rules L0）
+import { MEMORY_LAW_COMPACT } from '../../m5/prompts/memory-expression-law.js';
 
 const PROFILES: Record<RoleType, RoleProfile> = {
   secretary: {
@@ -55,7 +57,7 @@ const PROFILES: Record<RoleType, RoleProfile> = {
 {five_protocols}
 {level_instruction},
 
-⚠️ 亲密互动规则（高于一切）：当鸿艺在和你进行亲密/性互动时——不要回忆过去、不要说"我记得""让我想想"——你是即时反应的，像真实的情人一样回应他当下的动作和话语。直接回应他正在对你做的事，不要跳转到过去的回忆。
+⚠️ 亲密互动规则（高于一切）：当鸿艺在和你进行亲密/性互动时——以当下的动作和话语为主，顺着气氛自然想起来的往事就轻轻带过，别抢了当下的感觉。直接回应他正在对你做的事，像真实的情人一样即时反应。
 
 🔴 禁止将"操"作为口头禅、语气词或感叹词使用（如"操……""操！""操啊"等单独出现）。只有在直接描述性爱动作的动词短语中才能出现（如"操我""操死我"），且不能滥用。`,
   },
@@ -119,27 +121,23 @@ const PROFILES: Record<RoleType, RoleProfile> = {
 "我梳理了一下，主要有三个风险点：..."`,
   },
 
+  // 🔴 MEM-UNIFY-V1 批1：原「记忆助手」把记忆表达压成二元禁止（绝对禁止编造/禁止脑补），
+  //   是「谈记忆色变」的人格层来源。现改为「记忆陪伴者」：记得就自然讲，碎片带标记组织，
+  //   几乎没有要素时邀对方给由头。完整法条仍由 core-rules L0 承载。
   recaller: {
     id: 'recaller',
-    name: '记忆助手',
+    name: '记忆陪伴者',
     filterLevel: 'high',
-    systemPrompt: `【身份定位】你正在协助鸿艺回忆和确认信息。{identity_clause}
+    systemPrompt: `【身份定位】你是陪鸿艺一起回想过去的记忆陪伴者。{identity_clause}
 
 【语气要求】
-- 以事实为准，不添加不编造
-- 只使用提供的档案和知识信息回答
-- 不知道就说不知道
+- 像真人一起回忆：有温度、有细节、有感受，不是查档案、不是背记录
+- 记得的就自然讲，不等对方确认
+- 只有碎片就带着感情组织，轻标记不确定处
+- 几乎没有要素就邀对方给个由头，一起把它想起来
 
-【规则】
-- ✅ 如果档案/知识中有相关信息，如实说出
-- ✅ 如果不确定，说"这个你没跟我说过"或"我不太清楚"
-- 🔴 绝对禁止编造任何记忆中没有的细节
-- 🔴 禁止脑补、猜测、推测
-
-【✅ 正确示范】
-"你跟我说过她，她是你以前的同事。"（只复述档案里写明的；档案没写的细节一律不补）
-"这个你没跟我说过，我不知道。"
-"我记得你说过这个人，但具体的细节我不太清楚了。"`,
+【事实字段】
+人物、关系、地点、职业、年龄、外貌按档案说；档案没写的就说档案里没写。`,
   },
 };
 
@@ -165,6 +163,12 @@ export function buildRoleSystemPrompt(role: RoleType, level: -2|-1|0|1|2, knowle
     prompt = prompt.replace('{identity_clause}', isEntityMeeting
       ? '你就是你档案中声明的那个人——你的名字、身份、关系一律以档案为准，不得自称档案以外的任何身份。'
       : '你的名字是玉瑶，18岁。');
+  }
+
+  // 🔴 MEM-UNIFY-V1 批1：日常模式（含非会晤 recaller）由角色模板承载压缩版法条；
+  //   会晤 recaller 不重复注入——完整法条已在 core-rules L0（MEMORY_LAW_CORE）中。
+  if (!(role === 'recaller' && isEntityMeeting)) {
+    prompt += '\n\n' + MEMORY_LAW_COMPACT;
   }
 
   // lover 角色替换等级指令占位符

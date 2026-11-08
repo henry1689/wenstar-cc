@@ -92,15 +92,17 @@ describe('MeetingWallAdapter — 会晤隔离墙三槽位', () => {
     expect(hits.length).toBeGreaterThan(0);
   });
 
-  it('编造特征记忆应被过滤', async () => {
+  it('不按正文关键词过滤（MEMORY-LAW-V1）', async () => {
+    // MEM-UNIFY-V1 批1：静态编造特征黑名单已删除——记忆内容不是垃圾，
+    // 内容性质不作为过滤依据；只保留 UUID 隔离与结构去重。
     const rows = [
       { id: 'm1', raw_input: '我去海边穿了比基尼', calcium_score: 0.9, created_at: new Date().toISOString(), recent: true },
       { id: 'm2', raw_input: '阿芬的日常聊天', calcium_score: 0.7, created_at: new Date().toISOString(), recent: true },
     ];
     const adapter = new MeetingWallAdapter(makeSource(rows));
     const hits = await adapter.search(makeCtx());
-    expect(hits.length).toBe(1);
-    expect(hits[0].id).toBe('m2');
+    expect(hits.length).toBe(2);
+    expect(hits.map(h => h.id)).toEqual(['m1', 'm2']);
   });
 });
 

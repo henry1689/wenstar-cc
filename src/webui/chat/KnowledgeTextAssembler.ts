@@ -117,7 +117,7 @@ export class KnowledgeTextAssembler {
   withFamilyConstraint(constraint: string): this {
     if (constraint) {
       this.prepend(constraint);
-      this.append('【强制】未在档案中的外貌特征(身高/脸型/眼镜/发型等)你不知道，绝对不能编造。');
+      this.append('【强制】外貌特征（身高/脸型/眼镜/发型等）按档案写明的说；档案里没写的，就说档案里没写。');
     }
     return this;
   }

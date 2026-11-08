@@ -12,7 +12,7 @@
  * 设计原则：
  *   - route = 'meeting'，权重独立可配（retrieval-fusion.config.yaml）
  *   - 只查 belong_entity_uuid = 当前会晤实体（隐私隔离核心）
- *   - 编造特征过滤保留（FABRICATION_PATTERNS）
+ *   - 只做结构去重与条数上限，不按正文内容过滤（MEM-UNIFY-V1 批1：删除静态编造黑名单）
  *   - 输出 SearchHit 形状，供 fuseHits 融合
  */
 
@@ -35,9 +35,6 @@ import type { RecallMemoryRow } from '../meeting-recall.js';
 export interface MeetingWallSource {
   queryAll<T = unknown>(sql: string, params?: unknown[]): T[];
 }
-
-/** 编造特征过滤 — 命中特征词的记忆不注入（对齐原隔离墙 S2-J1b） */
-const FABRICATION_PATTERNS = /海边|比基尼|营销总监|全职太太|来月经|身体开始变|刻骨铭心|从零到一|泳衣|穿拖鞋/;
 
 /** 输出条数上限 */
 const MAX_MEMORIES = 15;
@@ -78,14 +75,12 @@ export class MeetingWallAdapter implements RetrievalAdapter {
       entityMems = [...entityMems, ...earlyRows];
     }
 
-    // ── 去重 + 编造特征过滤 ──
+    // ── 结构去重（不按正文内容过滤）──
     const seen = new Set<string>();
-    let fabFiltered = 0;
     for (const m of entityMems) {
       if (seen.has(m.id)) continue;
       seen.add(m.id);
       const body = String(m.raw_input || '');
-      if (FABRICATION_PATTERNS.test(body)) { fabFiltered++; continue; }
       hits.push({
         id: String(m.id),
         domain: 'memory',
@@ -101,7 +96,6 @@ export class MeetingWallAdapter implements RetrievalAdapter {
       if (hits.length >= MAX_MEMORIES) break;
     }
 
-    if (fabFiltered > 0) console.log(`[MeetingWallAdapter] 编造特征过滤: ${fabFiltered} 条`);
     return hits;
   }
 }

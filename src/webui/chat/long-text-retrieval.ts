@@ -117,6 +117,9 @@ export function fetchLongText(
  * @param level   注入级别
  * @returns 注入片段（带铁律标记）
  */
+// 🔴 MEM-UNIFY-V1 批1：原文/档案锚点规则统一引用 MEMORY-LAW-V1 单一法源。
+import { buildDialogArchiveRule, buildKnowledgeArchiveRule } from '../../m5/prompts/memory-expression-law.js';
+
 export function buildLongTextFragment(content: string, level: DetailLevel): string {
   const text = (content || '').trim();
   if (text.length <= LONG_TEXT_THRESHOLD) {
@@ -135,14 +138,9 @@ export function buildLongTextFragment(content: string, level: DetailLevel): stri
     body = _summaryOf(text);
   }
 
-  // 铁律标记：过去发生的事绝对不得编造——以原文为唯一事实来源
-  // 即使记忆/知识库/之前对话里提过其他人物或情节，只要原文没有，就不得提及（无中生有即违规）。
-  return '【对话原文·权威记录】' + body +
-    '\n\n🔴 铁律（关于过去的记忆，绝对不得违反）：\n' +
-    '1. 以上是检索到的这篇纪实的真实原文记录，是你回答的唯一事实来源。\n' +
-    '2. 原文中没有出现的人物、情节、数据、章节，一律不得提及或编造——即使你的记忆、知识库或之前对话里提过，也不得使用（那是当时没有发生的）。\n' +
-    '3. 如果用户问到原文中没有的内容，如实回答"当时记录的原文里没有这部分"。\n' +
-    '4. 严格按原文顺序和内容复述，不得增删改。';
+  // 原文是【记得】档锚点，不是逐字背诵的枷锁：可口语化复述、渲染感受，
+  // 但不新增原文没有的人物/情节/时间/地点（MEMORY-LAW-V1）。
+  return '【对话原文·权威记录】' + body + '\n\n' + buildDialogArchiveRule(level);
 }
 
 /**
@@ -225,15 +223,10 @@ export function buildKnowledgeArchiveFragment(
   else body = _summaryOf(text);
 
   const header = isFull ? '【知识库档案·权威记录】' : '【知识库档案】';
-  const iron = isFull
-    ? '\n\n🔴 铁律（知识库档案·权威记录，绝对不得违反）：\n' +
-      '1. 以上是该档案的完整原文，是你回答"过去事件/人物经历"的唯一事实来源。\n' +
-      '2. 原文中没有的经历、人物、时间、地点、情节，一律不得提及或编造。\n' +
-      '3. 严格按原文顺序和内容复述，不得增删改、不得润色虚构。'
-    : level === 'detail'
-      ? '\n\n（以上为档案分段原文。按原文顺序组织你的回答，原文没有的内容不得编造。）'
-      : '\n（以上为档案简要摘要。用自己的话概括，不得编造原文没有的内容。）';
-  return header + (title ? '《' + title + '》\n' : '') + body + iron;
+  // 档案是【记得】档锚点：full 按原文顺序复述；detail/summary 可口语化概括，
+  // 但不新增档案没有的人物/情节/时间（MEMORY-LAW-V1）。
+  return header + (title ? '《' + title + '》\n' : '') + body
+    + '\n\n' + buildKnowledgeArchiveRule(level);
 }
 
 /** 分段全文（每段 ~1500 字，覆盖全文） */
