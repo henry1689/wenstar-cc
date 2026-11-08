@@ -119,6 +119,14 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P157 记忆系统统一 · 批2A 召回总线（Claude Code）**：
+  新增 `src/m4/recall/recall-bus.ts`（casual/standard/deep/proactive 四模式、砂金/金库/黑钻/对话组层保底、
+  单一五级闸门降权排序、`applyRecallFeedback` 单点回写）+ `recall_bus` 配置段；
+  `retrieval-stage` 三出口接入（casual 不再早退，补小预算 Foundation）；**V14 下线（D1）**；
+  黑钻整句 LIKE → **分片 LIKE + 40D**；反馈统一。
+  验证：`tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（均既有或环境依赖）。**未改数据**。
+  详见 `active/P157`；下一步批2B 知识与档案 + 归属策略。
+
 - 2026-11-09 **✅ P156 记忆系统统一 · 批1 表达法收口（Claude Code）**：
   新增单一法源 `src/m5/prompts/memory-expression-law.ts`（MEMORY-LAW-V1：三档 / 三重奏 / 憧憬自由 / 双模式义务 / 守卫禁令）；
   `core-rules`、`cortex/rules`、`RoleProfiles`、`MemoryGate`、`chat.ts`、`retrieval-stage`、`MemoryInjector`、

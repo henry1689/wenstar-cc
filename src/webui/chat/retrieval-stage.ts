@@ -301,6 +301,11 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   // 剩余耗时必须逐段暴露出来才能定位（见 [RetT] 日志）。
   const _trT0 = Date.now();
   let _trPrev = _trT0;
+  // 🔴 MEM-UNIFY-V1 批2A：本轮召回反馈锚点（唯一收集点；出口统一 applyRecallFeedback 回写）
+  const _recallFeedbackRefs: Array<{
+    table: 'memories' | 'black_diamond' | 'knowledge_base';
+    id: string;
+  }> = [];
 
   // 🔴 V22 作品召回: 指称词解析（"那篇小说/继续写/标题"）→ 作品主键 → 注入完整作品全文
   // 放在会晤隔离墙之前：户主钥匙和会晤场景都能解析（会晤场景在隔离墙内提前 return）
@@ -363,7 +368,9 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
 
     // 🛡️ V5.2: 会晤信息隔离墙 — 阻断用户记忆，检索实体自有记忆
   // 🔴 V14 替代旧链路的开关。false = 退回「v2 与旧链路串联叠加」的老行为。
-  const WS_V2_REPLACE_LEGACY = true;
+  // 🔴 MEM-UNIFY-V1 批2A / D1：会晤 V14 替换路径同步下线（默认 false）。
+  //   与普通模式共用 WS_SEARCH_V14 应急回滚开关；默认走主库新鲜数据。
+  const WS_V2_REPLACE_LEGACY = process.env.WS_SEARCH_V14 === 'true';
   // 🔴 v2 结果达到这个条数才算「够用」，够用就跳过旧检索块。
   //   取 6：低于此值说明 v2 召回质量不足（时间窗内无内容 / 短查询），
   //   需要旧链路补位；高于此值则旧链路的增量有限，而代价是 ~1.8s 串行耗时。
@@ -1139,6 +1146,25 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
         const _rqGeneric = _topicKw.length === 0
           || _kwValidHits < (Number(getRetrievalFusionConfig()?.recall_quota?.generic_query_min_hits) || 0);
         applyRecallQuotaAtExit(memoryFragments, 'meeting', enrichedHistory, _rqGeneric);
+
+        // 🔴 MEM-UNIFY-V1 批2A：会晤出口统一总线（deep：三层各 2 保底 + 单一五级闸门）。
+        //   会晤 UUID 隔离已在各数据源执行；总线只做去重/保底/闸门排序，不改变隔离语义。
+        try {
+          const { runRecallBus, classifyFragmentTier } = await import('../../m4/recall/recall-bus.js');
+          const _mBus = runRecallBus({
+            mode: 'deep',
+            query: message,
+            candidates: memoryFragments.map((f: string) => ({
+              text: f,
+              tier: classifyFragmentTier(f),
+              score: 0.5,
+            })),
+          });
+          memoryFragments.length = 0;
+          for (const _c of _mBus.selected) memoryFragments.push(_c.text);
+        } catch (_mBusErr) {
+          console.warn('[RecallBus] 会晤出口总线失败，保留配额后片段:', (_mBusErr as Error)?.message);
+        }
       }
     } catch (_e) { /* non-critical */ }
     // 分段打点：会晤分支整体（含 V14 + 被跳过的旧检索块）到此的累计耗时
@@ -1302,7 +1328,56 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           memoryFragments.push(memFragWithTime('用户曾提到', '"' + _said + '"——这是用户以前说的【记得】锚点；可顺着接、口语化复述，不要添原文没有的人与事。', (_fm.record as any).created_at));
         }
       }
-      console.log(`[Latency] fast_path=1 mode=casual tier=floor floor_mem=${_floor.memories.length} floor_ms=${_floor.ms} retrieval_ms=${Date.now() - _trT0}（轻档：跳过 v11/v2/Foundation/LLM重排）`);
+
+      // 🔴 MEM-UNIFY-V1 批2A：casual 不再早退 —— 补一次小预算 Foundation 完整路由
+      //   （黑钻/金库/知识/对话组），再统一过 RecallBus（casual：total=5，三层各 1 保底）。
+      let _casualFoundationHits: any[] = [];
+      try {
+        const _cf = await startFoundationRouteTask(ctx, message, {
+          meetingMode: false,
+          activeEntityUuids: _activeEntityUuids,
+          isTopicShift: false,
+          perception: p,
+          perception40d: input.p40,
+          locusPath: (dna as any).locus_path || 'default',
+          entities: dna.entity_genes.map(g => ({ name: g.name, type: g.type })),
+        });
+        if (_cf) {
+          _casualFoundationHits = _cf.hits || [];
+          for (const _f of _cf.fragments) {
+            if (!memoryFragments.some((x: string) => x.includes(_f.substring(0, 20)))) {
+              memoryFragments.push(_f);
+            }
+          }
+        }
+      } catch (_cfErr) {
+        console.warn('[Latency] casual Foundation 失败，保留轻档记忆:', (_cfErr as Error)?.message);
+      }
+
+      try {
+        const { runRecallBus, classifyFragmentTier, applyRecallFeedback } = await import('../../m4/recall/recall-bus.js');
+        const _bus = runRecallBus({
+          mode: 'casual',
+          query: message,
+          candidates: memoryFragments.map((f: string) => ({
+            text: f,
+            tier: classifyFragmentTier(f),
+            score: 0.5,
+          })),
+        });
+        memoryFragments.length = 0;
+        for (const _c of _bus.selected) memoryFragments.push(_c.text);
+        const _refs = _casualFoundationHits
+          .map((h: any) => (h?.backref?.table && h?.backref?.id)
+            ? { table: h.backref.table, id: String(h.backref.id) }
+            : null)
+          .filter(Boolean) as Array<{ table: 'memories' | 'black_diamond' | 'knowledge_base'; id: string }>;
+        const _fb = applyRecallFeedback(ctx.storage.getSQLite(), _refs);
+        console.log(`[Latency] fast_path=1 mode=casual tier=bus floor_mem=${_floor.memories.length} bus=${_bus.selected.length} feedback=${_fb} floor_ms=${_floor.ms} retrieval_ms=${Date.now() - _trT0}（轻档：小预算完整总线）`);
+      } catch (_busErr) {
+        console.warn('[Latency] casual RecallBus 失败，保留已召回片段:', (_busErr as Error)?.message);
+      }
+
       return {
         isTopicShift,
         isFollowUp,
@@ -1483,9 +1558,10 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   // ── V11.0: 统一语义搜索 — n-gram初筛 + 自有40D向量精排（替代旧LIKE黑钻检索） ──
   // ── V13.0: WS_SEARCH_V13=true 时走七层仿生管线 ──
   const WS_SEARCH_V13 = true; // 硬编码开启，绕过 env 加载问题
-  // ── V14: MemArch v2 主召回（拆旧链路第 1 步）──
-  //   置 false 即完整回滚到 V13/V11，零数据变更。
-  const WS_SEARCH_V14 = true;
+  // ── V14: MemArch v2 主召回 ──
+  // 🔴 MEM-UNIFY-V1 批2A / D1：memarch-v2 已移出生产主链（快照停在 2026-11-04，
+  //   会抢占主库新鲜数据）。默认 false ⇒ V13/V11 使用主库；应急回滚显式设 WS_SEARCH_V14=true。
+  const WS_SEARCH_V14 = process.env.WS_SEARCH_V14 === 'true';
   console.error('[RETRIEVAL-STAGE-V13] ENTERED runRetrieval, WS_SEARCH_V13=' + WS_SEARCH_V13 + ' WS_SEARCH_V14=' + WS_SEARCH_V14 + ' m4=' + !!ctx.m4 + ' retrieveFn=' + !!(ctx.m4?.retrieveMultiRankForSearch));
   try {
     if (message.trim().length > 1) {
@@ -1662,14 +1738,17 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           }
         } catch (_ltErr) { /* 长文直取失败不阻塞 */ }
 
-        // 更新召回计数（V13/V11 共用）
-        for (const _r of (_v13Result?.raw || _dbResult?.raw || []).slice(0, 3)) {
-          try {
-            if (_r.item?.source === 'black_diamond') {
-              _sqlite.writeRaw?.('UPDATE black_diamond SET recall_count = recall_count + 1, updated_at = ? WHERE id = ?',
-                [new Date().toISOString(), _r.item.id]);
-            }
-          } catch { /* 非关键 */ }
+        // 🔴 MEM-UNIFY-V1 批2A：不再就地写库，只收集反馈锚点，出口统一 applyRecallFeedback。
+        for (const _r of (_v13Result?.raw || _dbResult?.raw || []).slice(0, 5)) {
+          const _src = _r?.item?.source;
+          const _id = _r?.item?.id;
+          if (!_id) continue;
+          if (_src === 'black_diamond' || _src === 'memory') {
+            _recallFeedbackRefs.push({
+              table: _src === 'black_diamond' ? 'black_diamond' : 'memories',
+              id: String(_id),
+            });
+          }
         }
       }
     }
@@ -1770,6 +1849,14 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
   try {
     const _fResult = await _foundationPromise;
     if (_fResult) {
+      // 🔴 MEM-UNIFY-V1 批2A：收集 Foundation 命中 backref（出口统一反馈）
+      for (const _fh of (_fResult.hits || [])) {
+        const _br = (_fh as any)?.backref;
+        if (_br?.table && _br?.id
+          && (_br.table === 'memories' || _br.table === 'black_diamond' || _br.table === 'knowledge_base')) {
+          _recallFeedbackRefs.push({ table: _br.table, id: String(_br.id) });
+        }
+      }
       if (WS_FOUNDATION_ROUTES) {
         // 🔴 Phase 2.3 (F / T005) F0+F3（非会晤侧，受 _rqOn 门控）：
         //   formatHit 对 dialog_group / high_calcium_group 走 default 分支输出 `💭 …`，
@@ -1858,6 +1945,29 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     memoryFragments, 'normal', enrichedHistory,
     extractTopicKeywords(message, [], 8).length === 0,
   );
+
+  // 🔴 MEM-UNIFY-V1 批2A：统一召回总线（standard/deep）—— 出口层保底 + 单一五级闸门。
+  //   放在配额之后：配额负责 A/B 比例，总线负责三层保底与 G2/G4/G5 降权排序，职责不重叠。
+  try {
+    const { runRecallBus, classifyFragmentTier, applyRecallFeedback } = await import('../../m4/recall/recall-bus.js');
+    const _busMode = isTopicShift ? 'deep' as const : 'standard' as const;
+    const _bus = runRecallBus({
+      mode: _busMode,
+      query: message,
+      candidates: memoryFragments.map((f: string) => ({
+        text: f,
+        tier: classifyFragmentTier(f),
+        score: 0.5,
+      })),
+    });
+    memoryFragments.length = 0;
+    for (const _c of _bus.selected) memoryFragments.push(_c.text);
+    // 单一反馈：本轮收集的 V13/V11/Foundation 锚点统一回写
+    const _fbCount = applyRecallFeedback(ctx.storage.getSQLite(), _recallFeedbackRefs);
+    if (_fbCount > 0) console.log(`[RecallBus] 反馈回写 ${_fbCount} 条`);
+  } catch (_busErr) {
+    console.warn('[RecallBus] 出口总线失败，保留配额后片段:', (_busErr as Error)?.message);
+  }
 
   return {
     isTopicShift,

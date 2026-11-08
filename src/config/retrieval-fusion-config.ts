@@ -129,6 +129,35 @@ export interface RetrievalFusionConfig {
    * 不存在"开关关了但某处仍在查"的半失效状态。
    */
   dialog_group_v11_recall: boolean;
+  /**
+   * 🔴 MEM-UNIFY-V1 批2A: 记忆召回总线配置（src/m4/recall/recall-bus.ts）。
+   * 模式 → 层保底名额 → 单一五级闸门 → 反馈；名额由 YAML 驱动，禁止 ts 硬编码。
+   */
+  recall_bus: RecallBusConfig;
+}
+
+/** 一个召回模式的层保底名额（证据层 knowledge/long_text/work 只参与补足，不占三层名额） */
+export interface RecallBusModeBudget {
+  /** 本模式最多注入片段数 */
+  total: number;
+  /** 砂金层最小名额 */
+  sand: number;
+  /** 金库层最小名额 */
+  gold: number;
+  /** 黑钻层最小名额 */
+  diamond: number;
+  /** 对话组层最小名额 */
+  group: number;
+}
+
+export interface RecallBusConfig {
+  /** 总开关：false = 只去重+截断（一键回滚） */
+  enabled: boolean;
+  modes: Record<'casual' | 'standard' | 'deep' | 'proactive', RecallBusModeBudget>;
+  /** 是否挂载五级闸门（默认 true；false 仅用于故障排查，不得常态关闭） */
+  gate: { enabled: boolean };
+  /** 是否回写 recall_count/last_recalled_at */
+  feedback: { enabled: boolean };
 }
 
 // ── 默认值（yaml 缺失时兜底，保持系统可用）──
@@ -157,6 +186,18 @@ const DEFAULTS: RetrievalFusionConfig = {
   },
   // 对话块召回。yaml 缺失时默认开（块检索是本期交付的能力）
   dialog_group_v11_recall: true,
+  // MEM-UNIFY-V1 批2A: 召回总线默认名额（casual 轻档小预算完整总线；deep 给三层更多保底）
+  recall_bus: {
+    enabled: true,
+    modes: {
+      casual: { total: 5, sand: 1, gold: 1, diamond: 1, group: 1 },
+      standard: { total: 8, sand: 2, gold: 1, diamond: 1, group: 1 },
+      deep: { total: 15, sand: 3, gold: 2, diamond: 2, group: 2 },
+      proactive: { total: 6, sand: 1, gold: 1, diamond: 1, group: 1 },
+    },
+    gate: { enabled: true },
+    feedback: { enabled: true },
+  },
 };
 
 let _cache: RetrievalFusionConfig | null = null;
@@ -194,6 +235,19 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
       dialog_group_v11_recall: parsed.dialog_group_v11_recall === undefined
         ? DEFAULTS.dialog_group_v11_recall
         : parsed.dialog_group_v11_recall === true,
+      // 🔴 MEM-UNIFY-V1 批2A: 召回总线段逐层合并（yaml 只写一个模式时其余模式保持默认）
+      recall_bus: {
+        ...DEFAULTS.recall_bus,
+        ...(parsed.recall_bus || {}),
+        modes: {
+          casual: { ...DEFAULTS.recall_bus.modes.casual, ...(parsed.recall_bus?.modes?.casual || {}) },
+          standard: { ...DEFAULTS.recall_bus.modes.standard, ...(parsed.recall_bus?.modes?.standard || {}) },
+          deep: { ...DEFAULTS.recall_bus.modes.deep, ...(parsed.recall_bus?.modes?.deep || {}) },
+          proactive: { ...DEFAULTS.recall_bus.modes.proactive, ...(parsed.recall_bus?.modes?.proactive || {}) },
+        },
+        gate: { ...DEFAULTS.recall_bus.gate, ...(parsed.recall_bus?.gate || {}) },
+        feedback: { ...DEFAULTS.recall_bus.feedback, ...(parsed.recall_bus?.feedback || {}) },
+      },
     };
   } catch (e) {
     console.warn('[RetrievalFusionConfig] yaml 加载失败，使用默认值:', (e as Error)?.message);

@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **记忆系统统一 · 批2A 召回总线** —— 新增 `src/m4/recall/recall-bus.ts`（四模式/层保底/单一五级闸门/单点反馈）+ `recall_bus` 配置；`retrieval-stage` 三出口接入（casual 不再早退）；**V14 下线（D1）**；黑钻整句 LIKE → 分片 LIKE + 40D；反馈统一 `applyRecallFeedback`。详见 §6.25 与 `active/P157` | `tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批1 表达法收口（MEMORY-LAW-V1）** —— 新增单一法源 `src/m5/prompts/memory-expression-law.ts`（三档/三重奏/憧憬自由/双模式义务/守卫禁令）；10 个运行时提示词文件完成接线；**删除 3 处静态正文黑名单**；旧二元限制措辞扫描 **0 命中**；旧文档 3 份加废止标注；新增 23 项法源回归守卫。详见 §6.24 与 `active/P156` | `tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-08 | **记忆系统统一 · 批0 只读基线探针** —— 只读 aggregate 冻结基线：`memories` 18,706（今日 27 条全部完整编码）；无归属 617（`evt_` 459 / `mem_` 64 / note 94）；重复 987 组/3,160 行（16.9%）；晋升两不沾 665（523 无黑钻行 + 142 removed）；知识库 304（278 共享 / 26 私有 / 72 可检索 / `visible_entity_uuids` 全空）；memarch 17,296 最新 11-04，**25/31 FG UUID 不在 registry**；表达侧旧限制 44 处（chat.ts 16）。`perception_40d` 18,706/18,706 可解码。详见 §6.23 与 `active/P155` | 只读探针 `D:\tmp\mem-batch0-probe.cjs`；证据快照 `docs/agent-collab/active/P155-20261108-记忆系统批0基线.json`；未改代码/数据 |
 | 2026-11-08 | **记忆系统统一任务书立项（记忆总线 / 表达法 / 归属编码）** —— 业主裁决 D1–D10：memarch-v2 移出生产主链、取消 1:1 砂金→金库复制晋升、`vault_log` 定位审计台账、知识库无归属=共享、语义块补归属（不可补 50 条彻底删除）、`note_zone` 94 条回填玉瑶、黑钻 28 条随源继承/19 条 removed 保留。任务书 `docs/记忆系统统一任务书-V1.md` 含批0–批6、编码契约（UUID/DNA/40D）、表达法单一源与验收探针。详见 §6.22 | 只读基线：617 无归属语义块（47 conv / 420 dna / 6 gene / 94 note / 50 不可补）；黑钻 48；知识库 304（278 共享 / 72 可检索）；memarch-v2 最新 2026-11-04 |
@@ -829,6 +830,23 @@ FG 人物数不变（19 active / 12 dormant）。
 **验收**：`tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（memarch 并行会话 4、V15 probe 既有 2、环境/DB 4、E2E 2、API-SMOKE 2；唯一由本批导致的 MeetingWall 断言已改并转绿）。**未改数据**。
 
 **偏差**：`M5Orchestrator.ts` 未改（会晤仍固定 recaller，但 recaller 模板已重写）；两个无生产消费者的 guard-builder 死代码未改，列清理待办；事实槽（外貌/图片/户口）仍严格按档案回答，属 `FACTUAL_SLOT_LAW` 而非记忆压制。
+
+---
+
+### §6.25 2026-11-09 记忆系统统一 · 批2A 召回总线（P157）
+
+**目标**：一条召回总线（模式→层保底→单一五级闸门→单点反馈），解决“三库召不回”的结构性来源。
+
+**交付**：
+- 新增 `src/m4/recall/recall-bus.ts`：`RecallMode` 四档；`RecallTier` 八层（`other` 为上下文直通，不占记忆名额）；`dedupeCandidates`；`applyTierFloors`（砂金/金库/黑钻/对话组最小名额 + shortfalls）；`applyGate`（FiveStageGate 单点挂载，effective_strength 降权参与排序）；`runRecallBus`；`applyRecallFeedback`（白名单表回写 recall_count）。
+- 配置：`config/retrieval-fusion.config.yaml` 新增 `recall_bus`（casual 5 / standard 8 / deep 15 / proactive 6，各层保底）；`retrieval-fusion-config.ts` 新增接口/默认值/深合并。
+- `retrieval-stage`：casual 不再早退（补小预算 Foundation）；会晤/普通出口统一总线；V14 普通与会晤两处默认下线（D1）；反馈改为 `_recallFeedbackRefs` 收集 + 出口单点回写，删除 V13/V11 就地写库。
+- `BlackDiamondAdapter`：整句 LIKE → 分片 LIKE（标点词 + 重叠 CJK 2-gram，≤12 片）+ 40D 余弦重排；无 `emotion_vector` 列自动回退。
+- 测试：recall-bus 9 项、black-diamond-shard 5 项、recall-bus-wiring 7 项。
+
+**验收**：`tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（V15 probe 2、memarch 并行 4、WORLD/SCRIPT/SQL 环境 4、E2E 2）。未改数据。
+
+**遗留**：会晤分支 backref 反馈未收集（批2A-3）；`memarch-runtime` namespace fail-closed 归批2B；`MemoryRetriever` 内部不重复挂闸门（最终片段已由出口总线收口）。
 
 ---
 
