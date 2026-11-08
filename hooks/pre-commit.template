@@ -97,6 +97,26 @@ if [ -f "node_modules/.bin/vitest" ]; then
   fi
 fi
 
+# ──────────────────────────────────────
+# 6. oracle 自测（B-3 任务 10-5）
+#    本仓**没有远端 CI**（无 .github/workflows、无 .gitlab-ci.yml、无 Jenkinsfile），
+#    实际载体就是本模板 → scripts/install-hooks.sh → .git/hooks/pre-commit。
+#    本机未装 pytest（ModuleNotFoundError），故用零依赖的 run_oracle_tests.py：
+#    它收集 tests/oracle 下全部 test_* 并执行，另含 R-4 治理闸门。
+# ──────────────────────────────────────
+if [ -f "tests/oracle/run_oracle_tests.py" ] && command -v python > /dev/null 2>&1; then
+  echo "🔍 [pre-commit] oracle 自测 ..."
+  ORACLE_LOG=$(mktemp 2>/dev/null || echo "/tmp/oracle-$$.log")
+  if python -B tests/oracle/run_oracle_tests.py > "$ORACLE_LOG" 2>&1; then
+    rm -f "$ORACLE_LOG"
+    echo "✅ oracle 自测通过"
+  else
+    tail -30 "$ORACLE_LOG"
+    rm -f "$ORACLE_LOG"
+    fail "oracle 自测未通过（tests/oracle/run_oracle_tests.py）"
+  fi
+fi
+
 echo ""
 echo "✅ pre-commit 全部检查通过"
 exit 0
