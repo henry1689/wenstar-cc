@@ -166,7 +166,8 @@ export class MemoryAssessor {
     this.started = true;
     console.log('[MemoryAssessor] 启动三库流转调度器');
 
-    this.schedule('sandToGold', MEMORY_CONFIG.sandToGold.intervalMs, () => this.runSandToGold());
+    // 🔴 MEM-UNIFY-V1 批3（D2）：删除「砂金→金库」1:1 复制晋升调度 ——
+    //   对话语义块已由 persistence-stage 每轮写一次；再从 conversations 复制一份只会制造重复。
     this.schedule('goldToDiamond', MEMORY_CONFIG.goldToDiamond.intervalMs, () => this.runGoldToDiamond());
     this.schedule('decay', MEMORY_CONFIG.decay.intervalMs, () => this.runDecay());
   }
@@ -188,6 +189,9 @@ export class MemoryAssessor {
   // ── ① 砂金库→金库 ──
 
   private async runSandToGold(): Promise<void> {
+    // 🔴 MEM-UNIFY-V1 批3（D2）：1:1 复制晋升已停用 —— 调度已移除，函数体保留到批6 数据治理后清理。
+    //   默认关闭；设 MEM_SAND_TO_GOLD_LEGACY=true 可应急回开（仅限排障）。
+    if (process.env.MEM_SAND_TO_GOLD_LEGACY !== 'true') return;
     const cfg = MEMORY_CONFIG.sandToGold;
     let txOpened = false;
     try {

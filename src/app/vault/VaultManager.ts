@@ -180,45 +180,42 @@ export function addBlackDiamond(
   const id = `bd_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
   const now = new Date().toISOString();
   const tags = params.tags || [];
-  // 黑钻上限（从配置读取）：超出时**归档**钙化最低的一枚（非物理删除）
-  //   🔴 2026-09-22 用户决定 A：① 只统计 status='active'（归档/移除的不占额度）；
-  //   ② 淘汰改为 status='removed' + notes 记原因（保留记录，符合「只增不删」）。
+  // 黑钻上限（从配置读取）：超出时**逐枚归档**钙化最低者（非物理删除）
+  //   🔴 2026-09-22 用户决定 A：① 只统计 status='active'；② 淘汰改 status='removed' 保留记录。
+  //   🔴 批3：原 `if (total >= max)` 只归档一枚 —— 存量已超限时永远收不回额度（实测 894/800）。
+  //     改为 while（有步数上限防失控）；且**先归档黑钻、再按「是否仍有 active」决定源记忆状态**，
+  //     避免多枚黑钻指向同一源记忆时把 promoted_to_diamond 误清 0。
   try {
-    const total = (sqlite.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE COALESCE(status, 'active') = 'active'") as any[])?.[0]?.cnt || 0;
-    if (total >= MEMORY_CONFIG.blackDiamond.maxCount) {
+    let total = Number((sqlite.queryAll("SELECT COUNT(*) as cnt FROM black_diamond WHERE COALESCE(status, 'active') = 'active'") as any[])?.[0]?.cnt || 0);
+    let _guard = 0;
+    while (total >= MEMORY_CONFIG.blackDiamond.maxCount && _guard++ < 64) {
       const lowest = sqlite.queryAll("SELECT id, calcium_level FROM black_diamond WHERE COALESCE(status, 'active') = 'active' ORDER BY CAST(calcium_level AS REAL) ASC, created_at ASC LIMIT 1") as any[];
-      if (lowest.length > 0) {
-        const demotedId = lowest[0].id;
-        sqlite.writeRaw(
-          `UPDATE memories
-           SET promoted_to_diamond = 0,
-               lifecycle_state = 'active',
-               promotion_reason = NULL
-           WHERE id = (SELECT source_id FROM black_diamond WHERE id = ?)`,
-          demotedId,
-        );
-        // 🔴 2026-09-22：原为 `DELETE FROM black_diamond ...` —— 违反「只增不删」⇒ 改为归档
-        sqlite.writeRaw(
-          "UPDATE black_diamond SET status = 'removed', notes = ?, updated_at = ? WHERE id = ?",
-          '超出黑钻上限自动归档（源记忆已降级回金库层；记录保留，不物理删除）',
-          now,
-          demotedId,
-        );
-        console.log('[Vault] 黑钻超出上限(' + MEMORY_CONFIG.blackDiamond.maxCount + ')，归档(不删除): ' + demotedId);
-      }
+      if (!lowest.length) break;
+      const demotedId = lowest[0].id;
+      sqlite.writeRaw(
+        "UPDATE black_diamond SET status = 'removed', notes = ?, updated_at = ? WHERE id = ?",
+        '超出黑钻上限自动归档（源记忆按 active 判据降级；记录保留，不物理删除）',
+        now,
+        demotedId,
+      );
+      sqlite.writeRaw(
+        `UPDATE memories
+         SET promoted_to_diamond = 0,
+             lifecycle_state = 'active',
+             promotion_reason = NULL
+         WHERE id = (SELECT source_id FROM black_diamond WHERE id = ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM black_diamond b2
+             WHERE b2.source_id = memories.id AND COALESCE(b2.status, 'active') = 'active'
+           )`,
+        demotedId,
+      );
+      total--;
+      console.log('[Vault] 黑钻超出上限(' + MEMORY_CONFIG.blackDiamond.maxCount + ')，归档(不删除): ' + demotedId);
     }
   } catch (_) { /* 上限检测不阻塞晋升 */ }
-  if (params.source_id) {
-    sqlite.writeRaw(
-      `UPDATE memories
-       SET promoted_to_diamond = 1,
-           lifecycle_state = 'promoted',
-           promotion_reason = ?,
-           last_verified_at = ?
-       WHERE id = ?`,
-      params.promotion_reason || 'black_diamond_promotion', now, params.source_id,
-    );
-  }
+  // 🔴 批3：`promoted_to_diamond=1` 的置位已后移到 INSERT 之后（以 active 黑钻为判据），
+  //   见本函数末尾「单向门」处 —— 原位置在 INSERT 之前，无法证明落点存在。
   // 🔧 V10.1: 从 emotion_vector JSON 实时计算 l2_norm
   let _l2norm: number | null = null;
   if (params.emotion_vector) {
@@ -253,8 +250,8 @@ export function addBlackDiamond(
     } catch { /* 回查不阻塞 */ }
   }
   sqlite.writeRaw(
-    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, l2_norm, namespace, belong_entity_uuid, dna_root_id)
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO black_diamond (id, summary, emotion_tag, source_id, calcium_level, recall_count, tags, notes, created_at, updated_at, emotion_vector, l2_norm, namespace, belong_entity_uuid, dna_root_id, status)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
     id,
     params.summary,
     params.emotion_tag || null,
@@ -274,6 +271,23 @@ export function addBlackDiamond(
     //   🔴 批 4：调用方分支补上净化（原先只有回查分支净化 ⇒ 显式传入的脏值会直接落库）。
     sanitizeDnaRootId(params.dna_root_id) ?? _bdDnaRootId,
   );
+  // 🔴 批3（单向门）：置位必须在 INSERT 之后，并**以 active 黑钻为判据**；
+  //   没有 active 落点就绝不把源记忆标成「已晋升」（两不沾的写入端根因）。
+  if (params.source_id) {
+    sqlite.writeRaw(
+      `UPDATE memories
+       SET promoted_to_diamond = 1,
+           lifecycle_state = 'promoted',
+           promotion_reason = ?,
+           last_verified_at = ?
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM black_diamond
+           WHERE source_id = ? AND COALESCE(status, 'active') = 'active'
+         )`,
+      params.promotion_reason || 'black_diamond_promotion', now, params.source_id, params.source_id,
+    );
+  }
   return getBlackDiamond(sqlite, id)!;
 }
 
@@ -302,17 +316,23 @@ export function updateBlackDiamond(
 export function deleteBlackDiamond(sqlite: SQLiteAdapter, id: string): boolean {
   const existing = getBlackDiamond(sqlite, id);
   if (!existing) return false;
+  // 🔴 批3（单向门）：先删黑钻，再按「是否仍有其它 active 黑钻」决定源记忆状态 ——
+  //   同一源记忆可能被多枚黑钻引用（合并路径），不能因为删一枚就误清 promoted_to_diamond。
+  sqlite.writeRaw('DELETE FROM black_diamond WHERE id = ?', id);
   if (existing.source_id) {
     sqlite.writeRaw(
       `UPDATE memories
        SET promoted_to_diamond = 0,
            lifecycle_state = 'active',
            promotion_reason = NULL
-       WHERE id = ?`,
+       WHERE id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM black_diamond b2
+           WHERE b2.source_id = memories.id AND COALESCE(b2.status, 'active') = 'active'
+         )`,
       existing.source_id,
     );
   }
-  sqlite.writeRaw('DELETE FROM black_diamond WHERE id = ?', id);
   return true;
 }
 
@@ -879,9 +899,12 @@ function normalizeDiamondText(text: string): string {
 function findDuplicateDiamond(sqlite: SQLiteAdapter, rawInput: string, emotionTag: string): DiamondDuplicateMatch | null {
   const normalized = normalizeDiamondText(rawInput);
   if (normalized.length < 16) return null;
+  // 🔴 MEM-UNIFY-V1 批3：只与 **active** 黑钻合并 —— 草稿/已归档（removed）不得再被当作
+  //   「已晋升」的落点，否则源记忆被置 promoted_to_diamond=1 却没有任何 active 黑钻（两不沾）。
   const rows = sqlite.queryAll(
     `SELECT id, summary, emotion_tag, tags, notes, calcium_level
      FROM black_diamond
+     WHERE COALESCE(status, 'active') = 'active'
      ORDER BY updated_at DESC, created_at DESC
      LIMIT 50`,
   ) as any[];
@@ -918,6 +941,15 @@ function mergeIntoExistingDiamond(
   const memoryId = String(memory.id);
   const now = new Date().toISOString();
   const mergedReason = `merged-into:${duplicate.id}`;
+  // 🔴 MEM-UNIFY-V1 批3：合并目标必须仍是 active 黑钻；removed/草稿不得作为晋升落点，
+  //   否则源记忆被置 promoted_to_diamond=1 却无任何 active 黑钻（两不沾）。
+  try {
+    const _dup = sqlite.queryAll(
+      "SELECT COALESCE(status, 'active') AS s FROM black_diamond WHERE id = ? LIMIT 1",
+      [duplicate.id],
+    ) as any[];
+    if (!_dup.length || String(_dup[0]?.s ?? '') !== 'active') return null;
+  } catch { return null; }
   const mergedTags = new Set<string>(duplicate.tags);
   // 🆕 V10.0 P0-7: 逐个添加标签，而非将数组作为单元素加入 Set
   for (const _t of duplicate.tags) mergedTags.add(_t);
@@ -935,8 +967,12 @@ function mergeIntoExistingDiamond(
          lifecycle_state = 'promoted',
          promotion_reason = ?,
          last_verified_at = ?
-     WHERE id = ?`,
-    mergedReason, now, memoryId,
+     WHERE id = ?
+       AND EXISTS (
+         SELECT 1 FROM black_diamond
+         WHERE id = ? AND COALESCE(status, 'active') = 'active'
+       )`,
+    mergedReason, now, memoryId, duplicate.id,
   );
   sqlite.writeRaw(
     `UPDATE black_diamond

@@ -199,6 +199,12 @@ describe('[写入通道] memories — 唯一公共写入口必须能表达调用
     rawInput: '测试内容',
     primaryEmotion: '中性',
     memoryType: 'dialog',
+    // 🔴 批3：writeMemory 强制字段（belong / dna_root / genes / source 锚点 / 40D）
+    belongEntityUuid: 'TXS-000000001',
+    dnaRootId: 'DNA_TEST_1',
+    entityGenes: [{ name: '玉瑶', type: 'person' }],
+    sourceConversationIds: [1],
+    perceptionV40: '{"__v":2,"dims":[]}',
   };
 
   it('列清单必须含 source_type（否则收口会把 knowledge_vault 退化为默认 conversation）', () => {
@@ -288,6 +294,8 @@ describe('[写入通道] 全部 memories 写入点必须走 writeMemory（收口
       calciumScore: 0, calciumLevel: 0, locusPath: 'note.memory', leafZone: 'note_zone',
       rawInput: '冰箱里有牛奶', primaryEmotion: '中性', memoryType: 'note',
       subType: 'object_location', noteKey: '冰箱', isValid: 1,
+      // 🔴 批3：note 也要求归属（D9 写侧）
+      belongEntityUuid: 'TXS-000000001',
     });
     const map = mapColumnsToValues(runCalls[0].sql, runCalls[0].bind);
     for (const c of ['note_key', 'is_valid', 'remind_at', 'reminded', 'repeat_rule']) {
@@ -301,8 +309,10 @@ describe('[写入通道] 全部 memories 写入点必须走 writeMemory（收口
     const { self, runCalls } = stubAdapter();
     SQLiteAdapter.prototype.writeMemory.call(self as never, {
       id: 'm2', seqPos: 2, createdAt: '2026-01-01T00:00:00.000Z',
-      calciumScore: 0.5, calciumLevel: 1, locusPath: 'x', leafZone: 'y', rawInput: 'z',
-      primaryEmotion: '中性', memoryType: 'dialog',
+      calciumScore: 0.5, calciumLevel: 1, locusPath: 'x', leafZone: 'note_zone', rawInput: 'z',
+      primaryEmotion: '中性', memoryType: 'note',
+      // 🔴 批3：note 也要求归属（D9 写侧）
+      belongEntityUuid: 'TXS-000000001',
     });
     const map = mapColumnsToValues(runCalls[0].sql, runCalls[0].bind);
     expect(map.note_key).toBe(null);

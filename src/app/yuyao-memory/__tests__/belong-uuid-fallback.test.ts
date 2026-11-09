@@ -40,7 +40,8 @@ describe('P0-2a 归属兜底 — 记事写入', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // 🔴 批3：归属未定改用 console.error（拒写是配置错误，不是普通告警）
+    warnSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
   afterEach(() => {
     warnSpy.mockRestore();
@@ -79,26 +80,26 @@ describe('P0-2a 归属兜底 — 记事写入', () => {
     expect(written[0].belongEntityUuid).toBe('TXS-000000007');
   });
 
-  it('🔴 两者皆空 → 告警但**仍然写入**（兜底不得退化成丢弃）', () => {
+  // 🔴 批3（D9 写侧语义变更）：无归属 → **拒写**（不再照写 NULL）。
+  it('🔴 两者皆空 → 拒写 + 错误告警（不产生无归属记事）', () => {
     const { sqlite, written } = mkSqlite();
     const svc = new YuyaoMemoryService(sqlite);
 
     svc.storeFact('钥匙', '抽屉');
 
-    expect(written).toHaveLength(1);                      // 写入了，没丢
-    expect(written[0].belongEntityUuid).toBeNull();       // 归属仍为 null（如实）
-    expect(warnSpy).toHaveBeenCalled();                   // 但必须告警
+    expect(written).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
     expect(String(warnSpy.mock.calls[0][0])).toContain('归属未定');
   });
 
-  it('setFallbackUuid(null) 可显式清空兜底', () => {
+  it('setFallbackUuid(null) 清空兜底后同样拒写', () => {
     const { sqlite, written } = mkSqlite();
     const svc = new YuyaoMemoryService(sqlite);
     svc.setFallbackUuid('SELF-00001');
     svc.setFallbackUuid(null);
 
     svc.storeObjectLocation('伞', '门口');
-    expect(written[0].belongEntityUuid).toBeNull();
+    expect(written).toHaveLength(0);
   });
 
   it('无会话实体时不得抛错（失败不阻断对话）', () => {

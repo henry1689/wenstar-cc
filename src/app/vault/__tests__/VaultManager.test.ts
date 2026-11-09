@@ -38,6 +38,8 @@ type DiamondRow = {
   created_at: string;
   updated_at: string;
   namespace?: string;
+  /** 🔴 批3：晋升单向门以 active 为判据 */
+  status?: string;
 };
 
 class MockSQLite {
@@ -47,6 +49,10 @@ class MockSQLite {
   queryAll(sql: string, params?: any[]): any[] {
     if (sql.includes('SELECT COUNT(*) as cnt FROM black_diamond')) {
       return [{ cnt: this.diamonds.size }];
+    }
+    if (sql.includes("SELECT COALESCE(status, 'active') AS s FROM black_diamond")) {
+      const row = this.diamonds.get(String(params?.[0]));
+      return row ? [{ s: row.status ?? 'active' }] : [];
     }
     if (sql.includes('SELECT id, calcium_level FROM black_diamond ORDER BY')) {
       const rows = Array.from(this.diamonds.values())

@@ -80,7 +80,9 @@ class FakeSQLite {
 }
 
 describe('MemoryAssessor', () => {
-  it('promotes sand conversations into normalized gold memories and marks source rows', async () => {
+  // 🔴 MEM-UNIFY-V1 批3（D2）：砂金→金库的 1:1 复制晋升已删除 ——
+  //   对话语义块已由 persistence-stage 每轮写一次，此处不得再复制，也不得标记 is_promoted。
+  it('不再把 conversations 复制成 memories（D2 写入一次）', async () => {
     const sqlite = new FakeSQLite([
       {
         id: 11,
@@ -109,22 +111,13 @@ describe('MemoryAssessor', () => {
 
     const total = await assessor.triggerSandToGold();
 
-    expect(total).toBe(1);
-    expect(sqlite.conversations[0].is_promoted).toBe(1);
-    expect(sqlite.memories.has('mem_dna_root_a_11')).toBe(true);
-
-    const record = sqlite.memories.get('mem_dna_root_a_11');
-    expect(record.lifecycle_state).toBe('active');
-    expect(record.thread_id).toBe('dg_work_1');
-    expect(record.namespace).toBe('ops');
-    expect(record.source_conversation_ids).toEqual([11]);
-    expect(record.primary_emotion).toBe('激动');
-    expect(record.narrative_tag).toBe('工作复盘');
-    expect(record.entity_genes.map((item: any) => item.name)).toEqual(['客户', '项目']);
-    expect(sqlite.vaultLogs[0]).toMatchObject({ operation: 'promote_sand' });
+    expect(total).toBe(0);
+    expect(sqlite.memories.size).toBe(0);
+    expect(sqlite.conversations[0].is_promoted).toBe(0);
+    expect(sqlite.vaultLogs).toHaveLength(0);
   });
 
-  it('uses conversation id in memory id so same dna root can promote multiple sand entries', async () => {
+  it('同一 dna_root 的多条砂金也不会被复制（不产生 mem_* 派生行）', async () => {
     const sqlite = new FakeSQLite([
       {
         id: 21,
@@ -152,9 +145,9 @@ describe('MemoryAssessor', () => {
 
     const total = await assessor.triggerSandToGold();
 
-    expect(total).toBe(2);
-    expect(sqlite.memories.has('mem_shared_root_21')).toBe(true);
-    expect(sqlite.memories.has('mem_shared_root_22')).toBe(true);
-    expect(sqlite.memories.get('mem_shared_root_22').entity_genes.map((item: any) => item.name)).toEqual(['妈妈', '外婆']);
+    expect(total).toBe(0);
+    expect(sqlite.memories.has('mem_shared_root_21')).toBe(false);
+    expect(sqlite.memories.has('mem_shared_root_22')).toBe(false);
+    expect(sqlite.conversations.every((c) => c.is_promoted === 0)).toBe(true);
   });
 });

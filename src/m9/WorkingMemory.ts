@@ -42,9 +42,17 @@ export class MemoryWriteBuffer {
   private _consolidateFailures = 0;
   private _consecutiveConsolidateFailures = 0;
 
-  constructor(storage: FusionStorageAdapter, maxSize = 50) {
+  /**
+   * 🔴 MEM-UNIFY-V1 批3（D2 写入一次）：是否把工作记忆巩固为 `memories` 行（evt_*）。
+   *   默认 true（既有单测直接 push 的语义不变）；生产装配由 server 传 `persistEvents:false`
+   *   —— 同一轮已由 persistence-stage 写 mem_* 行，evt_* 是重复副本。
+   */
+  private persistEvents: boolean;
+
+  constructor(storage: FusionStorageAdapter, maxSize = 50, options?: { persistEvents?: boolean }) {
     this.storage = storage;
     this.maxSize = maxSize;
+    this.persistEvents = options?.persistEvents !== false;
   }
 
   startFlushTimer(intervalMs = 60_000): void {
@@ -106,6 +114,8 @@ export class MemoryWriteBuffer {
    * @param seqPos 由 FusionStorageAdapter.reserveNextSeq() 预分配的位置
    */
   push(dna: DNA, perception: PerceptionState24, seqPos: number, primaryEmotion?: string, secondaryEmotions?: string[]): void {
+    // 🔴 MEM-UNIFY-V1 批3（D2）：生产关闭 evt 重复写 —— 同一轮语义块已由 persistence-stage 写一次。
+    if (!this.persistEvents) return;
     const calcium = PerceptionAnalyzer.recalculateCalcium(perception);
     const meaningful = dna.entity_genes.some(g =>
       g.type !== 'self' && g.name.length > 0

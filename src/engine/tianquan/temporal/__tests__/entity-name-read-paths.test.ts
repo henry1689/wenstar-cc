@@ -66,6 +66,8 @@ describe('[C1] 实体名读路径端到端：写侧落库 → 三引擎可检索
         dnaRootId: `E2E_DNA_${STAMP}`,
         globalUid: `MME2E${STAMP.toUpperCase()}00000000`.slice(0, 23),
         belongEntityUuid: 'TXS-000000011',
+        // 🔴 批3：writeMemory 强制 source 锚点（新校验）
+        sourceConversationIds: [990000 + i],
       });
     }
     // 2026-11-06 迁移：better-sqlite3 写即落盘，无需 flushNow

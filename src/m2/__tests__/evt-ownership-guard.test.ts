@@ -78,32 +78,34 @@ describe('P0-2D evt_* 归属权威戳（FusionStorageAdapter.write 消费 dna.be
     expect(captured[0].belongEntityUuid).toBe('TXS-FG-INFERRED');
   });
 
-  // ── I2′: 单字人名机制确认（实测 435 条 NULL 的直接成因）──
-  it('I2′: dna 无戳 + 单字人名（「妈」）⇒ 被 name.length>1 过滤器跳过 ⇒ null（权威戳是其唯一解）', async () => {
+  // ── I2′（批3 语义变更）：单字人名推断被跳过 ⇒ 无归属 ⇒ **拒写**（不再落 NULL）──
+  it('I2′: dna 无戳 + 单字人名（「妈」）⇒ 拒写（success=false，无记录捕获）', async () => {
     const { adapter, captured } = makeAdapterCapturingWrites({
       fg: { getUUIDByName: (n: string) => (n === '妈' ? 'TXS-SHOULD-HAVE-MATCHED' : null) },
     });
-    const dna = makeDna(); // 「妈」单字 person 基因（生产库 435 条 NULL 即此形态）
-    await adapter.write(dna as any, { ...P24 } as any);
-    expect(captured[0].belongEntityUuid ?? null).toBeNull();
+    const dna = makeDna(); // 「妈」单字 person 基因（生产 435 条 NULL 即此形态）
+    const result = await adapter.write(dna as any, { ...P24 } as any);
+    expect(result.success).toBe(false);
+    expect(captured).toHaveLength(0);
   });
 
-  // ── I3: 两者皆无 ⇒ NULL（fail-closed，绝不硬编码兜底实体）──
-  it('I3: dna 无戳 + 人名不在户籍 ⇒ belongEntityUuid 为 null（不硬编码兜底）', async () => {
+  // ── I3（批3 语义变更）：两者皆无 ⇒ 拒写（fail-closed，绝不硬编码兜底实体）──
+  it('I3: dna 无戳 + 人名不在户籍 ⇒ 拒写（missing_belong）', async () => {
     const { adapter, captured } = makeAdapterCapturingWrites({
       fg: { getUUIDByName: () => null }, // 人名查无此人
     });
     const dna = makeDna();
-    await adapter.write(dna as any, { ...P24 } as any);
-    expect(captured[0].belongEntityUuid ?? null).toBeNull();
+    const result = await adapter.write(dna as any, { ...P24 } as any);
+    expect(result.success).toBe(false);
+    expect(captured).toHaveLength(0);
   });
 
-  it('I3′: dna 无戳 + FG 完全不可用 ⇒ belongEntityUuid 为 null（不抛错不阻塞）', async () => {
+  it('I3′: dna 无戳 + FG 完全不可用 ⇒ 拒写且不抛错', async () => {
     const { adapter, captured } = makeAdapterCapturingWrites({ fg: null });
     const dna = makeDna();
     const result = await adapter.write(dna as any, { ...P24 } as any);
-    expect(result.success).toBe(true);
-    expect(captured[0].belongEntityUuid ?? null).toBeNull();
+    expect(result.success).toBe(false);
+    expect(captured).toHaveLength(0);
   });
 });
 

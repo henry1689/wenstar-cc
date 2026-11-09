@@ -53,7 +53,7 @@ export class VaultAdapter implements RetrievalAdapter {
         for (const n of names) nameParams.push(`%${n}%`, `%${n}%`);
         rows = sqlite.queryAll<VaultLogRow>(
           `SELECT id, detail, content_md, operation, created_at, belong_entity_uuid
-           FROM vault_log WHERE ${nameClauses} AND operation='promote'${police.clause}
+           FROM vault_log WHERE ${nameClauses} AND operation='auto_induct'${police.clause}
            ORDER BY created_at DESC LIMIT ?`,
           [...nameParams, ...police.params, 2],
         );
@@ -62,7 +62,7 @@ export class VaultAdapter implements RetrievalAdapter {
       if (rows.length === 0) {
         rows = sqlite.queryAll<VaultLogRow>(
           `SELECT id, detail, content_md, operation, created_at, belong_entity_uuid
-           FROM vault_log WHERE (content_md IS NOT NULL OR detail IS NOT NULL)${police.clause}
+           FROM vault_log WHERE operation='auto_induct' AND (content_md IS NOT NULL OR detail IS NOT NULL)${police.clause}
            ORDER BY created_at DESC LIMIT ?`,
           [...police.params, limit],
         );

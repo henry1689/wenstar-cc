@@ -42,16 +42,23 @@ export class YuyaoMemoryService {
    */
   setFallbackUuid(uuid: string | null): void { this.fallbackUuid = uuid; }
 
-  /** 归属解析：会话实体优先 → 兜底 → 告警（仍写入，不丢弃） */
+  /**
+   * 归属解析：会话实体优先 → 兜底。
+   * 🔴 MEM-UNIFY-V1 批3（D9 写侧）：两者皆空 ⇒ 返回 null，调用方**拒写**（不再告警照写 NULL）。
+   *   写侧兜底由 server 装配 `setFallbackUuid(玉瑶)` 保证；缺装配是配置错误，必须可见。
+   */
   private resolveBelongUuid(): string | null {
     const u = this.entityUuid ?? this.fallbackUuid;
     if (!u) {
-      console.warn('[YuyaoMemoryService] 归属未定（会话实体与兜底均为空），本条记事将以 belong_entity_uuid=NULL 落库 —— 检查 server 装配是否调用了 setFallbackUuid');
+      console.error('[YuyaoMemoryService] 🚫 拒写：归属未定（会话实体与兜底均为空）—— 检查 server 装配是否调用了 setFallbackUuid');
     }
     return u;
   }
 
   storeObjectLocation(key: string, location: string, dgId?: string, dnaId?: string): void {
+    // 🔴 批3（D9 写侧）：归属未定 → 拒写（连旧记事也不作废，避免「旧值失效 + 新值没落库」）。
+    const _belong = this.resolveBelongUuid();
+    if (!_belong) return;
     // 旧记事作废（只标记不删除，恪守「只增不删」）
     this.sqlite.writeRaw("UPDATE memories SET is_valid=0 WHERE note_key=? AND sub_type='object_location' AND is_valid=1", key);
     // 🔴 2026-09-19 批 3：收口到**唯一公共写入口**（本文件是 memories 最后一处手写列清单）。
@@ -92,6 +99,9 @@ export class YuyaoMemoryService {
   }
 
   storeFact(key: string, fact: string, dgId?: string, dnaId?: string): void {
+    // 🔴 批3（D9 写侧）：归属未定 → 拒写（旧记事保持有效）
+    const _belong = this.resolveBelongUuid();
+    if (!_belong) return;
     // 旧记事作废（只标记不删除）
     this.sqlite.writeRaw("UPDATE memories SET is_valid=0 WHERE note_key=? AND sub_type='fact' AND is_valid=1", key);
     // 🔴 2026-09-19 批 3：收口到唯一公共写入口（口径与 storeObjectLocation 一致，详见该处注释）
@@ -124,7 +134,10 @@ export class YuyaoMemoryService {
     return rows.length > 0 ? rows[0] : null;
   }
 
-  setReminder(text: string, remindAt: string, repeatRule?: string, dgId?: string, dnaId?: string): NoteMemory {
+  setReminder(text: string, remindAt: string, repeatRule?: string, dgId?: string, dnaId?: string): NoteMemory | null {
+    // 🔴 批3（D9 写侧）：归属未定 → 拒写（返回 null，不产生孤立提醒）
+    const _belong = this.resolveBelongUuid();
+    if (!_belong) return null;
     const id = noteId();
     const now = new Date().toISOString();
     // 🔴 2026-09-19 批 3：收口到唯一公共写入口（口径与 storeObjectLocation/storeFact 一致）。

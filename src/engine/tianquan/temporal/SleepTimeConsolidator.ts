@@ -114,25 +114,17 @@ export class SleepTimeConsolidator {
     try {
       const sqlite = this.storage.getSQLite();
 
-      // ── [30min] 砂金→金库晋升 ──
-      if (hours >= STAGE_WINDOWS.SAND_TO_GOLD && this._shouldRun('sand_to_gold')) {
-        const sand = await this._promoteSandToGold(sqlite);
-        report.sandToGold = sand;
-        if (sand > 0) report.stagesRun.push('sand→gold');
-      }
-
       // ── [1h] 惊讶度评估 ──
       if (hours >= STAGE_WINDOWS.SURPRISE && this._shouldRun('surprise')) {
         await this._evaluateSurprise(sqlite);
         report.stagesRun.push('surprise');
       }
 
-      // ── [2h] 金库→黑钻晋升 ──
-      if (hours >= STAGE_WINDOWS.GOLD_TO_DIAMOND && this._shouldRun('gold_to_diamond')) {
-        const gold = await this._promoteGoldToDiamond(sqlite);
-        report.goldToDiamond = gold;
-        if (gold > 0) report.stagesRun.push('gold→diamond');
-      }
+      // 🔴 MEM-UNIFY-V1 批3（D2）：
+      //   · 砂金→金库 1:1 复制晋升已删除 —— 对话语义块由 persistence-stage 每轮写一次；
+      //   · 金库→黑钻的盲目复制晋升已删除 —— 黑钻晋升唯一路径 = VaultManager
+      //     （资格判定 + active 去重 + 合并 + 单向门），此处再写一份只会制造重复与状态分叉。
+      //   report.sandToGold / goldToDiamond 字段保留（0），供既有报告消费方零改动。
 
       // ── [4h] V4.0 第二大脑→金库同步 + 级联删除 ──
       if (hours >= STAGE_WINDOWS.SECOND_BRAIN_SYNC && this._shouldRun('second_brain_sync')) {
@@ -210,6 +202,9 @@ export class SleepTimeConsolidator {
 
   /** ① 砂金→金库晋升 (V3.1 弹性窗口) */
   private async _promoteSandToGold(sqlite: any): Promise<number> {
+    // 🔴 MEM-UNIFY-V1 批3（D2）：1:1 复制晋升已停用（调用点已移除）。
+    //   默认关闭；设 MEM_SAND_TO_GOLD_LEGACY=true 可应急回开（仅限排障）。
+    if (process.env.MEM_SAND_TO_GOLD_LEGACY !== 'true') return 0;
     try {
       const now = Date.now();
       // 弹性晋升公式：弹性分 = calcium × 时间衰减 × 实体多样性
@@ -335,6 +330,10 @@ export class SleepTimeConsolidator {
 
   /** ③ 金库→黑钻晋升 */
   private async _promoteGoldToDiamond(sqlite: any): Promise<number> {
+    // 🔴 MEM-UNIFY-V1 批3：重复晋升路径已停用（调用点已移除）。
+    //   黑钻晋升唯一路径 = VaultManager（资格判定 + active 去重 + 合并 + 单向门）。
+    //   默认关闭；设 MEM_GOLD_TO_DIAMOND_LEGACY=true 可应急回开（仅限排障）。
+    if (process.env.MEM_GOLD_TO_DIAMOND_LEGACY !== 'true') return 0;
     try {
       const rows = sqlite.queryAll(
         `SELECT id, raw_input, calcium_score, recall_count, belong_entity_uuid, dna_root_id FROM memories

@@ -1284,9 +1284,21 @@ async function initPipeline(): Promise<void> {
     addTimer(setInterval(() => { void bionic.health().catch(() => {}); }, 60_000));
   } catch (_) { /* Bionic 健康刷新可选 */ }
 
-  workingMemory = new MemoryWriteBuffer(storage, 50);
+  // 🔴 MEM-UNIFY-V1 批3（D2 写入一次）：同一轮由 persistence-stage 写 mem_* 行；
+  //   工作记忆不再把 evt_* 重复副本写进 memories。应急回开：persistEvents: true。
+  workingMemory = new MemoryWriteBuffer(storage, 50, { persistEvents: false });
   workingMemory.startFlushTimer();
-  console.log('  工作记忆已启动 ✓');
+  console.log('  工作记忆已启动 ✓（evt 重复写入已关闭）');
+
+  // 🔴 批3：语义块写侧的 FG 归属存在性校验（fail-closed）。
+  //   校验器为可插拔单例（SQLiteAdapter 不直接依赖 FG）；此处装配时 familyGraph 已初始化。
+  void import('../m2/SQLiteAdapter.js')
+    .then(({ SQLiteAdapter }) => {
+      SQLiteAdapter.setBelongEntityValidator((uuid: string) => {
+        try { return !!familyGraph?.getEntityByUUID?.(uuid); } catch { return false; }
+      });
+    })
+    .catch((e: any) => console.warn('[Server] FG 归属校验器注册失败（写侧仅做格式校验）:', e?.message));
 
   // ── 初始化玉瑶本人档案（永久存入知识库 + 同步黑钻库） ──
   (async () => {

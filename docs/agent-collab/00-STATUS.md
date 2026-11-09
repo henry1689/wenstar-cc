@@ -119,6 +119,15 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P159 记忆系统统一 · 批3 写入与晋升收口 + 编码强制（Claude Code）**：
+  写入一次（D2）：`WorkingMemory.persistEvents`（生产 false）关闭 evt 重复写；删除砂金→金库 1:1 复制与重复黑钻晋升路径。
+  去重键统一 `(belong, role, normalized_text)`（新增 `memory-identity`）；user/assistant 仍互不拦截，同角色跨 taxonomy zone 拦截。
+  晋升单向门：`findDuplicateDiamond` 仅 active、INSERT 后 `EXISTS(active)` 置位、合并复核、降级 `while` 逐枚归档、删除按 active 判据。
+  强制字段：belong（含 FG 钩子）/ dna_root 派生 / entity_genes / source 锚点 / 40D（note、knowledge_vault 豁免）+ 健康计数；记事归属为空拒写；
+  `VaultAdapter` 仅召回 `operation='auto_induct'`（D3）。
+  验证：`tsc=0`；批3 相关 151 项全绿；全量 4220 passed / 14 failed（均既有或环境依赖）。**未改数据**。
+  详见 `active/P159`；下一步批4 深度整编 + 主动回忆。
+
 - 2026-11-09 **✅ P158 记忆系统统一 · 批2B 知识与档案 + 归属策略（Claude Code）**：
   `policyFor` 增加 `ownerMode`、`allowUnowned` 降为派生只读；`buildPolicePolicy` / `SQLiteAdapter` /
   `UnifiedSearchEngine`×2 / `chat.ts` / `retrieval-stage` 五处手写策略全部收口（守卫清单清空）。

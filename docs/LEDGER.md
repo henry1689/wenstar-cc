@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **记忆系统统一 · 批3 写入与晋升收口 + 编码强制** —— evt 重复写关闭（`WorkingMemory.persistEvents`）；删除砂金→金库 1:1 复制与重复黑钻晋升；去重键统一 `(belong, role, normalized_text)`（新增 `memory-identity`）；`promoted_to_diamond` 单向门以 active 黑钻为判据（INSERT 后 EXISTS / 合并复核 / 降级 while / 删除守卫）；语义块强制字段校验 + 健康计数 + FG 归属钩子；记事归属为空拒写；vault_log 退出召回（仅 auto_induct）。详见 §6.27 与 `active/P159` | `tsc=0`；批3 相关 151 项全绿；全量 4220 passed / 14 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批2B 知识与档案 + 归属策略** —— `policyFor` 增加 `ownerMode`，`allowUnowned` 降为派生，五处手写策略全部收口（守卫清单清空）；知识检索空关键词返回空 + 会话 UUID 兜底 + FTS 回读可见名单/来源并过滤；`SourceTypePolicy.RETRIEVABLE_WHERE_SQL()` 单源；新增证据层收集器（档案/作品/记事）+ `WorkAdapter` 扩展注册；删除【本地回复】直出（D7）；memarch 命名空间 fail-closed。详见 §6.26 与 `active/P158` | `tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批2A 召回总线** —— 新增 `src/m4/recall/recall-bus.ts`（四模式/层保底/单一五级闸门/单点反馈）+ `recall_bus` 配置；`retrieval-stage` 三出口接入（casual 不再早退）；**V14 下线（D1）**；黑钻整句 LIKE → 分片 LIKE + 40D；反馈统一 `applyRecallFeedback`。详见 §6.25 与 `active/P157` | `tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批1 表达法收口（MEMORY-LAW-V1）** —— 新增单一法源 `src/m5/prompts/memory-expression-law.ts`（三档/三重奏/憧憬自由/双模式义务/守卫禁令）；10 个运行时提示词文件完成接线；**删除 3 处静态正文黑名单**；旧二元限制措辞扫描 **0 命中**；旧文档 3 份加废止标注；新增 23 项法源回归守卫。详见 §6.24 与 `active/P156` | `tsc=0`；法源/提示词/线索/长文 67 项全绿；全量 4155 passed / 13 failed（均既有或环境依赖）；**未改数据** |
@@ -868,6 +869,24 @@ FG 人物数不变（19 active / 12 dormant）。
 **验收**：`tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖：V15 probe 2、memarch-v2 4、WORLD/SCRIPT/SQL 4、E2E/HTTP 限流波动）。未改数据。
 
 **遗留**：`search`/`weightedSearch` 打分仍两档（守卫与来源已合并）；证据层 `sweepAllStores` 接线属批4；`server-memarch-bridge-routes.ts` 的 schema 失败为存量。
+
+---
+
+### §6.27 2026-11-09 记忆系统统一 · 批3 写入与晋升收口 + 编码强制（P159）
+
+**目标**：同一语义只写一次；去重与字段校验收敛唯一判据；晋升状态以 active 黑钻为唯一真源；vault_log 退出记忆召回。
+
+**交付**：
+- 写入一次（D2）：`WorkingMemory` 增 `persistEvents`（server 传 false）→ 不再产生 `evt_*` 重复；删除砂金→金库 1:1 复制（`MemoryAssessor` 调度移除、`SleepTimeConsolidator` 默认关闭，环境变量可应急回开）；关闭重复黑钻晋升路径。
+- 去重：新增 `src/m2/memory-identity.ts`（NFKC 归一 / 角色 / `(belong, role, normalized_text)` / 字段矩阵）；`write()`/`writeMemory()` 共用；user 与 assistant 仍互不拦截，同角色跨 taxonomy zone 拦截。
+- 晋升单向门（`VaultManager`）：`findDuplicateDiamond` 仅 active；INSERT 后 `EXISTS(active)` 才置 `promoted_to_diamond=1`；合并目标复核 active；降级 `while` 逐枚归档、先归档后按「仍有 active」判源记忆；删除同理；INSERT 显式 `status='active'`。
+- 强制字段：`writeMemory` 写前校验（belong + 格式 + 可插拔 FG 校验、dna_root 派生、entity_genes、source 锚点、40D；note/knowledge_vault 豁免）+ 健康计数 `getMemoryWriteHealth()`；`FusionStorageAdapter.write` 无归属拒写；`YuyaoMemoryService` 归属为空拒写。
+- D3：`VaultAdapter` 仅召回 `operation='auto_induct'`。
+- 测试：新增 memory-identity、memory-write-required-fields；更新 evt-ownership / write-channel / MemoryAssessor / entity-name-read-paths / VaultManager / belong-uuid-fallback / adapters。
+
+**验收**：`tsc=0`；批3 相关 151 项全绿；全量 4220 passed / 14 failed（E2E 波动 4、V15 probe 2、memarch-v2 4、WORLD/SCRIPT/SQL 4，均既有或环境依赖）。未改数据。
+
+**遗留**：存量 665 两不沾 / 95 反向 / 894 超限 / 988 组重复属批6；`derived_from` 派生摘要晋升留后续；停用函数体默认关闭保留至批6清理。
 
 ---
 

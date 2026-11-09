@@ -148,6 +148,14 @@ export class FusionStorageAdapter {
       } catch { /* FG 不可用时不阻塞写入 */ }
     }
 
+    // 🔴 MEM-UNIFY-V1 批3（任务书 §4.2）：语义块写入必须带归属。
+    //   权威戳/FG 推断都拿不到 ⇒ 拒写并进健康计数，不再静默落 NULL（历史 459 条 evt 无归属的来源）。
+    //   说明：evt 路默认已关闭（WorkingMemory persistEvents=false）；本守卫防其回开时再生无归属。
+    if (!belongEntityUuid) {
+      console.warn(`[FusionStorage] 🚫 拒写：无归属实体 id=${dna.branch_id}`);
+      return { success: false, real_ref: '', seq_pos: -1, error: 'missing_belong' };
+    }
+
     const record: EmotionalMemoryRecord = {
       id: dna.branch_id,
       seq_pos: pos,

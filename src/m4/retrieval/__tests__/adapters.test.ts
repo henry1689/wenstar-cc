@@ -142,17 +142,21 @@ describe('WorkAdapter', () => {
 });
 
 describe('VaultAdapter', () => {
-  it('金库 promote 检索 + backref=vault_log', async () => {
+  // 🔴 MEM-UNIFY-V1 批3（D3）：vault_log 是审计台账 —— 只有 auto_induct 事实锚点进入证据层，
+  //   promote/landmark 记录只审计、不得被召回。
+  it('只召回 auto_induct（promote 记录不进入召回）+ backref=vault_log', async () => {
     const { queryAll } = await makeDb();
     queryAll(`INSERT INTO vault_log (id, detail, content_md, operation, created_at, belong_entity_uuid) VALUES ('v1', '用户说过要写星落之城', '承诺写星落之城', 'promote', '2026-07-01', 'uuid-zm')`);
+    queryAll(`INSERT INTO vault_log (id, detail, content_md, operation, created_at, belong_entity_uuid) VALUES ('v2', '[对话归纳·地址] 我住在银河路', '鸿艺曾说过：我住在银河路', 'auto_induct', '2026-07-02', 'uuid-zm')`);
     const ad = new VaultAdapter({ queryAll });
     const hits = await ad.search(makeCtx({ entityUuids: ['uuid-zm'] }));
     expect(hits.length).toBeGreaterThan(0);
     expect(hits[0]).toMatchObject({
       domain: 'vault', route: 'vault',
-      backref: { table: 'vault_log', id: 'v1' },
+      backref: { table: 'vault_log', id: 'v2' },
     });
-    expect(hits[0].text).toContain('星落之城');
+    expect(hits[0].text).toContain('银河路');
+    expect(hits.map((h) => h.id)).not.toContain('v1');
   });
 });
 

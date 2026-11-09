@@ -25,8 +25,40 @@ import { getPeriod, getSeason, getLunarTerm } from '../engine/temporal/global-ty
 //   is_summary 被绑成 is_compacted。此处收口后，列清单与绑定顺序在结构上不可能再分叉。
 //   依赖方向已核：ConversationDB 不 import 本文件（仅 node 内置 + EntityNameCodec），无循环依赖。
 import { buildConversationInsert } from './ConversationDB.js';
+// 🔴 MEM-UNIFY-V1 批3：记忆身份键 / 强制字段 / 归一文本的唯一判据（纯函数模块）
+import { normalizeMemoryText, deriveMemoryRole, validateMemoryWriteFields } from './memory-identity.js';
 // 🔴 FG-P0(2026-09-09): 实体写前统一合规闸门 — ensureEntity object 通道过滤垃圾(句子片段/外貌特征词不建独立实体)
 // 内联实现（避免 m2→m4 反向依赖，CK-01 九层管线检查拦截）
+
+// ─────────────────────────────────────────────────────────────
+// MEM-UNIFY-V1 批3：写侧健康计数（拒绝原因分布 / 校验失败）
+// ─────────────────────────────────────────────────────────────
+export interface MemoryWriteHealth {
+  rejected: number;
+  reasons: Record<string, number>;
+  validationErrors: number;
+}
+const _memoryWriteHealth: MemoryWriteHealth = { rejected: 0, reasons: {}, validationErrors: 0 };
+export function getMemoryWriteHealth(): MemoryWriteHealth {
+  return {
+    rejected: _memoryWriteHealth.rejected,
+    reasons: { ..._memoryWriteHealth.reasons },
+    validationErrors: _memoryWriteHealth.validationErrors,
+  };
+}
+export function _resetMemoryWriteHealthForTest(): void {
+  _memoryWriteHealth.rejected = 0;
+  _memoryWriteHealth.reasons = {};
+  _memoryWriteHealth.validationErrors = 0;
+}
+function _recordWriteRejection(reason: string): void {
+  _memoryWriteHealth.rejected++;
+  _memoryWriteHealth.reasons[reason] = (_memoryWriteHealth.reasons[reason] ?? 0) + 1;
+  if (_memoryWriteHealth.rejected % 20 === 0) {
+    console.warn('[MemoryWriteHealth] 累计拒写', _memoryWriteHealth.rejected, JSON.stringify(_memoryWriteHealth.reasons));
+  }
+}
+
 const OBJECT_MAX_LEN = 6;
 const CHAT_RESIDUE = /[，。、；：""''（）【】…！？的了很多把被你我她他这那在说]/;
 const OBJECT_FRAG_TAIL = /(?:的(?:事|话|样子|话吧)|呢|吧|啊|呀|吗|了|过|着|一下|一桩|这个|那个)$/;
@@ -299,6 +331,19 @@ export function extractInsertColumns(sql: string): string[] {
 export class SQLiteAdapter {
   private db: SqlJsDatabase | null = null;
   private dbPath: string;
+
+  /**
+   * 🔴 MEM-UNIFY-V1 批3：FG 归属存在性校验器（可插拔单例）。
+   *   SQLiteAdapter 位于 m2，不反向依赖 m4/FamilyGraph；由 server 装配时注册
+   *   `(uuid) => !!familyGraph.getEntityByUUID(uuid)`。未注册时写侧只做格式校验。
+   */
+  private static _belongValidator: ((uuid: string) => boolean) | null = null;
+  static setBelongEntityValidator(fn: ((uuid: string) => boolean) | null): void {
+    SQLiteAdapter._belongValidator = typeof fn === 'function' ? fn : null;
+  }
+  static hasBelongEntityValidator(): boolean {
+    return SQLiteAdapter._belongValidator !== null;
+  }
 
   /** 获取底层兼容实例 — 供 DualHelixWriter / UUIDHealthReport 等底层写入与巡检使用 */
   get rawDb(): SqlJsDatabase | null { return this.db; }
@@ -968,8 +1013,13 @@ export class SQLiteAdapter {
     // 🔴 A 去重闸门（业主 2026-10-15 批准 A+C）：新建时同原文已存在 → 不再写第二条。
     //   放在所有预处理之前：重复即不写，后面的 seq_pos 预检/感知向量编码全是无用功。
     //   只影响 memories；对话原文在 conversations 表原样保留，本闸门绝不触碰。
-    if (this._isDuplicateNewWrite(record.raw_input, record.id)) {
-      console.warn(`[SQLiteAdapter] ♻️ write() 去重拦下重复记忆 id=${record.id} seq=${record.seq_pos}（同原文已存在于库）`);
+    if (this._isDuplicateNewWrite(record.raw_input, record.id, undefined, {
+      belongEntityUuid: record.belongEntityUuid,
+      memoryType: (record as any).memory_type ?? 'dialog',
+      memoryKind: (record as any).memory_kind ?? 'episodic',
+      sourceType: (record as any).source_type ?? 'conversation',
+    })) {
+      console.warn(`[SQLiteAdapter] ♻️ write() 去重拦下重复记忆 id=${record.id} seq=${record.seq_pos}（同归属同角色同文已存在）`);
       return;
     }
     // 🔴 D8 值保留守卫: 入参未携带的 6 个身份关键列 → 继承旧行值（REPLACE 会把未携带列重置为 NULL）
@@ -1169,12 +1219,38 @@ export class SQLiteAdapter {
     repeatRule?: string | null;
   }): boolean {
     this.ensureReady();
+    // 🔴 MEM-UNIFY-V1 批3（任务书 §4.2）：写前强制字段校验（单一判据在 memory-identity）。
+    const _validation = validateMemoryWriteFields(opts as any);
+    if (!_validation.allowed) {
+      _recordWriteRejection(_validation.reason ?? 'invalid');
+      console.warn(`[SQLiteAdapter] 🚫 writeMemory 拒写 id=${opts.id} reason=${_validation.reason}`);
+      return false;
+    }
+    // FG 归属存在性校验（生产由 server 注册；未注册时只做格式校验，测试不受影响）
+    const _belongValidator = SQLiteAdapter._belongValidator;
+    if (_belongValidator && opts.memoryKind !== 'knowledge_vault' && opts.sourceType !== 'knowledge_vault') {
+      const _belong = String(opts.belongEntityUuid ?? '').trim();
+      if (_belong && !_belongValidator(_belong)) {
+        _recordWriteRejection('unknown_belong_entity');
+        console.warn(`[SQLiteAdapter] 🚫 writeMemory 拒写 id=${opts.id} reason=unknown_belong_entity uuid=${_belong}`);
+        return false;
+      }
+    }
+    // dna_root 缺失时采用统一判据的派生值（dialogGroupId → threadId）
+    if (!opts.dnaRootId && _validation.derived?.dnaRootId) opts.dnaRootId = _validation.derived.dnaRootId;
+
     try {
       // 🔴 A 去重闸门（业主 2026-10-15 批准 A+C）：新建时同原文已存在 → 不再写第二条。
       //   返回 true（而非 false）：调用方关心的是「这条内容是否已在库」，重复命中即已达成；
       //   返回 false 会让 persistence-stage 误判写入失败并触发重试/报错链路。
-      if (this._isDuplicateNewWrite(opts.rawInput, opts.id, opts.leafZone)) {
-        console.warn(`[SQLiteAdapter] ♻️ writeMemory 去重拦下重复记忆 id=${opts.id} seq=${opts.seqPos} zone=${opts.leafZone}（同 zone 内同原文已存在）`);
+      // 🔴 批3：键统一为 (belong_uuid, role, normalized_text)。
+      if (this._isDuplicateNewWrite(opts.rawInput, opts.id, opts.leafZone, {
+        belongEntityUuid: opts.belongEntityUuid,
+        memoryType: opts.memoryType,
+        memoryKind: opts.memoryKind,
+        sourceType: opts.sourceType,
+      })) {
+        console.warn(`[SQLiteAdapter] ♻️ writeMemory 去重拦下重复记忆 id=${opts.id} seq=${opts.seqPos} zone=${opts.leafZone}（同归属同角色同文已存在）`);
         return true;
       }
     // 🔴 P072 批1（2026-10-24）：原 perceptionJson(24D) 派生分支已删——writeMemory 单轨接收
@@ -1262,7 +1338,8 @@ export class SQLiteAdapter {
           opts.primaryEmotion, opts.memoryType || 'dialog',
           opts.dialogGroupId ?? null, opts.topicLabel ?? null,
           opts.dnaRootId ?? null, opts.entityGenes ? JSON.stringify(opts.entityGenes) : null,
-          opts.globalUid || ('MM' + createHash('sha256').update(opts.id).digest('hex').substring(0, 8).toUpperCase()), opts.locationFingerprint ?? null,
+          // 🔴 批3：global_uid 缺省派生改为从 dna_root_id（溯源锚点）派生，其次才回退 id
+          opts.globalUid || ('MM' + createHash('sha256').update(String(opts.dnaRootId ?? opts.id)).digest('hex').substring(0, 8).toUpperCase()), opts.locationFingerprint ?? null,
 	          opts.belongEntityUuid ?? null,
           opts.isForesight ? 1 : 0, opts.validUntilMs ?? null, opts.foresightStatus ?? null,
           opts.namespace || 'default',
@@ -1300,22 +1377,58 @@ export class SQLiteAdapter {
    *
    * fail-open：查重 SQL 任何异常都放行写入 —— 去重是**优化**，不能变成数据写不进去的理由。
    */
-  private _isDuplicateNewWrite(rawInput: string, selfId: string, leafZone?: string | null): boolean {
+  private _isDuplicateNewWrite(
+    rawInput: string,
+    selfId: string,
+    leafZone?: string | null,
+    meta?: {
+      belongEntityUuid?: string | null;
+      memoryType?: string | null;
+      memoryKind?: string | null;
+      sourceType?: string | null;
+    },
+  ): boolean {
     try {
-      const s = String(rawInput ?? '').trim();
+      // 🔴 MEM-UNIFY-V1 批3：去重键统一为 (belong_uuid, role, normalized_text)。
+      //   - role 取代 leaf_zone 的 taxonomy 分区：同角色跨 zone 同文即重复；
+      //   - user 与 assistant 仍互不拦截（2026-10-30 业主裁决：两条独立证据）；
+      //   - 传 meta ⇒ 同时按归属过滤（跨实体同文不得互相拦截）。
+      const s = normalizeMemoryText(rawInput);
       if (s.length < 2) return false;   // 退化/极短内容归 MemoryWriteGateway 道2 管，此处不越权
       const self = this.queryAll('SELECT 1 FROM memories WHERE id = ? LIMIT 1', [selfId]);
       if (self.length) return false;    // 同 id 已存在 = 更新既有行 → 放行
-      // TRIM 两侧口径统一：库里历史行可能带空白，故对列也 TRIM（10k 行全扫，实测 <5ms）
-      // 🔴 2026-10-30 去重作用域收敛到**同一 leaf_zone**（业主批准）。
-      //   原实现是**全库跨 zone** 比对 ⇒ 玉瑶在 assistant 区说过一句与用户相同的话，
-      //   用户这条就被判「已存在」而不写 ⇒ **用户侧记忆真缺失**（「刚说的话她没记住」的根因之一）。
-      //   依据：user 的发言与 assistant 的应答是两条独立证据，文本相同不等于同一件事。
-      //   未传 leafZone 的调用方（write() 事件行）保持原全库语义，行为零变化。
-      const zone = leafZone === undefined || leafZone === null ? null : String(leafZone);
-      const dup = zone === null
-        ? this.queryAll('SELECT id FROM memories WHERE TRIM(raw_input) = ? LIMIT 1', [s])
-        : this.queryAll('SELECT id FROM memories WHERE TRIM(raw_input) = ? AND leaf_zone = ? LIMIT 1', [s, zone]);
+
+      const role = deriveMemoryRole({
+        leafZone: leafZone ?? null,
+        memoryType: meta?.memoryType ?? null,
+        memoryKind: meta?.memoryKind ?? null,
+        sourceType: meta?.sourceType ?? null,
+      });
+      const params: unknown[] = [s];
+      let roleClause: string;
+      if (role === 'user' || role === 'assistant') {
+        roleClause = ' AND leaf_zone = ?';
+        params.push(role);
+      } else if (role === 'note') {
+        roleClause = " AND COALESCE(memory_type,'') = 'note'";
+      } else if (role === 'roleplay') {
+        roleClause = " AND COALESCE(memory_kind,'') = 'roleplay'";
+      } else if (role === 'knowledge_vault') {
+        roleClause = " AND (COALESCE(memory_kind,'') = 'knowledge_vault' OR COALESCE(source_type,'') = 'knowledge_vault')";
+      } else {
+        // dialog：taxonomy zone 之间不再分区（跨 zone），但排除 user/assistant/note/roleplay
+        roleClause = " AND COALESCE(memory_type,'dialog') = 'dialog'"
+          + " AND COALESCE(memory_kind,'') NOT IN ('roleplay','knowledge_vault')"
+          + " AND COALESCE(leaf_zone,'') NOT IN ('user','assistant','note_zone')";
+      }
+      if (meta !== undefined) {
+        roleClause += " AND COALESCE(belong_entity_uuid,'') = ?";
+        params.push(String(meta?.belongEntityUuid ?? '').trim());
+      }
+      const dup = this.queryAll(
+        `SELECT id FROM memories WHERE TRIM(raw_input) = ?${roleClause} LIMIT 1`,
+        params,
+      );
       return dup.length > 0;
     } catch (e: any) {
       console.warn('[SQLiteAdapter] 去重预检失败 → fail-open 放行写入:', e?.message);
