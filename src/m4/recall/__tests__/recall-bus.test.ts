@@ -36,6 +36,14 @@ describe('RecallBus · 标签分层', () => {
     expect(classifyFragmentTier('📌 一条重要记忆')).toBe('sand');
     expect(classifyFragmentTier('没有标签的普通片段')).toBe('sand');
   });
+
+  it('批4：指令类片段归 other，不占三层名额', () => {
+    expect(classifyFragmentTier('【深度回忆素材包 · MemSym】以下是全部记忆仓…')).toBe('other');
+    expect(classifyFragmentTier('【结晶表达 · 宪法信条0】照三重奏说…')).toBe('other');
+    expect(classifyFragmentTier('【回忆表达三档 · MemSym】关于过去的记忆…')).toBe('other');
+    expect(classifyFragmentTier('【默契元素 · MemSym】以下是沉淀元素…')).toBe('other');
+    expect(classifyFragmentTier('【主动回忆 · MemSym】本轮检测到主动回忆信号…')).toBe('other');
+  });
 });
 
 describe('RecallBus · 归一化去重', () => {

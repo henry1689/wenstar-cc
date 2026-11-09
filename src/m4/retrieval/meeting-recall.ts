@@ -1068,19 +1068,55 @@ export function countHighCalciumGroups(
  * 限额降级为整编层的排序权重。适用所有记忆/回忆/递归衍生场景（不限于情感）。
  * 零 import（本模块单源纪律）。
  */
-export const SWEEP_POLICY = { memoriesPerKw: 2, vaultPerKw: 2, kbPerKw: 1, maxFrags: 12 } as const;
+export const SWEEP_POLICY = {
+  /** 每关键词每仓条数（整编前的候选上限，不是注入上限） */
+  memoriesPerKw: 2,
+  diamondPerKw: 2,
+  kbPerKw: 1,
+  kbSharedPerKw: 1,
+  conversationPerKw: 1,
+  /** 单条片段字符上限（原 110 字硬顶改为可配，默认 400） */
+  perFragmentChars: 400,
+  /** 整编注入的总字符预算（原 12 条硬顶改为按字符打包，默认 6000） */
+  maxChars: 6000,
+  /** 安全条数上限：防异常数据把提示词撑爆；正常数据由 maxChars 决定 */
+  safetyMaxFrags: 48,
+  /** 知识库无归属 = 共享（任务书 D5），默认收集 */
+  includeSharedKnowledge: true,
+  /** 对话原文（conversations）默认收集 */
+  includeConversations: true,
+} as const;
+
+/** sweepAllStores 可选项（调用方用配置覆盖；缺省走 SWEEP_POLICY） */
+export interface SweepOptions {
+  memoriesPerKw?: number;
+  diamondPerKw?: number;
+  kbPerKw?: number;
+  kbSharedPerKw?: number;
+  conversationPerKw?: number;
+  perFragmentChars?: number;
+  maxChars?: number;
+  safetyMaxFrags?: number;
+  includeSharedKnowledge?: boolean;
+  includeConversations?: boolean;
+  /**
+   * 知识库可检索谓词。调用方传 `SourceTypePolicy.RETRIEVABLE_WHERE_SQL()`（唯一来源策略），
+   * 本模块保持零 import（不反向依赖 app 层，也不复制 source_type 名单）。
+   */
+  kbWhereSql?: string;
+}
 
 /** 问句功能词噪声（切词残留治理——"还记/是就"类不得进入主题扫） */
 const SWEEP_NOISE_RE = /^(?:还记|记得|是不是|是就|吗|呢|吧|的|了|得|地|那|这|什么|怎么|如何|啥|咋|什么时候|怎么样|讲讲|说说|跟我说|告诉我)+$/;
 
 /**
- * 🔴 2026-11-03（S4 独立评审 P1-B 类）：SweptFragment 增 `createdAt`。
- * 原只有 source+content，导致**体量最大的记忆聚合通道**（跨砂金/金库黑钻/知识库三仓、
- * 无时间窗、maxFrags=12）注入时不带时间坐标，而数据层 created_at 100% 在库
- * —— 是通道**选择不取**，不是数据没有（S8 立法意图为「记忆类注入必须携带时间坐标」）。
+ * 碎片来源（MEM-UNIFY-V1 批4 扩展）：
+ *   砂金 / 金库黑钻 / 知识库 / 对话原文 —— 由本模块收集；
+ *   档案 / 作品 / 记事 —— 由 webui 证据层（`evidence-layer.ts`）收集后并入同一整编包。
+ * 🔴 2026-11-03（S4 独立评审 P1-B 类）：碎片必须携带 `createdAt`（S8 立法：记忆类注入带时间坐标）。
  */
 export interface SweptFragment {
-  source: '砂金' | '金库黑钻' | '知识库';
+  source: '砂金' | '金库黑钻' | '知识库' | '对话原文' | '档案' | '作品' | '记事';
   content: string;
   /** 该碎片的落库时间（ISO）；无时间时为 undefined，由调用方 memFragWithTime 回退旧标签 */
   createdAt?: string;
@@ -1094,19 +1130,42 @@ export function cleanSweepKeywords(keywords: string[]): string[] {
     .slice(0, 6);
 }
 
+/** 数值选项归一（非法值回落默认；clamp 防异常配置） */
+function _sweepInt(v: number | undefined, def: number, min: number, max: number): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
 /**
- * 统一多仓收集：砂金(memories 无窗关键词) + 金库/黑钻(vault_log 主题扫) + 知识库(kb 主题扫)。
+ * 统一多仓收集（MEM-UNIFY-V1 批4 扩容）：
+ *   · memories（砂金，排除 note——记事走证据层）
+ *   · black_diamond **active**（长期层；不再读 vault_log —— D3 它是审计台账）
+ *   · knowledge_base（自有 + 无归属共享，D5；可检索谓词由调用方传入）
+ *   · conversations（对话原文，按归属隔离）
  * 收集最大化：无时间窗、跨层全收；去重按内容前缀；来源标注（整编可溯源）。
- * 🔴 2026-11-03：三条 SQL 均**增取 created_at**（此前只 SELECT 文本 —— 该列本就在
- *   ORDER BY 里用着，取它零成本），使碎片可携带时间坐标。
+ * 限额只决定**候选**数量，不是注入上限（注入上限见 organizeForQuestion 的字符预算）。
  */
 export function sweepAllStores(
   src: { queryAll: (sql: string, p: unknown[]) => Array<Record<string, unknown>> },
   entityUuid: string, keywords: string[],
+  opts: SweepOptions = {},
 ): SweptFragment[] {
   const kws = cleanSweepKeywords(keywords);
   const out: SweptFragment[] = [];
   const seen = new Set<string>();
+  const perFrag = _sweepInt(opts.perFragmentChars, SWEEP_POLICY.perFragmentChars, 40, 4000);
+  const safetyCap = _sweepInt(opts.safetyMaxFrags, SWEEP_POLICY.safetyMaxFrags, 1, 256);
+  const memLimit = _sweepInt(opts.memoriesPerKw, SWEEP_POLICY.memoriesPerKw, 0, 20);
+  const diamondLimit = _sweepInt(opts.diamondPerKw, SWEEP_POLICY.diamondPerKw, 0, 20);
+  const kbLimit = _sweepInt(opts.kbPerKw, SWEEP_POLICY.kbPerKw, 0, 10);
+  const kbSharedLimit = _sweepInt(opts.kbSharedPerKw, SWEEP_POLICY.kbSharedPerKw, 0, 10);
+  const convLimit = _sweepInt(opts.conversationPerKw, SWEEP_POLICY.conversationPerKw, 0, 10);
+  const includeShared = opts.includeSharedKnowledge ?? SWEEP_POLICY.includeSharedKnowledge;
+  const includeConversations = opts.includeConversations ?? SWEEP_POLICY.includeConversations;
+  const kbWhere = String(opts.kbWhereSql || '').trim();
+  const kbWhereClause = kbWhere ? ` AND ${kbWhere}` : '';
+
   const push = (source: SweptFragment['source'], text: string, createdAt?: unknown) => {
     const t = String(text || '').replace(/\s+/g, ' ').trim();
     const key = t.substring(0, 18);
@@ -1114,24 +1173,71 @@ export function sweepAllStores(
     seen.add(key);
     // 时间解析失败时留 undefined（fail-open：由 memFragWithTime 回退无时间标签，不阻塞注入）
     const iso = typeof createdAt === 'string' && createdAt ? createdAt : undefined;
-    out.push({ source, content: t.substring(0, 110), ...(iso ? { createdAt: iso } : {}) });
+    out.push({ source, content: t.length > perFrag ? t.substring(0, perFrag) : t, ...(iso ? { createdAt: iso } : {}) });
   };
+  /** 知识库行级可见性：visible_entity_uuids 非空且不含当前实体 ⇒ 跳过（与批2B 读侧一致） */
+  const visibleAllows = (raw: unknown): boolean => {
+    const s = String(raw || '').trim();
+    if (!s) return true;
+    try {
+      const arr = JSON.parse(s);
+      if (!Array.isArray(arr) || arr.length === 0) return true;
+      if (!entityUuid) return false;
+      return arr.map(String).includes(entityUuid);
+    } catch {
+      return true; // 解析失败 fail-open（隔离已在读写两侧的 UUID 策略兜底）
+    }
+  };
+
   for (const kw of kws) {
-    if (out.length >= SWEEP_POLICY.maxFrags) break;
-    const mem = src.queryAll(
-      `SELECT raw_input, created_at FROM memories WHERE belong_entity_uuid = ? AND raw_input LIKE ?
-       ORDER BY calcium_score DESC, created_at DESC LIMIT ${SWEEP_POLICY.memoriesPerKw}`,
-      [entityUuid, `%${kw}%`]) || [];
-    for (const r of mem) push('砂金', String(r.raw_input || ''), r.created_at);
-    const vlt = src.queryAll(
-      `SELECT content_md, created_at FROM vault_log WHERE belong_entity_uuid = ? AND content_md LIKE ? AND length(trim(content_md)) >= 12
-       ORDER BY created_at DESC LIMIT ${SWEEP_POLICY.vaultPerKw}`,
-      [entityUuid, `%${kw}%`]) || [];
-    for (const r of vlt) push('金库黑钻', String(r.content_md || ''), r.created_at);
-    const kb = src.queryAll(
-      `SELECT content, created_at FROM knowledge_base WHERE belong_entity_uuid = ? AND content LIKE ? LIMIT ${SWEEP_POLICY.kbPerKw}`,
-      [entityUuid, `%${kw}%`]) || [];
-    for (const r of kb) push('知识库', String(r.content || ''), r.created_at);
+    if (out.length >= safetyCap) break;
+    if (memLimit > 0) {
+      const mem = src.queryAll(
+        `SELECT raw_input, created_at FROM memories
+         WHERE belong_entity_uuid = ? AND COALESCE(memory_type, '') != 'note' AND raw_input LIKE ?
+         ORDER BY calcium_score DESC, created_at DESC LIMIT ${memLimit}`,
+        [entityUuid, `%${kw}%`]) || [];
+      for (const r of mem) push('砂金', String(r.raw_input || ''), r.created_at);
+    }
+    if (diamondLimit > 0) {
+      const dia = src.queryAll(
+        `SELECT summary, created_at FROM black_diamond
+         WHERE belong_entity_uuid = ? AND COALESCE(status, 'active') = 'active' AND summary LIKE ?
+         ORDER BY calcium_level DESC, created_at DESC LIMIT ${diamondLimit}`,
+        [entityUuid, `%${kw}%`]) || [];
+      for (const r of dia) push('金库黑钻', String(r.summary || ''), r.created_at);
+    }
+    if (kbLimit > 0) {
+      const kb = src.queryAll(
+        `SELECT content, created_at, visible_entity_uuids FROM knowledge_base
+         WHERE belong_entity_uuid = ? AND content LIKE ?${kbWhereClause}
+         ORDER BY impression_score DESC, created_at DESC LIMIT ${kbLimit}`,
+        [entityUuid, `%${kw}%`]) || [];
+      for (const r of kb) {
+        if (!visibleAllows(r.visible_entity_uuids)) continue;
+        push('知识库', String(r.content || ''), r.created_at);
+      }
+    }
+    if (includeShared && kbSharedLimit > 0) {
+      const shared = src.queryAll(
+        `SELECT content, created_at, visible_entity_uuids FROM knowledge_base
+         WHERE belong_entity_uuid IS NULL AND content LIKE ?${kbWhereClause}
+         ORDER BY impression_score DESC, created_at DESC LIMIT ${kbSharedLimit}`,
+        [`%${kw}%`]) || [];
+      for (const r of shared) {
+        if (!visibleAllows(r.visible_entity_uuids)) continue;
+        push('知识库', String(r.content || ''), r.created_at);
+      }
+    }
+    if (includeConversations && convLimit > 0) {
+      const conv = src.queryAll(
+        `SELECT content, timestamp AS created_at FROM conversations
+         WHERE belong_entity_uuid = ? AND is_test = 0 AND role = 'user'
+           AND length(content) >= 12 AND content LIKE ?
+         ORDER BY timestamp DESC LIMIT ${convLimit}`,
+        [entityUuid, `%${kw}%`]) || [];
+      for (const r of conv) push('对话原文', String(r.content || ''), r.created_at);
+    }
   }
   return out;
 }
@@ -1149,19 +1255,39 @@ export interface OrganizedFragment {
   createdAt?: string;
 }
 
-/** 问题中心整编：按关键词命中密度排序（命中多=更相关），输出带来源标注的行 */
-export function organizeForQuestion(frags: SweptFragment[], keywords: string[]): OrganizedFragment[] {
+/**
+ * 问题中心整编（MEM-UNIFY-V1 批4）：按关键词命中密度排序（命中多=更相关），
+ * 再按**字符预算**装包 —— 取消原「固定 12 条」硬顶。
+ * 装包规则：高分优先；预算已满时跳过这条、继续尝试更短的高分片段（不静默截断预算）。
+ */
+export function organizeForQuestion(
+  frags: SweptFragment[], keywords: string[],
+  opts: { maxChars?: number; safetyMaxFrags?: number } = {},
+): OrganizedFragment[] {
   const kws = cleanSweepKeywords(keywords);
+  const maxChars = _sweepInt(opts.maxChars, SWEEP_POLICY.maxChars, 200, 100000);
+  const cap = _sweepInt(opts.safetyMaxFrags, SWEEP_POLICY.safetyMaxFrags, 1, 256);
   const scored = frags.map((f) => ({
     f, hits: kws.reduce((s, k) => s + (f.content.includes(k) ? 1 : 0), 0),
   }));
-  scored.sort((a, b) => b.hits - a.hits);
-  return scored.slice(0, SWEEP_POLICY.maxFrags).map((s) => ({
-    line: `〔${s.f.source}〕${s.f.content}`,
-    source: s.f.source,
-    content: s.f.content,
-    ...(s.f.createdAt ? { createdAt: s.f.createdAt } : {}),
-  }));
+  scored.sort((a, b) =>
+    b.hits - a.hits
+    || String(b.f.createdAt || '').localeCompare(String(a.f.createdAt || '')));
+  const out: OrganizedFragment[] = [];
+  let used = 0;
+  for (const s of scored) {
+    if (out.length >= cap) break;
+    const line = `〔${s.f.source}〕${s.f.content}`;
+    if (out.length > 0 && used + line.length > maxChars) continue;
+    out.push({
+      line,
+      source: s.f.source,
+      content: s.f.content,
+      ...(s.f.createdAt ? { createdAt: s.f.createdAt } : {}),
+    });
+    used += line.length;
+  }
+  return out;
 }
 
 /**

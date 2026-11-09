@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **记忆系统统一 · 批4 深度整编 + 主动回忆 + 憧憬** —— `sweepAllStores` 扩到记忆/黑钻 active/知识（自有+共享 D5）/对话原文 + 证据层（档案/作品/记事）；**不再读 vault_log（D3）**；取消 12 条/110 字硬顶，改 `maxChars=6000` 字符预算 + 单条 400 字；新增主动回忆触发器（节日/纪念日/情绪/日常/话题关联，零 LLM）与接线阶段；普通（玉瑶）分支首次接入深度素材包 + `CRYSTAL_DIRECTIVE`；会晤通路接 `applyProactiveToPath`；指令类片段归 `other`。详见 §6.28 与 `active/P160` | `tsc=0`；批4 相关 49 项全绿；检索/聊天相关 469 项全绿；全量 4240 passed / 17 failed（E2E 单跑仍为批3 基线 4，其余为既有环境/存量）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批3 写入与晋升收口 + 编码强制** —— evt 重复写关闭（`WorkingMemory.persistEvents`）；删除砂金→金库 1:1 复制与重复黑钻晋升；去重键统一 `(belong, role, normalized_text)`（新增 `memory-identity`）；`promoted_to_diamond` 单向门以 active 黑钻为判据（INSERT 后 EXISTS / 合并复核 / 降级 while / 删除守卫）；语义块强制字段校验 + 健康计数 + FG 归属钩子；记事归属为空拒写；vault_log 退出召回（仅 auto_induct）。详见 §6.27 与 `active/P159` | `tsc=0`；批3 相关 151 项全绿；全量 4220 passed / 14 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批2B 知识与档案 + 归属策略** —— `policyFor` 增加 `ownerMode`，`allowUnowned` 降为派生，五处手写策略全部收口（守卫清单清空）；知识检索空关键词返回空 + 会话 UUID 兜底 + FTS 回读可见名单/来源并过滤；`SourceTypePolicy.RETRIEVABLE_WHERE_SQL()` 单源；新增证据层收集器（档案/作品/记事）+ `WorkAdapter` 扩展注册；删除【本地回复】直出（D7）；memarch 命名空间 fail-closed。详见 §6.26 与 `active/P158` | `tsc=0`；批2B 相关 418 项全绿；全量 4196~4197 passed / 12~14 failed（均既有或环境依赖）；**未改数据** |
 | 2026-11-09 | **记忆系统统一 · 批2A 召回总线** —— 新增 `src/m4/recall/recall-bus.ts`（四模式/层保底/单一五级闸门/单点反馈）+ `recall_bus` 配置；`retrieval-stage` 三出口接入（casual 不再早退）；**V14 下线（D1）**；黑钻整句 LIKE → 分片 LIKE + 40D；反馈统一 `applyRecallFeedback`。详见 §6.25 与 `active/P157` | `tsc=0`；批2A 相关 71 项全绿；全量 4177 passed / 12 failed（均既有或环境依赖）；**未改数据** |
@@ -887,6 +888,25 @@ FG 人物数不变（19 active / 12 dormant）。
 **验收**：`tsc=0`；批3 相关 151 项全绿；全量 4220 passed / 14 failed（E2E 波动 4、V15 probe 2、memarch-v2 4、WORLD/SCRIPT/SQL 4，均既有或环境依赖）。未改数据。
 
 **遗留**：存量 665 两不沾 / 95 反向 / 894 超限 / 988 组重复属批6；`derived_from` 派生摘要晋升留后续；停用函数体默认关闭保留至批6清理。
+
+---
+
+### §6.28 2026-11-09 记忆系统统一 · 批4 深度整编 + 主动回忆 + 憧憬（P160）
+
+**目标**：深度收集从三仓扩到七个仓；取消固定条数/字数硬顶；主动回忆五类信号落地；普通分支接入结晶表达。
+
+**交付**：
+- `meeting-recall.sweepAllStores`：砂金（排除 note）+ 黑钻 active + 知识（自有 + 无归属共享，D5）+ 对话原文；**不再读 vault_log**（D3）。证据层（FG 档案/作品/记事）由 `collectDeepEvidenceFragments` 并入。
+- 硬顶取消：`maxFrags=12` → `maxChars=6000` + 安全条数 48；单条 110 字 → 400 字；`organizeForQuestion` 按命中密度 + 字符预算装包。
+- 主动回忆：新增 `src/m4/recall/proactive-trigger.ts`（节日/纪念日/情绪/日常/话题关联，纯规则零 LLM）与 `src/webui/chat/proactive-stage.ts`（CalendarEngine 节日单源 + MEMORY-LAW-V1 文案）；纪念日只读 `memories`（同月同日 + 往年 + 钙化≥3/地标）。
+- 接线：会晤分支 `applyProactiveToPath`（纪念日/话题关联升 A）+ 证据层 + `[Proactive]/[DeepSweep]` 日志；普通（玉瑶）分支首次接入深度素材包 + `CRYSTAL_DIRECTIVE`，总线模式 deep/proactive/standard，主动指令在总线后注入。
+- 总线：指令类片段归 `other`，不占三层名额。
+- 配置：`deep_sweep` / `proactive` 两段（yaml + 类型 + 逐层深合并）；双开关可回批3 行为。
+- 测试：新增 proactive-trigger / proactive-stage；扩 sweep-organize / recall-bus / recall-bus-wiring。
+
+**验收**：`tsc=0`；批4 相关 49 项全绿；检索/聊天相关 469 项全绿；全量 4240 passed / 17 failed（E2E 单跑 4 = 批3 基线，其余为既有环境/存量：V15 probe 2、memarch-v2 并行、governance/scripts、`server-memarch-bridge-routes.ts:328` schema）。未改数据。
+
+**遗留**：憧憬/三重奏出现率与深度要素覆盖率属行为验收（批5 真机压测）；纪念日为近似判据；`per_kw` 为候选额度、注入总量由 `max_chars` 决定。
 
 ---
 

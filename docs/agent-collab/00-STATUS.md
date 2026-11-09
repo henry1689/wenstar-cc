@@ -119,6 +119,15 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P160 记忆系统统一 · 批4 深度整编 + 主动回忆 + 憧憬（Claude Code）**：
+  深度收集扩到砂金/黑钻 active/知识（自有+共享 D5）/对话原文 + 证据层（FG 档案/作品/记事）；**不再读 vault_log（D3）**。
+  取消 12 条/110 字硬顶 → `maxChars=6000` 字符预算 + 单条 400 字；`organizeForQuestion` 按命中密度 + 预算装包。
+  新增主动回忆触发器（节日/纪念日/情绪/日常/话题关联，零 LLM，`[Proactive]` 日志）与接线阶段；
+  普通（玉瑶）分支首次接入深度素材包 + `CRYSTAL_DIRECTIVE`；会晤通路接 `applyProactiveToPath`；指令类片段归 `other`。
+  配置新增 `deep_sweep` / `proactive` 双开关（关闭回批3 行为）。
+  验证：`tsc=0`；批4 相关 49 项全绿；检索/聊天相关 469 项全绿；全量 4240 passed / 17 failed（E2E 单跑 4 = 批3 基线，其余既有环境/存量）。**未改数据**。
+  详见 `active/P160`；下一步批5 回归、文档、验收。
+
 - 2026-11-09 **✅ P159 记忆系统统一 · 批3 写入与晋升收口 + 编码强制（Claude Code）**：
   写入一次（D2）：`WorkingMemory.persistEvents`（生产 false）关闭 evt 重复写；删除砂金→金库 1:1 复制与重复黑钻晋升路径。
   去重键统一 `(belong, role, normalized_text)`（新增 `memory-identity`）；user/assistant 仍互不拦截，同角色跨 taxonomy zone 拦截。

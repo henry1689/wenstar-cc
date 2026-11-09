@@ -20,10 +20,19 @@ import { WorkRepository } from '../../app/works/WorkRepository.js';
 import { passes as policePasses, policyFor, type PolicePolicy } from '../../governance/police/UUIDPoliceFilter.js';
 // 🔴 2026-09-09 会晤失忆修复: 共享召回工具（关键词内容相关召回/钙化保底/压缩原文取回/统一触发正则）
 //   与 MeetingWallAdapter 共用本模块，杜绝同构漂移（模块零 import，无 M 层反向依赖）。
-import { classifyMemSymPath, boostElementSource } from '../../m4/retrieval/memsym-path-router.js';
+import { classifyMemSymPath, boostElementSource, applyProactiveToPath } from '../../m4/retrieval/memsym-path-router.js';
 import { pickElements } from '../../m4/retrieval/element-picker.js';
 import { incMemSym, trackElementUse } from '../../m4/retrieval/memsym-metrics.js';
-import { sweepAllStores, organizeForQuestion, cleanSweepKeywords, CRYSTAL_DIRECTIVE, SWEEP_POLICY } from '../../m4/retrieval/meeting-recall.js';
+import {
+  sweepAllStores, organizeForQuestion, cleanSweepKeywords, CRYSTAL_DIRECTIVE, SWEEP_POLICY,
+  type SweptFragment, type SweepOptions,
+} from '../../m4/retrieval/meeting-recall.js';
+// 🔴 MEM-UNIFY-V1 批4：深度回忆接线（配置→收集参数 / 证据层并入 / 主动回忆信号与指令）
+import {
+  buildSweepOptions, buildSweepBudget, collectDeepEvidenceFragments, DEEP_PACKAGE_HEADER,
+} from './deep-recall-stage.js';
+import { detectProactive, buildProactiveDirective } from './proactive-stage.js';
+import type { ProactiveResult } from '../../m4/recall/proactive-trigger.js';
 import {
   RECALL_TRIGGER_RE,
   extractTopicKeywords,
@@ -902,11 +911,22 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             '③几乎对不上的 → 邀对方给由头：「你再给个由头，我们一块把它想起来？」——他说到哪，你顺着接；' +
             '对自己的感受和评价永远直说：「美好」「幸福」「暖」是你的感受，不是事实断言，不需要任何标记；印象的边缘用一句轻标记就够：「印象里…可能记混了，你别当准的」。');
         }
+        // 🔴 MEM-UNIFY-V1 批4：会晤分支主动回忆信号（节日/纪念日/情绪/日常/话题关联）。
+        //   只产结构化信号与日志；文案由 proactive-stage 从 MEMORY-LAW-V1 单源组装。
+        let _meetingProactive: ProactiveResult = { active: false, triggers: [] };
+        try {
+          _meetingProactive = detectProactive(message, { sqlite: _sqlite as never, entityUuid: _entityUuid });
+          if (_meetingProactive.active) {
+            console.log(`[Proactive] meeting 触发 ${_meetingProactive.triggers.map(t => t.type).join(',')}（${_meetingProactive.triggers.map(t => t.reason).join('；')}）`);
+          }
+        } catch (_proErr) {
+          console.warn('[Proactive] 会晤分支触发检测失败（跳过）:', (_proErr as Error)?.message);
+        }
         // 🔴 MemSym 批δ · 通路B元素浸润（ADR-MEM-002 第三块）：主旨判定为当下对话时，
         //   拾取沉淀元素作为风格素材注入（非往事叙事）；主动运用义务（宪法信条7）——
         //   实体可主动、自然地融入当下对话，无需回忆前缀；不得复述为往事、不得新增细节。
         try {
-          const _memsymPath = classifyMemSymPath(message);
+          const _memsymPath = applyProactiveToPath(classifyMemSymPath(message), _meetingProactive.triggers);
           incMemSym(_memsymPath === 'A' ? 'pathA' : 'pathB');
           if (_memsymPath === 'B' && _entityUuid) {
             const _picked = pickElements(_sqlite as never, {
@@ -930,21 +950,24 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
             }
           }
         } catch (_memsymErr) { /* 通路B失败不阻塞召回主链 */ }
-        // 🔴 P093 统一编排器调用（结晶核心令执行层——收集最大化+问题中心整编，单源自 meeting-recall）
+        // 🔴 MEM-UNIFY-V1 批4（P093 编排器扩容）：会晤深度素材包
+        //   · sweepAllStores：砂金 + 黑钻 active + 知识自有/共享 + 对话原文（D5/D3）
+        //   · collectDeepEvidenceFragments：FG 档案 / 作品 / 记事（按会晤实体 strict）
+        //   · organizeForQuestion：按字符预算装包（取消 12 条/110 字硬顶）
+        //   每条碎片经 memFragWithTime 带时间坐标（S8 立法），格式化仍在本文件单源。
         try {
-          if (classifyMemSymPath(message) === 'A' && _entityUuid) {
+          if (applyProactiveToPath(classifyMemSymPath(message), _meetingProactive.triggers) === 'A' && _entityUuid) {
             const _sweepKw = cleanSweepKeywords(_topicKw.length > 0 ? _topicKw : extractTopicKeywords(message, _exclKwNames, 8, _topicPrefer));
             if (_sweepKw.length > 0) {
-              const _swept = organizeForQuestion(sweepAllStores(_sqlite as never, _entityUuid, _sweepKw), _sweepKw);
+              const _baseFrags = sweepAllStores(_sqlite as never, _entityUuid, _sweepKw, buildSweepOptions());
+              const _evidenceFrags = await collectDeepEvidenceFragments(
+                _sweepKw, _sqlite as never, ctx.m4?.getFamilyGraph?.() ?? null, _entityUuid,
+              );
+              const _swept = organizeForQuestion([..._baseFrags, ..._evidenceFrags], _sweepKw, buildSweepBudget());
               if (_swept.length > 0) {
-                // 🔴 2026-11-03（S4 独立评审 P1-B 类）：每条碎片经 memFragWithTime 带时间坐标。
-                //   该通道是体量最大的记忆聚合（跨三仓、无时间窗、maxFrags=12），此前只注入文本，
-                //   而数据层 created_at 100% 在库 ⇒ 是通道选择不取。时间格式化保持**单源**
-                //   （复用本文件既有 memFragWithTime，与 :867 金库通道同形态），m4 层不造第二份。
-                //   无 createdAt 时 memFragWithTime 自动回退无时间标签（fail-open，不阻塞注入）。
-                memoryFragments.push('【深度回忆素材包 · MemSym】以下是全部记忆仓（砂金/金库黑钻/知识库）与该话题相关的碎片——整编组织，努力还原情景：\n' +
+                memoryFragments.push(DEEP_PACKAGE_HEADER +
                   _swept.map((s) => memFragWithTime(s.source, s.content, s.createdAt)).join('\n') + CRYSTAL_DIRECTIVE);
-                console.log(`[MemSym·深度素材] P093编排器 ${_sweepKw.join('/')} → ${_swept.length} 条整编入包`);
+                console.log(`[DeepSweep] meeting ${_sweepKw.join('/')} → ${_swept.length} 条（证据 ${_evidenceFrags.length}）`);
               }
             }
           }
@@ -1934,6 +1957,39 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     }
   } catch (_fErr) { console.warn('[FoundationRoutes] 影子/注入失败:', (_fErr as Error)?.message); }
 
+  // 🔴 MEM-UNIFY-V1 批4：普通（玉瑶）分支主动回忆 + 深度收集。
+  //   此前普通分支完全没有 sweep / CRYSTAL，深度回忆能力只存在于会晤分支。
+  //   触发条件：话题切换（deep）或主动信号命中；无 sqlite / 无检索主体时跳过（fail-closed）。
+  let _proactiveResult: ProactiveResult = { active: false, triggers: [] };
+  try {
+    const _dsSqlite = ctx.storage?.getSQLite?.();
+    const _dsUuid = _activeEntityUuids[0] || null;
+    if (getRetrievalFusionConfig().proactive?.enabled !== false) {
+      _proactiveResult = detectProactive(message, { sqlite: _dsSqlite as never, entityUuid: _dsUuid });
+      if (_proactiveResult.active) {
+        console.log(`[Proactive] normal 触发 ${_proactiveResult.triggers.map(t => t.type).join(',')}（${_proactiveResult.triggers.map(t => t.reason).join('；')}）`);
+      }
+    }
+    const _dsCfg = getRetrievalFusionConfig().deep_sweep;
+    if (_dsCfg?.enabled !== false && (isTopicShift || _proactiveResult.active) && _dsSqlite && _dsUuid) {
+      const _dsKw = cleanSweepKeywords(extractTopicKeywords(message, [], 8));
+      if (_dsKw.length > 0) {
+        const _dsBase = sweepAllStores(_dsSqlite as never, _dsUuid, _dsKw, buildSweepOptions());
+        const _dsEvidence = await collectDeepEvidenceFragments(
+          _dsKw, _dsSqlite as never, ctx.m4?.getFamilyGraph?.() ?? null, _dsUuid,
+        );
+        const _dsOrganized = organizeForQuestion([..._dsBase, ..._dsEvidence], _dsKw, buildSweepBudget());
+        if (_dsOrganized.length > 0) {
+          memoryFragments.push(DEEP_PACKAGE_HEADER +
+            _dsOrganized.map((s) => memFragWithTime(s.source, s.content, s.createdAt)).join('\n') + CRYSTAL_DIRECTIVE);
+          console.log(`[DeepSweep] normal ${_dsKw.join('/')} → ${_dsOrganized.length} 条（证据 ${_dsEvidence.length}）`);
+        }
+      }
+    }
+  } catch (_dsErr) {
+    console.warn('[DeepSweep] 普通分支深度收集失败（不阻塞召回）:', (_dsErr as Error)?.message);
+  }
+
   // 🔴 Phase 2.3 (F / T005) F2: 非会晤场景 B60% / A40% 配额 —— **出口闸门**。
   //   覆盖上方全部注入路径（情感记忆 / V13 / V11 / 长文 / 砂金 / Foundation 多路）。
   //   近期记忆并入 B 侧同一池（R020 Q2）；铁律/金库/作品/长文属 OTHER，不受配额约束。
@@ -1946,9 +2002,12 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
 
   // 🔴 MEM-UNIFY-V1 批2A：统一召回总线（standard/deep）—— 出口层保底 + 单一五级闸门。
   //   放在配额之后：配额负责 A/B 比例，总线负责三层保底与 G2/G4/G5 降权排序，职责不重叠。
+  //   批4：普通分支仅主动触发（非话题切换）时走 proactive 小预算，聚焦"此刻该主动说起的事"。
   try {
     const { runRecallBus, classifyFragmentTier, applyRecallFeedback } = await import('../../m4/recall/recall-bus.js');
-    const _busMode = isTopicShift ? 'deep' as const : 'standard' as const;
+    const _busMode = isTopicShift
+      ? 'deep' as const
+      : _proactiveResult.active ? 'proactive' as const : 'standard' as const;
     const _bus = runRecallBus({
       mode: _busMode,
       query: message,
@@ -1965,6 +2024,15 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
     if (_fbCount > 0) console.log(`[RecallBus] 反馈回写 ${_fbCount} 条`);
   } catch (_busErr) {
     console.warn('[RecallBus] 出口总线失败，保留配额后片段:', (_busErr as Error)?.message);
+  }
+
+  // 🔴 MEM-UNIFY-V1 批4：主动回忆指令 —— 总线之后注入（指令不占记忆名额；无信号不注入）。
+  //   文案由 proactive-stage 从 MEMORY-LAW-V1 单源组装；普通分支由此接入三重奏/憧憬。
+  try {
+    const _proactiveDirective = buildProactiveDirective(_proactiveResult);
+    if (_proactiveDirective) memoryFragments.push(_proactiveDirective);
+  } catch (_pdErr) {
+    console.warn('[Proactive] 指令组装失败（跳过）:', (_pdErr as Error)?.message);
   }
 
   return {

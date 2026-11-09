@@ -98,11 +98,19 @@ const TIER_MATCHERS: Array<[RecallTier, RegExp]> = [
   ['sand', /📌|重要记忆|【回忆】|【用户曾提到】/],
 ];
 
+/**
+ * 指令类片段（MEM-UNIFY-V1 批4）：深度回忆素材包 / 结晶令 / 三档协议 / 默契元素 / 主动回忆
+ * 是**表达指令**，不是记忆条目 —— 归 other 直通，不占砂金/金库/黑钻/对话组名额。
+ */
+const DIRECTIVE_FRAGMENT_RE =
+  /^【(?:深度回忆素材包|结晶表达|回忆表达三档|默契元素|主动回忆)/;
+
 /** 把注入片段按标签归类；未标注的默认按砂金处理。 */
 export function classifyFragmentTier(fragment: string): RecallTier {
   const s = String(fragment || '').trim();
   // 上下文直通：用户状态/系统/引擎块不是记忆，不占记忆预算（见 applyTierFloors）
   if (/^【用户状态】|^【系统|^【引擎/.test(s)) return 'other';
+  if (DIRECTIVE_FRAGMENT_RE.test(s)) return 'other';
   for (const [tier, re] of TIER_MATCHERS) {
     if (re.test(s)) return tier;
   }

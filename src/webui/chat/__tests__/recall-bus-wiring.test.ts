@@ -41,6 +41,31 @@ describe('RecallBus 接线 · retrieval-stage', () => {
     expect(src).toContain('applyRecallFeedback(');
     expect(src).not.toContain('UPDATE black_diamond SET recall_count = recall_count + 1, updated_at = ? WHERE id = ?');
   });
+
+  /**
+   * MEM-UNIFY-V1 批4 接线守卫：普通（玉瑶）分支此前没有深度收集与结晶令。
+   * 锁定：主动触发、深度素材包（含证据层）、结晶令、proactive 总线模式、指令在总线后注入。
+   */
+  it('批4：普通分支接入主动触发 + 深度素材包 + 结晶令', () => {
+    expect(src).toContain("import { detectProactive, buildProactiveDirective } from './proactive-stage.js'");
+    expect(src).toContain('collectDeepEvidenceFragments(');
+    expect(src).toContain('DEEP_PACKAGE_HEADER');
+    expect(src).toContain('[Proactive] normal 触发');
+    expect(src).toContain('[DeepSweep] normal');
+    expect(src).toContain('_proactiveResult.active ? \'proactive\' as const');
+    // 主动指令必须在总线之后（否则会占记忆名额）—— 用出现顺序断言
+    const busIdx = src.lastIndexOf('runRecallBus({');
+    const dirIdx = src.lastIndexOf('buildProactiveDirective(_proactiveResult)');
+    expect(busIdx).toBeGreaterThan(-1);
+    expect(dirIdx).toBeGreaterThan(busIdx);
+  });
+
+  it('批4：会晤分支同样接入主动触发与证据层', () => {
+    expect(src).toContain("detectProactive(message, { sqlite: _sqlite as never, entityUuid: _entityUuid })");
+    expect(src).toContain('applyProactiveToPath(classifyMemSymPath(message)');
+    expect(src).toContain('[Proactive] meeting 触发');
+    expect(src).toContain('[DeepSweep] meeting');
+  });
 });
 
 describe('RecallBus · other 上下文直通', () => {

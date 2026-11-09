@@ -136,3 +136,38 @@ p1_speed:
 #          关则该路不注册 —— **不存在回退到 n-gram 的路径**（旧实现在 B2 批次删除）。
 # 生效点：src/m4/retrieval/index.ts 的 createDefaultRegistry。
 dialog_group_v11_recall: true
+
+# ── MEM-UNIFY-V1 批4: 深度收集（sweepAllStores / organizeForQuestion）──
+# 唯一代码源：src/m4/retrieval/meeting-recall.ts；由 src/config/retrieval-fusion-config.ts 读取。
+# 候选限额（per_kw）**不是**注入上限：注入由 max_chars 字符预算决定（取消原 12 条硬顶）。
+# 单条 400 字（取消原 110 字硬顶）；知识库无归属 = 共享（D5）；证据层含 FG 档案/作品/记事。
+deep_sweep:
+  enabled: true
+  per_kw:
+    memories: 2
+    diamond: 2
+    knowledge: 1
+    shared_knowledge: 1
+    conversation: 1
+  per_fragment_chars: 400
+  max_chars: 6000
+  safety_max_frags: 48
+  include_shared_knowledge: true
+  include_conversations: true
+  evidence:
+    enabled: true
+    per_keyword: 3
+    max_keywords: 2
+
+# ── MEM-UNIFY-V1 批4: 主动回忆触发（m4/recall/proactive-trigger.ts）──
+# 纯规则、零 LLM；节日来自 CalendarEngine 单源；纪念日只读 memories（D3：vault_log 不参与）。
+# 触发日志：[Proactive] ...（调用层打点）；关闭 enabled 即回批3 行为。
+proactive:
+  enabled: true
+  festival: true
+  anniversary: true
+  emotion: true
+  routine: true
+  topic: true
+  min_weight: 0.4
+  anniversary_min_calcium: 3

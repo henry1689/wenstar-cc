@@ -99,6 +99,56 @@ export interface P1SpeedConfig {
   llm_reduction: LLMReductionConfig;
 }
 
+/**
+ * MEM-UNIFY-V1 批4：深度收集配置（`meeting-recall.sweepAllStores` 的候选限额与注入预算）。
+ * 注意：候选限额**不是**注入上限 —— 注入由 `max_chars` 字符预算决定。
+ */
+export interface DeepSweepConfig {
+  /** 总开关：false = 普通/会晤分支都不做深度收集（回批3 行为） */
+  enabled: boolean;
+  /** 每关键词每仓候选条数 */
+  per_kw: {
+    memories: number;
+    diamond: number;
+    knowledge: number;
+    shared_knowledge: number;
+    conversation: number;
+  };
+  /** 单条片段字符上限（原 110 字硬顶的可配替代） */
+  per_fragment_chars: number;
+  /** 整编注入总字符预算（原 12 条硬顶的可配替代） */
+  max_chars: number;
+  /** 安全条数上限（防异常数据撑爆提示词） */
+  safety_max_frags: number;
+  /** 知识库无归属 = 共享（D5） */
+  include_shared_knowledge: boolean;
+  /** 收集对话原文 */
+  include_conversations: boolean;
+  /** 证据层（FG 档案 / 作品 / 记事） */
+  evidence: {
+    enabled: boolean;
+    /** 每个关键词每路返回上限 */
+    per_keyword: number;
+    /** 最多取前 N 个关键词做证据检索 */
+    max_keywords: number;
+  };
+}
+
+/** MEM-UNIFY-V1 批4：主动回忆触发器配置（`m4/recall/proactive-trigger.ts`）。 */
+export interface ProactiveConfig {
+  /** 总开关：false = 不检测、不注入主动回忆指令 */
+  enabled: boolean;
+  festival: boolean;
+  anniversary: boolean;
+  emotion: boolean;
+  routine: boolean;
+  topic: boolean;
+  /** 信号权重阈值（低于此值丢弃） */
+  min_weight: number;
+  /** 纪念日判定的钙化等级下限（与 is_landmark=1 取或） */
+  anniversary_min_calcium: number;
+}
+
 export interface RetrievalFusionConfig {
   inject_priority: InjectPriorityConfig;
   timeline_weight: TimelineWeightConfig;
@@ -134,6 +184,14 @@ export interface RetrievalFusionConfig {
    * 模式 → 层保底名额 → 单一五级闸门 → 反馈；名额由 YAML 驱动，禁止 ts 硬编码。
    */
   recall_bus: RecallBusConfig;
+  /**
+   * 🔴 MEM-UNIFY-V1 批4: 深度收集配置（meeting-recall.sweepAllStores / organizeForQuestion）。
+   */
+  deep_sweep: DeepSweepConfig;
+  /**
+   * 🔴 MEM-UNIFY-V1 批4: 主动回忆触发配置（m4/recall/proactive-trigger.ts）。
+   */
+  proactive: ProactiveConfig;
 }
 
 /** 一个召回模式的层保底名额（证据层 knowledge/long_text/work 只参与补足，不占三层名额） */
@@ -198,6 +256,28 @@ const DEFAULTS: RetrievalFusionConfig = {
     gate: { enabled: true },
     feedback: { enabled: true },
   },
+  // MEM-UNIFY-V1 批4: 深度收集默认（取消 12 条/110 字硬顶 → 字符预算）
+  deep_sweep: {
+    enabled: true,
+    per_kw: { memories: 2, diamond: 2, knowledge: 1, shared_knowledge: 1, conversation: 1 },
+    per_fragment_chars: 400,
+    max_chars: 6000,
+    safety_max_frags: 48,
+    include_shared_knowledge: true,
+    include_conversations: true,
+    evidence: { enabled: true, per_keyword: 3, max_keywords: 2 },
+  },
+  // MEM-UNIFY-V1 批4: 主动回忆默认（五类信号全开；阈值 0.4 让日常时段也能轻触发）
+  proactive: {
+    enabled: true,
+    festival: true,
+    anniversary: true,
+    emotion: true,
+    routine: true,
+    topic: true,
+    min_weight: 0.4,
+    anniversary_min_calcium: 3,
+  },
 };
 
 let _cache: RetrievalFusionConfig | null = null;
@@ -248,6 +328,14 @@ export function getRetrievalFusionConfig(): RetrievalFusionConfig {
         gate: { ...DEFAULTS.recall_bus.gate, ...(parsed.recall_bus?.gate || {}) },
         feedback: { ...DEFAULTS.recall_bus.feedback, ...(parsed.recall_bus?.feedback || {}) },
       },
+      // 🔴 MEM-UNIFY-V1 批4: 深度收集与主动回忆逐层合并（yaml 只写一段不丢另一段）
+      deep_sweep: {
+        ...DEFAULTS.deep_sweep,
+        ...(parsed.deep_sweep || {}),
+        per_kw: { ...DEFAULTS.deep_sweep.per_kw, ...(parsed.deep_sweep?.per_kw || {}) },
+        evidence: { ...DEFAULTS.deep_sweep.evidence, ...(parsed.deep_sweep?.evidence || {}) },
+      },
+      proactive: { ...DEFAULTS.proactive, ...(parsed.proactive || {}) },
     };
   } catch (e) {
     console.warn('[RetrievalFusionConfig] yaml 加载失败，使用默认值:', (e as Error)?.message);

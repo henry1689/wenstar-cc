@@ -37,6 +37,22 @@ export function classifyMemSymPath(message: string): 'A' | 'B' {
   return 'B';
 }
 
+/**
+ * 主动回忆信号对通路的修正（MEM-UNIFY-V1 批4）。
+ *
+ * 只升不降：纪念日 / 话题关联天然指向「具体往事」，按 A 路走三档全套；
+ * 节日 / 情绪 / 日常是「借记忆烘托当下」，维持原判定（通常为 B），避免给闲聊乱加"印象里"。
+ * 无信号时原样返回 —— 本函数不改变既有判定口径。
+ */
+export function applyProactiveToPath(
+  base: 'A' | 'B',
+  triggers: ReadonlyArray<{ type: string }> | null | undefined,
+): 'A' | 'B' {
+  if (!triggers || triggers.length === 0) return base;
+  if (base === 'A') return 'A';
+  return triggers.some(t => t.type === 'anniversary' || t.type === 'topic') ? 'A' : 'B';
+}
+
 /** B 路钙化增强配置（ADR-MEM-002 第三块：B 系数 < A 系数（A 召回 boost≈0.2）+ 冷却 + 上限） */
 export const B_BOOST_CONFIG = {
   coefficient: 0.05,      // 低系数（郑重回忆分量更重——默契生长但不压倒主动回忆）
