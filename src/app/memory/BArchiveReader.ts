@@ -54,6 +54,9 @@
 import { appendGroupLog, makeLogEntry, parseAppendLog } from './bArchiveLog.js';
 import type { AppendLogEntry } from './bArchiveLog.js';
 import { computeContentHash, computeSummaryHash } from './bArchiveHash.js';
+// 🔴 依赖单向：业务层 → memwen 核心库（ADR-024）；链原语唯一实现落 memwen
+import { chainHash, sha256Hex, MW_GENESIS } from '../../memwen/hash-chain.js';
+import { stableStringify } from '../../memwen/canon.js';
 
 // ══════════════════════════════════════════════════════════════
 // 常量（口径收拢处）
@@ -449,4 +452,54 @@ function parseSnapshot(raw: unknown): BArchiveSnapshot | null {
   } catch {
     return null;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 归档事件链验证（ADR-024 附录 v2 §6.1 分段链，段=组 · 守卫10 落地）
+// ═══════════════════════════════════════════════════════════════════
+
+/** 链验证结果 */
+export interface AppendChainVerifyResult {
+  /** 链完好（含「全旧日志无链」——现状可接受，不报错） */
+  ok: boolean;
+  /** 首个失配条目下标（ok=false 时有效） */
+  breakIndex?: number;
+  /** 失配条目 ts（便于定位，不打印正文） */
+  breakTs?: string;
+  /** 参与链验证的条目数（0 = 全旧日志，无可验链） */
+  linkedCount: number;
+}
+
+/** 取条目的链输入体（与 bArchiveLog 追加时的 body 构造逐字一致 —— 同源） */
+function chainBody(e: AppendLogEntry): string {
+  return stableStringify({ ts: e.ts, type: e.type, actor: e.actor, detail: e.detail });
+}
+
+/**
+ * 验证 append_log 事件链：C_i = chainHash(C_{i-1}, sha256(body_i))。
+ *
+ * - 旧条目（无 chain）在**首个带链条目之前**跳过（历史不回改，现状不可追溯是既成事实）；
+ * - 首个带链条目起逐条重算比对，首个失配即返回断点（篡改/删改定位）；
+ * - 全部无链 → ok=true、linkedCount=0（旧日志，不误报）。
+ *
+ * 纯函数：不读时钟、不碰 I/O。
+ */
+export function verifyAppendChain(log: readonly AppendLogEntry[]): AppendChainVerifyResult {
+  let prev = MW_GENESIS;
+  let linked = 0;
+  let started = false;
+  for (let i = 0; i < log.length; i++) {
+    const e = log[i]!;
+    if (e.chain === undefined) {
+      // 带链段中途出现无链条目 = 链断裂（新代码追加必带链）
+      if (started) return { ok: false, breakIndex: i, breakTs: e.ts, linkedCount: linked };
+      continue; // 前缀旧条目：跳过
+    }
+    started = true;
+    const expect = chainHash(prev, sha256Hex(chainBody(e)));
+    if (expect !== e.chain) return { ok: false, breakIndex: i, breakTs: e.ts, linkedCount: linked };
+    prev = e.chain;
+    linked++;
+  }
+  return { ok: true, linkedCount: linked };
 }

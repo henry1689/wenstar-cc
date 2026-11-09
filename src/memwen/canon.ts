@@ -58,3 +58,45 @@ export function canon(core: MwImmutableCore): string {
   }
   return parts.join('|');
 }
+
+/**
+ * 稳定 JSON 序列化（链输入的唯一序列化实现）。
+ *
+ * - 对象键**递归排序**（同一逻辑对象不同插入序 → 同一文本）；
+ * - 字符串 NFC 归一；
+ * - undefined / 函数 / symbol 按 JSON 语义跳过；数组保持顺序（顺序即语义）；
+ * - 循环引用 fail-fast（抛错，不静默截断 —— 静默截断会让两条不同输入算出同一哈希）。
+ *
+ * 用途：append_log 条目 → 链输入文本（bArchiveLog 计算 chain / BArchiveReader 验证）。
+ */
+export function stableStringify(value: unknown): string {
+  const seen = new Set<object>();
+  const walk = (v: unknown): string | undefined => {
+    if (v === null) return 'null';
+    const t = typeof v;
+    if (t === 'string') return JSON.stringify((v as string).normalize('NFC'));
+    if (t === 'number') return Number.isFinite(v as number) ? String(v) : 'null';
+    if (t === 'boolean') return String(v);
+    if (t === 'bigint') return JSON.stringify(String(v));
+    if (t === 'undefined' || t === 'function' || t === 'symbol') return undefined;
+    const obj = v as object;
+    if (seen.has(obj)) throw new TypeError('stableStringify: 循环引用');
+    seen.add(obj);
+    let out: string;
+    if (Array.isArray(obj)) {
+      out = `[${obj.map((x) => walk(x) ?? 'null').join(',')}]`;
+    } else {
+      const keys = Object.keys(obj as Record<string, unknown>).sort();
+      const parts: string[] = [];
+      for (const k of keys) {
+        const sv = walk((obj as Record<string, unknown>)[k]);
+        if (sv !== undefined) parts.push(`${JSON.stringify(k.normalize('NFC'))}:${sv}`);
+      }
+      out = `{${parts.join(',')}}`;
+    }
+    seen.delete(obj);
+    return out;
+  };
+  const r = walk(value);
+  return r === undefined ? 'null' : r;
+}

@@ -25,6 +25,10 @@
  *   记于此并在 P145 任务书留痕 —— 属于「只增」范围内的扩展，不是改名。
  */
 
+// 🔴 依赖单向：业务层 → memwen 核心库（ADR-024）；链原语唯一实现落 memwen
+import { chainHash, sha256Hex, MW_GENESIS } from '../../memwen/hash-chain.js';
+import { stableStringify } from '../../memwen/canon.js';
+
 /** append_log 条目类型（枚举只增不改） */
 export type BArchiveLogType =
   | 'snapshot_created'      // 闭组生成 40D 快照
@@ -43,6 +47,14 @@ export interface AppendLogEntry {
   type: BArchiveLogType;
   actor: string;
   detail: Record<string, unknown>;
+  /**
+   * 归档事件链（ADR-024 附录 v2 §6.1 分段链，段=组）：
+   * C_i = chainHash(C_{i-1}, sha256(stableStringify({ts,type,actor,detail})))
+   * - 仅**新追加**的条目携带（旧条目不回改 —— append-only 语义不变）；
+   * - 链头自取（末条 entry 的 chain，无则 MW_GENESIS），无全局单点；
+   * - 验证见 BArchiveReader.verifyAppendChain。
+   */
+  chain?: string;
 }
 
 /**
@@ -69,7 +81,6 @@ export function parseAppendLog(raw: unknown): AppendLogEntry[] {
     return [];
   }
 }
-
 /**
  * 追加一条日志。
  *
@@ -102,6 +113,15 @@ export function appendGroupLog(
     }
 
     log.push(entry);
+    // 🔴 链值计算（fail-open：链失败不阻断追加，与本模块告警风格一致）
+    //   旧条目无 chain → 新链从本条起算（prev=GENESIS）；有则续链。
+    try {
+      const prev = log.length >= 2 ? (log[log.length - 2]!.chain ?? MW_GENESIS) : MW_GENESIS;
+      const body = { ts: entry.ts, type: entry.type, actor: entry.actor, detail: entry.detail };
+      entry.chain = chainHash(prev, sha256Hex(stableStringify(body)));
+    } catch (e) {
+      console.warn(`[BArchiveLog] ${dgId} 链值计算失败（条目仍写入，链自下条续）:`, (e as Error)?.message);
+    }
     if (log.length >= WARN_ENTRIES) {
       console.warn(`[BArchiveLog] ${dgId} 日志条数 ${log.length} 已达告警水位 ${WARN_ENTRIES}（不裁剪，请排查上游节流）`);
     }

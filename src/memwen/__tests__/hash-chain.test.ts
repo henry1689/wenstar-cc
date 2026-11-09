@@ -3,6 +3,7 @@ import {
   canon,
   hashCore,
   chainHash,
+  sha256Hex,
   buildChain,
   verifyChain,
   segmentHead,
@@ -132,5 +133,69 @@ describe('哈希链 · 墓碑（合法删除不报篡改）', () => {
   it('链步进输入校验：非 64 位十六进制即抛', () => {
     expect(() => chainHash('short', 'f'.repeat(64))).toThrow(TypeError);
     expect(() => chainHash(MW_GENESIS, 'xyz')).toThrow(TypeError);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// stableStringify（链输入唯一序列化）+ 事件链序列化守卫
+// ═══════════════════════════════════════════════════════════════════
+import { stableStringify } from '../canon.js';
+
+describe('stableStringify · 稳定序列化（链输入单源）', () => {
+  it('键序无关：不同插入序的同一逻辑对象 → 同一文本', () => {
+    const a = { ts: 'T', type: 'x', actor: 'A', detail: { b: 1, a: 2 } };
+    const b = { detail: { a: 2, b: 1 }, actor: 'A', type: 'x', ts: 'T' };
+    expect(stableStringify(a)).toBe(stableStringify(b));
+  });
+
+  it('嵌套递归排序 + 数组保序（顺序即语义）', () => {
+    const a = { z: [{ y: 1, x: 2 }], m: { n: 3 } };
+    const b = { m: { n: 3 }, z: [{ x: 2, y: 1 }] };
+    expect(stableStringify(a)).toBe(stableStringify(b));
+    expect(stableStringify([1, 2])).not.toBe(stableStringify([2, 1])); // 数组不排序
+  });
+
+  it('中文 NFC 归一：不同码点形式同文本', () => {
+    expect(stableStringify({ s: 'é' })).toBe(stableStringify({ s: 'é' }));
+  });
+
+  it('JSON 语义：undefined/函数跳过，null 保留，循环引用抛错', () => {
+    expect(stableStringify({ a: undefined, b: 1 })).toBe('{"b":1}');
+    expect(stableStringify({ a: null })).toBe('{"a":null}');
+    const cyc: Record<string, unknown> = { a: 1 };
+    cyc.self = cyc;
+    expect(() => stableStringify(cyc)).toThrow(TypeError);
+  });
+});
+
+describe('事件链序列化 · 与 bArchiveLog 同源（body 构造逐字一致）', () => {
+  const body = (e: { ts: string; type: string; actor: string; detail: Record<string, unknown> }) =>
+    stableStringify({ ts: e.ts, type: e.type, actor: e.actor, detail: e.detail });
+
+  it('同一条目不同构造序 → 同链值', () => {
+    const e1 = { ts: 'T1', type: 'content_hashed', actor: 'svc', detail: { h: 'aa', g: 'g1' } };
+    const e2 = { ts: 'T1', type: 'content_hashed', actor: 'svc', detail: { g: 'g1', h: 'aa' } };
+    const c1 = chainHash(MW_GENESIS, sha256Hex(body(e1)));
+    const c2 = chainHash(MW_GENESIS, sha256Hex(body(e2)));
+    expect(c1).toBe(c2);
+  });
+
+  it('条目任一字段被篡改 → 链值变化（断点可检）', () => {
+    const e = { ts: 'T1', type: 'content_hashed', actor: 'svc', detail: { h: 'aa' } };
+    const base = chainHash(MW_GENESIS, sha256Hex(body(e)));
+    for (const alt of [{ ...e, ts: 'T2' }, { ...e, actor: 'evil' }, { ...e, detail: { h: 'bb' } }]) {
+      expect(chainHash(MW_GENESIS, sha256Hex(body(alt)))).not.toBe(base);
+    }
+  });
+
+  it('链式续接：第 2 条依赖第 1 条（改第 1 条 → 第 2 条失配，仿 verifyAppendChain 断点语义）', () => {
+    const e1 = { ts: 'T1', type: 'content_hashed' as const, actor: 'a', detail: {} };
+    const e2 = { ts: 'T2', type: 'summary_generated' as const, actor: 'a', detail: {} };
+    const c1 = chainHash(MW_GENESIS, sha256Hex(body(e1)));
+    const c2 = chainHash(c1, sha256Hex(body(e2)));
+    // 篡改 e1 → 重算 c1' ≠ c1，而 c2 仍锚定旧 c1 → 断点在第 1 条
+    const c1Tampered = chainHash(MW_GENESIS, sha256Hex(body({ ...e1, actor: 'evil' })));
+    expect(c1Tampered).not.toBe(c1);
+    expect(chainHash(c1Tampered, sha256Hex(body(e2)))).not.toBe(c2);
   });
 });
