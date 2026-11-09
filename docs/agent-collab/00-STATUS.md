@@ -5,7 +5,7 @@ title: 协作区当前状态面板
 author: both
 status: active
 created: 2026-10-08
-updated: 2026-11-09
+updated: 2026-11-10
 ---
 
 # 协作区当前状态面板
@@ -118,6 +118,22 @@ updated: 2026-11-09
 7. **如实记录**：做成了什么、没做成什么、为什么，都写清楚
 
 ## 更新记录
+
+- 2026-11-09 **🏗️ P174 MenWen OS 重新设计 v2 · 类脑五层认知架构(Sonnet构思×现有零件全利用)**：
+  - 业主转Claude Sonnet评审+指令全面扫描重设计。**扫描核心发现：Sonnet提的机制大半已有底座**——遗忘曲线(decay_log 90198条+G3 floor)、睡眠整合(dream_logs 653条dream_evolution/高情绪提炼在跑)、再巩固(_reconsolidateAsync V3.1)、时序字段(valid_*索引已建仅42条用)、事件日志4张表(vault/calcium/retrieval/aqc共8万行)、主动回忆(proactive-stage)、五层物理结构(L1情景/L2语义/L4归档甚至超配)。
+  - **真正缺三样**：A意图路由(查询按认知功能分路,非一锅召回)、B三真缺口(dormant软遗忘/冲突消解valid_*用起来/查询改写R1+动态预算R3)、C闭环工程(评测常驻/置信度输出/4表事件流收口)。
+  - **v2设计**：五层×五路映射图 + N1 dormant(=suppressed语义改造一并解决P170裁决③,休眠可强线索唤醒) + N2冲突消解(外公去世→外公健康失效,用dna_root_id簇+valid_*) + N3查询改写+动态预算(连贯性R1/R3) + mem_class类型标注(fact/preference/relation/episode/skill) + 向量版本绑定(embed_model@version在线双写) + MW-Bench评测集常驻。
+  - **路线图v2(M0-M6约3周)**：M0诊断+评测集→M1固化内核→**M2连贯性提前(痛点先修)**→M3 dense(bge-small-zh试点/bge-m3预留/在线双写免停服)→M4 contextual+类型+时序→M5巩固遗忘→M6白皮书(差异化=40D场景召回+类脑巩固遗忘+可审计自研底座)。
+  - **裁决更新**：B1拆包/我先P167-A/suppressed=dormant/数据删除先归档隔离30天。详见 `active/P174`。
+- 2026-11-10 **🔍 P174 批0→批8 全面复查与目标达成报告（Claude Code，领 `P173-20261110` 派单，只读零改动）**：
+  - **A1–A5：0/5 达标，不可交付**。A1 实召 554/7,154=**7.74%**；A2 数据层隔离未见越权但**表现层串台成立**；A3 **五个名字**；A4 垃圾实体可成参会者、入口/昵称失效；A5 假绿 + test 锚点洗白 + 指标随重启波动。
+  - **22 项链**：已修 0 / 部分 1（#21）/ 判定错误 2（#4 未来时间戳、#8 “23 条被删”）/ 设计取舍 1（#14）/ 未修或未查清 18。
+  - **17–19 根因（P0）**：L3 滑窗切名 → `checkPersonEntity` 实测放行 grade3“仅长度”（骚一点/声爸爸/爹爹日/屄日还爽/阿珍一）→ ADR-021 后写 active → `detectIntent` 子串唤醒 → 垃圾席位上开场协议 → `attributeReply` 只认白名单，非白名单 `徐诗雨：` 被 sticky 拼成 `【罗珍思】徐诗雨：`。
+  - **#8 更正 P172**：batch6d 38 条 test 锚点当前 **38/38 仍存在、0 删除、38/38 变 default**；根因是锚点重建按“首条会话”继承 namespace，不是被清理。
+  - **#29 新根因**：`scripts/__tests__/memory-roundtrip-runtime-smoke.test.ts` 直接 POST `localhost:3000/api/memory`，服务在跑时写生产 → 199 条测试 note。
+  - **#30 新根因**：`KnowledgeContextBuilder.ts:380` 未校验 `dna.branch_id` 是否落库，knowledge FK 孤儿 21→**30** 且增长。
+  - **完成度**：任务书 15 项 10 通过/2 部分/3 未通过（工程约 67%）；用户目标 0/5；**可交付 0%**。详见 `active/P174-20261110-ClaudeCode-批0至批8全面复查与目标达成报告.md`。
+  - ⚠️ **编号撞车**：`P173-20261110-豆包-全面复查派单` 与 `P173-20261109-PI-文曲星MenWenOS记忆系统总体规划` 共用 P173，需后续重编号。
 
 - 2026-11-09 **📋 P173 文曲星记忆系统(MenWen OS)总体规划 · 立项书(待业主确认)**：
   - 业主定名：**文曲星记忆系统 / MenWen OS / MW- 前缀**，自研记忆系统，要求高度集成集中管理、核心机制固化不易篡改、补缺口、修上下文连贯、行业前瞻。
