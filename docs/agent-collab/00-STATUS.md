@@ -119,6 +119,13 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-09 **🏗️ M1 第一批完成 · src/memwen/ 核心库落地(业主「动工吧」授权, c8fde46)**：
+  - **新库 8 文件零现有改动**：canon(规范化)/hash-chain(分段链+墓碑两层验证)/event-rebuild(fold纯函数+reconcile对账)/gate-stats(wilsonCI+配对三态门禁)/index + 3守卫。
+  - **守卫 29/29 绿**：NFC等价/键序无关/时间归一/篡改断点定位/墓碑合法删除不误报/段间独立/重放幂等/Δ=0/校验和漂移检出/三态边界+Wilson附录锚点[0.49,0.94]。tsc 全量0错。
+  - **Harness 全程**：plan_review_flow + core_repair_flow **10阶段全过**（S4.5补DS-23角色五类横向清单、S6-B任务单ck_f359727d34cc2c0f 4/4含**回滚演练实跑**：移走→零引用0错绿→恢复→29/29）。依赖单向=仅node:crypto。
+  - **归因纪律**：全量14失败全在governance/memarch-v2存量子系统，引用memwen的现有测试=0，**本批零归因**(未修不谎报)。
+  - **教训**：git add 禁用 -A（上批混入他窗口归档移动）；s2_evidence 四必填+final_approved_plan枚举(patch/arch_structural)+confirmations裸key。
+  - **下一步 M1 第二批**：单写入口全收口（MemoryWriteGateway 覆盖审计）+ 事件流逻辑视图/outbox 接线 + 哈希封存扩展接线——均涉现有文件，走 Harness。
 - 2026-11-09 **📐 ADR-024附录v2(Sonnet第三轮批改14处全部验算采纳)**：
   - **公式错误3处(P0)**：①预算解析解B+1→**B+2**(KKT验算成立,原式每轮丢1单位)+water-filling clamp+守卫改**等式h*+m*=B**；②衰减改**增量形式**(半群性质,修召回后曲线重画跳变,decay_log分批=一次)；③唤醒**饱和**s'=s+η_w(1-s)W·ĉ(修越界)。
   - **设计矛盾4处**：④失效改**append-only版本行**(消灭"原地写v_e vs旧数据不动"矛盾)；⑤拆**情景m_epi/事实f**两对象(情景永不失效,"去世前一年对话仍可检出"语义干净)；⑥冲突须**有效期重叠**+单值/多值键声明+"以前身体很好"不推翻"已去世"+v_inferred；⑦**遗忘闭包**(摘要/黑钻/dream/dense二手泄露防护,守卫=遗忘后全库独有关键词命中0)。
