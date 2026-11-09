@@ -119,6 +119,11 @@ updated: 2026-11-04
 
 ## 更新记录
 
+- 2026-11-09 **✅ P164 记忆系统统一 · 批6 追加治理（Claude Code，两次停服窗口）**：
+  按业主三项追加指令：① 悬空归属归玉瑶（memories 197 + 锚点 98 + conversations 573 + black_diamond 459 + dialog_groups 101）；② 悬空 `source_id` 19 → NULL（不删行）；③ 重复语义块删除 959 行（128 组），保留 1 条/组、被引用 274 行保留（额外重复 0）。
+  复核：四表悬空 **0/0/0/0**、未归属 0、active 黑钻 800、quick/integrity ok、webui 200、Top 3 实体 × 6 主题召回全命中、跨实体 0、知识库 304 不变。
+  证据：`data/backups/batch6b-20261109043725/`、`batch6c-20261109044212/`；详见 `active/P164`。
+
 - 2026-11-09 **✅ P163 记忆系统统一 · 批6 数据治理执行（Claude Code，停服窗口）**：
   停服 14 分钟（watchdog→MCP→webui）；整库备份 + 行级导出后单事务执行。
   回填 **567** 条语义块归属（source_conv 47 / dna_unique 420 / entity_genes 6 / note_zone 94）；**28** 条 active 黑钻随源回填；**93** 条超限黑钻归档（不删行）；**删除 50 条不可补语义块 + 1 条源失效 active 黑钻（D8/D10）**；晋升不一致 665/95 归零。
