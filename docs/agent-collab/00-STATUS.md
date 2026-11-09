@@ -119,6 +119,12 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-09 **🔍 M1 第二批·单写入口覆盖审计完成(P177, 只读零改动)**：
+  - **主路径已收口**：新记忆 INSERT 走 writeMemory(14生产调用方, 多处注释自证唯一公共入口)+网关值守卫4方在位；writeRaw 其余215处为非memories表(aqc/entity_context/FG等)不在立法范围。
+  - **真绕过=16处状态UPDATE/DELETE**（收口清单）：A生命周期有效性7处(YuyaoMemoryService is_valid/reminded/DELETE+command-consumer)/B钙化晋升3处(SleepTimeConsolidator)/C元数据回写4处(work_id/round_count/perception_40d回写)/D待核1。
+  - memories表总入口分布10文件已列(SQLiteAdapter11内部+MigrationManager9合法旁路+VaultManager已收口等)。
+  - **收口方案骨架**：网关扩状态专用方法(列清单单源)+豁免白名单(MigrationManager)+能力断言grep守卫(UPDATE/DELETE memories字面只允许网关与白名单)+执行前逐文件git status确认租约。
+  - **租约现状**：对方10文件在途(SQLiteAdapter/recall-bus/meeting-recall/retrieval-stage/server等)红线不碰；可并行项=BlockArchive哈希链接线(文件干净)。详见 `active/P177`。
 - 2026-11-09 **🏗️ M1 第一批完成 · src/memwen/ 核心库落地(业主「动工吧」授权, c8fde46)**：
   - **新库 8 文件零现有改动**：canon(规范化)/hash-chain(分段链+墓碑两层验证)/event-rebuild(fold纯函数+reconcile对账)/gate-stats(wilsonCI+配对三态门禁)/index + 3守卫。
   - **守卫 29/29 绿**：NFC等价/键序无关/时间归一/篡改断点定位/墓碑合法删除不误报/段间独立/重放幂等/Δ=0/校验和漂移检出/三态边界+Wilson附录锚点[0.49,0.94]。tsc 全量0错。
