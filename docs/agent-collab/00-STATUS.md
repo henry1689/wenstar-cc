@@ -119,6 +119,12 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-09 **✅ P175 MenWenOS M0 完成(业主批v2+10修正→ADR-024→M0只读)**：
+  - **ADR-024 总纲落地**(`0d28af6`)：命名定案+10处修正(4bug级)+2补充+工期4-5周+N2双时态不可削减令+P170四裁决(B1拆包/PI先P167-A/suppressed=dormant+硬抑制分家/删除先隔离30天)。
+  - **连贯性R1/R2/R3根因定案**：🔴R1查询零上文=**全时段主因**(runRetrieval只传当前单句,previousTurn全仓零命中)；🟡R2历史窗口V35-B已修5套口径收口(残余PFC仅10条×200字/压缩anchor)；🔴R3预算正反馈(C=histChars×1.0, 压缩→历史短→记忆预算缩水, 长会话双重劣化)。修复方向均按ADR-024修正5(话题漂移判定)约束。
+  - **MW-Bench v1**(`docs/agent-collab/mw-bench/bench-v1.json`)：**47组(dev39+holdout8)**——内容语义17/连贯15/守恒15，T1/T4固定留出防过拟合，[待润色]题待业主/LLM润色。
+  - **指标基线**：候选资格99.7%/实召7.7%(待批7后重基线)/零召回L3=153(149地标)/双靶子0-2/suppressed141/dormant=0。
+  - **下一步M1**：固化内核+P167-A同批Harness走(与CC批8租约串行)。详见 `active/P175`。
 - 2026-11-09 **🏗️ P174 MenWen OS 重新设计 v2 · 类脑五层认知架构(Sonnet构思×现有零件全利用)**：
   - 业主转Claude Sonnet评审+指令全面扫描重设计。**扫描核心发现：Sonnet提的机制大半已有底座**——遗忘曲线(decay_log 90198条+G3 floor)、睡眠整合(dream_logs 653条dream_evolution/高情绪提炼在跑)、再巩固(_reconsolidateAsync V3.1)、时序字段(valid_*索引已建仅42条用)、事件日志4张表(vault/calcium/retrieval/aqc共8万行)、主动回忆(proactive-stage)、五层物理结构(L1情景/L2语义/L4归档甚至超配)。
   - **真正缺三样**：A意图路由(查询按认知功能分路,非一锅召回)、B三真缺口(dormant软遗忘/冲突消解valid_*用起来/查询改写R1+动态预算R3)、C闭环工程(评测常驻/置信度输出/4表事件流收口)。
