@@ -1297,6 +1297,15 @@ async function initPipeline(): Promise<void> {
       SQLiteAdapter.setBelongEntityValidator((uuid: string) => {
         try { return !!familyGraph?.getEntityByUUID?.(uuid); } catch { return false; }
       });
+      // 🔴 批7：空 entity_genes 时按归属实体名做结构化兜底（不按正文推断）；
+      //   解析失败返回 null，写入器放行并打告警（不丢普通闲聊记忆）。
+      SQLiteAdapter.setBelongNameResolver((uuid: string) => {
+        try {
+          const name = familyGraph?.getEntityByUUID?.(uuid)?.name;
+          const s = String(name || '').trim();
+          return s || null;
+        } catch { return null; }
+      });
     })
     .catch((e: any) => console.warn('[Server] FG 归属校验器注册失败（写侧仅做格式校验）:', e?.message));
 

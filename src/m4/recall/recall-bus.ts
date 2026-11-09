@@ -91,10 +91,14 @@ export interface RecallBusResult {
 const TIER_MATCHERS: Array<[RecallTier, RegExp]> = [
   ['long_text', /^【(对话原文|知识库档案)/],
   ['work', /^【作品】/],
-  ['diamond', /【珍藏记忆】|💎|珍藏记忆/],
+  // 🔴 批7：深度收集的黑钻片段标签是「金库黑钻」，此前被下方的 /金库/ 先归成 gold，
+  //   导致生产 RecallBus 的 diamond 恒为 0、层保底长期缺口。此处显式归 diamond（diamond 先匹配）。
+  ['diamond', /【珍藏记忆】|💎|珍藏记忆|【金库黑钻】|金库黑钻/],
   ['gold', /【金库记忆】|金库/],
   ['knowledge', /^\s*📖|^【知识库/],
   ['group', /【对话组|💭|对话组/],
+  // 🔴 批7：证据层（档案/记事）是收集材料，不是砂金记忆；归 other 直通，不占三层名额。
+  ['other', /^【(?:档案|记事)】/],
   ['sand', /📌|重要记忆|【回忆】|【用户曾提到】/],
 ];
 

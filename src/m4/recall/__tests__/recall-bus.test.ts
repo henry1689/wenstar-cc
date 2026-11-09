@@ -37,6 +37,13 @@ describe('RecallBus · 标签分层', () => {
     expect(classifyFragmentTier('没有标签的普通片段')).toBe('sand');
   });
 
+  it('批7：金库黑钻归 diamond（此前被 /金库/ 误归 gold）；档案/记事归 other', () => {
+    expect(classifyFragmentTier('【金库黑钻】那次海边的回忆')).toBe('diamond');
+    expect(classifyFragmentTier('【金库记忆】旧金库片段')).toBe('gold');
+    expect(classifyFragmentTier('【档案】玉瑶: 人物档案')).toBe('other');
+    expect(classifyFragmentTier('【记事】钥匙放在抽屉')).toBe('other');
+  });
+
   it('批4：指令类片段归 other，不占三层名额', () => {
     expect(classifyFragmentTier('【深度回忆素材包 · MemSym】以下是全部记忆仓…')).toBe('other');
     expect(classifyFragmentTier('【结晶表达 · 宪法信条0】照三重奏说…')).toBe('other');

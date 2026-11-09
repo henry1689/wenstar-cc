@@ -43,7 +43,10 @@ const GOOD = {
 };
 
 describe('A. writeMemory 强制字段', () => {
-  beforeEach(() => _resetMemoryWriteHealthForTest());
+  beforeEach(() => {
+    _resetMemoryWriteHealthForTest();
+    SQLiteAdapter.setBelongNameResolver(null);
+  });
 
   it('完整字段 → 写入成功', () => {
     const a = makeStub();
@@ -60,10 +63,18 @@ describe('A. writeMemory 强制字段', () => {
     expect(h.reasons.missing_belong).toBe(1);
   });
 
-  it('缺 entity_genes → 拒写（roleplay 豁免）', () => {
+  it('批7：缺 entity_genes → 放行（无解析器只告警）；有解析器时按归属合成', () => {
     const a = makeStub();
-    expect(a.writeMemory({ ...GOOD, id: 'mem_no_genes', entityGenes: [] })).toBe(false);
+    // 无解析器：不拒写（普通闲聊不丢记忆）
+    expect(a.writeMemory({ ...GOOD, id: 'mem_no_genes', entityGenes: [] })).toBe(true);
+    expect(a.written).toBe(1);
+    // roleplay 豁免不变
     expect(a.writeMemory({ ...GOOD, id: 'mem_roleplay', entityGenes: [], memoryKind: 'roleplay' })).toBe(true);
+    // 注册名字解析器：按 belong 合成后写入
+    SQLiteAdapter.setBelongNameResolver((uuid: string) => (uuid === 'TXS-000000001' ? '玉瑶' : null));
+    expect(a.writeMemory({ ...GOOD, id: 'mem_genes_from_belong', entityGenes: [] })).toBe(true);
+    expect(a.written).toBe(3);
+    SQLiteAdapter.setBelongNameResolver(null);
   });
 
   it('缺 40D → 拒写；note 豁免', () => {

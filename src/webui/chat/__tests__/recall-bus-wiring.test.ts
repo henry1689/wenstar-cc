@@ -53,6 +53,9 @@ describe('RecallBus 接线 · retrieval-stage', () => {
     expect(src).toContain('[Proactive] normal 触发');
     expect(src).toContain('[DeepSweep] normal');
     expect(src).toContain('_proactiveResult.active ? \'proactive\' as const');
+    // 批7：深度收集 backref 必须汇入统一反馈（会晤立即回写 / 普通出口统一回写）
+    expect(src).toContain('if (_s.backref) _recallFeedbackRefs.push(_s.backref)');
+    expect(src).toContain('[RecallBus] 会晤反馈回写');
     // 主动指令必须在总线之后（否则会占记忆名额）—— 用出现顺序断言
     const busIdx = src.lastIndexOf('runRecallBus({');
     const dirIdx = src.lastIndexOf('buildProactiveDirective(_proactiveResult)');

@@ -83,6 +83,24 @@ describe('P093 统一多仓收集编排器', () => {
     expect(small.length).toBeGreaterThan(0);
   });
 
+  it('批7：同文跨源去重时升级为更高层来源（砂金 → 金库黑钻），并透传 backref', () => {
+    const SAME = '那次海边旅行我们坐在礁石上很久';
+    const frags = sweepAllStores(mockSrc({
+      memories: [{ id: 'mem_1', raw_input: SAME, created_at: '2026-01-01' }],
+      diamond: [{ id: 'bd_1', summary: SAME, created_at: '2026-01-01' }],
+    }) as never, 'TXS-1', ['海边']);
+    expect(frags).toHaveLength(1);
+    expect(frags[0].source).toBe('金库黑钻');
+    expect(frags[0].backref).toEqual({ table: 'black_diamond', id: 'bd_1' });
+  });
+
+  it('批7：砂金片段携带 memories backref（供出口统一反馈）', () => {
+    const frags = sweepAllStores(mockSrc({
+      memories: [{ id: 'mem_2', raw_input: '海边旅行那天风很大', created_at: '2026-01-01' }],
+    }) as never, 'TXS-1', ['海边']);
+    expect(frags[0].backref).toEqual({ table: 'memories', id: 'mem_2' });
+  });
+
   it('噪声词治理："还记/是就"类功能词不得进入主题扫（含"还记得"闭合）', () => {
     const cleaned = cleanSweepKeywords(['还记', '是就', '还记得', '记得吗', '诗雨', '亲热']);
     expect(cleaned).toEqual(['诗雨', '亲热']);

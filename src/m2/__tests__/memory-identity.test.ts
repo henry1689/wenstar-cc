@@ -89,8 +89,8 @@ describe('D. validateMemoryWriteFields', () => {
     expect(validateMemoryWriteFields({ ...base, belongEntityUuid: 'uuid-a' }).reason).toBe('invalid_belong_format');
   });
 
-  it('缺 entity_genes → 拒写（roleplay 豁免）', () => {
-    expect(validateMemoryWriteFields({ ...base, entityGenes: [] }).reason).toBe('missing_entity_genes');
+  it('批7：缺 entity_genes 不再拒写（由写入器按归属兜底/告警）', () => {
+    expect(validateMemoryWriteFields({ ...base, entityGenes: [] }).allowed).toBe(true);
     expect(validateMemoryWriteFields({ ...base, entityGenes: [], memoryKind: 'roleplay' }).allowed).toBe(true);
   });
 

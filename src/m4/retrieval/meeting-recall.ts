@@ -1120,6 +1120,12 @@ export interface SweptFragment {
   content: string;
   /** 该碎片的落库时间（ISO）；无时间时为 undefined，由调用方 memFragWithTime 回退旧标签 */
   createdAt?: string;
+  /**
+   * 🔴 批7：召回反馈锚点（仅 memories / black_diamond / knowledge_base）。
+   *   sweep 此前只返回文本，retrieval-stage 无法收集 backref ⇒ 黑钻 recall_count 恒 0
+   *   （MemoryHealth 黑钻命中率 0%）。带上锚点后在出口统一 applyRecallFeedback。
+   */
+  backref?: { table: 'memories' | 'black_diamond' | 'knowledge_base'; id: string };
 }
 
 /** 关键词治理：去噪 + 截断（整编层入口） */
@@ -1153,7 +1159,8 @@ export function sweepAllStores(
 ): SweptFragment[] {
   const kws = cleanSweepKeywords(keywords);
   const out: SweptFragment[] = [];
-  const seen = new Set<string>();
+  /** 🔴 批7：键 → 索引（同文可跨来源出现；保留更高层来源，而不是先到先得） */
+  const seen = new Map<string, number>();
   const perFrag = _sweepInt(opts.perFragmentChars, SWEEP_POLICY.perFragmentChars, 40, 4000);
   const safetyCap = _sweepInt(opts.safetyMaxFrags, SWEEP_POLICY.safetyMaxFrags, 1, 256);
   const memLimit = _sweepInt(opts.memoriesPerKw, SWEEP_POLICY.memoriesPerKw, 0, 20);
@@ -1166,14 +1173,45 @@ export function sweepAllStores(
   const kbWhere = String(opts.kbWhereSql || '').trim();
   const kbWhereClause = kbWhere ? ` AND ${kbWhere}` : '';
 
-  const push = (source: SweptFragment['source'], text: string, createdAt?: unknown) => {
+  /** 来源层级：同文重复时高层来源覆盖低层（黑钻 > 知识/作品 > 砂金/档案/记事 > 对话原文） */
+  const SOURCE_PRIORITY: Record<SweptFragment['source'], number> = {
+    '对话原文': 1,
+    '砂金': 2,
+    '档案': 2,
+    '记事': 2,
+    '知识库': 3,
+    '作品': 3,
+    '金库黑钻': 5,
+  };
+
+  const push = (
+    source: SweptFragment['source'], text: string, createdAt?: unknown,
+    backref?: SweptFragment['backref'],
+  ) => {
     const t = String(text || '').replace(/\s+/g, ' ').trim();
     const key = t.substring(0, 18);
-    if (t.length < 8 || !key || seen.has(key)) return;
-    seen.add(key);
-    // 时间解析失败时留 undefined（fail-open：由 memFragWithTime 回退无时间标签，不阻塞注入）
+    if (t.length < 8 || !key) return;
     const iso = typeof createdAt === 'string' && createdAt ? createdAt : undefined;
-    out.push({ source, content: t.length > perFrag ? t.substring(0, perFrag) : t, ...(iso ? { createdAt: iso } : {}) });
+    const idx = seen.get(key);
+    if (idx !== undefined) {
+      const prev = out[idx];
+      if ((SOURCE_PRIORITY[source] || 0) > (SOURCE_PRIORITY[prev.source] || 0)) {
+        out[idx] = {
+          source,
+          content: prev.content,
+          ...(prev.createdAt ? { createdAt: prev.createdAt } : {}),
+          ...(backref ? { backref } : prev.backref ? { backref: prev.backref } : {}),
+        };
+      }
+      return;
+    }
+    seen.set(key, out.length);
+    out.push({
+      source,
+      content: t.length > perFrag ? t.substring(0, perFrag) : t,
+      ...(iso ? { createdAt: iso } : {}),
+      ...(backref ? { backref } : {}),
+    });
   };
   /** 知识库行级可见性：visible_entity_uuids 非空且不含当前实体 ⇒ 跳过（与批2B 读侧一致） */
   const visibleAllows = (raw: unknown): boolean => {
@@ -1193,40 +1231,40 @@ export function sweepAllStores(
     if (out.length >= safetyCap) break;
     if (memLimit > 0) {
       const mem = src.queryAll(
-        `SELECT raw_input, created_at FROM memories
+        `SELECT id, raw_input, created_at FROM memories
          WHERE belong_entity_uuid = ? AND COALESCE(memory_type, '') != 'note' AND raw_input LIKE ?
          ORDER BY calcium_score DESC, created_at DESC LIMIT ${memLimit}`,
         [entityUuid, `%${kw}%`]) || [];
-      for (const r of mem) push('砂金', String(r.raw_input || ''), r.created_at);
+      for (const r of mem) push('砂金', String(r.raw_input || ''), r.created_at, { table: 'memories', id: String(r.id) });
     }
     if (diamondLimit > 0) {
       const dia = src.queryAll(
-        `SELECT summary, created_at FROM black_diamond
+        `SELECT id, summary, created_at FROM black_diamond
          WHERE belong_entity_uuid = ? AND COALESCE(status, 'active') = 'active' AND summary LIKE ?
          ORDER BY calcium_level DESC, created_at DESC LIMIT ${diamondLimit}`,
         [entityUuid, `%${kw}%`]) || [];
-      for (const r of dia) push('金库黑钻', String(r.summary || ''), r.created_at);
+      for (const r of dia) push('金库黑钻', String(r.summary || ''), r.created_at, { table: 'black_diamond', id: String(r.id) });
     }
     if (kbLimit > 0) {
       const kb = src.queryAll(
-        `SELECT content, created_at, visible_entity_uuids FROM knowledge_base
+        `SELECT id, content, created_at, visible_entity_uuids FROM knowledge_base
          WHERE belong_entity_uuid = ? AND content LIKE ?${kbWhereClause}
          ORDER BY impression_score DESC, created_at DESC LIMIT ${kbLimit}`,
         [entityUuid, `%${kw}%`]) || [];
       for (const r of kb) {
         if (!visibleAllows(r.visible_entity_uuids)) continue;
-        push('知识库', String(r.content || ''), r.created_at);
+        push('知识库', String(r.content || ''), r.created_at, { table: 'knowledge_base', id: String(r.id) });
       }
     }
     if (includeShared && kbSharedLimit > 0) {
       const shared = src.queryAll(
-        `SELECT content, created_at, visible_entity_uuids FROM knowledge_base
+        `SELECT id, content, created_at, visible_entity_uuids FROM knowledge_base
          WHERE belong_entity_uuid IS NULL AND content LIKE ?${kbWhereClause}
          ORDER BY impression_score DESC, created_at DESC LIMIT ${kbSharedLimit}`,
         [`%${kw}%`]) || [];
       for (const r of shared) {
         if (!visibleAllows(r.visible_entity_uuids)) continue;
-        push('知识库', String(r.content || ''), r.created_at);
+        push('知识库', String(r.content || ''), r.created_at, { table: 'knowledge_base', id: String(r.id) });
       }
     }
     if (includeConversations && convLimit > 0) {
@@ -1253,6 +1291,8 @@ export interface OrganizedFragment {
   source: SweptFragment['source'];
   content: string;
   createdAt?: string;
+  /** 🔴 批7：透传召回反馈锚点 */
+  backref?: SweptFragment['backref'];
 }
 
 /**
@@ -1284,6 +1324,7 @@ export function organizeForQuestion(
       source: s.f.source,
       content: s.f.content,
       ...(s.f.createdAt ? { createdAt: s.f.createdAt } : {}),
+      ...(s.f.backref ? { backref: s.f.backref } : {}),
     });
     used += line.length;
   }

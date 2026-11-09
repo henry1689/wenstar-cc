@@ -118,9 +118,10 @@ export function validateMemoryWriteFields(f: MemoryWriteFieldInput): MemoryWrite
   const dnaRootId = String(f.dnaRootId ?? f.dialogGroupId ?? f.threadId ?? '').trim() || null;
 
   if (!isEvidence && !isNote) {
-    if (!isRoleplay && (!Array.isArray(f.entityGenes) || f.entityGenes.length === 0)) {
-      return { allowed: false, reason: 'missing_entity_genes' };
-    }
+    // 🔴 批7（业主 2026-11-09）：entity_genes 缺失**不再硬拒写**。
+    //   生产实证：普通闲聊（如「今天天气真好」）不提及任何实体 ⇒ L3 返回 []，原规则会把整轮记忆拒掉。
+    //   现由 SQLiteAdapter.writeMemory 用归属实体做结构化兜底（不按正文推断）；
+    //   若 FG 名字解析不可用，则计入 MemoryWriteHealth.encodingIncompleteGenes 后放行 —— 宁可留告警，不可丢记忆。
     const hasAnchor =
       (Array.isArray(f.sourceConversationIds) && f.sourceConversationIds.length > 0) ||
       !!String(f.dialogGroupId ?? '').trim();

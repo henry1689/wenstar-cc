@@ -345,6 +345,21 @@ export class SQLiteAdapter {
     return SQLiteAdapter._belongValidator !== null;
   }
 
+  /**
+   * 🔴 批7（业主 2026-11-09）：归属实体**名字**解析器（可插拔单例）。
+   *   用途：普通闲聊不提及任何实体 ⇒ L3 entity_genes 为空；原强制校验会拒写整轮记忆。
+   *   现用 `belong_entity_uuid`（结构列，非正文推断）解析实体名，合成一条结构化基因。
+   *   SQLiteAdapter 位于 m2 不反向依赖 m4/FamilyGraph；由 server 装配时注册。
+   *   未注册或解析失败 ⇒ 放行并打告警（宁可留告警，不可丢记忆）。
+   */
+  private static _belongNameResolver: ((uuid: string) => string | null) | null = null;
+  static setBelongNameResolver(fn: ((uuid: string) => string | null) | null): void {
+    SQLiteAdapter._belongNameResolver = typeof fn === 'function' ? fn : null;
+  }
+  static hasBelongNameResolver(): boolean {
+    return SQLiteAdapter._belongNameResolver !== null;
+  }
+
   /** 获取底层兼容实例 — 供 DualHelixWriter / UUIDHealthReport 等底层写入与巡检使用 */
   get rawDb(): SqlJsDatabase | null { return this.db; }
   private ready = false;
@@ -1219,6 +1234,32 @@ export class SQLiteAdapter {
     repeatRule?: string | null;
   }): boolean {
     this.ensureReady();
+    // 🔴 批7（业主 2026-11-09）：空 entity_genes 的结构化兜底。
+    //   生产实证：普通闲聊不提及任何实体 ⇒ L3 返回 [] ⇒ 批3 强制校验拒写整轮记忆（已实际丢过 2 条）。
+    //   兜底来源只允许 **belong_entity_uuid（结构列）**，禁止按正文推断；roleplay/note/knowledge_vault 豁免。
+    //   FG 名字解析不可用 ⇒ 放行 + 告警（宁可留告警，不可丢记忆）。
+    if (!Array.isArray(opts.entityGenes) || opts.entityGenes.length === 0) {
+      const _kind = String(opts.memoryKind ?? '');
+      const _type = String(opts.memoryType ?? '');
+      const _srcType = String(opts.sourceType ?? '');
+      const _exempt = _kind === 'roleplay' || _type === 'note' || _type === 'knowledge_vault' || _srcType === 'knowledge_vault';
+      if (!_exempt) {
+        const _belongUuid = String(opts.belongEntityUuid ?? '').trim();
+        const _name = _belongUuid ? SQLiteAdapter._belongNameResolver?.(_belongUuid) : null;
+        if (_name) {
+          opts.entityGenes = [{
+            name: String(_name),
+            uuid: _belongUuid,
+            type: 'person',
+            allele: String(_name),
+            phenotype: 'neutral',
+            knowledge_type: 'family',
+          }];
+        } else {
+          console.warn(`[SQLiteAdapter] ⚠️ entity_genes 缺失且无法按归属合成（id=${opts.id} belong=${_belongUuid || '∅'}）— 放行并保留告警`);
+        }
+      }
+    }
     // 🔴 MEM-UNIFY-V1 批3（任务书 §4.2）：写前强制字段校验（单一判据在 memory-identity）。
     const _validation = validateMemoryWriteFields(opts as any);
     if (!_validation.allowed) {

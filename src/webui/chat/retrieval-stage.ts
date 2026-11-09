@@ -969,6 +969,21 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
                   _swept.map((s) => memFragWithTime(s.source, s.content, s.createdAt)).join('\n') + CRYSTAL_DIRECTIVE);
                 console.log(`[DeepSweep] meeting ${_sweepKw.join('/')} → ${_swept.length} 条（证据 ${_evidenceFrags.length}）`);
               }
+              // 🔴 批7：深度收集片段携带 backref（memories/black_diamond/knowledge_base）；
+              //   会晤分支在最终统一反馈点之前 return，故此处立即回写，避免黑钻 recall_count 恒 0。
+              for (const _s of _swept) {
+                if (_s.backref) _recallFeedbackRefs.push(_s.backref);
+              }
+              if (_recallFeedbackRefs.length > 0) {
+                try {
+                  const { applyRecallFeedback } = await import('../../m4/recall/recall-bus.js');
+                  const _fb = applyRecallFeedback(ctx.storage?.getSQLite?.(), _recallFeedbackRefs);
+                  if (_fb > 0) console.log(`[RecallBus] 会晤反馈回写 ${_fb} 条`);
+                  _recallFeedbackRefs.length = 0;
+                } catch (_fbErr) {
+                  console.warn('[RecallBus] 会晤反馈回写失败（不阻塞）:', (_fbErr as Error)?.message);
+                }
+              }
             }
           }
         } catch (_deepErr) { /* 深度素材包失败不阻塞召回主链 */ }
@@ -1983,6 +1998,10 @@ export async function runRetrieval(input: RetrievalInput): Promise<RetrievalOutp
           memoryFragments.push(DEEP_PACKAGE_HEADER +
             _dsOrganized.map((s) => memFragWithTime(s.source, s.content, s.createdAt)).join('\n') + CRYSTAL_DIRECTIVE);
           console.log(`[DeepSweep] normal ${_dsKw.join('/')} → ${_dsOrganized.length} 条（证据 ${_dsEvidence.length}）`);
+        }
+        // 🔴 批7：深度收集片段携带 backref，汇入出口统一反馈点（黑钻/记忆/知识 recall_count）
+        for (const _s of _dsOrganized) {
+          if (_s.backref) _recallFeedbackRefs.push(_s.backref);
         }
       }
     }
