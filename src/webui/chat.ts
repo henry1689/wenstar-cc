@@ -846,8 +846,9 @@ export async function processChat(
         //   若 enter 用 Date.now()、历史用其原生 timestamp（必然更早），
         //   会晤内历史会全部落在任期之前 ⇒ 人物对新会晤彻底失忆（已被单测锁定）。
         //   故此处顺序为：先 syncFromHistory（记录会晤起点）→ 再 syncParticipants。
+        // 🔴 高风险(P181-A)：仅路径升格 m5→kernel，不改注入顺序/会晤逻辑。
         const { ChatSpaceAdapter: _ChatSpaceAdapter } = await import(
-          '../m5/space/adapters/chat-adapter.js'
+          '../kernel/space-router/adapters/chat-adapter.js'
         );
         // 🔴 2026-10-30 第一层固化：`WS_SPACE_ROUTER_VIEW` 开关已删除，本块**恒定执行**。
         //   旧分支 `_ecm.getContextWindow(...)`（按 belongEntityUuid 归属过滤）已随之删除 ——
