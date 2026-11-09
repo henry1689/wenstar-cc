@@ -130,6 +130,7 @@ n-gram 拆除结项时做了一次**逐条归因**（不按数量吻合推断，
 
 | 日期 | 事项 | 证据 |
 |---|---|---|
+| 2026-11-09 | **MEM-UNIFY-V1 批7 写入 genes 兜底 + 黑钻层级/反馈修复** —— 复盘发现的 3 个 P0：① 普通闲聊无 `entity_genes` 被拒写（生产已丢 2 条）→ 按归属实体合成（FG 名字），解析不到放行告警；② `金库黑钻` 被归 gold → 显式归 diamond，`档案/记事` 归 other；③ sweep 无 backref → 透传 memories/black_diamond/knowledge_base 锚点，会晤/普通两分支统一回写。详见 §6.33 与 `active/P166` | `tsc=0`；批7 相关 60 项全绿；全量 4246 passed / 14 failed（均既有类别）；生产库副本集成：空 genes 写入成功并合成、黑钻反馈 0→1；**未改生产数据** |
 | 2026-11-09 | **失效外键孤儿行清理（批6d）** —— 业主确认孤儿与实体无关后全部删除：`decay_log` **14,573** / `knowledge_memories` **5,900** / `atom_repair_index` **130**，共 **20,603** 行。三类均为指向已不存在父行的审计/索引/关联残片（仅 ID/分数/时间戳，无实体内容）。停服单事务删除 + 备份 + 行级导出；`foreign_key_check=0`、`quick/integrity=ok`；重启后 **FK 违规仍为 0**（无再生）；memories 17,837 未变；webui 200。详见 §6.32 与 `active/P165` | 备份 `data/backups/batch6d-20261109045319/`（整库 + 三类孤儿全量导出 + 迁移器 + dry-run/apply） |
 | 2026-11-09 | **记忆系统统一 · 批6 追加治理（悬空归属 / 悬空 source / 重复清理）** —— 业主三项追加指令：悬空归属归玉瑶、悬空 `source_id` 置 NULL、重复部分删除。批6b：memories 悬空 197→玉瑶、黑钻悬空 source 19→NULL、删除重复 959 行（128 组，274 行受引用保护保留）。批6c：同根悬空扩到 conversations 573 / black_diamond 459 / dialog_groups 101 / 锚点 98，全部→玉瑶。复核：四表悬空 **0/0/0/0**、无归属 active 黑钻 0、active=800、重复额外行 0（274 受保护行保留）、integrity ok、webui 200、召回全命中、跨实体 0。详见 §6.31 与 `active/P164` | 备份 `data/backups/batch6b-20261109043725/`、`batch6c-20261109044212/`（整库 + 行级导出 + 迁移器）；两次窗口均 `quick/integrity=ok` |
 | 2026-11-09 | **记忆系统统一 · 批6 数据治理（停服窗口）** —— 停服 14 分钟；整库备份 + 行级导出；**回填 567** 条语义块归属（source_conv 47 / dna_unique 420 / entity_genes 6 / note_zone 94）、**28** 条 active 黑钻随源回填、**93** 条超限黑钻归档、**删除 50 条不可补语义块 + 1 条源失效 active 黑钻（D8/D10 唯一授权删除）**；晋升不一致 665/95 **归零**。独立复核：无归属语义块 0、无归属 active 黑钻 0、active=800、非锚点行精确 −50、integrity ok、服务 200、跨实体 0。详见 §6.30 与 `active/P163` | 备份 `data/backups/batch6-20261109041506/`（整库 + exports）；`quick_check/integrity_check=ok`；锚点重建 3,495→3,493（派生缓存，非数据丢失）；**197 悬空归属/1,313 重复行未动（无授权）** |
@@ -989,6 +990,25 @@ FG 人物数不变（19 active / 12 dormant）。
 **复核**：重启后 `foreign_key_check` 仍 **0**（无再生）；`decay_log` 103,669→89,096；`knowledge_memories` 6,489→589（余下全部有效）；`atom_repair_index` 9,980→9,850；`memories` 17,837 未变；webui 200。
 
 **证据**：`data/backups/batch6d-20261109045319/`。回滚：备份覆盖 + 行级导出恢复。
+
+---
+
+### §6.33 2026-11-09 MEM-UNIFY-V1 批7 写入基因兜底 + 黑钻层级/反馈修复（P166）
+
+**背景（批0–批6 复盘发现）**：
+1. 普通闲聊不提及实体 ⇒ L3 `entity_genes=[]` ⇒ 批3 强制校验拒写；生产日志实证 2 条被拒、1 轮对话记忆缺失。
+2. 深度收集标签 `金库黑钻` 被 `/金库/` 先归 gold ⇒ 生产 RecallBus `diamond` 恒 0；同文去重还会把黑钻降成砂金。
+3. sweep 片段无 `backref` ⇒ active 黑钻 `recall_count>0` = **0/800**，Health 黑钻命中率恒 0%。
+
+**修复**：
+- `memory-identity` 移除 genes 硬拒写；`SQLiteAdapter` 增 `setBelongNameResolver`，`writeMemory` 对空 genes 按 `belong_entity_uuid` 解析 FG 名字并合成结构化基因；解析不到放行告警。server 注册解析器。
+- `recall-bus`：`金库黑钻→diamond`、`档案/记事→other`。
+- `meeting-recall`：`SweptFragment/OrganizedFragment` 增 `backref`；去重改为来源优先级升级；四路查询透传 id。
+- `retrieval-stage`：会晤分支收集 backref 并立即反馈（该分支提前 return），普通分支汇入出口统一反馈。
+
+**验证**：`tsc=0`；批7 相关 60 项全绿；全量 4246 passed / 14 failed（均既有类别）；生产库副本集成：空 genes 写入成功且合成 1 条基因、`金库黑钻→diamond`、黑钻反馈 `0→1`。未改生产数据。
+
+**遗留**：重启后尚无普通对话的线上实证；批8 处理 274 条受引用重复与 19+2 条 dna_root / 1 条 global_uid；批9 收口 14 项既有测试失败并做真机验收。
 
 ---
 
