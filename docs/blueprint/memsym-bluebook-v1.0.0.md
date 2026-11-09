@@ -76,6 +76,21 @@ masterProfile / 偏好注入通道（PFC/M6 领地）标记 **Legacy**：批γ �
 - **v1.2**：双向反馈回路（用户显性正/负反馈干预元素优先级与钙化衰减速率）
 - **v2.0（远期）**：记忆冲突调解子模块（新旧感受矛盾、模糊记忆互相冲突）
 
+## 六、MEM-UNIFY-V1 落地状态（2026-11-09，批0–批4）
+
+> 依据 `docs/记忆系统统一任务书-V1.md`、`docs/adr/ADR-023-20261109-MEM-UNIFY-V1-记忆总线与归属表达收口.md`。
+
+| 层 | 实现 | 说明 |
+|---|---|---|
+| 表达 | `src/m5/prompts/memory-expression-law.ts` | 三档 / 三重奏 / 憧憬自由 / 双模式义务 / 守卫禁令唯一法源；旧反编造措辞静态扫描 0 命中 |
+| 写入 | `memory-identity.ts` + `SQLiteAdapter.writeMemory` | `(belong, role, normalized_text)` 去重；强制字段（belong/dna_root/genes/source/40D）+ 健康计数；私有域无归属拒写 |
+| 长期 | `black_diamond(status='active')` | 晋升单向门以 active 为唯一真源；`vault_log` 不再是记忆源（D3） |
+| 召回 | `src/m4/recall/recall-bus.ts` | 四模式 / 层保底 / 单一五级闸门 / 单点反馈；指令类片段归 `other` |
+| 深度整编 | `meeting-recall.sweepAllStores` + `deep-recall-stage` | 砂金/黑钻/知识（自有+共享）/对话原文 + 证据层（档案/作品/记事）；字符预算装包 |
+| 主动回忆 | `proactive-trigger.ts` + `proactive-stage.ts` | 节日/纪念日/情绪/日常/话题关联，纯规则零 LLM；文案仍由法源组装 |
+
+**验收摘要**（批5 探针，只读 + 真实 LLM 不落库）：跨实体越权 0；四路 round-trip 全通过；可召回主题深度覆盖 100%；表达纯回避率 0%、三重奏出现率 100%；存量 617 无归属 / 1313 重复行 / 665 两不沾留批6。
+
 ## 关联
 
 宪法摘要 `governance/memsym-constitution-v1.md` · 白皮书 `memsym-whitepaper-v1.0.0.md` · ADR-MEM-002 · 构建批次见 `docs/agent-collab/active/MemSym-v1.0.0-落地方案.md`

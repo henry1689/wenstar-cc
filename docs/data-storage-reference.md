@@ -1,7 +1,28 @@
 # 太虚境 · 数据存储清单
 
 > 所有存储位置的完整索引 — 数据库 / 数据文件 / 缓存 / 日志
-> 最后更新: 2026-06-28
+> 最后更新: 2026-11-09（MEM-UNIFY-V1 批5）
+
+---
+
+## 〇、MEM-UNIFY-V1 记忆分层与归属（2026-11-09）
+
+> 唯一口径见 `docs/adr/ADR-023-20261109-MEM-UNIFY-V1-记忆总线与归属表达收口.md`。
+> 本节是存储层速查；业务规则以 ADR-023 与记忆表达法源为准。
+
+| 层 | 物理表 | 定位 | 归属域 |
+|---|---|---|---|
+| L0 当下 | `conversations` | 原始对话、连续感 | private |
+| L1 短期/语义块 | `memories` | 语义块、40D、钙化 | private（新写入无归属拒写） |
+| L2 长期 | `black_diamond`（`status='active'`） | 终身珍藏 | private |
+| 证据层 | `knowledge_base` / FG 档案 / `works` / 记事（`memories.memory_type='note'`） | 知识、档案、作品、记事 | 知识无归属 = **共享**（D5）；其余 owned |
+| 审计台账 | `vault_log` | 晋升/地标/事实锚点审计 | **不是记忆层**；仅 `auto_induct` 可作事实锚点（D3） |
+
+**写入纪律**：同一语义只写一次（persistence 的 `mem_*`；M9 `evt_*` 默认不落库）；去重键 `(belong_uuid, role, normalized_text)`；
+私有域强制字段 = belong / dna_root / entity_genes / source 锚点 / 40D（note、knowledge_vault 豁免）。
+
+**召回纪律**：唯一出口 `src/m4/recall/recall-bus.ts`（四模式 + 层保底 + 单一五级闸门 + 单点反馈）；
+深度收集 = 砂金 / 黑钻 active / 知识（自有+共享）/ 对话原文 + 证据层，按字符预算装包（默认 6000 字）。
 
 ---
 
@@ -11,14 +32,14 @@
 
 | 数据库 | 路径 | 大小 | 包含表 |
 |:-------|:-----|:---:|:-------|
-| **fusion_memory.db** | `D:\wenstar\data\webui\fusion_memory.db` | ~32 MB | conversations(547条), memories(124条), black_diamond(45条), knowledge_base(35条), knowledge_chunks(182块), master_profile(227条), master_affairs(19条), master_network(22条), dream_logs, 等 |
+| **fusion_memory.db** | `D:\tools\wenstar-cc\data\webui\fusion_memory.db` | ~136 MB | conversations(~22,100), memories(~18,800), black_diamond(4,094；active 894 / removed 3,200), knowledge_base(304；共享 278), vault_log(~10,800；审计台账), works(248), 等 |
 
 ### 1.2 家族图谱库
 
 | 数据库 | 路径 | 包含表 |
 |:-------|:-----|:-------|
-| **family_graph.db** | `D:\wenstar\data\webui\knowledge\family_graph.db` | nodes(39节点), edges(105边) |
-| family_graph.db(副本) | `D:\wenstar\data\knowledge\family_graph.db` | 同上(副本) |
+| **family_graph.db** | `D:\tools\wenstar-cc\data\webui\knowledge\family_graph.db` | nodes(43节点), edges(301边) |
+| family_graph.db(副本) | `D:\wenstar\data\knowledge\family_graph.db` | 同上(副本，旧路径) |
 
 ### 1.3 其他数据库
 
@@ -253,9 +274,9 @@ data/webui/knowledge/family_graph.db → nodes (39) + edges (105)
 | 数据 | 保留策略 | 清理机制 |
 |:-----|:---------|:---------|
 | conversations | 永久保留(只标记`is_compacted`) | 无物理删除 |
-| memories | 动态衰减+黑钻晋升 | 钙化衰减至0自动归档 |
-| black_diamond | 永久保留 | 上限200条后降级最低钙化 |
-| knowledge_base | 用户自主管理 | 无自动删除 |
+| memories | 动态衰减+黑钻晋升 | 钙化衰减至0自动归档；晋升单向门以 active 黑钻为判据（ADR-023） |
+| black_diamond | 永久保留（removed 归档） | 上限按配置（当前 800），超出时**逐枚归档**为 `status='removed'`，不物理删除 |
+| knowledge_base | 用户自主管理 | 无自动删除；无归属 = 共享（D5）；`source_type` 隔离区不可检索 |
 | 记事记忆(note) | `is_valid=0`标记失效 | `cleanExpired(365)`定期清理 |
 | TTS音频 | 临时缓存 | 无自动清理 |
 | 归纳记录 | 永久保留 | 无自动清理 |
