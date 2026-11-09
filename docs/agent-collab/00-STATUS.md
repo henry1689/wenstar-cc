@@ -119,6 +119,11 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-10 **✅ P182 给PI三件全部完成(勘误104f362 + Port a135e15 + 链接线76faf19) + 🔴越界事件修复(ced5135)**：
+  - **任务3 BlockArchive归档链接线落地**：stableStringify(递归键排序+NFC)落canon单源 + bArchiveLog追加算链(条目只增chain字段, 旧日志GENESIS起链, fail-open) + verifyAppendChain断点定位(守卫10归档域)。**98守卫绿(memwen42+app-memory56)+tsc0+回滚演练实跑**(stash移走旧版自洽→恢复)。core_repair 10阶段全过(S6-B票ck_87e1aabb65172132 3/3)。
+  - **CK-10排障经验**：parseIntent把memo小写化后(?:新增|添加|实现)…(\w+)提取函数名→大小写敏感grep必失败(verifyappendchain vs verifyAppendChain)；**message措辞避开12触发词(bug/修复/错误/异常/新增/功能/添加/重构…)落unknown分支规避**。
+  - **🔴 越界事件(第二次,与git add -A同族)**：76faf19的commit未带pathspec→把CC已staged的P181-A九个rename(m5/space→kernel/space-router)一并提交,而chat.ts:851 import路径改动仍在工作区→**HEAD断裂**(文件移走/引用旧路径/tsc模拟拉取报错)。**已修复**：ced5135代提交CC写好的1行import(内容零改动,注明缘由), tsc复验0。**教训: git commit必须带pathspec或先核git diff --cached(与add -A同族, 已二次记取)**。
+  - **P181-A现状**：9个rename+chat.ts import均已在HEAD(76faf19+ced5135), 移动完整性=0行变化; P181-A其余验收(全量测试/grep m5/space=0/routeStats不变)归CC自证(P183已出)。
 - 2026-11-10 **✅ P182 给PI三件·前两件完成(勘误104f362 + Port a135e15)**：
   - **任务1缺口①核清**：原「16处」=grep行数含水分 → **精确13处(A生命周期8/B钙化晋升2/C元数据3)**；D组=maintenance.ts:625注释(runGC的DELETE未激活,非实际绕过)剔除；knowledge_memories 2处=关联表排除；414/498=conversations表排除。CC对照去重用13处口径(P177勘误节)。
   - **任务2 MwIdentityPort落地**(a135e15)：四函数逐字P181§4.1 + MwContextView(事件用id, 适配器映射, 不import m5) + 签名冻结条款 + 类型层守卫35/35绿 + 回滚演练实跑(index悬空报错证导出生效)。发布即冻结。
