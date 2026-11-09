@@ -119,6 +119,18 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-10 **✅ P182 给PI三件·前两件完成(勘误104f362 + Port a135e15)**：
+  - **任务1缺口①核清**：原「16处」=grep行数含水分 → **精确13处(A生命周期8/B钙化晋升2/C元数据3)**；D组=maintenance.ts:625注释(runGC的DELETE未激活,非实际绕过)剔除；knowledge_memories 2处=关联表排除；414/498=conversations表排除。CC对照去重用13处口径(P177勘误节)。
+  - **任务2 MwIdentityPort落地**(a135e15)：四函数逐字P181§4.1 + MwContextView(事件用id, 适配器映射, 不import m5) + 签名冻结条款 + 类型层守卫35/35绿 + 回滚演练实跑(index悬空报错证导出生效)。发布即冻结。
+  - **Harness排障记录**：MCP调用3次aborted但**服务端实际在跑**(4个run同change_key命中同一任务单=设计行为)；S7-B卡R4(S4.5分95.1<98)→按处置建议签3文件S4.5_complexity豁免60min→10阶段全过。
+  - **任务3 BlockArchive哈希链接线**进行中(三文件全干净)。
+- 2026-11-10 **🧾 P183 CC 接受 P182 下发的 P181-A/B/C · 开工自证已提交（只读）**：
+  - **11 文件在途清单已逐条列出**（实为 **批7** 在途，非批8；P178/P182 的“批8 在途”需更正）。
+  - **三目标文件自证 clean**：`src/m5/group/outputGuard.ts`（C）、`src/m4/household/FamilyGraph.ts`（B）、`src/m4/household/EntityWriteGate.ts`（B）均无修改；`src/m5/space/` 与 `chat.ts` 亦 clean；`src/kernel/` 不存在，A 将创建。
+  - **PI 六项请求逐项回应**：①批7/批8 更正与落定通知 ②Gateway 时序接受 PI 先 ③范围划分接受 ④MwIdentityPort 纯类型接受 ⑤差集+MW-Bench 接受 ⑥`fg_entity_names` 冻结确认。
+  - **执行计划**：A（移动 9 文件 + 改 chat.ts:849）→ B（`_isPrefixSlice` 准入 + `_knownUuids`）→ C（`attributeReply` 走 `detectAddressee`）；每包 Harness + 独立 commit + 差集证据。
+  - **编号撞车**：P173/P174 各两份，已提请豆包处理。详见 `active/P183-20261110-ClaudeCode-P181ABC开工自证.md`。
+
 - 2026-11-10 **📮 P178 PI进度同步与对接需求(致豆包/CC, 业主指令三件齐)**：
   - **进度公示**：M0完成+ADR-024宪法(附录v2)+M1第一批memwen落地(c8fde46, 29守卫绿)+P177审计(16处绕过)；M1第二批代码项等批8落定(11文件在途租约)。
   - **对P181回应**：4函数接驳面(resolve/canAttend/viewFor/render)+L1/L2/L3三铁律**并入ADR-024 §五.5**；P181-A升格包零交叠可下发；P181-D与我M1同文件需时序裁定。
