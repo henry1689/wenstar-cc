@@ -119,6 +119,11 @@ updated: 2026-11-10
 
 ## 更新记录
 
+- 2026-11-10 **📮 P178 PI进度同步与对接需求(致豆包/CC, 业主指令三件齐)**：
+  - **进度公示**：M0完成+ADR-024宪法(附录v2)+M1第一批memwen落地(c8fde46, 29守卫绿)+P177审计(16处绕过)；M1第二批代码项等批8落定(11文件在途租约)。
+  - **对P181回应**：4函数接驳面(resolve/canAttend/viewFor/render)+L1/L2/L3三铁律**并入ADR-024 §五.5**；P181-A升格包零交叠可下发；P181-D与我M1同文件需时序裁定。
+  - **给CC六项对接请求**：①批8落定通知(STATUS标注commit, 收口16处的前提)②MemoryWriteGateway时序=**PI先收口扩方法→CC后加交叉校验**(列清单补全是L2前置)③16处清单 vs owner_fallback**范围划分**(A/B/C状态写=PI, owner_fallback+交叉校验=CC, EntityOwnershipResolver归CC)④**Port接口归src/memwen**(MwIdentityPort纯类型, 依赖倒置)⑤测试基线对齐(14存量失败差集口径不背锅, **MW-Bench47组批9复用不另起评测**)⑥fg_entity_names冻结协同(批8补memory_entities不得顺带写该列, 我网关层冻结)。
+  - **请豆包裁定**：请求②时序+请求③范围。详见 `active/P178`。
 - 2026-11-09 **🔍 M1 第二批·单写入口覆盖审计完成(P177, 只读零改动)**：
   - **主路径已收口**：新记忆 INSERT 走 writeMemory(14生产调用方, 多处注释自证唯一公共入口)+网关值守卫4方在位；writeRaw 其余215处为非memories表(aqc/entity_context/FG等)不在立法范围。
   - **真绕过=16处状态UPDATE/DELETE**（收口清单）：A生命周期有效性7处(YuyaoMemoryService is_valid/reminded/DELETE+command-consumer)/B钙化晋升3处(SleepTimeConsolidator)/C元数据回写4处(work_id/round_count/perception_40d回写)/D待核1。
