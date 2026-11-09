@@ -46,3 +46,9 @@ export {
   type MwPaired,
   type MwGateVerdict,
 } from './gate-stats.js';
+export {
+  type MwIdentityPort,
+  type MwResolveResult,
+  type MwContextView,
+  type MwRenderResult,
+} from './identity-port.js';
